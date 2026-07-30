@@ -28,6 +28,7 @@ src-tauri/target/
 src-tauri/.env
 src-tauri/data.db*
 src-tauri/*.log
+src-tauri/index/
 
 # Local session data
 .omo/
