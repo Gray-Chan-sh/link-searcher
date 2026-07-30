@@ -1,0 +1,446 @@
+import { useEffect, useState } from 'react'
+import { open } from '@tauri-apps/plugin-dialog'
+import { useSettings } from '../hooks/useSettings'
+import { useTheme } from '../theme'
+import { useI18n } from '../i18n'
+import { LoadingSpinner } from '../icons'
+import { getConfig, migrateData, updateConfig, type ConfigInfo } from '../api/config'
+import { checkDependencies, listOcrEngines, testOcrEngine, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
+
+const OCR_LANGS = [
+  { value: 'eng', label: 'English' },
+  { value: 'chi_sim', label: 'Chinese (Simplified)' },
+  { value: 'jpn', label: 'Japanese' },
+  { value: 'kor', label: 'Korean' },
+]
+
+const LANG_OPTIONS = [
+  { value: 'zh', labelKey: 'chinese' },
+  { value: 'en', labelKey: 'english' },
+]
+
+export default function Settings() {
+  const { t, lang, setLang } = useI18n()
+  const { settings, loading, saving, error, saveError, setValue, save } = useSettings()
+  const { theme, setTheme } = useTheme()
+  const [ocrEngines, setOcrEngines] = useState<OcrEngineStatus[]>([])
+  const [ocrTesting, setOcrTesting] = useState(false)
+  const [ocrResult, setOcrResult] = useState<OcrTestResult | null>(null)
+  const [deps, setDeps] = useState<DependencyStatus[]>([])
+  const [appConfig, setAppConfig] = useState<ConfigInfo | null>(null)
+  const [migrating, setMigrating] = useState(false)
+  const [loPath, setLoPath] = useState<string>('')
+
+  useEffect(() => {
+    listOcrEngines().then(setOcrEngines).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    checkDependencies().then(setDeps).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    getConfig().then(setAppConfig).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (appConfig) {
+      setLoPath(appConfig.lo_binary_path || 'soffice')
+    }
+  }, [appConfig])
+
+  const handleTestOcr = async () => {
+    const engineType = settings['ocr_engine'] ?? 'Tesseract'
+    setOcrTesting(true)
+    setOcrResult(null)
+    try {
+      const result = await testOcrEngine(engineType)
+      setOcrResult(result)
+    } catch (e) {
+      setOcrResult({ success: false, text: '', duration_ms: 0, error: String(e) })
+    } finally {
+      setOcrTesting(false)
+    }
+  }
+
+  const handleChangeDataDir = async () => {
+    const selected = await open({ directory: true, multiple: false, title: t('data_directory') })
+    if (!selected || !appConfig) return
+    if (selected === appConfig.data_dir) return
+
+    setMigrating(true)
+    try {
+      const result = await migrateData(appConfig.data_dir, selected)
+      setAppConfig({ ...appConfig, data_dir: result })
+      await updateConfig({ data_dir: result })
+    } finally {
+      setMigrating(false)
+    }
+  }
+
+  const handleChangeLang = async (newLang: string) => {
+    await setLang(newLang as 'zh' | 'en')
+  }
+
+  const handleChangeLoPath = (path: string) => {
+    setLoPath(path)
+  }
+
+  const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'Tesseract'))
+
+  const handleSave = async () => {
+    await save()
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <LoadingSpinner className="size-6 text-blue-500" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="h-full p-6">
+        <div className="px-4 py-3 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg">
+          {error}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="h-full p-6 overflow-y-auto">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('settings')}</h2>
+          <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+            Configure indexing and search preferences
+          </p>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
+        >
+          {saving && <LoadingSpinner className="size-4" />}
+          {t('save_settings')}
+        </button>
+      </div>
+
+      {saveError && (
+        <div className="px-4 py-3 mb-4 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg">
+          {saveError}
+        </div>
+      )}
+
+      <div className="space-y-6 max-w-xl">
+        <Section title={t('data_directory')}>
+          <div className="text-sm text-gray-700 dark:text-gray-300 font-mono break-all">
+            {appConfig?.data_dir || t('loading')}
+          </div>
+          <button
+            onClick={handleChangeDataDir}
+            disabled={migrating}
+            className="mt-2 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50 transition-colors"
+          >
+            {migrating && <LoadingSpinner className="size-3" />}
+            {t('migrate_data')}
+          </button>
+        </Section>
+
+        <Section title={t('libreoffice_path')}>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={loPath}
+              onChange={e => handleChangeLoPath(e.target.value)}
+              placeholder="soffice (or full path)"
+              className="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            />
+            <button
+              onClick={async () => {
+                if (!appConfig) return
+                try {
+                  await updateConfig({ ...appConfig, lo_binary_path: loPath })
+                  getConfig().then(setAppConfig)
+                } catch (e) {
+                  alert(`保存失败: ${e}`)
+                }
+              }}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors disabled:cursor-not-allowed"
+            >
+              保存
+            </button>
+          </div>
+          {loPath && loPath !== 'soffice' && (
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+              自定义路径: {loPath}
+            </p>
+          )}
+        </Section>
+
+        <Section title={t('ocr_engine')}>
+          <div className="space-y-2">
+            {ocrEngines.map(engine => (
+              <label key={engine.engine_type} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
+                <input
+                  type="radio"
+                  name="ocr_engine"
+                  value={engine.engine_type}
+                  checked={settings['ocr_engine'] === engine.engine_type}
+                  onChange={() => setValue('ocr_engine', engine.engine_type)}
+                  className="text-blue-600"
+                />
+                <div className="flex-1">
+                  <span className="text-sm text-gray-900 dark:text-gray-100">{engine.name}</span>
+                  {!engine.available && (
+                    <span className="ml-2 text-xs text-amber-600 dark:text-amber-400">({t('not_installed')})</span>
+                  )}
+                </div>
+              </label>
+            ))}
+          </div>
+
+          <button
+            onClick={handleTestOcr}
+            disabled={ocrTesting}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50 transition-colors"
+          >
+            {ocrTesting && <LoadingSpinner className="size-4" />}
+            {t('test_ocr')}
+          </button>
+
+          {ocrResult && (
+            <div className={`p-3 rounded-lg text-sm ${
+              ocrResult.success
+                ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400'
+                : 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400'
+            }`}>
+              {ocrResult.success
+                ? `✅ ${t('ocr_test_success')}: "${ocrResult.text}" (${ocrResult.duration_ms}ms)`
+                : `❌ ${t('ocr_test_failed')}: ${ocrResult.error ?? 'Unknown'}`
+              }
+            </div>
+          )}
+
+          {selectedEngine && !selectedEngine.available && (
+            <div className="p-3 bg-amber-50 dark:bg-amber-900/20 rounded-lg text-sm text-amber-700 dark:text-amber-400">
+              <p className="font-medium mb-2">Install Guide:</p>
+              <pre className="whitespace-pre-wrap text-xs font-mono">{selectedEngine.install_guide}</pre>
+            </div>
+          )}
+
+          <p className="text-xs text-gray-500 dark:text-gray-400">
+            ⚠️ {t('ocr_engine_required')}
+          </p>
+        </Section>
+
+        <Section title="OCR">
+          <SelectField
+            label="Language"
+            value={settings['ocr_lang'] ?? 'eng'}
+            onChange={v => setValue('ocr_lang', v)}
+            options={OCR_LANGS}
+          />
+          <NumberField
+            label="Concurrency"
+            value={parseInt(settings['ocr_concurrency'] ?? '2', 10)}
+            onChange={v => setValue('ocr_concurrency', String(v))}
+            min={1}
+            max={16}
+            placeholder="Default: 2"
+          />
+        </Section>
+
+        <Section title={t('language')}>
+          <SelectField
+            label={t('language')}
+            value={lang}
+            onChange={handleChangeLang}
+            options={LANG_OPTIONS.map(o => ({ value: o.value, label: t(o.labelKey) }))}
+          />
+        </Section>
+
+        <Section title="System">
+          <ToggleField
+            label="Launch on system startup"
+            checked={settings['auto_start'] === 'true'}
+            onChange={v => setValue('auto_start', v ? 'true' : 'false')}
+          />
+        </Section>
+
+        <Section title="Scheduling">
+          <TextField
+            label="Scheduled scan time"
+            value={settings['scan_time'] ?? '02:00'}
+            onChange={v => setValue('scan_time', v)}
+            placeholder="Default: 02:00 (2 AM)"
+          />
+          <ToggleField
+            label="Auto backup"
+            checked={settings['auto_backup'] === 'true'}
+            onChange={v => setValue('auto_backup', v ? 'true' : 'false')}
+          />
+          <NumberField
+            label="Backup interval (days)"
+            value={parseInt(settings['backup_interval'] ?? '7', 10)}
+            onChange={v => setValue('backup_interval', String(v))}
+            min={1}
+            max={365}
+            placeholder="Default: 7"
+          />
+          <NumberField
+            label="Maximum search results"
+            value={parseInt(settings['max_results'] ?? '1000', 10)}
+            onChange={v => setValue('max_results', String(v))}
+            min={100}
+            max={10000}
+            step={100}
+            placeholder="Default: 1000"
+          />
+        </Section>
+
+        <Section title="Exclusions">
+          <TextareaField
+            label="Exclude patterns"
+            value={settings['exclude_patterns'] ?? ''}
+            onChange={v => setValue('exclude_patterns', v)}
+            placeholder="*.tmp&#10;node_modules&#10;.git"
+            rows={4}
+          />
+        </Section>
+
+        <Section title={t('dependencies')}>
+          {deps.map(dep => (
+            <div key={dep.command} className="flex items-start gap-3">
+              {dep.available
+                ? <span className="text-green-600 dark:text-green-400 text-lg">✓</span>
+                : <span className="text-amber-600 dark:text-amber-400 text-lg">✗</span>
+              }
+              <div className="flex-1">
+                <p className="text-sm text-gray-900 dark:text-gray-100">{dep.name}</p>
+                <p className="text-xs text-gray-500">{dep.command}</p>
+                {!dep.available && (
+                  <pre className="mt-1 text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 p-2 rounded">{dep.install_guide}</pre>
+                )}
+              </div>
+            </div>
+          ))}
+        </Section>
+
+        <Section title={t('theme')}>
+          <SelectField
+            label={t('theme')}
+            value={theme}
+            onChange={v => setTheme(v as 'light' | 'dark' | 'system')}
+            options={[
+              { value: 'light', label: t('light') },
+              { value: 'dark', label: t('dark') },
+              { value: 'system', label: t('system') },
+            ]}
+          />
+        </Section>
+      </div>
+    </div>
+  )
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+      <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-4">{title}</h3>
+      <div className="space-y-4">{children}</div>
+    </div>
+  )
+}
+
+function TextField({ label, value, onChange, placeholder }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</label>
+      <input
+        type="text"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+      />
+    </div>
+  )
+}
+
+function SelectField({ label, value, onChange, options }: {
+  label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[]
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</label>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+      >
+        {options.map(o => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+function NumberField({ label, value, onChange, min, max, step, placeholder }: {
+  label: string; value: number; onChange: (v: number) => void; min: number; max: number; step?: number; placeholder?: string
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</label>
+      <input
+        type="number"
+        value={value}
+        onChange={e => onChange(parseInt(e.target.value, 10) || min)}
+        min={min}
+        max={max}
+        step={step}
+        placeholder={placeholder}
+        className="w-24 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+      />
+    </div>
+  )
+}
+
+function TextareaField({ label, value, onChange, placeholder, rows }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string; rows?: number
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</label>
+      <textarea
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder={placeholder}
+        rows={rows ?? 3}
+        className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors resize-vertical font-mono"
+      />
+    </div>
+  )
+}
+
+function ToggleField({ label, checked, onChange }: {
+  label: string; checked: boolean; onChange: (v: boolean) => void
+}) {
+  return (
+    <label className="flex items-center gap-3 cursor-pointer">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={e => onChange(e.target.checked)}
+        className="rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500 dark:bg-gray-700"
+      />
+      <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
+    </label>
+  )
+}

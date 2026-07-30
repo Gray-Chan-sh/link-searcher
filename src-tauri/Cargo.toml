@@ -1,0 +1,60 @@
+[package]
+name = "link-searcher"
+version = "0.1.0"
+description = "Cross-platform full-text search desktop application"
+authors = ["Link-Searcher"]
+edition = "2024"
+
+[lib]
+name = "link_searcher_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+tantivy = "0.22"
+regex = "1"
+jieba-rs = "0.10"
+notify = { version = "7", features = ["macos_fsevent"] }
+notify-debouncer-full = "0.4"
+rayon = "1"
+lopdf = "0.34"
+calamine = "0.26"
+quick-xml = "0.36"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+md-5 = "0.10"
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
+zip = "2"
+image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
+encoding_rs = "0.8"
+opener = "0.7"
+anyhow = "1"
+walkdir = "2"
+glob = "0.3"
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+
+[dev-dependencies]
+dirs = "5"
+tauri = { version = "2", features = ["test", "dynamic-acl"] }
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]

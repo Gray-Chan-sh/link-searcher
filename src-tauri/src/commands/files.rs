@@ -1,0 +1,416 @@
+use std::io::Write;
+
+use serde::Serialize;
+use tauri::State;
+
+use crate::db;
+use crate::state::AppState;
+
+#[derive(Serialize)]
+pub struct FileDetail {
+    pub id: String,
+    pub path: String,
+    pub dir_id: String,
+    pub file_name: String,
+    pub file_ext: String,
+    pub file_size: u64,
+    pub mtime: i64,
+    pub size: u64,
+    pub md5: Option<String>,
+    pub status: String,
+    pub indexed: bool,
+    pub error_msg: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Serialize)]
+pub struct FileListResponse {
+    pub files: Vec<FileDetail>,
+    pub total: u64,
+}
+
+#[derive(Serialize)]
+pub struct DuplicateGroup {
+    pub md5: String,
+    pub count: u64,
+    pub paths: Vec<String>,
+    pub file_ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn get_file(state: State<'_, AppState>, id: String) -> Result<FileDetail, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+    let file_name = std::path::Path::new(&file.path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let file_ext = std::path::Path::new(&file.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_string();
+    Ok(FileDetail {
+        indexed: file.indexed == 1,
+        id: file.id,
+        path: file.path.clone(),
+        dir_id: file.dir_id,
+        file_name,
+        file_ext,
+        file_size: file.size,
+        mtime: file.mtime,
+        size: file.size,
+        md5: file.md5,
+        status: file.status,
+        error_msg: file.error_msg,
+        created_at: file.created_at,
+        updated_at: file.updated_at,
+    })
+}
+
+#[tauri::command]
+pub async fn list_files(
+    state: State<'_, AppState>,
+    dir_id: Option<String>,
+    _status: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<FileListResponse, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    let (files, total) = if let Some(did) = &dir_id {
+        let all = db::tracker::get_files_by_dir(&conn, did)
+            .map_err(|e| format!("query error: {e}"))?;
+        let total = all.len() as u64;
+        let page = page.unwrap_or(1).max(1);
+        let ps = page_size.unwrap_or(50);
+        let start = (page - 1) * ps;
+        let slice: Vec<_> = all.into_iter().skip(start).take(ps).collect();
+        (slice, total)
+    } else {
+        (Vec::new(), 0)
+    };
+
+    Ok(FileListResponse {
+        total,
+        files: files
+            .into_iter()
+            .map(|f| {
+                let p = std::path::Path::new(&f.path);
+                let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
+                let file_ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+                FileDetail {
+                    indexed: f.indexed == 1,
+                    id: f.id,
+                    path: f.path,
+                    dir_id: f.dir_id,
+                    file_name,
+                    file_ext,
+                    file_size: f.size,
+                    mtime: f.mtime,
+                    size: f.size,
+                    md5: f.md5,
+                    status: f.status,
+                    error_msg: f.error_msg,
+                    created_at: f.created_at,
+                    updated_at: f.updated_at,
+                }
+            })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+pub async fn get_duplicates(state: State<'_, AppState>) -> Result<Vec<DuplicateGroup>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let groups = db::tracker::get_duplicates(&conn).map_err(|e| format!("query error: {e}"))?;
+    Ok(groups
+        .into_iter()
+        .map(|g| DuplicateGroup {
+            md5: g.md5,
+            count: g.count,
+            paths: g.paths,
+            file_ids: g.file_ids,
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn preview_file(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+
+    let md5 = file.md5.ok_or_else(|| "file has no content indexed".to_string())?;
+    db::tracker::get_content(&conn, &md5)
+        .map_err(|e| format!("content query error: {e}"))?
+        .ok_or_else(|| "content not found".to_string())
+}
+
+#[tauri::command]
+pub async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+    drop(conn);
+
+    opener::open(&file.path).map_err(|e| format!("failed to open file: {e}"))
+}
+
+#[tauri::command]
+pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Result<String, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    let tmp_dir = std::env::temp_dir().join(format!("ls_download_{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+    let zip_path = tmp_dir.join("download.zip");
+    let file = std::fs::File::create(&zip_path).map_err(|e| format!("failed to create zip: {e}"))?;
+    let mut zip_writer = zip::ZipWriter::new(file);
+    let options = zip::write::FileOptions::<()>::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    for id in &ids {
+        let file_record = db::tracker::get_file_by_id(&conn, id)
+            .map_err(|e| format!("query error: {e}"))?
+            .ok_or_else(|| format!("file not found: {id}"))?;
+
+        let path = std::path::Path::new(&file_record.path);
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let data = std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", file_record.path))?;
+
+        zip_writer
+            .start_file(name, options.clone())
+            .map_err(|e| format!("zip error: {e}"))?;
+        zip_writer
+            .write_all(&data)
+            .map_err(|e| format!("zip write error: {e}"))?;
+    }
+
+    zip_writer
+        .finish()
+        .map_err(|e| format!("zip finish error: {e}"))?;
+
+    let path_str = zip_path.to_string_lossy().to_string();
+    Ok(path_str)
+}
+
+#[derive(Serialize)]
+pub struct FilePreview {
+    pub content: Option<String>,
+    pub image_path: Option<String>,
+    pub file_type: String,
+    pub char_count: usize,
+    pub ocr_used: bool,
+}
+
+#[tauri::command]
+pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<FilePreview, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+
+    // Determine file type
+    let ext = std::path::Path::new(&file.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
+    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
+    let is_pdf = ext == "pdf";
+    let is_office = matches!(ext.as_str(), "docx"|"xlsx"|"pptx");
+
+    let file_type = if is_image { "image" }
+        else if is_pdf { "pdf" }
+        else if is_office { "office" }
+        else if is_text { "text" }
+        else { "unknown" }.to_string();
+
+    let image_path = if is_image { Some(file.path.clone()) } else { None };
+
+    let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
+        if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
+            let cc = c.chars().count();
+            let ocr = db::tracker::get_content_ocr_used(&conn, md5).unwrap_or(false);
+            (Some(c), cc, ocr)
+        } else {
+            (None, 0, false)
+        }
+    } else {
+        (None, 0, false)
+    };
+
+    Ok(FilePreview { content, image_path, file_type, char_count, ocr_used })
+}
+
+#[tauri::command]
+pub async fn reveal_in_folder(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+    drop(conn);
+
+    let parent = std::path::Path::new(&file.path)
+        .parent()
+        .ok_or_else(|| "no parent directory".to_string())?;
+
+    opener::open(parent).map_err(|e| format!("failed to open: {e}"))
+}
+
+#[derive(Serialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub is_supported: bool,
+    pub file_size: u64,
+    pub mtime: i64,
+    pub indexed: bool,
+}
+
+/// List files and directories at a given filesystem path.
+#[tauri::command]
+pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
+    let dir = std::path::Path::new(&path);
+    if !dir.is_dir() {
+        return Err("not a directory".to_string());
+    }
+
+    let mut entries = Vec::new();
+    let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read dir: {e}"))?;
+
+    for entry in read_dir.flatten() {
+        let ft = entry.file_type().ok();
+        let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
+        let name = entry.file_name().to_string_lossy().to_string();
+        let entry_path = entry.path().to_string_lossy().to_string();
+
+        let meta = entry.metadata().ok();
+        let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let mtime = meta
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        let is_supported = is_dir || crate::extractor::is_supported(&entry.path());
+
+        entries.push(DirEntry {
+            name,
+            path: entry_path,
+            is_dir,
+            is_supported,
+            file_size,
+            mtime,
+            indexed: false,
+        });
+    }
+
+    entries.sort_by(|a, b| {
+        if a.is_dir != b.is_dir {
+            b.is_dir.cmp(&a.is_dir) // directories first
+        } else {
+            a.name.to_lowercase().cmp(&b.name.to_lowercase())
+        }
+    });
+
+    Ok(entries)
+}
+
+/// Preview a file by its filesystem path (looks up DB if indexed, falls back to direct read).
+#[tauri::command]
+pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> Result<FilePreview, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    // Try to find the file in DB first
+    if let Ok(Some(file)) = db::tracker::get_file_by_path(&conn, &path) {
+        drop(conn);
+        // Delegate to get_file_preview logic
+        return get_file_preview_inner(&state, &file).await;
+    }
+    drop(conn);
+
+    // Not in DB — try reading directly
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err("file not found".to_string());
+    }
+
+    let ext = p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
+    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
+    let is_pdf = ext == "pdf";
+
+    let file_type = if is_image { "image" }
+        else if is_pdf { "pdf" }
+        else if is_text { "text" }
+        else { "unknown" }.to_string();
+
+    let image_path = if is_image { Some(path.clone()) } else { None };
+
+    let content = if is_text {
+        std::fs::read_to_string(&path).ok()
+    } else {
+        None
+    };
+    let char_count = content.as_ref().map(|c| c.chars().count()).unwrap_or(0);
+
+    Ok(FilePreview {
+        content,
+        image_path,
+        file_type,
+        char_count,
+        ocr_used: false,
+    })
+}
+
+/// Shared logic: build a FilePreview from a DB FileRecord.
+async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker::FileRecord) -> Result<FilePreview, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    let ext = std::path::Path::new(&file.path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+
+    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
+    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
+    let is_pdf = ext == "pdf";
+    let is_office = matches!(ext.as_str(), "docx"|"xlsx"|"pptx");
+
+    let file_type = if is_image { "image" }
+        else if is_pdf { "pdf" }
+        else if is_office { "office" }
+        else if is_text { "text" }
+        else { "unknown" }.to_string();
+
+    let image_path = if is_image { Some(file.path.clone()) } else { None };
+
+    let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
+        if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
+            let cc = c.chars().count();
+            let ocr = db::tracker::get_content_ocr_used(&conn, md5).unwrap_or(false);
+            (Some(c), cc, ocr)
+        } else {
+            (None, 0, false)
+        }
+    } else {
+        (None, 0, false)
+    };
+
+    Ok(FilePreview { content, image_path, file_type, char_count, ocr_used })
+}

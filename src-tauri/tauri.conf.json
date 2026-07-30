@@ -1,0 +1,41 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasio/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
+  "productName": "Link-Searcher",
+  "version": "0.1.0",
+  "identifier": "com.link-searcher.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "trayIcon": {
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": true
+    },
+    "windows": [
+      {
+        "title": "Link-Searcher",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png"
+    ]
+  }
+}

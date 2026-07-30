@@ -1,0 +1,216 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useSearch } from '../hooks/useSearch'
+import { useDirs } from '../hooks/useDirs'
+import SearchBar from '../components/SearchBar'
+import FilterPanel from '../components/FilterPanel'
+import ResultList from '../components/ResultList'
+import PreviewPanel from '../components/PreviewPanel'
+import EmptyState from '../components/EmptyState'
+import { ResultListSkeleton } from '../components/Skeleton'
+import type { SearchHit } from '../api/search'
+import { exportSearchResults } from '../api/search'
+import { openFile } from '../api/files'
+import { SearchIcon } from '../icons'
+
+export default function SearchPage() {
+  const search = useSearch()
+  const { dirs } = useDirs()
+  const [selectedHit, setSelectedHit] = useState<SearchHit | null>(null)
+  const [focusIndex, setFocusIndex] = useState(-1)
+  const [showFilters, setShowFilters] = useState(true)
+  const [exportMsg, setExportMsg] = useState<string | null>(null)
+  const [sortField, setSortField] = useState('score')
+
+  const totalPages = useMemo(
+    () => Math.max(1, Math.ceil(search.total / search.pageSize)),
+    [search.total, search.pageSize],
+  )
+
+  const handleExtToggle = (ext: string) => {
+    const next = search.extFilter.includes(ext)
+      ? search.extFilter.filter(e => e !== ext)
+      : [...search.extFilter, ext]
+    search.setExtFilter(next)
+  }
+
+  const handleExport = async () => {
+    try {
+      const path = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
+      setExportMsg(`Saved to ${path}`)
+      setTimeout(() => setExportMsg(null), 3000)
+    } catch (e) {
+      setExportMsg(`Export failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
+      setTimeout(() => setExportMsg(null), 5000)
+    }
+  }
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (search.status !== 'success' || search.hits.length === 0) return
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        const next = focusIndex + 1
+        if (next < search.hits.length) {
+          setFocusIndex(next)
+          setSelectedHit(search.hits[next])
+        }
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        const prev = focusIndex - 1
+        if (prev >= 0) {
+          setFocusIndex(prev)
+          setSelectedHit(search.hits[prev])
+        }
+      } else if (e.key === 'Enter' && focusIndex >= 0) {
+        e.preventDefault()
+        openFile(search.hits[focusIndex].file_id)
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [search.status, search.hits, focusIndex])
+
+  // Reset focus index when results change
+  useEffect(() => {
+    setFocusIndex(-1)
+  }, [search.hits])
+
+  return (
+    <div className="flex h-full">
+      {showFilters && (
+        <FilterPanel
+          dirs={dirs}
+          dirPaths={search.dirPaths}
+          extFilter={search.extFilter}
+          onDirPathsChange={search.setDirPaths}
+          onExtToggle={handleExtToggle}
+          onClearFilters={() => {
+            search.setDirIds([])
+            search.setDirPaths([])
+            search.setExtFilter([])
+          }}
+        />
+      )}
+
+      <div className="flex-1 flex flex-col min-w-0">
+        <div className="px-4 pt-4 pb-2 space-y-3">
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <SearchBar
+                query={search.query}
+                loading={search.status === 'loading'}
+                suggestions={search.suggestions}
+                onQueryChange={search.setQuery}
+                onFetchSuggestions={search.fetchSuggestions}
+                onClearSuggestions={search.clearSuggestions}
+              />
+            </div>
+            <button
+              onClick={() => setShowFilters(v => !v)}
+              className="px-2.5 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0"
+            >
+              Filters
+            </button>
+          </div>
+
+          {search.status === 'success' && (
+            <div className="flex items-center justify-between">
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                {search.total} results ({search.tookMs}ms) — Page {search.page} of {totalPages}
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  value={sortField}
+                  onChange={e => setSortField(e.target.value)}
+                  className="text-xs px-2 py-1 border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
+                >
+                  <option value="score">By Relevance</option>
+                  <option value="date">By Date</option>
+                  <option value="name">By Name</option>
+                  <option value="size">By Size</option>
+                </select>
+                {exportMsg && (
+                  <span className="text-xs text-gray-500 dark:text-gray-400 max-w-48 truncate">{exportMsg}</span>
+                )}
+                <button
+                  onClick={handleExport}
+                  className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0"
+                >
+                  Export CSV
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex-1 overflow-y-auto">
+          {search.status === 'idle' && (
+            <EmptyState
+              icon={<SearchIcon className="size-12" />}
+              title="Search your documents"
+              description="Type a query above to search across your indexed files"
+            />
+          )}
+
+          {search.status === 'loading' && (
+            <ResultListSkeleton />
+          )}
+
+          {search.status === 'error' && (
+            <div className="flex flex-col items-center justify-center py-16 px-4">
+              <p className="text-sm text-red-600 dark:text-red-400 mb-3">{search.error}</p>
+              <button
+                onClick={search.retry}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+
+          {search.status === 'success' && (
+            <ResultList
+              hits={search.hits}
+              selectedId={selectedHit?.file_id ?? null}
+              onSelect={setSelectedHit}
+            />
+          )}
+
+          {search.status === 'success' && search.hits.length === 0 && (
+            <EmptyState title="No results found" description="Try a different query or check your filters" />
+          )}
+        </div>
+
+        {search.status === 'success' && totalPages > 1 && (
+          <div className="flex items-center justify-center gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-800">
+            <button
+              onClick={() => search.setPage(search.page - 1)}
+              disabled={search.page <= 1}
+              className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Previous
+            </button>
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              {search.page} / {totalPages}
+            </span>
+            <button
+              onClick={() => search.setPage(search.page + 1)}
+              disabled={search.page >= totalPages}
+              className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              Next
+            </button>
+          </div>
+        )}
+      </div>
+
+      <PreviewPanel
+        fileId={selectedHit?.file_id ?? null}
+        searchQuery={search.query}
+        onClose={() => setSelectedHit(null)}
+      />
+    </div>
+  )
+}
