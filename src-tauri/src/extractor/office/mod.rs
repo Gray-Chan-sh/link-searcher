@@ -83,11 +83,41 @@ fn determine_lo_binary() -> String {
     "soffice".to_string()
 }
 
+#[cfg(target_os = "macos")]
+struct LsuiElementGuard;
+
+#[cfg(target_os = "macos")]
+impl LsuiElementGuard {
+    fn suppress() -> Self {
+        let _ = std::process::Command::new("defaults")
+            .args(["write", "org.libreoffice.script", "LSUIElement", "1"])
+            .status();
+        LsuiElementGuard
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for LsuiElementGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("defaults")
+            .args(["delete", "org.libreoffice.script", "LSUIElement"])
+            .status();
+    }
+}
+
 pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
     let binary = determine_lo_binary();
     if binary.is_empty() {
         return Err(anyhow::anyhow!("LibreOffice 未配置且不可用"));
     }
+
+    // macOS only: hide LibreOffice Dock icon for headless conversion
+    #[cfg(target_os = "macos")]
+    let _lsu_guard = if binary.contains("LibreOffice") {
+        Some(LsuiElementGuard::suppress())
+    } else {
+        None
+    };
 
     let tmp_dir = std::env::temp_dir().join(format!("ls_lo_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).context("failed to create LO temp dir")?;
