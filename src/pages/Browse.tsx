@@ -1,8 +1,8 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { getFilePreview, type FilePreview } from '../api/files'
-import { FolderIcon, FileTextIcon, ChevronDownIcon, XIcon } from '../icons'
+import { type FilePreview } from '../api/files'
+import { FolderIcon, FileTextIcon, ChevronDownIcon } from '../icons'
 
 interface DirEntry {
   name: string
@@ -27,10 +27,6 @@ function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts / 1000).toLocaleString()
 }
 
 export default function Browse() {

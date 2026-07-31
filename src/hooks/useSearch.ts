@@ -5,10 +5,10 @@ const LS_FILTER_DIR_KEY = 'ls_filter_dirs'
 const LS_FILTER_EXT_KEY = 'ls_filter_exts'
 const LS_FILTER_PATH_KEY = 'ls_filter_paths'
 
-function loadFromStorage(key: string, fallback: unknown): unknown {
+function loadFromStorage<T>(key: string, fallback: T): T {
   try {
     const item = localStorage.getItem(key)
-    return item ? JSON.parse(item) : fallback
+    return item ? JSON.parse(item) as T : fallback
   } catch (e) {
     console.warn('Failed to load from localStorage', e)
     return fallback

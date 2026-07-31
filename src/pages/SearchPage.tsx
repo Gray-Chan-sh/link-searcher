@@ -48,7 +48,7 @@ const handleExport = async () => {
     }
 
     const content = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
-    await writeTextFile({ path: savedPath, content })
+    await writeTextFile(savedPath, content)
 
     setExportMsg(`Saved to ${savedPath}`)
     setTimeout(() => setExportMsg(null), 3000)
