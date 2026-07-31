@@ -128,6 +128,22 @@ pub fn get_files_by_dir(conn: &Connection, dir_id: &str) -> Result<Vec<FileRecor
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect files_by_dir")
 }
 
+pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
+    let dirs = crate::db::dir_config::list_dirs(conn)
+        .context("failed to list dirs for migration")?;
+    let mut count = 0u64;
+    for dir in &dirs {
+        let prefix = format!("{}/", dir.path.trim_end_matches('/'));
+        let updated = conn.execute(
+            "UPDATE file_tracking SET path = REPLACE(path, ?1, '') WHERE dir_id = ?2 AND path LIKE ?3",
+            rusqlite::params![prefix, dir.id, format!("{prefix}%")],
+        ).context("migrate path to relative failed")?;
+        count += updated as u64;
+    }
+    log::info!("[DB] 路径迁移: {} 条记录", count);
+    Ok(count)
+}
+
 pub fn get_files_needing_index(conn: &Connection, limit: usize) -> Result<Vec<FileRecord>> {
     let mut s = conn
         .prepare(&format!("{SEL} WHERE indexed IN (0,2) ORDER BY updated_at ASC LIMIT ?1"))
@@ -179,8 +195,8 @@ fn run_stats_query(conn: &Connection, clause: &str, param: Option<&str>) -> Resu
 
 pub fn get_stats(conn: &Connection, dir_id: Option<&str>) -> Result<IndexStats> {
     match dir_id {
-        Some(d) => run_stats_query(conn, "WHERE dir_id=?1", Some(d)),
-        None => run_stats_query(conn, "", None),
+        Some(d) => run_stats_query(conn, "WHERE dir_id=?1 AND status='active'", Some(d)),
+        None => run_stats_query(conn, "WHERE status='active'", None),
     }
 }
 

@@ -214,6 +214,11 @@ pub fn run() {
                     return;
                 }
 
+                // One-time migration: convert absolute paths to relative
+                if let Ok(conn) = db_ref.get() {
+                    let _ = crate::db::tracker::migrate_paths_to_relative(&conn);
+                }
+
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
                 for dir in &dirs {
                     match scanner_ref.startup_scan(&dir.id) {
