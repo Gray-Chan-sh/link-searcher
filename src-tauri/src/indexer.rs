@@ -6,7 +6,7 @@
 //! can batch documents before a single [`commit`](IndexerService::commit).
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use md5::Digest;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use rayon::prelude::*;
 use tantivy::IndexWriter;
 
 use crate::search::indexer::Indexer;
@@ -32,6 +33,32 @@ pub struct IndexerService {
 // SAFETY: IndexWriter is `Send` (it holds owned channels + Arc<Mutex<…>>).
 // Mutex<Option<IndexWriter>> adds Sync, so IndexerService itself is Sync.
 
+/// A single file to be processed in a batch index operation.
+pub struct BatchJob {
+    pub file_id: String,
+    pub file_path: PathBuf,
+    pub dir_id: String,
+}
+
+/// Outcome of indexing a single file within a batch.
+pub struct BatchResult {
+    pub file_id: String,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+struct ExtractedData {
+    file_id: String,
+    file_name: String,
+    file_ext: String,
+    dir_id: String,
+    file_path_str: String,
+    text: String,
+    mtime: i64,
+    file_size: u64,
+    hash: String,
+}
+
 impl IndexerService {
     /// Create a new indexer service backed by a DB pool and a tantivy index.
     pub fn new(
@@ -45,6 +72,262 @@ impl IndexerService {
             commit_counter: AtomicU64::new(0),
             commit_interval: AtomicU64::new(100),
         }
+    }
+
+    /// Batch-index multiple files.
+    ///
+    /// Phase 1 (Rayon `par_iter`): read file content, compute MD5, extract text
+    /// (CPU/IO-bound, fully parallel).
+    /// Phase 2 (serial): lock the Tantivy writer once, add every document, and
+    /// update DB tracking.
+    pub fn batch_index(&self, jobs: Vec<BatchJob>) -> Result<Vec<BatchResult>> {
+        let db = self.db.clone();
+        let total = jobs.len();
+
+        // ── Phase 1: parallel extraction ──────────────────────────────
+        let extracted: Vec<Result<ExtractedData, (String, String)>> = jobs
+            .par_iter()
+            .map(|job| {
+                let conn = match db.get() {
+                    Ok(c) => c,
+                    Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
+                };
+
+                let file_name = job
+                    .file_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let file_ext = job
+                    .file_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                const MAX_FILE_SIZE: u64 = 1024 * 1024 * 100;
+                const CHUNK_SIZE: u64 = 1024 * 1024;
+
+                let meta = match std::fs::metadata(&job.file_path) {
+                    Ok(m) => m,
+                    Err(e) => return Err((job.file_id.clone(), format!("stat: {e}"))),
+                };
+                let file_size = meta.len();
+
+                let file = match std::fs::File::open(&job.file_path) {
+                    Ok(f) => f,
+                    Err(e) => return Err((job.file_id.clone(), format!("open: {e}"))),
+                };
+                let mut reader = BufReader::new(file);
+
+                let mut raw: Vec<u8>;
+                let hash: String;
+
+                if file_size > MAX_FILE_SIZE {
+                    let mut head = vec![0u8; CHUNK_SIZE as usize];
+                    if let Err(e) = reader.read_exact(&mut head) {
+                        return Err((job.file_id.clone(), format!("read head: {e}")));
+                    }
+                    if let Err(e) = reader.seek(SeekFrom::End(-(CHUNK_SIZE as i64))) {
+                        return Err((job.file_id.clone(), format!("seek: {e}")));
+                    }
+                    let mut tail = vec![0u8; CHUNK_SIZE as usize];
+                    if let Err(e) = reader.read_exact(&mut tail) {
+                        return Err((job.file_id.clone(), format!("read tail: {e}")));
+                    }
+                    let mut hasher = md5::Md5::new();
+                    hasher.update(&head);
+                    hasher.update(&tail);
+                    hash = format!("{:x}", hasher.finalize());
+                    head.extend_from_slice(&tail);
+                    raw = head;
+                } else {
+                    let mut buf = [0u8; 65536];
+                    let mut hasher = md5::Md5::new();
+                    raw = Vec::new();
+                    loop {
+                        let n = match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => n,
+                            Err(e) => return Err((job.file_id.clone(), format!("read: {e}"))),
+                        };
+                        hasher.update(&buf[..n]);
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                    hash = format!("{:x}", hasher.finalize());
+                }
+
+                log::info!("[INDEX] 开始: {file_name} ({file_ext}, {file_size} B)");
+
+                // Dedup – reuse previously extracted content for the same hash.
+                let text = match crate::db::tracker::get_content(&conn, &hash) {
+                    Ok(Some(t)) => {
+                        log::info!(
+                            "[INDEX] 去重: {file_name} 复用 md5={hash:.8} 的已有内容"
+                        );
+                        t
+                    }
+                    Ok(None) => {
+                        let mut ocr_used = false;
+                        let extracted = match crate::extractor::extract_text(&job.file_path) {
+                            Ok(t) if t.len() > 10 => t,
+                            Ok(t) => {
+                                log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
+                                match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
+                                    Ok(ocr) if !ocr.is_empty() => {
+                                        ocr_used = true;
+                                        ocr
+                                    }
+                                    _ => {
+                                        log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
+                                        t
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::warn!("[INDEX] 提取失败: {e}, 尝试纯文本回退");
+                                let fallback = if file_size <= MAX_FILE_SIZE {
+                                    std::str::from_utf8(&raw).ok().map(|s| s.to_owned())
+                                } else {
+                                    None
+                                };
+                                match fallback {
+                                    Some(t) => {
+                                        ocr_used = true;
+                                        t
+                                    }
+                                    None => {
+                                        return Err((
+                                            job.file_id.clone(),
+                                            format!("所有提取方式均失败: {e}"),
+                                        ))
+                                    }
+                                }
+                            }
+                        };
+                        let char_count = extracted.chars().count();
+                        log::info!("[INDEX] 提取文字: {file_name} ({char_count} 字符)");
+                        if let Err(e) =
+                            crate::db::tracker::store_content(&conn, &hash, &extracted, ocr_used, None)
+                        {
+                            log::warn!("[INDEX] 存储提取内容失败: {e}");
+                        }
+                        extracted
+                    }
+                    Err(e) => return Err((job.file_id.clone(), format!("dedup query: {e}"))),
+                };
+
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_micros() as i64)
+                    .unwrap_or(0);
+
+                Ok(ExtractedData {
+                    file_id: job.file_id.clone(),
+                    file_name,
+                    file_ext,
+                    dir_id: job.dir_id.clone(),
+                    file_path_str: job.file_path.to_string_lossy().to_string(),
+                    text,
+                    mtime,
+                    file_size,
+                    hash,
+                })
+            })
+            .collect();
+
+        // ── Phase 2: serial Tantivy write + DB tracking ──────────────
+        let mut guard = self.lock_writer()?;
+        let writer = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
+        let conn = self.db.get().context("failed to get DB connection")?;
+
+        let mut results = Vec::with_capacity(total);
+        let mut success_count = 0u64;
+
+        for extraction in extracted {
+            match extraction {
+                Ok(data) => {
+                    let file_id = data.file_id;
+                    if let Err(e) = Indexer::add_document(
+                        writer,
+                        &file_id,
+                        &data.file_name,
+                        &data.file_ext,
+                        &data.dir_id,
+                        &data.file_path_str,
+                        &data.text,
+                        data.mtime,
+                        data.file_size,
+                    ) {
+                        let err = format!("add_document: {e}");
+                        log::error!("[INDEX] 写入失败: {}: {}", data.file_name, err);
+                        let _ = crate::db::tracker::log_index_error(
+                            &conn,
+                            &file_id,
+                            &data.file_path_str,
+                            classify_error_str(&err, &data.file_ext),
+                            &err,
+                        );
+                        let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
+                        results.push(BatchResult {
+                            file_id,
+                            success: false,
+                            error: Some(err),
+                        });
+                        continue;
+                    }
+
+                    if let Err(e) =
+                        crate::db::tracker::update_indexed(&conn, &file_id, Some(&data.hash))
+                    {
+                        let err = format!("update_indexed: {e}");
+                        log::error!("[INDEX] 更新 tracking 失败: {}: {}", data.file_name, err);
+                        results.push(BatchResult {
+                            file_id,
+                            success: false,
+                            error: Some(err),
+                        });
+                        continue;
+                    }
+
+                    log::info!("[INDEX] 完成: {}", data.file_name);
+                    success_count += 1;
+                    results.push(BatchResult {
+                        file_id,
+                        success: true,
+                        error: None,
+                    });
+                }
+                Err((file_id, err)) => {
+                    log::error!("[INDEX] 提取失败 (batch): {}", err);
+                    let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
+                    results.push(BatchResult {
+                        file_id,
+                        success: false,
+                        error: Some(err),
+                    });
+                }
+            }
+        }
+
+        // Periodic auto-commit every N successful files.
+        if success_count > 0 {
+            let prev = self.commit_counter.fetch_add(success_count, Ordering::Relaxed);
+            let current = prev + success_count;
+            let interval = self.commit_interval.load(Ordering::Relaxed);
+            if interval > 0 && current / interval > prev / interval {
+                if let Err(e) = self.commit() {
+                    log::error!("[INDEX] 定期提交失败: {e}");
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     // ------------------------------------------------------------------
@@ -309,8 +592,7 @@ impl IndexerService {
     }
 }
 
-fn classify_error(err: &anyhow::Error, _ext: &str) -> &'static str {
-    let msg = format!("{err}");
+fn classify_error_str(msg: &str, _ext: &str) -> &'static str {
     if msg.contains("Permission denied") || msg.contains("Access denied") {
         "access_denied"
     } else if msg.contains("OCR") || msg.contains("tesseract") {
@@ -322,6 +604,10 @@ fn classify_error(err: &anyhow::Error, _ext: &str) -> &'static str {
     } else {
         "unknown"
     }
+}
+
+fn classify_error(err: &anyhow::Error, ext: &str) -> &'static str {
+    classify_error_str(&format!("{err}"), ext)
 }
 
 impl Drop for IndexerService {

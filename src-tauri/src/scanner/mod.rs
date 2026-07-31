@@ -17,7 +17,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 
 use crate::db::dir_config;
 use crate::db::tracker;
-use crate::indexer::IndexerService;
+use crate::indexer::{BatchJob, IndexerService};
 use crate::search::indexer::Indexer;
 
 pub use watcher::{ChangeKind, FileChangeEvent, FileWatcher, WatcherCommand};
@@ -112,6 +112,7 @@ impl Scanner {
         let mut errors = 0u64;
         let mut processed = 0u64;
         let mut disk_paths: Vec<String> = Vec::new();
+        let mut jobs: Vec<BatchJob> = Vec::new();
 
         for entry in walkdir::WalkDir::new(&config.path)
             .follow_links(false)
@@ -138,19 +139,23 @@ impl Scanner {
 
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, size, None)?;
-                match self.indexer.index_file(&file_id, &path, dir_id) {
-                    Ok(()) => indexed += 1,
-                    Err(e) => {
-                        let _ = tracker::mark_failed(&conn, &file_id, &e.to_string());
-                        errors += 1;
-                    }
-                }
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
             }
 
             if processed % 100 == 0 {
                 log::info!("[SCAN] 进度 [{processed}/{total}]");
             }
             progress(ScanProgress { total, processed, errors, current_file: path_str });
+        }
+
+        if !jobs.is_empty() {
+            for r in self.indexer.batch_index(jobs)? {
+                if r.success {
+                    indexed += 1;
+                } else {
+                    errors += 1;
+                }
+            }
         }
 
         // Mark files in DB but absent from disk as deleted.
@@ -195,6 +200,7 @@ impl Scanner {
         let mut on_disk: Vec<String> = Vec::new();
         let mut indexed = 0u64;
         let mut errors = 0u64;
+        let mut jobs: Vec<BatchJob> = Vec::new();
 
         for entry in walker {
             let entry = entry.context("walkdir error")?;
@@ -216,12 +222,16 @@ impl Scanner {
 
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, meta.len(), None)?;
-                match self.indexer.index_file(&file_id, &path, dir_id) {
-                    Ok(()) => indexed += 1,
-                    Err(e) => {
-                        let _ = tracker::mark_failed(&conn, &file_id, &e.to_string());
-                        errors += 1;
-                    }
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
+            }
+        }
+
+        if !jobs.is_empty() {
+            for r in self.indexer.batch_index(jobs)? {
+                if r.success {
+                    indexed += 1;
+                } else {
+                    errors += 1;
                 }
             }
         }
@@ -268,6 +278,7 @@ impl Scanner {
         let mut indexed = 0u64;
         let mut errors = 0u64;
         let mut moved = 0u64;
+        let mut jobs: Vec<BatchJob> = Vec::new();
 
         for entry in walker {
             let entry = entry.context("walkdir error")?;
@@ -289,16 +300,20 @@ impl Scanner {
 
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, size, None)?;
-                match self.indexer.index_file(&file_id, &path, dir_id) {
-                    Ok(()) => indexed += 1,
-                    Err(e) => {
-                        let _ = tracker::mark_failed(&conn, &file_id, &e.to_string());
-                        errors += 1;
-                    }
-                }
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
             }
 
             on_disk.push(DiskEntry { path: path_str, size, name });
+        }
+
+        if !jobs.is_empty() {
+            for r in self.indexer.batch_index(jobs)? {
+                if r.success {
+                    indexed += 1;
+                } else {
+                    errors += 1;
+                }
+            }
         }
 
         let disk_set: std::collections::HashSet<String> =
