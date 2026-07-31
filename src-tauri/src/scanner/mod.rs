@@ -35,6 +35,8 @@ pub struct ScanProgress {
 pub struct ScanResult {
     pub total_files: u64,
     pub indexed: u64,
+    pub deleted: u64,
+    pub modified: u64,
     pub errors: u64,
     pub duration_ms: u64,
 }
@@ -116,6 +118,9 @@ impl Scanner {
         let mut processed = 0u64;
         let mut disk_paths: Vec<String> = Vec::new();
         let mut jobs: Vec<BatchJob> = Vec::new();
+        let mut added = 0u64;
+        let mut modified = 0u64;
+        let mut deleted = 0u64;
 
         for entry in walkdir::WalkDir::new(&config.path)
             .follow_links(false)
@@ -136,8 +141,16 @@ impl Scanner {
             let size = meta.len();
             let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
-                Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
-                None => true,
+                Some(r) => {
+                    if r.mtime != mtime {
+                        modified += 1;
+                    }
+                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
+                },
+                None => {
+                    added += 1;
+                    true
+                },
             };
 
             if needs_index {
@@ -166,6 +179,7 @@ impl Scanner {
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status == "active" && !disk_set.contains(&rec.path) {
                 let _ = self.indexer.delete_file(&rec.id);
+                deleted += 1;
             }
         }
 
@@ -174,7 +188,7 @@ impl Scanner {
         self.indexer.commit().context("failed to commit index after full scan")?;
         let duration_ms = start.elapsed().as_millis() as u64;
         log::info!("[SCAN] 扫描完成: {total} files, {indexed} indexed, {errors} errors in {duration_ms}ms");
-        Ok(ScanResult { total_files: total, indexed, errors, duration_ms })
+        Ok(ScanResult { total_files: total, indexed, deleted, modified, errors, duration_ms })
     }
 
     /// Incremental scan — only processes files whose mtime is newer than
@@ -206,6 +220,8 @@ impl Scanner {
         let mut indexed = 0u64;
         let mut errors = 0u64;
         let mut jobs: Vec<BatchJob> = Vec::new();
+        let mut added = 0u64;
+        let mut modified = 0u64;
 
         for entry in walker {
             let entry = entry.context("walkdir error")?;
@@ -221,8 +237,16 @@ impl Scanner {
 
             let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
-                Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
-                None => true,
+                Some(r) => {
+                    if r.mtime != mtime {
+                        modified += 1;
+                    }
+                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
+                },
+                None => {
+                    added += 1;
+                    true
+                },
             };
 
             if needs_index {
@@ -243,9 +267,11 @@ impl Scanner {
 
         // Detect and remove deleted files.
         let disk_set: std::collections::HashSet<String> = on_disk.into_iter().collect();
+        let mut deleted = 0u64;
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status == "active" && !disk_set.contains(&rec.path) {
                 let _ = self.indexer.delete_file(&rec.id);
+                deleted += 1;
             }
         }
 
@@ -254,7 +280,7 @@ impl Scanner {
 
         self.indexer.commit().context("failed to commit index after incremental scan")?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        Ok(ScanResult { total_files, indexed, errors, duration_ms })
+        Ok(ScanResult { total_files, indexed, deleted, modified, errors, duration_ms })
     }
 
     pub fn startup_scan(&self, dir_id: &str) -> Result<ScanResult> {
@@ -285,6 +311,9 @@ impl Scanner {
         let mut indexed = 0u64;
         let mut errors = 0u64;
         let mut moved = 0u64;
+        let mut added = 0u64;
+        let mut modified = 0u64;
+        let mut deleted = 0u64;
         let mut jobs: Vec<BatchJob> = Vec::new();
 
         for entry in walker {
@@ -301,8 +330,16 @@ impl Scanner {
 
             let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
-                Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
-                None => true,
+                Some(r) => {
+                    if r.mtime != mtime {
+                        modified += 1;
+                    }
+                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
+                },
+                None => {
+                    added += 1;
+                    true
+                },
             };
 
             if needs_index {
@@ -334,6 +371,7 @@ impl Scanner {
             if is_excluded(std::path::Path::new(&rec.path), &exclude) {
                 self.indexer.delete_file(&rec.id)?;
                 cleaned += 1;
+                deleted += 1;
             }
         }
         if cleaned > 0 {
@@ -375,6 +413,7 @@ impl Scanner {
 
             self.indexer.delete_file(&rec.id)?;
             log::info!("[STARTUP] 删除: {}", rec.path);
+            deleted += 1;
         }
 
         let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
@@ -386,7 +425,7 @@ impl Scanner {
             "[STARTUP] {} 完成: {} files, {} indexed, {} moved, {} errors in {}ms",
             config.path, total_files, indexed, moved, errors, duration_ms
         );
-        Ok(ScanResult { total_files, indexed, errors, duration_ms })
+        Ok(ScanResult { total_files, indexed, deleted, modified, errors, duration_ms })
     }
 }
 

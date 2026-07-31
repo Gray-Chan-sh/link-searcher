@@ -181,6 +181,8 @@ pub async fn trigger_scan(
                     log::info!("[SCAN] {}: {} files, {} indexed, {} errors in {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
                     added += r.indexed;
+                    deleted += r.deleted;
+                    modified += r.modified;
                     total_errors += r.errors;
                     total_duration_ms = r.duration_ms;
                 }
@@ -192,8 +194,8 @@ pub async fn trigger_scan(
             let mut delta = scan_delta.lock().unwrap();
             *delta = ScanDelta {
                 added,
-                deleted: 0,
-                modified: 0,
+                deleted,
+                modified,
                 errors: total_errors,
                 duration_ms: total_duration_ms,
             };
@@ -229,10 +231,12 @@ pub async fn rebuild_index(
     let cancel_scan = state.cancel_scan.clone();
     let scan_delta = state.scan_delta.clone();
 
-    tokio::task::spawn_blocking(move || {
-        let mut added = 0u64;
-        let mut total_errors = 0u64;
-        let mut total_duration_ms = 0u64;
+        tokio::task::spawn_blocking(move || {
+            let mut added = 0u64;
+            let mut deleted = 0u64;
+            let mut modified = 0u64;
+            let mut total_errors = 0u64;
+            let mut total_duration_ms = 0u64;
 
         // 1. Delete old index directory
         if let Err(e) = std::fs::remove_dir_all(&index_dir) {
@@ -305,6 +309,8 @@ pub async fn rebuild_index(
                     log::info!("[SCAN] {}: {} files, {} indexed, {} errors, {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
                     added += r.indexed;
+                    deleted += r.deleted;
+                    modified += r.modified;
                     total_errors += r.errors;
                     total_duration_ms = r.duration_ms;
                 }
@@ -316,8 +322,8 @@ pub async fn rebuild_index(
             let mut delta = scan_delta.lock().unwrap();
             *delta = ScanDelta {
                 added,
-                deleted: 0,
-                modified: 0,
+                deleted,
+                modified,
                 errors: total_errors,
                 duration_ms: total_duration_ms,
             };

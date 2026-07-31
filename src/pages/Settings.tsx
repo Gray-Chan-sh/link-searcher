@@ -147,10 +147,10 @@ export default function Settings() {
             <input
               type="text"
               value={loPath}
-              onChange={e => {
-                setLoPath(e.target.value)
+              onChange={e => setLoPath(e.target.value)}
+              onBlur={async () => {
                 if (appConfig) {
-                  updateConfig({ ...appConfig, lo_binary_path: e.target.value })
+                  await updateConfig({ ...appConfig, lo_binary_path: loPath })
                     .catch(err => setLocalError(err instanceof Error ? err.message : 'Failed to save LO path'))
                 }
               }}
