@@ -20,3 +20,7 @@ export async function updateConfig(config: Partial<ConfigInfo>): Promise<void> {
 export async function migrateData(oldPath: string, newPath: string): Promise<string> {
     return invoke<string>('migrate_data', { oldPath, newPath })
 }
+
+export async function restartApp(): Promise<void> {
+    return invoke('restart_app')
+}

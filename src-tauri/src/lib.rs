@@ -12,7 +12,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
-use crate::commands::config::{get_config, migrate_data, update_config};
+use crate::commands::config::{get_config, migrate_data, restart_app, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{cancel_scan, check_index_health, get_index_status, rebuild_index, trigger_scan};
@@ -83,6 +83,7 @@ pub fn run() {
             get_config,
             update_config,
             migrate_data,
+            restart_app,
         ])
         .setup(|app| {
             log::info!("data directory: {:?}", data_dir);

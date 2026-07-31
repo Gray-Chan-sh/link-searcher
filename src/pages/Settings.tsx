@@ -4,7 +4,7 @@ import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { getConfig, migrateData, updateConfig, type ConfigInfo } from '../api/config'
+import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo } from '../api/config'
 import { checkDependencies, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
 
 const OCR_LANGS = [
@@ -75,7 +75,9 @@ export default function Settings() {
       setAppConfig({ ...appConfig, data_dir: selected })
       await updateConfig({ data_dir: selected })
       setLocalError(null)
+      setMigrating(false)
       alert(msg)
+      await restartApp()
     } catch (e: unknown) {
       const err = e instanceof Error ? e.message : String(e)
       setLocalError(`迁移失败: ${err}`)

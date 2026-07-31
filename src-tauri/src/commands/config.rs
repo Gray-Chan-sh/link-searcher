@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
 use crate::config::{AppConfig, load_config, save_config};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -77,7 +78,7 @@ pub fn migrate_data(old_path: String, new_path: String) -> Result<String, String
     loaded.data_dir = new_path.into();
     save_config(&loaded)?;
 
-    Ok("数据已迁移到新目录，请重启应用以生效".to_string())
+    Ok("数据已迁移到新目录，即将自动重启".to_string())
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
@@ -94,4 +95,9 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
         }
     }
     Ok(())
+}
+
+#[tauri::command]
+pub fn restart_app(app: AppHandle) {
+    app.restart();
 }
