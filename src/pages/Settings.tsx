@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { open } from '@tauri-apps/plugin-dialog'
+import { ask, open } from '@tauri-apps/plugin-dialog'
 import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
@@ -76,8 +76,8 @@ export default function Settings() {
       await updateConfig({ data_dir: selected })
       setLocalError(null)
       setMigrating(false)
-      alert(msg)
-      await restartApp()
+      const restart = await ask(msg, { title: '迁移完成', kind: 'info' })
+      if (restart) await restartApp()
     } catch (e: unknown) {
       const err = e instanceof Error ? e.message : String(e)
       setLocalError(`迁移失败: ${err}`)
