@@ -3,6 +3,7 @@ import { addDir } from '../api/dirs'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
+import { ask } from '@tauri-apps/plugin-dialog'
 
 export default function DirManager() {
   const { dirs, loading, error, addDirectory, removeDirectory, refresh } = useDirs()
@@ -89,7 +90,12 @@ export default function DirManager() {
                 </div>
               </div>
               <button
-                onClick={() => removeDirectory(dir.id)}
+                onClick={async () => {
+                  const confirmed = await ask('确认删除此目录？', { title: '删除资料库', kind: 'warning' })
+                  if (confirmed) {
+                    removeDirectory(dir.id)
+                  }
+                }}
                 className="p-1.5 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors shrink-0"
                 title="Remove directory"
               >

@@ -11,6 +11,8 @@ import type { SearchHit } from '../api/search'
 import { exportSearchResults } from '../api/search'
 import { openFile } from '../api/files'
 import { SearchIcon } from '../icons'
+import { save } from '@tauri-apps/plugin-dialog'
+import { writeTextFile } from '@tauri-apps/plugin-fs'
 
 export default function SearchPage() {
   const search = useSearch()
@@ -19,7 +21,6 @@ export default function SearchPage() {
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
-  const [sortField, setSortField] = useState('score')
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(search.total / search.pageSize)),
@@ -33,16 +34,29 @@ export default function SearchPage() {
     search.setExtFilter(next)
   }
 
-  const handleExport = async () => {
-    try {
-      const path = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
-      setExportMsg(`Saved to ${path}`)
+const handleExport = async () => {
+  try {
+    const savedPath = await save({
+      defaultPath: 'results.csv',
+      filters: [{ name: 'CSV', extensions: ['csv'] }],
+    })
+
+    if (!savedPath) {
+      setExportMsg('Export cancelled')
       setTimeout(() => setExportMsg(null), 3000)
-    } catch (e) {
-      setExportMsg(`Export failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
-      setTimeout(() => setExportMsg(null), 5000)
+      return
     }
+
+    const content = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
+    await writeTextFile({ path: savedPath, content })
+
+    setExportMsg(`Saved to ${savedPath}`)
+    setTimeout(() => setExportMsg(null), 3000)
+  } catch (e) {
+    setExportMsg(`Export failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
+    setTimeout(() => setExportMsg(null), 5000)
   }
+}
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -122,8 +136,8 @@ export default function SearchPage() {
               </div>
               <div className="flex items-center gap-2">
                 <select
-                  value={sortField}
-                  onChange={e => setSortField(e.target.value)}
+                  value={search.sortField}
+                  onChange={e => search.setSort(e.target.value)}
                   className="text-xs px-2 py-1 border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
                 >
                   <option value="score">By Relevance</option>

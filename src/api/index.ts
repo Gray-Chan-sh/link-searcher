@@ -10,6 +10,7 @@ export interface IndexStatus {
   total_images: number
   last_scan: number | null
   is_scanning: boolean
+  scan_delta?: { added: number; deleted: number; modified: number; errors: number }
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
@@ -24,12 +25,16 @@ export async function rebuildIndex(): Promise<void> {
   return invoke('rebuild_index')
 }
 
+export async function cancelScan(): Promise<void> {
+  return invoke('cancel_scan')
+}
+
 export interface IndexError {
-    file_id: string
-    file_path: string
-    error_type: string
-    error_msg: string
-    created_at: number
+  file_id: string
+  file_path: string
+  error_type: string
+  error_msg: string
+  created_at: number
 }
 
 export async function getIndexErrors(limit?: number): Promise<IndexError[]> {

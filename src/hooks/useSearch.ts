@@ -25,6 +25,8 @@ export function useSearch() {
     hits: [],
     error: null,
   })
+  const [sortField, setSortField] = useState<string>('score')
+  const [sortOrder, setSortOrder] = useState<string>('desc')
   const [dirIds, setDirIds] = useState<string[]>([])
   const [dirPaths, setDirPaths] = useState<string[]>([])
   const [extFilter, setExtFilter] = useState<string[]>([])
@@ -41,11 +43,15 @@ export function useSearch() {
     dirIds: string[]
     extFilter: string[]
     dirPaths: string[]
+    sortField: string
+    sortOrder: string
   }>({
     pageSize: state.pageSize,
     dirIds,
     extFilter,
     dirPaths,
+    sortField,
+    sortOrder,
   })
 
   // Keep filtersRef in sync with state and filter states
@@ -55,8 +61,10 @@ export function useSearch() {
       dirIds,
       extFilter,
       dirPaths,
+      sortField,
+      sortOrder,
     }
-  }, [state.pageSize, dirIds, extFilter, dirPaths])
+  }, [state.pageSize, dirIds, extFilter, dirPaths, sortField, sortOrder])
 
   const executeSearch = useCallback(async (
     q: string,
@@ -65,6 +73,8 @@ export function useSearch() {
     dirs: string[],
     exts: string[],
     paths: string[],
+    sort?: string,
+    sortOrder?: string,
   ) => {
     abortRef.current?.abort()
     const ctrl = new AbortController()
@@ -78,7 +88,7 @@ export function useSearch() {
     setState(s => ({ ...s, status: 'loading', query: q, page: p, error: null }))
 
     try {
-      const res: SearchResponse = await search(q, p, ps, dirs, paths, exts)
+      const res: SearchResponse = await search(q, p, ps, dirs, paths, exts, sort, sortOrder)
       if (!ctrl.signal.aborted) {
         setState(s => ({
           ...s,
@@ -112,12 +122,12 @@ export function useSearch() {
   // Immediate search (for Enter key) – uses latest filters from ref
   const submitSearch = useCallback(() => {
     const f = filtersRef.current
-    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
   const setPage = useCallback((p: number) => {
     const f = filtersRef.current
-    executeSearch(state.query, p, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, p, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
   const updateDirIds = useCallback((ids: string[]) => {
@@ -125,26 +135,26 @@ export function useSearch() {
     // Update ref synchronously so the subsequent search sees the new ids
     filtersRef.current = { ...filtersRef.current, dirIds: ids }
     const f = filtersRef.current
-    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
   const updateDirPaths = useCallback((paths: string[]) => {
     setDirPaths(paths)
     filtersRef.current = { ...filtersRef.current, dirPaths: paths }
     const f = filtersRef.current
-    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
   const updateExtFilter = useCallback((exts: string[]) => {
     setExtFilter(exts)
     filtersRef.current = { ...filtersRef.current, extFilter: exts }
     const f = filtersRef.current
-    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
   const retry = useCallback(() => {
     const f = filtersRef.current
-    executeSearch(state.query, state.page, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    executeSearch(state.query, state.page, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, state.page, filtersRef])
 
   const fetchSuggestions = useCallback((prefix: string) => {
@@ -167,10 +177,18 @@ export function useSearch() {
   useEffect(() => {
     const timer = setTimeout(() => {
       const f = filtersRef.current
-      executeSearch(deferredQuery, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+      executeSearch(deferredQuery, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
     }, 300)
     return () => clearTimeout(timer)
   }, [deferredQuery, executeSearch, filtersRef])
+
+  // setSort: update sort field/order and immediately re-execute search with current filters
+  const setSort = useCallback((sort: string) => {
+    setSortField(sort)
+    setSortOrder('desc')
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, sort, 'desc')
+  }, [executeSearch, state.query, filtersRef])
 
   // Cleanup on unmount
   useEffect(() => {
@@ -185,16 +203,17 @@ export function useSearch() {
     dirIds,
     dirPaths,
     extFilter,
+    sortField,
     suggestions,
     setQuery,
     setPage,
+    setSort,
     setDirIds: updateDirIds,
     setDirPaths: updateDirPaths,
     setExtFilter: updateExtFilter,
     retry,
     fetchSuggestions,
     clearSuggestions: () => setSuggestions([]),
-    // Added for immediate submission (e.g., Enter key) – does not alter existing API
     submitSearch,
   }
 }

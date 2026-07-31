@@ -16,6 +16,32 @@ pub struct HistoryEntry {
     pub created_at: i64,
 }
 
+#[derive(Serialize)]
+pub struct FileTypeStat {
+    pub extension: String,
+    pub name: String,
+    pub count: u64,
+}
+
+fn file_type_name(ext: &str) -> String {
+    match ext.to_lowercase().as_str() {
+        "pdf" => "PDF".to_string(),
+        "doc" => "Word".to_string(),
+        "docx" => "Word".to_string(),
+        "xls" => "Excel".to_string(),
+        "xlsx" => "Excel".to_string(),
+        "ppt" => "PowerPoint".to_string(),
+        "pptx" => "PowerPoint".to_string(),
+        "txt" => "Text".to_string(),
+        "md" => "Markdown".to_string(),
+        "rtf" => "RTF".to_string(),
+        "odt" => "OpenDocument Text".to_string(),
+        "ods" => "OpenDocument Spreadsheet".to_string(),
+        "odp" => "OpenDocument Presentation".to_string(),
+        _ => ext.to_uppercase(),
+    }
+}
+
 #[tauri::command]
 pub async fn search(
     state: State<'_, AppState>,
@@ -278,3 +304,26 @@ pub async fn export_search_results(
     std::fs::write(&tmp_path, &output).map_err(|e| format!("failed to write export: {e}"))?;
     Ok(tmp_path.to_string_lossy().to_string())
 }
+#[tauri::command]
+pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileTypeStat>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let sql = "SELECT file_ext, COUNT(*) as cnt FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
+    let mut stmt = conn.prepare(sql).map_err(|e| format!("db prepare error: {e}"))?;
+    let mut results = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        let ext: String = row.get("file_ext")?;
+        let cnt: i64 = row.get("cnt")?;
+        let name = file_type_name(&ext);
+        Ok(FileTypeStat {
+            extension: ext,
+            name,
+            count: cnt as u64,
+        })
+    }).map_err(|e| format!("db query error: {e}"))?;
+    for row in rows {
+        let row = row.map_err(|e| format!("db query error: {e}"))?;
+        results.push(row);
+    }
+    Ok(results)
+}
+

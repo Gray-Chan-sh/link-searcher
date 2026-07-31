@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import { ask } from '@tauri-apps/plugin-dialog'
+import { invoke } from '@tauri-apps/api/core'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, type IndexError } from '../api/index'
+import { getIndexErrors, type IndexError, type IndexStatus } from '../api/index'
 import { getDuplicates, type DuplicateGroup } from '../api/files'
+import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
 import EmptyState from '../components/EmptyState'
@@ -19,12 +21,11 @@ export default function IndexStatus() {
   const [dupesLoading, setDupesLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [scanError, setScanError] = useState<string | null>(null)
-  const [isPaused, setIsPaused] = useState(false)
-  const [typeStats, setTypeStats] = useState<Record<string, number>>({})
+  const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
   const [showErrors, setShowErrors] = useState(false)
   const [errorsList, setErrorsList] = useState<IndexError[]>([])
   const [retrying, setRetrying] = useState(false)
-  const [lastDelta, setLastDelta] = useState<{ added: number; modified: number; deleted: number } | null>(null)
+  const [lastDelta, setLastDelta] = useState<{ added: number; deleted: number; modified: number; errors: number } | null>(null)
 
   const handleScan = async () => {
     setScanError(null)
@@ -53,33 +54,21 @@ export default function IndexStatus() {
     }
   }, [status?.total_files])
 
+  // Get file type distribution from backend
   useEffect(() => {
-    if (status?.total_files && status.total_files > 0) {
-      // Mock file type distribution — replace with backend API call in production
-      const total = status.total_files
-      setTypeStats({
-        pdf: Math.round(total * 0.35),
-        docx: Math.round(total * 0.20),
-        txt: Math.round(total * 0.15),
-        png: Math.round(total * 0.10),
-        jpg: Math.round(total * 0.08),
-        html: Math.round(total * 0.07),
-        md: Math.round(total * 0.05),
-      })
-    }
-  }, [status])
+    getFileTypeStats()
+      .then(setTypeStats)
+      .catch(() => {})
+  }, [])
 
+  // Compute recent changes from scan_delta
   useEffect(() => {
-    // Compute delta from indexed vs total — placeholder for real file_tracking API
-    if (status && status.last_scan) {
-      const added = status.indexed
-      const deleted = Math.max(0, status.errors - Math.round(status.total_files * 0.02))
-      const modified = Math.max(0, status.pending - deleted)
-      setLastDelta({ added, modified, deleted })
+    if (status?.scan_delta) {
+      setLastDelta(status.scan_delta)
     } else {
       setLastDelta(null)
     }
-  }, [status])
+  }, [status?.scan_delta])
 
   const handleRebuild = async () => {
     const confirmed = await ask(
@@ -108,6 +97,14 @@ export default function IndexStatus() {
     setShowErrors(true)
   }
 
+  const handleCancelScan = async () => {
+    try {
+      await invoke('cancel_scan')
+    } catch (e) {
+      console.error('Cancel scan failed:', e)
+    }
+  }
+
   const progress = status && status.total_files > 0
     ? Math.round((status.indexed / status.total_files) * 100)
     : 0
@@ -132,10 +129,10 @@ export default function IndexStatus() {
           </button>
           {status?.is_scanning && (
             <button
-              onClick={() => setIsPaused(v => !v)}
-              className="px-3 py-2 text-sm font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-900 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+              onClick={handleCancelScan}
+              className="px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
             >
-              {isPaused ? 'Resume' : 'Pause'}
+              Cancel Scan
             </button>
           )}
           <button
@@ -255,17 +252,21 @@ export default function IndexStatus() {
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
                 File Types
               </h3>
-              {Object.keys(typeStats).length === 0 ? (
-                <p className="text-sm text-gray-400 dark:text-gray-500">No data</p>
+              {typeStats.length === 0 ? (
+                <p className="text-sm text-gray-400 dark:text-gray-500">暂无数据</p>
               ) : (
                 <div className="space-y-1.5">
-                  {Object.entries(typeStats).map(([ext, count]) => (
-                    <div key={ext} className="flex items-center gap-2">
-                      <span className="text-xs text-gray-500 w-12">{ext.toUpperCase()}</span>
+                  {typeStats.map((t) => (
+                    <div key={t.extension} className="flex items-center gap-2">
+                      <span className="text-xs w-12 truncate font-medium text-gray-700 dark:text-gray-300">{t.name}</span>
                       <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${(count / status.total_files) * 100}%` }} />
+                        {status?.total_files && status.total_files > 0 && (
+                          <div className="h-full bg-blue-500 rounded-full transition-all" 
+                                style={{ width: `${(t.count / status.total_files) * 100}%` }} 
+                          />
+                        )}
                       </div>
-                      <span className="text-xs text-gray-500 w-10 text-right">{count}</span>
+                      <span className="text-xs text-gray-500 w-10 text-right">{t.count}</span>
                     </div>
                   ))}
                 </div>
@@ -277,12 +278,13 @@ export default function IndexStatus() {
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">Recent Changes</h3>
               {!lastDelta ? (
-                <p className="text-sm text-gray-400 dark:text-gray-500">No scan data yet</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500">暂无数据</p>
               ) : (
                 <div className="space-y-2">
                   <DeltaRow label="Added" value={lastDelta.added} color="green" />
                   <DeltaRow label="Modified" value={lastDelta.modified} color="yellow" />
                   <DeltaRow label="Deleted" value={lastDelta.deleted} color="red" />
+                  <DeltaRow label="Errors" value={lastDelta.errors} color="red" />
                 </div>
               )}
             </div>

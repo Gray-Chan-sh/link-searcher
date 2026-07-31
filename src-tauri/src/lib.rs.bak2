@@ -9,14 +9,14 @@ pub mod search;
 pub mod state;
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
 use crate::commands::config::{get_config, migrate_data, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{cancel_scan, check_index_health, get_index_status, rebuild_index, trigger_scan};
-use crate::commands::search::{export_search_results, get_file_type_stats, get_search_history, search, suggest};
+use crate::commands::search::{export_search_results, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, update_settings};
 use crate::commands::logs::{clear_logs, get_logs};
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, list_ocr_engines, test_ocr_engine};
@@ -25,7 +25,6 @@ use crate::scanner::Scanner;
 use crate::scanner::watcher::FileWatcher;
 use crate::search::IndexManager;
 use crate::state::AppState;
-use crate::state::ScanDelta;
 use env_logger;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
@@ -47,7 +46,6 @@ pub fn run() {
             suggest,
             get_search_history,
             export_search_results,
-            get_file_type_stats,
             get_index_status,
             trigger_scan,
             rebuild_index,
@@ -160,7 +158,6 @@ pub fn run() {
                 scanner.clone(),
                 is_scanning,
                 cancel_scan,
-                Arc::new(Mutex::new(ScanDelta::default())),
                 data_dir,
                 index_dir,
                 db_path,

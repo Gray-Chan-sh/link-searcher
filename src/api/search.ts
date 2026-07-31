@@ -29,6 +29,12 @@ export interface SearchHistoryEntry {
   created_at: number
 }
 
+export interface FileTypeStat {
+  extension: string
+  name: string
+  count: number
+}
+
 export async function search(
   query: string,
   page: number,
@@ -36,6 +42,8 @@ export async function search(
   dirIds?: string[],
   dirPaths?: string[],
   extFilter?: string[],
+  sort?: string,
+  sortOrder?: string,
 ): Promise<SearchResponse> {
   return invoke<SearchResponse>('search', {
     query,
@@ -44,6 +52,8 @@ export async function search(
     dirIds: dirIds ?? [],
     dirPaths: dirPaths ?? [],
     extFilter: extFilter ?? [],
+    sort,
+    sortOrder,
   })
 }
 
@@ -67,4 +77,8 @@ export async function exportSearchResults(
     extFilter: extFilter ?? [],
     format: format ?? 'csv',
   })
+}
+
+export async function getFileTypeStats(): Promise<FileTypeStat[]> {
+  return invoke<FileTypeStat[]>('get_file_type_stats')
 }

@@ -7,7 +7,7 @@ use crate::db;
 use crate::extractor::ocr;
 use crate::scanner::{ScanProgress, ScanResult};
 use crate::search::IndexManager;
-use crate::state::AppState;
+use crate::state::{AppState, ScanDelta};
 
 #[derive(Serialize)]
 pub struct IndexHealth {
@@ -27,6 +27,7 @@ pub struct IndexStatus {
     pub total_images: u64,
     pub last_scan: Option<i64>,
     pub is_scanning: bool,
+    pub scan_delta: Option<ScanDelta>,
 }
 
 #[derive(Clone, Serialize)]
@@ -63,6 +64,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         total_images,
         last_scan,
         is_scanning: state.is_scanning.load(Ordering::Relaxed),
+        scan_delta: Some({ let d = state.scan_delta.lock().unwrap(); d.clone() }),
     })
 }
 
@@ -112,6 +114,7 @@ pub async fn trigger_scan(
     let scanner = state.scanner.clone();
     let db_pool = state.db.clone();
     let app_clone = app.clone();
+    let scan_delta = state.scan_delta.clone();
 
     tokio::task::spawn_blocking(move || {
         let conn = match db_pool.get() {
@@ -133,6 +136,12 @@ pub async fn trigger_scan(
             }
         };
         drop(conn);
+
+        let mut added = 0u64;
+        let mut deleted = 0u64;
+        let mut modified = 0u64;
+        let mut total_errors = 0u64;
+        let mut total_duration_ms = 0u64;
 
         let targets: Vec<_> = if let Some(single_id) = &dir_id {
             dirs.into_iter().filter(|d| d.id == *single_id).collect()
@@ -168,10 +177,26 @@ pub async fn trigger_scan(
                 scanner.incremental_scan(&dir.id).map_err(|e| format!("{e}"))
             };
             match result {
-                Ok(r) => log::info!("[SCAN] {}: {} files, {} indexed, {} errors in {}ms",
-                    dir.id, r.total_files, r.indexed, r.errors, r.duration_ms),
+                Ok(r) => {
+                    log::info!("[SCAN] {}: {} files, {} indexed, {} errors in {}ms",
+                        dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
+                    added += r.indexed;
+                    total_errors += r.errors;
+                    total_duration_ms = r.duration_ms;
+                }
                 Err(e) => log::error!("[SCAN] {} failed: {e}", dir.id),
             }
+        }
+
+        {
+            let mut delta = scan_delta.lock().unwrap();
+            *delta = ScanDelta {
+                added,
+                deleted: 0,
+                modified: 0,
+                errors: total_errors,
+                duration_ms: total_duration_ms,
+            };
         }
 
         is_scanning.store(false, Ordering::SeqCst);
@@ -202,8 +227,13 @@ pub async fn rebuild_index(
     let scanner = state.scanner.clone();
     let is_scanning = state.is_scanning.clone();
     let cancel_scan = state.cancel_scan.clone();
+    let scan_delta = state.scan_delta.clone();
 
     tokio::task::spawn_blocking(move || {
+        let mut added = 0u64;
+        let mut total_errors = 0u64;
+        let mut total_duration_ms = 0u64;
+
         // 1. Delete old index directory
         if let Err(e) = std::fs::remove_dir_all(&index_dir) {
             log::error!("[SCAN] failed to remove index dir: {e}");
@@ -271,10 +301,26 @@ pub async fn rebuild_index(
                 });
             };
             match scanner.full_scan(&dir.id, p) {
-                Ok(r) => log::info!("[SCAN] {}: {} files, {} indexed, {} errors",
-                    dir.id, r.total_files, r.indexed, r.errors),
+                Ok(r) => {
+                    log::info!("[SCAN] {}: {} files, {} indexed, {} errors, {}ms",
+                        dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
+                    added += r.indexed;
+                    total_errors += r.errors;
+                    total_duration_ms = r.duration_ms;
+                }
                 Err(e) => log::error!("[SCAN] {} failed: {e}", dir.id),
             }
+        }
+
+        {
+            let mut delta = scan_delta.lock().unwrap();
+            *delta = ScanDelta {
+                added,
+                deleted: 0,
+                modified: 0,
+                errors: total_errors,
+                duration_ms: total_duration_ms,
+            };
         }
 
         is_scanning.store(false, Ordering::SeqCst);
