@@ -201,7 +201,7 @@ impl IndexerService {
                                     None => {
                                         return Err((
                                             job.file_id.clone(),
-                                            format!("所有提取方式均失败: {e}"),
+                                            format!("{}: 所有提取方式均失败: {e}", job.file_path.display()),
                                         ))
                                     }
                                 }
@@ -305,7 +305,7 @@ impl IndexerService {
                     });
                 }
                 Err((file_id, err)) => {
-                    log::error!("[INDEX] 提取失败 (batch): {}", err);
+                    log::error!("[INDEX] 提取失败 ({}): {}", &file_id, err);
                     let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
                     results.push(BatchResult {
                         file_id,
