@@ -92,9 +92,13 @@ export default function IndexStatus() {
       setShowErrors(false)
       return
     }
-    const errs = await getIndexErrors(50)
-    setErrorsList(errs)
-    setShowErrors(true)
+    try {
+      const errs = await getIndexErrors(50)
+      setErrorsList(errs)
+      setShowErrors(true)
+    } catch {
+      setShowErrors(false)
+    }
   }
 
   const handleCancelScan = async () => {

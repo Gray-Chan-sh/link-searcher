@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db;
+use crate::db::tracker;
 use crate::extractor::ocr;
 use crate::scanner::{ScanProgress, ScanResult};
 use crate::search::IndexManager;
@@ -369,4 +370,10 @@ pub async fn check_index_health(state: State<'_, AppState>) -> Result<IndexHealt
         num_docs,
         db_integrity,
     })
+}
+
+#[tauri::command]
+pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<tracker::IndexError>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    tracker::get_index_errors(&conn, limit.unwrap_or(50)).map_err(|e| format!("{e}"))
 }
