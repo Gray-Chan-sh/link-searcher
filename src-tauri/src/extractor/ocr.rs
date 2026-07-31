@@ -8,19 +8,48 @@
 //! The Tesseract engine uses the `tesseract` CLI via `std::process::Command`.
 //! Falls back to English if the requested language is not installed.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
+use super::paddleocr;
+use imageproc::distance_transform::Norm;
 
 /// Supported language codes for OCR.
 #[allow(dead_code)]
 const SUPPORTED_LANGUAGES: &[&str] = &["eng", "chi_sim", "jpn", "kor"];
 
+/// Preprocess an image for better OCR accuracy.
+///
+/// Pipeline: grayscale → 2x enlargement → Gaussian denoising → adaptive binarization → morphological opening.
+/// Outputs a white-background, black-text image optimized for Tesseract.
+pub fn preprocess_image(input_path: &Path) -> Result<PathBuf> {
+    let img = image::open(input_path).context("failed to load image for preprocessing")?;
+    let gray = img.to_luma8();
+
+    let enlarged = image::imageops::resize(
+        &gray,
+        gray.width() * 2,
+        gray.height() * 2,
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let denoised = imageproc::filter::gaussian_blur_f32(&enlarged, 1.0);
+    let thresholded = imageproc::contrast::adaptive_threshold(&denoised, 31);
+
+    let cleaned = imageproc::morphology::open(&thresholded, Norm::L1, 1);
+
+    let output_path = std::env::temp_dir().join(format!("ls_pp_{}.png", std::process::id()));
+    cleaned.save(&output_path).context("failed to save preprocessed image")?;
+
+    Ok(output_path)
+}
+
 /// The OCR engine to use for text extraction.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum OcrEngineType {
+    PaddleOCR,
     AppleVision,
     WindowsOcr,
     Tesseract,
@@ -32,6 +61,8 @@ pub enum OcrEngineType {
 /// Returns engines in priority order (platform-native first, then Tesseract).
 pub fn detect_available_engines() -> Vec<OcrEngineType> {
     let mut engines = Vec::new();
+
+    engines.push(OcrEngineType::PaddleOCR);
 
     #[cfg(target_os = "macos")]
     engines.push(OcrEngineType::AppleVision);
@@ -53,16 +84,17 @@ pub fn detect_available_engines() -> Vec<OcrEngineType> {
 /// Delegates to the underlying engine implementation.
 pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) -> Result<String> {
     match engine {
+        OcrEngineType::PaddleOCR => paddleocr::recognize_from_path(path),
         OcrEngineType::Tesseract => ocr_image_tesseract(path, lang),
         OcrEngineType::AppleVision => {
             // ponytail: call macOS Vision framework via objc or CLI wrapper.
-            // For now, fall back to tesseract.
-            ocr_image_tesseract(path, lang)
+            // For now, fall back to paddleocr.
+            paddleocr::recognize_from_path(path)
         }
         OcrEngineType::WindowsOcr => {
             // ponytail: call Windows OCR via WinRT.
-            // For now, fall back to tesseract.
-            ocr_image_tesseract(path, lang)
+            // For now, fall back to paddleocr.
+            paddleocr::recognize_from_path(path)
         }
         OcrEngineType::None => Ok(String::new()),
     }
@@ -84,14 +116,19 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
         "eng"
     };
 
+    // Preprocess image for better OCR accuracy
+    let pp_path = preprocess_image(image_path)?;
+
     let output = Command::new("tesseract")
-        .arg(image_path.as_os_str())
+        .arg(pp_path.as_os_str())
         .arg("stdout")
         .arg("-l")
         .arg(effective_lang)
         .stderr(std::process::Stdio::null())
         .output()
         .context("failed to execute tesseract — is it installed?")?;
+
+    let _ = std::fs::remove_file(&pp_path);
 
     if !output.status.success() {
         anyhow::bail!(
@@ -109,8 +146,8 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
 /// Convenience wrapper that delegates to `ocr_image_with_engine` with
 /// `OcrEngineType::Tesseract`. Callers that need a specific engine should
 /// use `ocr_image_with_engine` directly.
-pub fn ocr_image(image_path: &Path, lang: &str) -> Result<String> {
-    ocr_image_tesseract(image_path, lang)
+pub fn ocr_image(image_path: &Path, _lang: &str) -> Result<String> {
+    paddleocr::recognize_from_path(image_path)
 }
 
 /// Generate a simple test pattern PNG image for OCR engine validation.
@@ -255,5 +292,50 @@ mod tests {
         assert!(SUPPORTED_LANGUAGES.contains(&"chi_sim"));
         assert!(SUPPORTED_LANGUAGES.contains(&"jpn"));
         assert!(SUPPORTED_LANGUAGES.contains(&"kor"));
+    }
+}
+
+#[cfg(test)]
+mod paddleocr_poc {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn model_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models").join("ppocrv5")
+    }
+
+    #[test]
+    fn poc_recognizes_hello_ocr() {
+        let det = model_dir().join("det.onnx");
+        let rec = model_dir().join("rec.onnx");
+        let dict = model_dir().join("ppocrv5_dict.txt");
+
+        if !det.exists() {
+            eprintln!("POC SKIP: det.onnx not found at {:?}", det);
+            return;
+        }
+
+        let engine = pure_onnx_ocr::OcrEngineBuilder::new()
+            .det_model_path(&det)
+            .rec_model_path(&rec)
+            .dictionary_path(&dict)
+            .det_limit_side_len(960)
+            .build()
+            .expect("POC: engine build failed");
+
+        let png_data = create_test_image().expect("POC: create_test_image failed");
+        let tmp_path = std::env::temp_dir().join(format!("ls_poc_{}.png", std::process::id()));
+        std::fs::write(&tmp_path, &png_data).expect("POC: write tmp file failed");
+
+        let results = engine.run_from_path(&tmp_path).expect("POC: OCR inference failed");
+        let _ = std::fs::remove_file(&tmp_path);
+
+        eprintln!("POC: detected {} text regions", results.len());
+        for (i, r) in results.iter().enumerate() {
+            eprintln!("  [{}] \"{}\"  conf={:.4}", i, r.text, r.confidence);
+        }
+
+        assert!(!results.is_empty(), "POC FAIL: expected ≥1 text region");
+        eprintln!("POC SUCCESS: {} regions recognized", results.len());
     }
 }

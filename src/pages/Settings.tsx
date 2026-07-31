@@ -50,7 +50,7 @@ export default function Settings() {
   }, [appConfig])
 
   const handleTestOcr = async () => {
-    const engineType = settings['ocr_engine'] ?? 'Tesseract'
+    const engineType = settings['ocr_engine'] ?? 'PaddleOCR'
     setOcrTesting(true)
     setOcrResult(null)
     try {
@@ -86,7 +86,7 @@ export default function Settings() {
     setLoPath(path)
   }
 
-  const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'Tesseract'))
+  const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'PaddleOCR'))
 
   const handleSave = async () => {
     await save()

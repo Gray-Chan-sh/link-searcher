@@ -25,7 +25,6 @@
     "core:window:allow-show",
     "core:window:allow-hide",
     "core:tray:default",
-    "global-shortcut:default",
     "autostart:default"
   ]
 }

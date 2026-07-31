@@ -35,6 +35,11 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
     let mut result = Vec::new();
     for engine in engines {
         let (name, platforms, install_guide) = match &engine {
+            ocr::OcrEngineType::PaddleOCR => (
+                "PaddleOCR（内置）".to_string(),
+                vec!["macOS".to_string(), "Windows".to_string(), "Linux".to_string()],
+                "内置引擎，无需安装，开箱即用".to_string(),
+            ),
             ocr::OcrEngineType::AppleVision => (
                 "Apple Vision (macOS 内置)".to_string(),
                 vec!["macOS".to_string()],
@@ -60,6 +65,7 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
             ),
         };
         let available = match &engine {
+            ocr::OcrEngineType::PaddleOCR => true,
             ocr::OcrEngineType::Tesseract => ocr::is_tesseract_available(),
             ocr::OcrEngineType::AppleVision => true,
             ocr::OcrEngineType::WindowsOcr => true,
@@ -172,6 +178,7 @@ pub fn get_file_type_support(state: State<'_, AppState>) -> Result<Vec<FileTypeI
 #[tauri::command]
 pub fn test_ocr_engine(engine_type: String) -> Result<OcrTestResult, String> {
     let engine = match engine_type.as_str() {
+        "PaddleOCR" => ocr::OcrEngineType::PaddleOCR,
         "Tesseract" => ocr::OcrEngineType::Tesseract,
         "AppleVision" => ocr::OcrEngineType::AppleVision,
         "WindowsOcr" => ocr::OcrEngineType::WindowsOcr,

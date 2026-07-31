@@ -47,8 +47,9 @@ Link-Searcher 是一款**跨平台桌面全文搜索**软件，支持 Windows、
 | **搜索建议** | 输入关键词时自动补全，快速定位目标 |
 | **目录树筛选** | 展开任意层级子目录，支持父级联动选择 |
 | **多格式支持** | PDF、Word(docx)、Excel(xlsx)、PPT(pptx)、纯文本、代码、图片 OCR |
-| **OCR 引擎管理** | 支持 Apple Vision / Windows OCR / Tesseract，引擎测试与切换 |
-| **实时文件监控** | 文件新增/修改/删除自动检测，增量更新索引 |
+| **OCR 引擎管理** | 内置 PaddleOCR，零安装即可识别中英文；支持 Apple Vision / Windows OCR / Tesseract 作为备选 |
+| **启动自动扫描** | 程序启动时自动检测目录变更：新增/修改→索引，移位→更新路径，删除→清理 |
+| **实时文件监控** | 启动后持续监控已配置目录，文件新增/修改/删除实时同步索引 |
 | **错误分类 + Fallback 链** | 索引失败时自动降级，错误分类显示 |
 
 ### 界面特性
@@ -70,7 +71,6 @@ Link-Searcher 是一款**跨平台桌面全文搜索**软件，支持 Windows、
 
 | 特性 | 说明 |
 |------|------|
-| **全局快捷键** | 默认 Ctrl+Space，全局呼出/隐藏搜索窗口 |
 | **系统托盘** | 关闭窗口后最小化到托盘，后台持续运行 |
 | **开机自启** | 一键设置开机自动启动 |
 | **命令行搜索** | `link-searcher search "keyword"` 终端直接搜索 |
@@ -184,9 +184,13 @@ npm run tauri build
 - **Windows** → `.msi` 文件（双击安装）
 - **Linux** → `.deb` 或 `.AppImage` 文件
 
-### 4.3 安装 OCR 识别功能（可选）
+### 4.3 OCR 识别（已内置，无需额外安装）
 
-如果需要搜索图片和扫描件中的文字，需要额外安装 Tesseract：
+Link-Searcher 已内置 **PaddleOCR** 引擎，无需安装任何额外软件即可识别中英文图片文字。
+
+如需备选引擎：
+
+**安装 Tesseract（备选引擎）：**
 
 **macOS：**
 ```bash
@@ -198,15 +202,35 @@ brew install tesseract-lang
 ```bash
 winget install Tesseract-OCR
 ```
-或者从 https://github.com/UB-Mannheim/tesseract/wiki 下载安装
 
 **Linux（Ubuntu/Debian）：**
 ```bash
 sudo apt install tesseract-ocr
-sudo apt install tesseract-ocr-chi-sim tesseract-ocr-jpn tesseract-ocr-kor
 ```
 
-安装后在应用「设置」页面可以查看 OCR 状态。
+**安装 LibreOffice（备选 Office 文档提取）：**
+
+**macOS：**
+```bash
+brew install --cask libreoffice
+```
+
+**Linux：**
+```bash
+sudo apt install libreoffice
+```
+
+**安装 poppler（备选 PDF OCR 渲染）：**
+
+**macOS：**
+```bash
+brew install poppler
+```
+
+**Linux：**
+```bash
+sudo apt install poppler-utils
+```
 
 ---
 
@@ -454,9 +478,14 @@ target/*
 - **全量扫描**：重新扫描所有文件，耗时较长
 - **重建索引**：清空索引后重新构建，解决索引损坏问题
 
-### 自动扫描
+### 自动扫描与实时监控
 
-在设置中配置定时扫描时间，系统会在指定时间自动执行全量扫描。
+- **启动扫描**：程序启动时自动对已配置目录进行增量扫描，检测文件变更：
+  - **新增/修改**：自动提取内容并编入索引
+  - **移位**（移动/重命名）：通过 MD5 内容哈希识别，更新路径而不重新提取
+  - **删除**：自动从索引和数据库中移除
+- **实时监控**：启动后持续监控已配置目录，文件变更实时同步索引
+- **内容去重**：相同内容的文件只提取一次（MD5 去重），节省时间和存储
 
 ### 扫描进度
 
@@ -475,13 +504,14 @@ OCR（光学字符识别）可以将图片和扫描件中的文字提取出来�
 
 ### 支持引擎
 
-Link-Searcher 支持三种 OCR 引擎，您可以根据操作系统选择：
+Link-Searcher 内置 **PaddleOCR** 引擎，基于 PP-OCRv5 模型和纯 Rust ONNX 推理（tract），零外部依赖，开箱即用。
 
 | 引擎 | 支持平台 | 特点 |
 |------|----------|------|
-| **Apple Vision** | macOS | 系统原生，无需额外安装，速度快，识别质量高 |
-| **Windows OCR** | Windows | 系统原生，无需额外安装，支持多语言 |
-| **Tesseract** | Windows / Linux / macOS | 开源引擎，需手动安装，支持 100+ 语言 |
+| **PaddleOCR**（默认） | Windows / Linux / macOS | 内置引擎，零安装，纯 Rust 实现，支持中英文 |
+| **Apple Vision** | macOS | 系统原生，待实现 |
+| **Windows OCR** | Windows | 系统原生，待实现 |
+| **Tesseract** | Windows / Linux / macOS | 开源引擎，需手动安装，作为后备 |
 
 ### 引擎选择与测试
 
@@ -553,16 +583,15 @@ PNG、JPG/JPEG、GIF、BMP、WebP、TIFF
 
 | 设置项 | 说明 |
 |--------|------|
-| OCR 引擎 | 选择 OCR 引擎（Apple Vision / Windows OCR / Tesseract） |
-| OCR 语言 | 识别文字的语言 |
+| OCR 引擎 | 选择 OCR 引擎（PaddleOCR / Tesseract） |
+| OCR 语言 | 识别文字的语言（eng / chi_sim / jpn / kor） |
 | OCR 并发数 | 同时处理的 OCR 任务数（根据内存调整） |
 
-### 扫描设置
+### 扫描与排除设置
 
 | 设置项 | 说明 |
 |--------|------|
-| 定时扫描 | 每日自动全量扫描的时间 |
-| 排除模式 | 全局排除规则（Glob 模式） |
+| 排除模式 | 额外排除规则（Glob 模式），默认已排除临时/隐藏文件 |
 
 ### 备份设置
 
@@ -641,7 +670,7 @@ tar -xzf link-searcher-data.tar.gz -C ~/
 
 可能的原因：
 1. 文件格式不受支持（见上表）
-2. 文件被排除模式匹配
+2. 文件被排除规则匹配（默认排除以 `#`、`$`、`.`、`~` 开头的文件，以及 `.tmp`、`.bak` 等临时文件）
 3. 文件权限不足
 4. OCR 文件需要先安装 Tesseract
 
@@ -695,9 +724,9 @@ tar -xzf link-searcher-data.tar.gz -C ~/
 | 数据库 | SQLite (rusqlite + r2d2 连接池) |
 | 中文分词 | jieba-rs |
 | 文本提取 | lopdf (PDF) / calamine (XLSX) / quick-xml (DOCX/PPTX) / pdf-extract |
-| OCR | Apple Vision (macOS) / Windows OCR / Tesseract (全平台) |
-| 图片处理 | image-rs (格式解码与缩放) |
-| 文件监控 | notify 库 (FSEvents / inotify / ReadDirectoryChanges) |
+| OCR | PaddleOCR（内置，PP-OCRv5 + tract ONNX 推理）/ Apple Vision / Windows OCR / Tesseract |
+| 图片处理 | image-rs + imageproc (格式解码、预处理) |
+| 文件监控 | notify + notify-debouncer-full |
 | 并行处理 | Rayon |
 | 后端语言 | Rust (edition 2024) |
 | 前端构建 | Vite |
@@ -709,7 +738,8 @@ tar -xzf link-searcher-data.tar.gz -C ~/
 
 | 版本 | 日期 | 说明 |
 |------|------|------|
-| 0.1.0 | 2026-07 | 初始版本：全文搜索、OCR、多格式支持、实时监控 |
+| 0.2.0 | 2026-07 | PaddleOCR 内置引擎、启动自动扫描、实时文件监控、文件移位检测、默认排除规则 |
+| 0.1.0 | 2026-07 | 初始版本：全文搜索、Tesseract OCR、多格式支持 |
 
 ---
 

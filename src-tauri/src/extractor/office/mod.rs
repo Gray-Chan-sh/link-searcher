@@ -33,7 +33,9 @@ fn check_binary(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    if !Path::new(path).exists() {
+    // Only check file existence for absolute/relative paths, not for bare commands (like "soffice") that rely on PATH resolution
+    let is_bare_name = !path.contains('/') && !path.contains('\\');
+    if !is_bare_name && !Path::new(path).exists() {
         return false;
     }
     std::process::Command::new(path)
@@ -96,20 +98,27 @@ pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
 
     std::thread::spawn(move || {
         let result = (|| -> Result<String> {
-            let status = std::process::Command::new(&binary)
+            let output = std::process::Command::new(&binary)
+                .env("SAL_USE_VCLPLUGIN", "svp")
                 .args(["--headless", "--convert-to", "txt:Text"])
                 .arg("--outdir")
                 .arg(&out_dir)
                 .arg(&path)
-                .status()
+                .output()
                 .map_err(|e| anyhow::anyhow!("{} not available: {e}", binary))?;
 
-            if !status.success() {
-                anyhow::bail!("{} --convert-to txt failed with code {:?}", binary, status.code());
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("{} --convert-to txt failed (code {:?}): {}", binary, output.status.code(), stderr.trim());
             }
 
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
             let out_path = out_dir.join(format!("{}.txt", stem));
+
+            if !out_path.exists() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("LibreOffice 转换失败: {}", if stderr.trim().is_empty() { "未生成输出文件" } else { stderr.trim() });
+            }
 
             let text = std::fs::read_to_string(&out_path)
                 .map_err(|e| anyhow::anyhow!("failed to read LO output: {e}"))?;
@@ -143,23 +152,32 @@ impl Extractor for OfficeExtractor {
             .map(|e| e.to_lowercase())
             .unwrap_or_default();
 
+        let lo_available = is_libreoffice_available();
         let is_office = matches!(ext.as_str(), "doc"|"docx"|"xls"|"xlsx"|"ppt"|"pptx");
 
-        if is_office && is_libreoffice_available() {
-            if let Ok(text) = extract_via_libreoffice(path) {
-                if !text.trim().is_empty() {
-                    return Ok(text);
-                }
+        let lo_error = if is_office && lo_available {
+            match extract_via_libreoffice(path) {
+                Ok(text) if !text.trim().is_empty() => return Ok(text),
+                Ok(_) => Some("LibreOffice 提取结果为空".to_string()),
+                Err(e) => Some(format!("LibreOffice 提取失败: {e}")),
             }
-        }
+        } else {
+            None
+        };
 
         match ext.as_str() {
             "docx" => extract_docx(path),
             "xlsx" => extract_xlsx(path),
             "pptx" => extract_pptx(path),
-            "doc" | "xls" | "ppt" => Err(anyhow::anyhow!(
-                "需要安装 LibreOffice 或使用自定义路径提取此格式。macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice。如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
-            )),
+            "doc" | "xls" | "ppt" => {
+                if let Some(msg) = lo_error {
+                    Err(anyhow::anyhow!("{}。文件可能已损坏或使用了不兼容的格式", msg))
+                } else {
+                    Err(anyhow::anyhow!(
+                        "需要安装 LibreOffice 或使用自定义路径提取此格式。macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice。如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
+                    ))
+                }
+            }
             _ => Err(anyhow::anyhow!("unsupported office format: {}", ext)),
         }
     }

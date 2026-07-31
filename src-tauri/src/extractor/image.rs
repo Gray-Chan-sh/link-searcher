@@ -3,9 +3,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use image::GenericImageView;
 
-use super::ocr;
 use super::Extractor;
 
+#[allow(dead_code)]
 const MAX_DIMENSION: u32 = 4000;
 
 pub struct ImageExtractor;
@@ -19,28 +19,12 @@ impl ImageExtractor {
 impl Extractor for ImageExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
         let img = image::open(path).context("failed to load image")?;
-
-        if !ocr::is_tesseract_available() {
-            return Ok(String::new());
-        }
-
-        let processed = preprocess_image(&img);
-        let tmp_dir = std::env::temp_dir().join("link_searcher_ocr");
-        std::fs::create_dir_all(&tmp_dir)?;
-
-        let tmp_path = tmp_dir.join(format!("ocr_{}.png", uuid::Uuid::new_v4()));
-        let result = processed.save(&tmp_path);
-        if result.is_err() {
-            return Ok(String::new());
-        }
-
-        let text = ocr::ocr_image(&tmp_path, "eng").unwrap_or_default();
-        let _ = std::fs::remove_file(&tmp_path);
-        Ok(text)
+        super::paddleocr::recognize_from_image(&img)
     }
 }
 
 /// Resize image if it exceeds MAX_DIMENSION on either axis, then convert to grayscale.
+#[allow(dead_code)]
 fn preprocess_image(img: &image::DynamicImage) -> image::DynamicImage {
     let (w, h) = img.dimensions();
     let resized = if w > MAX_DIMENSION || h > MAX_DIMENSION {

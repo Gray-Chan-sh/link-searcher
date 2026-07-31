@@ -35,17 +35,42 @@
 | 未知格式 | ✅ 纯文本回退尝试 |
 
 ### OCR 引擎
-- **Apple Vision** (macOS 内置) — 零安装，最佳性能
-- **Windows OCR** (Windows 内置) — 零安装
-- **Tesseract** (全平台) — 需安装
-- **引擎测试** — 设置页面一键测试，未通过不允许索引
+
+Link-Searcher 内置 **PaddleOCR** 引擎（基于 PP-OCRv5 模型，纯 Rust ONNX 推理），无需用户安装任何外部依赖即可识别中英文图片文字。
+
+| 引擎 | 状态 | 说明 |
+|------|------|------|
+| **PaddleOCR**（默认） | ✅ 内置 | 零安装，纯 Rust 实现，支持中英文。模型编译进二进制，开箱即用 |
+| Apple Vision | ⏳ 待实现 | macOS 10.15+ 内置，计划后续支持 |
+| Windows OCR | ⏳ 待实现 | Windows 10+ 内置，计划后续支持 |
+| Tesseract | ✅ 备选 | 需用户自行安装，作为后备引擎 |
+
+引擎优先级：PaddleOCR → Apple Vision → Windows OCR → Tesseract（自动降级）
 
 ### 索引
-- **实时监控** — 文件新增/修改/删除自动检测，增量更新
-- **全量/增量扫描** — 按需选择
+- **启动自动扫描** — 程序启动时自动对已配置目录进行增量扫描
+- **实时文件监控** — 启动后对已配置目录进行实时监控，新增/修改/删除自动检测、增量更新
+- **文件移位检测** — 通过 MD5 内容哈希识别被移动的文件，更新路径而不重新索引
+- **全量/增量扫描** — 按需选择触发
 - **流式处理** — 百万级目录不卡顿
 - **错误分类** — 访问拒绝/解析失败/OCR 失败/超时 分类记录
 - **Fallback 链** — 直接提取 → OCR → 纯文本 → 跳过
+- **内容去重** — 相同内容的文件只提取一次，通过 MD5 复用
+
+### 文件排除
+
+扫描时自动排除以下类型文件（无需手动配置）：
+
+| 规则 | 示例 |
+|------|------|
+| 以 `#` 开头 | `#temp.md`, `#backup#` |
+| 以 `$` 开头 | `$recycle` |
+| 以 `.` 开头（Unix 隐藏文件） | `.DS_Store`, `.gitignore` |
+| 以 `~` 开头 | `~$temp.docx` |
+| 以 `.tmp/.temp/.bak/.swp/.swo/~` 结尾 | `data.tmp`, `backup.bak` |
+| 精确名称 | `.DS_Store`, `Thumbs.db`, `.git`, `.svn`, `__pycache__` |
+
+用户可在设置中添加额外的 glob 排除规则。
 
 ### 界面
 - **暗色模式** — 浅色/深色/跟随系统，平滑过渡动画
@@ -59,7 +84,6 @@
 - **首次使用引导** — 三步向导
 
 ### 系统集成
-- **全局快捷键** — Ctrl+Space 弹出搜索窗口
 - **系统托盘** — 关闭窗口最小化到托盘
 - **开机自启** — 可选
 - **命令行搜索** — `link-searcher search "keyword"`
@@ -71,6 +95,8 @@
 
 - **Node.js** 20+：[下载](https://nodejs.org)
 - **Rust** 1.85+：[安装](https://rustup.rs)
+
+> **注意**：PaddleOCR 引擎已内置于二进制中，无需额外安装 OCR 软件。如需备选 Tesseract 引擎，请自行安装。
 
 ### 安装与运行
 
@@ -107,35 +133,46 @@ npm run tauri build
 | 数据库 | SQLite (rusqlite + r2d2) |
 | 中文分词 | jieba-rs |
 | 文本提取 | lopdf / calamine / quick-xml |
-| OCR | Apple Vision / Windows OCR / Tesseract |
-| 文件监控 | notify |
+| OCR | PaddleOCR（内置，PP-OCRv5 + tract ONNX 推理） |
+| 文件监控 | notify + notify-debouncer-full |
+| ONNX 推理 | tract（纯 Rust，零 C/C++ 依赖） |
 | 并行处理 | Rayon |
-| 测试 | 95 测试 (80 unit + 9 integration + 6 IPC) |
+| 测试 | 81 测试 (80 unit + 9 integration + 6 IPC) |
 
 ## 项目结构
 
 ```
 link-searcher/
-├── src-tauri/           # Rust 后端
+├── src-tauri/              # Rust 后端
 │   ├── src/
-│   │   ├── main.rs      # 入口
-│   │   ├── lib.rs        # Tauri 初始化
-│   │   ├── cli.rs        # 命令行搜索
-│   │   ├── search/       # Tantivy 搜索引擎
-│   │   ├── db/           # SQLite 数据库
-│   │   ├── extractor/    # 文本提取 + OCR
-│   │   ├── scanner/      # 目录扫描 + 文件监控
-│   │   ├── indexer.rs    # 索引服务
-│   │   ├── commands/     # Tauri IPC 命令
-│   │   └── state.rs      # 应用状态
-│   └── tests/            # 集成测试
-├── src/                  # React 前端
-│   ├── api/              # IPC 调用封装
-│   ├── components/       # 通用组件
-│   ├── pages/            # 页面组件
-│   └── hooks/            # 自定义 Hooks
-├── USER_MANUAL.md        # 用户手册
-└── TEST_PLAN.md          # 测试计划
+│   │   ├── main.rs         # 入口
+│   │   ├── lib.rs          # Tauri 初始化 + 启动扫描
+│   │   ├── cli.rs           # 命令行搜索
+│   │   ├── search/          # Tantivy 搜索引擎
+│   │   ├── db/              # SQLite 数据库
+│   │   ├── extractor/       # 文本提取 + OCR
+│   │   │   ├── ocr.rs       # OCR 引擎调度
+│   │   │   ├── paddleocr.rs # PaddleOCR 集成（模型内嵌）
+│   │   │   ├── pdf.rs       # PDF 提取 + OCR
+│   │   │   ├── office/      # Office 文档提取
+│   │   │   ├── image.rs      # 图片 OCR
+│   │   │   └── text.rs      # 纯文本提取
+│   │   ├── scanner/         # 目录扫描 + 文件监控
+│   │   │   ├── mod.rs       # Scanner：全量/增量/启动扫描
+│   │   │   ├── watcher.rs   # FileWatcher：实时文件监控
+│   │   │   └── helpers.rs   # 扫描辅助 + 排除规则
+│   │   ├── indexer.rs       # 索引服务
+│   │   ├── commands/        # Tauri IPC 命令
+│   │   └── state.rs         # 应用状态
+│   ├── models/              # PaddleOCR ONNX 模型文件
+│   └── tests/               # 集成测试
+├── src/                     # React 前端
+│   ├── api/                 # IPC 调用封装
+│   ├── components/          # 通用组件
+│   ├── pages/               # 页面组件
+│   └── hooks/               # 自定义 Hooks
+├── USER_MANUAL.md           # 用户手册
+└── TEST_PLAN.md             # 测试计划
 ```
 
 ## 测试

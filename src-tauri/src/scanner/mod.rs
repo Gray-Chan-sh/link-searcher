@@ -214,6 +214,131 @@ impl Scanner {
         let duration_ms = start.elapsed().as_millis() as u64;
         Ok(ScanResult { total_files, indexed, errors, duration_ms })
     }
+
+    pub fn startup_scan(&self, dir_id: &str) -> Result<ScanResult> {
+        let start = Instant::now();
+        let conn = self.db.get().context("failed to get DB connection")?;
+
+        let config = dir_config::get_dir(&conn, dir_id)?
+            .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
+        log::info!("[STARTUP] 启动扫描: {}", config.path);
+        let exclude = parse_exclude_patterns(&config.exclude_patterns);
+        let include_exts = parse_include_exts(&config.include_exts);
+
+        let walker = walkdir::WalkDir::new(&config.path)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !is_excluded(e.path(), &exclude));
+
+        struct DiskEntry {
+            path: String,
+            size: u64,
+            name: String,
+        }
+
+        let mut on_disk: Vec<DiskEntry> = Vec::new();
+        let mut indexed = 0u64;
+        let mut errors = 0u64;
+        let mut moved = 0u64;
+
+        for entry in walker {
+            let entry = entry.context("walkdir error")?;
+            if !entry.file_type().is_file() { continue; }
+            if !extension_allowed(entry.path(), &include_exts) { continue; }
+            let meta = entry.metadata().context("failed to read metadata")?;
+            let path = entry.path().to_path_buf();
+            let path_str = path.to_string_lossy().to_string();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            let mtime = mtime_micros(&meta).unwrap_or(0);
+            let size = meta.len();
+
+            let existing = tracker::get_file_by_path(&conn, &path_str)?;
+            let needs_index = match &existing {
+                Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
+                None => true,
+            };
+
+            if needs_index {
+                let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, size, None)?;
+                match self.indexer.index_file(&file_id, &path, dir_id) {
+                    Ok(()) => indexed += 1,
+                    Err(e) => {
+                        let _ = tracker::mark_failed(&conn, &file_id, &e.to_string());
+                        errors += 1;
+                    }
+                }
+            }
+
+            on_disk.push(DiskEntry { path: path_str, size, name });
+        }
+
+        let disk_set: std::collections::HashSet<String> =
+            on_disk.iter().map(|e| e.path.clone()).collect();
+
+        let mut cleaned = 0u64;
+        for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
+            if rec.status != "active" {
+                continue;
+            }
+            if is_excluded(std::path::Path::new(&rec.path), &exclude) {
+                self.indexer.delete_file(&rec.id)?;
+                cleaned += 1;
+            }
+        }
+        if cleaned > 0 {
+            log::info!("[STARTUP] 清理排除文件: {} 个", cleaned);
+        }
+
+        for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
+            if rec.status != "active" || disk_set.contains(&rec.path) {
+                continue;
+            }
+
+            let old_name = std::path::Path::new(&rec.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            let candidate = on_disk.iter().find(|e| {
+                e.name == old_name
+                    && e.size == rec.size
+                    && e.path != rec.path
+                    && tracker::get_file_by_path(&conn, &e.path)
+                        .map(|r| r.is_none())
+                        .unwrap_or(true)
+            });
+
+            if let Some(found) = candidate {
+                if let Some(ref expected_md5) = rec.md5 {
+                    if let Ok(raw) = std::fs::read(&found.path) {
+                        let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));
+                        if actual_md5 == *expected_md5 {
+                            tracker::update_file_path(&conn, &rec.id, &found.path, dir_id)?;
+                            log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.path);
+                            moved += 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            self.indexer.delete_file(&rec.id)?;
+            log::info!("[STARTUP] 删除: {}", rec.path);
+        }
+
+        let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
+        record_last_scan(&conn, dir_id)?;
+        drop(conn);
+
+        self.indexer.commit().context("failed to commit index after startup scan")?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        log::info!(
+            "[STARTUP] {} 完成: {} files, {} indexed, {} moved, {} errors in {}ms",
+            config.path, total_files, indexed, moved, errors, duration_ms
+        );
+        Ok(ScanResult { total_files, indexed, errors, duration_ms })
+    }
 }
 
 // ---------------------------------------------------------------------------

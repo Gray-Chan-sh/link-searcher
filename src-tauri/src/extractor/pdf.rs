@@ -74,7 +74,7 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
 
     let output_prefix = tmp_dir.join("page");
     let status = std::process::Command::new("pdftoppm")
-        .args(["-png", "-r", "200"])
+        .args(["-png", "-r", "300"])
         .arg(path)
         .arg(&output_prefix)
         .status()

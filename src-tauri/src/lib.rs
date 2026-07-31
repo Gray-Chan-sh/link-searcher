@@ -30,7 +30,6 @@ use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
-use tauri_plugin_global_shortcut::{Code, Modifiers, ShortcutState};
 
 pub fn run() {
     let app_config = config::load_config();
@@ -100,6 +99,13 @@ pub fn run() {
             .init();
             log::info!("application started");
 
+            if let Err(e) = crate::extractor::paddleocr::health_check() {
+                log::error!("OCR 引擎自检失败: {e}");
+                eprintln!("[OCR] 引擎自检失败: {e}");
+            } else {
+                log::info!("OCR 引擎自检通过");
+            }
+
             let index_dir = data_dir.join("index");
             let db_path = data_dir.join("data.db");
 
@@ -123,11 +129,10 @@ pub fn run() {
 
             let (watcher, event_rx) = FileWatcher::new();
             let watcher_tx = watcher.tx().clone();
+            let watcher_tx_for_startup = watcher_tx.clone();
 
-            // Spawn event consumer thread
             let scanner_for_watcher = scanner.clone();
             std::thread::spawn(move || {
-                let _watcher = watcher;
                 while let Ok(event) = event_rx.recv() {
                     log::info!("[WATCHER] file {:?}: {:?}", event.kind, event.path);
                     let _ = scanner_for_watcher.handle_event(event);
@@ -135,10 +140,10 @@ pub fn run() {
             });
 
             let app_state = AppState::new(
-                db_pool,
+                db_pool.clone(),
                 index_manager,
                 indexer,
-                scanner,
+                scanner.clone(),
                 is_scanning,
                 data_dir,
                 index_dir,
@@ -147,6 +152,76 @@ pub fn run() {
             );
 
             app.manage(app_state);
+
+            let scanner_ref = scanner.clone();
+            let db_ref = db_pool.clone();
+            let watch_tx = watcher_tx_for_startup;
+            std::thread::spawn(move || {
+                use crate::extractor::{office, pdf};
+
+                log::info!("[STARTUP] 检查系统依赖...");
+
+                let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
+                let lo_ok = office::is_libreoffice_available();
+                let pdf_ok = pdf::is_pdftoppm_available();
+
+                log::info!(
+                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={}",
+                    if ocr_ok { "OK" } else { "FAIL" },
+                    if lo_ok { "OK" } else { "N/A" },
+                    if pdf_ok { "OK" } else { "N/A" },
+                );
+
+                if !ocr_ok {
+                    log::error!("[STARTUP] PaddleOCR 引擎不可用，图片 OCR 将无法工作");
+                }
+
+                let conn = match db_ref.get() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[STARTUP] 无法获取数据库连接: {e}");
+                        return;
+                    }
+                };
+                let dirs = match crate::db::dir_config::list_dirs(&conn) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::error!("[STARTUP] 无法读取目录列表: {e}");
+                        return;
+                    }
+                };
+                drop(conn);
+
+                if dirs.is_empty() {
+                    log::info!("[STARTUP] 无已配置目录，跳过启动扫描");
+                    return;
+                }
+
+                log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
+                for dir in &dirs {
+                    match scanner_ref.startup_scan(&dir.id) {
+                        Ok(r) => log::info!(
+                            "[STARTUP] {}: {} files, {} indexed, {} errors",
+                            dir.path, r.total_files, r.indexed, r.errors
+                        ),
+                        Err(e) => log::error!("[STARTUP] {} 扫描失败: {e}", dir.path),
+                    }
+                }
+
+                for dir in &dirs {
+                    let path = std::path::PathBuf::from(&dir.path);
+                    if path.exists() {
+                        let _ = watch_tx.send(
+                            crate::scanner::watcher::WatcherCommand::StartWatch {
+                                dir_id: dir.id.clone(),
+                                path,
+                            },
+                        );
+                        log::info!("[STARTUP] 启动文件监控: {}", dir.path);
+                    }
+                }
+                log::info!("[STARTUP] 启动扫描完成");
+            });
 
             // Set window icon from embedded PNG bytes
             if let Some(window) = app.get_webview_window("main") {
@@ -159,21 +234,6 @@ pub fn run() {
                     let _ = window.set_icon(tauri::image::Image::new(&rgba, w, h));
                 }
             }
-
-            // Global hotkey: Ctrl+Space to show/focus window
-            app.handle().plugin(
-                tauri_plugin_global_shortcut::Builder::new()
-                    .with_shortcuts(["ctrl+space"])?
-                    .with_handler(move |app, shortcut, event| {
-                        if event.state == ShortcutState::Pressed && shortcut.matches(Modifiers::CONTROL, Code::Space) {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                    })
-                    .build(),
-            )?;
 
             // System tray
             let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -217,6 +277,7 @@ pub fn run() {
                 });
             }
 
+            std::mem::forget(watcher);
             Ok(())
         })
         .run(tauri::generate_context!())

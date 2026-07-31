@@ -7,11 +7,21 @@ use anyhow::{Context, Result};
 
 const EXCLUDED_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", ".git", ".svn", "__pycache__"];
 
-/// Check whether a path should be excluded from scanning based on file name
-/// or user-supplied glob patterns.
+const EXCLUDED_PREFIXES: &[char] = &['#', '$', '.', '~'];
+
+const EXCLUDED_SUFFIXES: &[&str] = &[".tmp", ".temp", ".bak", ".swp", ".swo", "~"];
+
 pub fn is_excluded(path: &Path, exclude_patterns: &[glob::Pattern]) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     if EXCLUDED_NAMES.contains(&name) {
+        return true;
+    }
+    if let Some(c) = name.chars().next() {
+        if EXCLUDED_PREFIXES.contains(&c) {
+            return true;
+        }
+    }
+    if EXCLUDED_SUFFIXES.iter().any(|s| name.ends_with(s)) {
         return true;
     }
     for pattern in exclude_patterns {

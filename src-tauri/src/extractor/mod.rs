@@ -1,6 +1,7 @@
 mod image;
 pub mod ocr;
 pub mod office;
+pub mod paddleocr;
 pub mod pdf;
 mod text;
 

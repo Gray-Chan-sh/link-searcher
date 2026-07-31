@@ -290,10 +290,15 @@ pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
     let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read dir: {e}"))?;
 
     for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        if crate::scanner::helpers::is_excluded(&entry_path, &[]) {
+            continue;
+        }
+
         let ft = entry.file_type().ok();
         let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
         let name = entry.file_name().to_string_lossy().to_string();
-        let entry_path = entry.path().to_string_lossy().to_string();
+        let entry_path = entry_path.to_string_lossy().to_string();
 
         let meta = entry.metadata().ok();
         let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);

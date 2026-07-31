@@ -74,6 +74,19 @@ pub fn mark_deleted(conn: &Connection, path: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn update_file_path(conn: &Connection, file_id: &str, new_path: &str, new_dir_id: &str) -> Result<()> {
+    let n = conn
+        .execute(
+            "UPDATE file_tracking SET path=?1, dir_id=?2, updated_at=?3 WHERE id=?4",
+            rusqlite::params![new_path, new_dir_id, chrono::Utc::now().timestamp(), file_id],
+        )
+        .context("update_file_path failed")?;
+    if n == 0 {
+        anyhow::bail!("file not found: {file_id}");
+    }
+    Ok(())
+}
+
 fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
     Ok(FileRecord {
         id: row.get("id")?,
