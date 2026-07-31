@@ -15,7 +15,8 @@ const SCHEMA_VERSION: &str = "1";
 pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
-        .max_size(8)
+        .max_size(32)
+        .connection_timeout(std::time::Duration::from_secs(10))
         .build(manager)
         .context("failed to create connection pool")?;
 
