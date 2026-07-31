@@ -11,6 +11,11 @@ use tantivy::{
 
 use crate::search::schema::build_schema;
 
+/// Cap for the number of results loaded into memory for name sorting.
+/// Beyond this cap, only the first 10_000 matching results are sorted by
+/// file_name; users can narrow the search scope to see more.
+const SORT_NAME_CAP: usize = 10_000;
+
 /// Parameters for a search query.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchParams {
@@ -167,7 +172,7 @@ impl SearcherWrap {
                 // (TEXT fields do not support fast-field sorting in Tantivy).
                 let top = searcher.search(
                     &*query,
-                    &TopDocs::with_limit(total as usize),
+                    &TopDocs::with_limit(total.min(SORT_NAME_CAP) as usize),
                 )?;
                 let file_name_field = schema.get_field("file_name")?;
                 let mut results: Vec<(DocAddress, f64, String)> = top

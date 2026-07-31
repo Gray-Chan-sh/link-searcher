@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useDeferredValue } from 'react'
 import { search, suggest, type SearchHit, type SearchResponse } from '../api/search'
 
 interface SearchState {
@@ -31,6 +31,32 @@ export function useSearch() {
   const [suggestions, setSuggestions] = useState<string[]>([])
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+
+  // Deferred query for useDeferredValue-based debounce
+  const deferredQuery = useDeferredValue(state.query)
+
+  // Filter ref to always hold the latest values (avoids closure staleness)
+  const filtersRef = useRef<{
+    pageSize: number
+    dirIds: string[]
+    extFilter: string[]
+    dirPaths: string[]
+  }>({
+    pageSize: state.pageSize,
+    dirIds,
+    extFilter,
+    dirPaths,
+  })
+
+  // Keep filtersRef in sync with state and filter states
+  useEffect(() => {
+    filtersRef.current = {
+      pageSize: state.pageSize,
+      dirIds,
+      extFilter,
+      dirPaths,
+    }
+  }, [state.pageSize, dirIds, extFilter, dirPaths])
 
   const executeSearch = useCallback(async (
     q: string,
@@ -78,33 +104,48 @@ export function useSearch() {
     }
   }, [])
 
+  // setQuery: only updates query state. Debounced search is triggered separately.
   const setQuery = useCallback((q: string) => {
     setState(s => ({ ...s, query: q }))
-    executeSearch(q, 1, state.pageSize, dirIds, extFilter, dirPaths)
-  }, [executeSearch, state.pageSize, dirIds, extFilter, dirPaths])
+  }, [])
+
+  // Immediate search (for Enter key) – uses latest filters from ref
+  const submitSearch = useCallback(() => {
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, filtersRef])
 
   const setPage = useCallback((p: number) => {
-    executeSearch(state.query, p, state.pageSize, dirIds, extFilter, dirPaths)
-  }, [executeSearch, state.query, state.pageSize, dirIds, extFilter, dirPaths])
+    const f = filtersRef.current
+    executeSearch(state.query, p, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, filtersRef])
 
   const updateDirIds = useCallback((ids: string[]) => {
     setDirIds(ids)
-    executeSearch(state.query, 1, state.pageSize, ids, extFilter, dirPaths)
-  }, [executeSearch, state.query, state.pageSize, extFilter, dirPaths])
+    // Update ref synchronously so the subsequent search sees the new ids
+    filtersRef.current = { ...filtersRef.current, dirIds: ids }
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, filtersRef])
 
   const updateDirPaths = useCallback((paths: string[]) => {
     setDirPaths(paths)
-    executeSearch(state.query, 1, state.pageSize, dirIds, extFilter, paths)
-  }, [executeSearch, state.query, state.pageSize, dirIds, extFilter])
+    filtersRef.current = { ...filtersRef.current, dirPaths: paths }
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, filtersRef])
 
   const updateExtFilter = useCallback((exts: string[]) => {
     setExtFilter(exts)
-    executeSearch(state.query, 1, state.pageSize, dirIds, exts, dirPaths)
-  }, [executeSearch, state.query, state.pageSize, dirIds, extFilter, dirPaths])
+    filtersRef.current = { ...filtersRef.current, extFilter: exts }
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, filtersRef])
 
   const retry = useCallback(() => {
-    executeSearch(state.query, state.page, state.pageSize, dirIds, extFilter, dirPaths)
-  }, [executeSearch, state.query, state.page, state.pageSize, dirIds, extFilter, dirPaths])
+    const f = filtersRef.current
+    executeSearch(state.query, state.page, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+  }, [executeSearch, state.query, state.page, filtersRef])
 
   const fetchSuggestions = useCallback((prefix: string) => {
     if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -122,6 +163,16 @@ export function useSearch() {
     }, 200)
   }, [])
 
+  // Debounced search effect: triggers after 300ms of inactivity on the query
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const f = filtersRef.current
+      executeSearch(deferredQuery, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths)
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [deferredQuery, executeSearch, filtersRef])
+
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -143,5 +194,7 @@ export function useSearch() {
     retry,
     fetchSuggestions,
     clearSuggestions: () => setSuggestions([]),
+    // Added for immediate submission (e.g., Enter key) – does not alter existing API
+    submitSearch,
   }
 }

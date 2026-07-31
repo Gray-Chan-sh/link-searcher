@@ -523,11 +523,12 @@ impl IndexerService {
         Indexer::delete_document(w, file_id)
             .map_err(|e| anyhow::anyhow!("failed to delete document from index: {e}"))?;
 
-        // Mark as indexed=0 (re-indexable) so a future scan can re-add it.
-        // If the file still exists in file_tracking, it gets a second chance.
-        crate::db::tracker::update_indexed(&conn, file_id, None)
-            .or_else(|_| crate::db::tracker::mark_deleted(&conn, file_id))
-            .context("failed to update file tracking")?;
+        // 文件已从 Tantivy 索引移除，标记为 deleted 使统计准确。
+        // 记录不存在时（已被 upsert 覆盖或清理）静默忽略。
+        match crate::db::tracker::mark_deleted(&conn, file_id) {
+            Ok(()) => {}
+            Err(_) => { /* 记录可能已不存在，忽略 */ }
+        }
 
         Ok(())
     }

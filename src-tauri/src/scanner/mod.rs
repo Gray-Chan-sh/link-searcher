@@ -1,7 +1,7 @@
 //! Directory scanner — full and incremental scans with progress reporting.
 //!
-//! Also provides [`process_event`] / [`process_event_batch`] for the
-//! real-time file watcher to consume [`FileChangeEvent`]s.
+//! Also provides [`handle_event`] for the real-time file watcher to consume
+//! [`FileChangeEvent`]s.
 
 pub mod watcher;
 pub mod helpers;
@@ -18,7 +18,6 @@ use r2d2_sqlite::SqliteConnectionManager;
 use crate::db::dir_config;
 use crate::db::tracker;
 use crate::indexer::{BatchJob, IndexerService};
-use crate::search::indexer::Indexer;
 
 pub use watcher::{ChangeKind, FileChangeEvent, FileWatcher, WatcherCommand};
 
@@ -67,6 +66,10 @@ impl Scanner {
         log::info!("[SCAN] 开始扫描: {}", config.path);
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
+
+        // Record last scan time BEFORE walking — prevents missing files
+        // that are modified during the scan.
+        record_last_scan(&conn, dir_id)?;
 
         // Phase 1: Count files for the progress bar.
         //
@@ -166,7 +169,6 @@ impl Scanner {
             }
         }
 
-        record_last_scan(&conn, dir_id)?;
         drop(conn);
 
         self.indexer.commit().context("failed to commit index after full scan")?;
@@ -196,6 +198,9 @@ impl Scanner {
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| !is_excluded(e.path(), &exclude));
+
+        // Record last scan time BEFORE walking the main loop.
+        record_last_scan(&conn, dir_id)?;
 
         let mut on_disk: Vec<String> = Vec::new();
         let mut indexed = 0u64;
@@ -245,7 +250,6 @@ impl Scanner {
         }
 
         let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
-        record_last_scan(&conn, dir_id)?;
         drop(conn);
 
         self.indexer.commit().context("failed to commit index after incremental scan")?;
@@ -267,6 +271,9 @@ impl Scanner {
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| !is_excluded(e.path(), &exclude));
+
+        // Record last scan time BEFORE walking the main loop.
+        record_last_scan(&conn, dir_id)?;
 
         struct DiskEntry {
             path: String,
@@ -371,7 +378,6 @@ impl Scanner {
         }
 
         let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
-        record_last_scan(&conn, dir_id)?;
         drop(conn);
 
         self.indexer.commit().context("failed to commit index after startup scan")?;
@@ -420,69 +426,6 @@ impl Scanner {
         Ok(())
     }
 }
-
-/// Process a single [`FileChangeEvent`] using the provided [`IndexWriter`].
-pub fn process_event(
-    event: FileChangeEvent,
-    conn: &rusqlite::Connection,
-    writer: &mut tantivy::IndexWriter,
-) -> Result<()> {
-    match event.kind {
-        ChangeKind::Create | ChangeKind::Modify => handle_create_modify(event, conn, writer),
-        ChangeKind::Delete => handle_delete(event, conn, writer),
-    }
-}
-
-/// Process a batch of events, committing the writer once at the end.
-pub fn process_event_batch(
-    events: Vec<FileChangeEvent>,
-    conn: &rusqlite::Connection,
-    writer: &mut tantivy::IndexWriter,
-) -> Result<()> {
-    for event in events {
-        process_event(event, conn, writer)?;
-    }
-    Indexer::commit(writer)?;
-    Ok(())
-}
-
-fn handle_create_modify(
-    event: FileChangeEvent,
-    conn: &rusqlite::Connection,
-    writer: &mut tantivy::IndexWriter,
-) -> Result<()> {
-    let path_str = event.path.to_string_lossy().to_string();
-    let meta = std::fs::metadata(&event.path)?;
-    let mtime = mtime_micros(&meta).unwrap_or(0);
-    let size = meta.len();
-    let file_name = event.path
-        .file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let file_ext = event.path
-        .extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-
-    let file_id = tracker::upsert_file(conn, &path_str, &event.dir_id, mtime, size, None)?;
-    let text = crate::extractor::extract_text(&event.path).unwrap_or_default();
-    Indexer::add_document(writer, &file_id, &file_name, &file_ext, &event.dir_id, &path_str, &text, mtime, size)?;
-
-    let raw_bytes = std::fs::read(&event.path).unwrap_or_default();
-    let hash = format!("{:x}", md5::Md5::digest(&raw_bytes));
-    tracker::update_indexed(conn, &file_id, Some(&hash))?;
-    Ok(())
-}
-
-fn handle_delete(
-    event: FileChangeEvent,
-    conn: &rusqlite::Connection,
-    writer: &mut tantivy::IndexWriter,
-) -> Result<()> {
-    let path_str = event.path.to_string_lossy().to_string();
-    if let Some(record) = tracker::get_file_by_path(conn, &path_str)? {
-        Indexer::delete_document(writer, &record.id)?;
-        tracker::mark_deleted(conn, &path_str)?;
-    }
-    Ok(())
-}
-
 
 #[cfg(test)]
 mod tests {

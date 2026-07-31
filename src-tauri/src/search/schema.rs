@@ -144,58 +144,6 @@ impl TokenStream for JiebaTokenStream<'_> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Raw tokenizer (for suggest field – emits the entire text as one token)
-// ---------------------------------------------------------------------------
-
-/// A tokenizer that emits the entire text as a single token.
-/// Used together with [`LowerCaser`] for the suggest/autocomplete field.
-#[derive(Clone, Default)]
-pub struct RawTokenizer;
-
-impl Tokenizer for RawTokenizer {
-    type TokenStream<'a> = RawTokenStream<'a>;
-
-    fn token_stream<'a>(&mut self, text: &'a str) -> RawTokenStream<'a> {
-        RawTokenStream {
-            text,
-            done: false,
-            token: Token::default(),
-        }
-    }
-}
-
-/// Token stream produced by [`RawTokenizer`].
-pub struct RawTokenStream<'a> {
-    text: &'a str,
-    done: bool,
-    token: Token,
-}
-
-impl TokenStream for RawTokenStream<'_> {
-    fn advance(&mut self) -> bool {
-        if self.done {
-            return false;
-        }
-        self.done = true;
-        self.token.offset_from = 0;
-        self.token.offset_to = self.text.len();
-        self.token.position = 0;
-        self.token.position_length = 1;
-        self.token.text.clear();
-        self.token.text.push_str(self.text);
-        true
-    }
-
-    fn token(&self) -> &Token {
-        &self.token
-    }
-
-    fn token_mut(&mut self) -> &mut Token {
-        &mut self.token
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,14 +171,6 @@ mod tests {
             tokens.push(t.text.clone());
         }
         assert_eq!(tokens, vec!["hello", " ", "world"]);
-    }
-
-    #[test]
-    fn test_raw_tokenizer_emits_one_token() {
-        let mut tokenizer = RawTokenizer;
-        let mut stream = tokenizer.token_stream("some text for suggest");
-        let tokens: Vec<String> = std::iter::from_fn(|| stream.next().map(|t| t.text.clone())).collect();
-        assert_eq!(tokens, vec!["some text for suggest"]);
     }
 
     #[test]
