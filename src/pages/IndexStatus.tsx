@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
+import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { getIndexErrors, type IndexError, type IndexStatus } from '../api/index'
 import { getDuplicates, type DuplicateGroup } from '../api/files'
@@ -16,6 +17,7 @@ function formatTime(ts: number | null): string {
 }
 
 export default function IndexStatus() {
+  const navigate = useNavigate()
   const { status, loading, error, scan, rebuild } = useIndexStatus()
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
   const [dupesLoading, setDupesLoading] = useState(false)
@@ -174,10 +176,10 @@ export default function IndexStatus() {
       {status && (
         <>
           <div className="grid grid-cols-5 gap-4 mb-6">
-            <StatCard label="Total Files" value={status.total_files.toLocaleString()} color="gray" />
-            <StatCard label="Indexed" value={status.indexed.toLocaleString()} color="green" />
-            <StatCard label="Pending" value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? 'incl. errors' : undefined} />
-            <StatCard label="OCR'd" value={status.ocred.toLocaleString()} color="purple" />
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label="Total Files" value={status.total_files.toLocaleString()} color="gray" /></div>
+            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label="Indexed" value={status.indexed.toLocaleString()} color="green" /></div>
+            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label="Pending" value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? 'incl. errors' : undefined} /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label="OCR'd" value={status.ocred.toLocaleString()} color="purple" /></div>
             <div
               className={`p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg cursor-pointer hover:border-red-300 dark:hover:border-red-700 transition-colors ${status.errors > 0 ? 'cursor-pointer' : ''}`}
               onClick={status.errors > 0 ? handleShowErrors : undefined}
@@ -328,7 +330,7 @@ function StatCard({ label, value, color, subtitle }: { label: string; value: str
     purple: 'text-purple-600 dark:text-purple-400',
   }
   return (
-    <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+    <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg transition-colors">
       <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</p>
       <p className={`text-2xl font-semibold ${colors[color]}`}>{value}</p>
       {subtitle && <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{subtitle}</p>}

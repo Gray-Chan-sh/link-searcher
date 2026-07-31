@@ -7,6 +7,26 @@ use crate::db;
 use crate::state::AppState;
 
 #[derive(Serialize)]
+pub struct FileItem {
+    pub file_id: String,
+    pub file_name: String,
+    pub rel_path: String,
+    pub file_ext: String,
+    pub indexed: i64,
+    pub error_msg: Option<String>,
+    pub file_size: u64,
+    pub mtime: i64,
+}
+
+#[derive(Serialize)]
+pub struct FileListResponse {
+    pub items: Vec<FileItem>,
+    pub total: u64,
+    pub page: usize,
+    pub page_size: usize,
+}
+
+#[derive(Serialize)]
 pub struct FileDetail {
     pub id: String,
     pub path: String,
@@ -25,7 +45,7 @@ pub struct FileDetail {
 }
 
 #[derive(Serialize)]
-pub struct FileListResponse {
+pub struct FileListResponseAll {
     pub files: Vec<FileDetail>,
     pub total: u64,
 }
@@ -36,6 +56,96 @@ pub struct DuplicateGroup {
     pub count: u64,
     pub paths: Vec<String>,
     pub file_ids: Vec<String>,
+}
+
+#[tauri::command]
+pub async fn list_files_db(
+    state: State<'_, AppState>,
+    filter: Option<String>,
+    ext: Option<String>,
+    search: Option<String>,
+    sort: Option<String>,
+    order: Option<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<FileListResponse, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    let ps = page_size.unwrap_or(50).max(1);
+    let p = page.unwrap_or(1).max(1);
+    let offset = (p - 1) * ps;
+
+    let mut wheres: Vec<&str> = vec!["status = 'active'"];
+    let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
+
+    match filter.as_deref() {
+        Some("indexed") => { wheres.push("indexed = 1"); }
+        Some("pending") => { wheres.push("indexed = 0"); }
+        Some("failed") => { wheres.push("indexed = 2"); }
+        _ => {}
+    }
+
+    if let Some(e) = &ext {
+        wheres.push("path LIKE ?");
+        params.push(Box::new(format!("%.{e}")));
+    }
+    if let Some(s) = &search {
+        wheres.push("path LIKE ?");
+        params.push(Box::new(format!("%{s}%")));
+    }
+
+    let where_clause = wheres.join(" AND ");
+
+    let count_sql = format!("SELECT COUNT(*) FROM file_tracking WHERE {where_clause}");
+    let total: u64 = conn
+        .query_row(&count_sql, [], |row| row.get(0))
+        .map_err(|e| format!("count query error: {e}"))?;
+
+    let sort_col = match sort.as_deref().unwrap_or("path") {
+        "name" => "file_name".to_string(),
+        "path" => "path".to_string(),
+        "ext" => "file_ext".to_string(),
+        "size" => "size".to_string(),
+        "mtime" => "mtime".to_string(),
+        _ => "path".to_string(),
+    };
+    let order_dir = if order.as_deref() == Some("desc") { "DESC" } else { "ASC" };
+
+    let data_sql = format!(
+        "SELECT id, path, size, mtime, indexed, error_msg \
+         FROM file_tracking WHERE {where_clause} \
+         ORDER BY {sort_col} {order_dir} \
+         LIMIT ? OFFSET ?",
+    );
+    let mut stmt = conn
+        .prepare(&data_sql)
+        .map_err(|e| format!("prepare error: {e}"))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params![ps as i64, offset as i64], |row| Ok(FileItem {
+            file_id: row.get("id")?,
+            file_name: std::path::Path::new(&row.get::<_, String>("path")?)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            rel_path: row.get("path")?,
+            file_ext: std::path::Path::new(&row.get::<_, String>("path")?)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_string(),
+            indexed: row.get("indexed")?,
+            error_msg: row.get("error_msg")?,
+            file_size: row.get::<_, i64>("size")? as u64,
+            mtime: row.get("mtime")?,
+        }))
+        .map_err(|e| format!("query error: {e}"))?;
+
+    let items: Vec<FileItem> = rows.collect::<rusqlite::Result<_>>()
+        .map_err(|e| format!("collect error: {e}"))?;
+
+    Ok(FileListResponse { items, total, page: p, page_size: ps })
 }
 
 #[tauri::command]
@@ -79,7 +189,7 @@ pub async fn list_files(
     _status: Option<String>,
     page: Option<usize>,
     page_size: Option<usize>,
-) -> Result<FileListResponse, String> {
+) -> Result<FileListResponseAll, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
     let (files, total) = if let Some(did) = &dir_id {
@@ -95,7 +205,7 @@ pub async fn list_files(
         (Vec::new(), 0)
     };
 
-    Ok(FileListResponse {
+    Ok(FileListResponseAll {
         total,
         files: files
             .into_iter()
@@ -217,7 +327,6 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         .map_err(|e| format!("query error: {e}"))?
         .ok_or_else(|| format!("file not found: {id}"))?;
 
-    // Determine file type
     let ext = std::path::Path::new(&file.path)
         .extension()
         .and_then(|e| e.to_str())
@@ -378,7 +487,6 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
     }
     drop(conn);
 
-    // Not in DB — try reading directly
     let p = std::path::Path::new(&path);
     if !p.exists() {
         return Err("file not found".to_string());

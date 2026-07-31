@@ -48,3 +48,37 @@ export async function revealInFolder(id: string): Promise<void> {
 export async function openFile(id: string): Promise<void> {
   return invoke('open_file', { id })
 }
+
+export interface FileItem {
+  file_id: string
+  file_name: string
+  rel_path: string
+  file_ext: string
+  indexed: number  // 0=pending, 1=indexed, 2=failed
+  error_msg: string | null
+  file_size: number
+  mtime: number
+}
+
+export interface FileListResponse {
+  items: FileItem[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export type FilterType = 'all' | 'indexed' | 'pending' | 'failed'
+export type SortKey = 'name' | 'size' | 'mtime' | 'ext'
+export type SortOrder = 'asc' | 'desc'
+
+export async function listFilesDb(params: {
+  filter?: FilterType
+  ext?: string
+  search?: string
+  sort?: SortKey
+  order?: SortOrder
+  page?: number
+  page_size?: number
+}): Promise<FileListResponse> {
+  return invoke<FileListResponse>('list_files_db', params)
+}
