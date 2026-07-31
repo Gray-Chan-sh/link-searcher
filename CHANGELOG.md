@@ -158,7 +158,24 @@
 | 🎨 UI/UX 修复 | 20+ |
 | 🚀 新功能 | 6 |
 | 📖 文档 | 3 |
-| **总计 commits** | **30** |
+| **总计 commits** | **31** |
+
+---
+
+## 2026-08-01（第五轮：Browse 页重写为表格视图）
+
+### 🚀 新功能
+- **Browse 页全面重写** (`a2e0e16`)：从文件系统目录树浏览改为数据库驱动的表格视图
+  - 新增后端 `list_files_db` 命令：分页查询 `file_tracking` 表，支持状态筛选（全部/已索引/未索引/失败）、文件类型筛选、文件名模糊搜索、多字段排序（名称/路径/类型/大小/时间）
+  - 前端表格列：文件名（ellipsis 截断）| 路径（ellipsis + title 完整路径）| 类型 | 状态（✓/✗/○ 图标）
+  - 工具栏：状态筛选下拉 + 类型筛选 + 搜索框 + 排序选择
+  - URL `useSearchParams` 同步所有筛选状态，刷新/分享不丢失
+  - 分页控件（上/下页 + 页码跳转）
+  - 点击行 → 右侧预览面板（复用 PreviewPanel）
+  - 移除旧的目录树递归逻辑和相关 state
+
+### 🟠 IndexStatus 卡片跳转
+- **索引状态页 StatCard 支持跳转**：Total Files → Browse，Indexed → `?filter=indexed`，Pending → `?filter=pending`。OCR'd 跳全部（暂无对应筛选），Errors 保留展开详情功能
 
 ---
 
