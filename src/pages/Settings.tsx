@@ -334,6 +334,20 @@ export default function Settings() {
             ]}
           />
         </Section>
+
+        <Section title="外部依赖">
+          <div className="space-y-2">
+            <DepRow name="PaddleOCR（内置）" status="✅" cmd="" />
+            {deps.filter(d => d.command !== 'tesseract').map(dep => (
+              <DepRow
+                key={dep.command}
+                name={dep.name}
+                status={dep.available ? '✅' : '❌'}
+                cmd={dep.install_guide}
+              />
+            ))}
+          </div>
+        </Section>
       </div>
     </div>
   )
@@ -434,5 +448,36 @@ function ToggleField({ label, checked, onChange }: {
       />
       <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
     </label>
+  )
+}
+
+function DepRow({ name, status, cmd }: { name: string; status: string; cmd: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = async () => {
+    if (!cmd) return
+    try {
+      await navigator.clipboard.writeText(cmd)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch { /* clipboard unavailable */ }
+  }
+  return (
+    <div className="flex items-start gap-2 py-2">
+      <span className="text-base mt-0.5">{status}</span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm text-gray-900 dark:text-gray-100">{name}</p>
+        {cmd && (
+          <div className="flex items-center gap-2 mt-1">
+            <pre className="flex-1 text-xs font-mono text-gray-500 dark:text-gray-400 whitespace-pre-wrap break-all">{cmd}</pre>
+            <button
+              onClick={handleCopy}
+              className="shrink-0 px-2 py-1 text-xs text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+            >
+              {copied ? '已复制' : '📋 复制'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
