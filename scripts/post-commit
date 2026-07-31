@@ -1,9 +1,0 @@
-#!/bin/bash
-# 每次 commit 后自动追加条目到 CHANGELOG.md
-
-CHANGELOG="$1/CHANGELOG.md"
-DATE=$(date +%Y-%m-%d)
-MSG=$(git log -1 --format="%s")
-
-[ ! -f "$CHANGELOG" ] && echo "# Link-Searcher 变更日志" > "$CHANGELOG" && echo "" >> "$CHANGELOG"
-echo "- $DATE $MSG" >> "$CHANGELOG"

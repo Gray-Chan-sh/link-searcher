@@ -153,10 +153,41 @@
 
 | 类别 | 数量 |
 |------|:---:|
-| 🔴 Bug 修复 | 20+ |
-| 🏗️ 架构/性能改进 | 16 |
-| 🎨 前端假功能修复 | 8 |
-| 🟠 可用性改进 | 11 |
+| 🔴 Bug 修复 | 25+ |
+| 🏗️ 架构/性能改进 | 20 |
+| 🎨 UI/UX 修复 | 20+ |
+| 🚀 新功能 | 6 |
+| 📖 文档 | 3 |
+| **总计 commits** | **30** |
+
+---
+
+## 2026-08-01（第四轮：更多 Bug + 文档 + 自动变更日志）
+
+### 🔴 严重 Bug
+- **修复 5 个 UX 缺陷** (`03949ac`)
+  - 删除文件无反应：`mark_deleted` SQL `WHERE path=?` 错误接收 UUID，改为 `WHERE id=?`
+  - `.DS_Store` 被实时索引：`handle_event` watcher 回调遗漏 `is_excluded` 检查
+  - 设置页安装命令显示三个平台：前端按 `navigator.platform` 过滤当前平台
+  - LO 路径输入与依赖检测分离：合并到依赖面板同一行
+  - 索引状态 `pending` 和 `errors` 关系不清：Pending 卡片加 `incl. errors` 副标题
+- **索引期间 UI 冻结** (`ae3857c`)：r2d2 连接池仅 8 个，Rayon 并行任务耗尽连接，前端 IPC 命令 `get()` 阻塞 → `max_size: 8→32` + `connection_timeout: 10s`
+- **启动扫描 VACUUM 阻塞** (`8f8980c`)：VACUUM 持有 SQLite 独占锁，移到 watcher 之后执行 + 发 `scan-completed` 事件
+- **绝对→相对路径迁移遗漏**：存量 DB 记录未更新，全量删除 → 添加自动迁移函数
+
+### 🟠 功能修复
+- **Details 按钮无响应** (`63d3d06`)：`get_index_errors` 命令未注册为 Tauri handler，前端 `invoke` 静默失败
+- **迁移数据路径错误** (`0c65e66`)：`migrateData` 返回消息字符串，前端误当路径存 → 改 `selected` + 加 catch 弹窗
+- **迁移后自动重启** (`0ed36ae`)：新增 `restart_app` Tauri 命令 + 确认对话框
+- **设置页外部依赖面板** (`19c595a`)：PaddleOCR/pdftoppm/LibreOffice 状态 + 一键复制安装命令
+- **7 个 TS 编译错误** (`6181000`)：泛型类型错误 + 未使用导入 + API 签名变更
+
+### 📖 文档
+- **README + 用户手册全面重写** (`57dd72b`)：基于项目当前全部功能（PaddleOCR/启动扫描/监控/排除规则/相对路径等）
+- **CHANGELOG.md**：27 个 commit 完整变更记录
+
+### 🔧 工作流
+- **自动变更日志** (`0adfab5`)：Git post-commit hook 首次尝试 → 改为 AI 手动编写详细条目
 | 🚀 新功能 | 4（PaddleOCR 内置 / 启动扫描 / 外部依赖面板 / 自动重启） |
 | 📖 文档 | 2（README + 用户手册重写） |
 | 📁 重构 | 1（相对路径存储） |

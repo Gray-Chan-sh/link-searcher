@@ -8,8 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "tauri": "tauri",
-    "postinstall": "cp scripts/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit"
+    "tauri": "tauri"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
