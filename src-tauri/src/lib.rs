@@ -29,6 +29,7 @@ use crate::state::ScanDelta;
 use env_logger;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::menu::{Menu, MenuItem};
+use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
@@ -172,6 +173,7 @@ pub fn run() {
 
             app.manage(app_state);
 
+            let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
             let watch_tx = watcher_tx_for_startup;
@@ -237,9 +239,6 @@ pub fn run() {
                     if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
                         log::error!("[STARTUP] orphan cleanup failed: {e}");
                     }
-                    if let Err(e) = crate::db::vacuum(&conn) {
-                        log::error!("[STARTUP] VACUUM failed: {e}");
-                    }
                     drop(conn);
                 }
 
@@ -255,6 +254,17 @@ pub fn run() {
                         log::info!("[STARTUP] 启动文件监控: {}", dir.path);
                     }
                 }
+
+                // VACUUM after watchers started
+                if let Ok(conn) = db_ref.get() {
+                    if let Err(e) = crate::db::vacuum(&conn) {
+                        log::error!("[STARTUP] VACUUM failed: {e}");
+                    }
+                    drop(conn);
+                }
+
+                app_handle.emit("scan-completed", serde_json::json!({}))
+                    .unwrap_or_else(|e| log::error!("[STARTUP] failed to emit scan-completed: {e}"));
                 log::info!("[STARTUP] 启动扫描完成");
             });
 
