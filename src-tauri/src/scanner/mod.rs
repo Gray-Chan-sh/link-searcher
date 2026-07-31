@@ -68,15 +68,43 @@ impl Scanner {
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
 
-        // Phase 1: Quick counting pass — determine total before processing.
-        let total: u64 = walkdir::WalkDir::new(&config.path)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| !is_excluded(e.path(), &exclude))
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-            .filter(|e| extension_allowed(e.path(), &include_exts))
-            .count() as u64;
+        // Phase 1: Count files for the progress bar.
+        //
+        // Two passes are intentional — the first gives the frontend a `total`
+        // so the progress bar renders determinate.  The second does the real
+        // indexing.
+        //
+        // walkdir calls `stat` internally on every entry (it needs the full
+        // `stat` struct for descent decisions), so we cannot avoid the syscall
+        // entirely.  This first pass is still cheaper because it **only** does
+        // the count — no DB queries, no mtime parsing, no indexing.  For very
+        // large directories the count itself can take seconds, so we time-box
+        // it at 3 s.  When it times out we report total=0 (unknown) and let
+        // the frontend show indeterminate progress.
+        let total: u64 = {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let path = config.path.clone();
+            let excl = exclude.clone();
+            let exts = include_exts.clone();
+            std::thread::spawn(move || {
+                let n = walkdir::WalkDir::new(&path)
+                    .follow_links(false)
+                    .into_iter()
+                    .filter_entry(|e| !is_excluded(e.path(), &excl))
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_file())
+                    .filter(|e| extension_allowed(e.path(), &exts))
+                    .count() as u64;
+                let _ = tx.send(n);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(3)) {
+                Ok(n) => n,
+                Err(_) => {
+                    log::warn!("[SCAN] count phase timed out (>3 s), showing indeterminate progress");
+                    0
+                }
+            }
+        };
 
         progress(ScanProgress { total, processed: 0, errors: 0, current_file: String::new() });
 

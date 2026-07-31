@@ -5,6 +5,7 @@
 //! lazily created on first use and shared via a mutex so multiple callers
 //! can batch documents before a single [`commit`](IndexerService::commit).
 
+use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
@@ -79,13 +80,59 @@ impl IndexerService {
 
         let result = (|| -> Result<()> {
 
-            // Read raw bytes and compute MD5 for dedup.
-            let raw = std::fs::read(file_path)
-                .with_context(|| format!("failed to read {file_path:?}"))?;
-            let hash = format!("{:x}", md5::Md5::digest(&raw));
+            const MAX_FILE_SIZE: u64 = 1024 * 1024 * 100; // 100 MB
+            const CHUNK_SIZE: u64 = 1024 * 1024; // 1 MB
+
+            let meta = std::fs::metadata(file_path)
+                .with_context(|| format!("failed to stat {file_path:?}"))?;
+            let file_size = meta.len();
+
+            let file = std::fs::File::open(file_path)
+                .with_context(|| format!("failed to open {file_path:?}"))?;
+            let mut reader = BufReader::new(file);
+
+            let mut raw: Vec<u8>;
+            let hash: String;
+
+            if file_size > MAX_FILE_SIZE {
+                let mut head = vec![0u8; CHUNK_SIZE as usize];
+                reader
+                    .read_exact(&mut head)
+                    .with_context(|| format!("failed to read head of {file_path:?}"))?;
+                reader
+                    .seek(SeekFrom::End(-(CHUNK_SIZE as i64)))
+                    .with_context(|| format!("failed to seek in {file_path:?}"))?;
+                let mut tail = vec![0u8; CHUNK_SIZE as usize];
+                reader
+                    .read_exact(&mut tail)
+                    .with_context(|| format!("failed to read tail of {file_path:?}"))?;
+
+                let mut hasher = md5::Md5::new();
+                hasher.update(&head);
+                hasher.update(&tail);
+                hash = format!("{:x}", hasher.finalize());
+                head.extend_from_slice(&tail);
+                raw = head;
+            } else {
+                let mut buf = [0u8; 65536];
+                let mut hasher = md5::Md5::new();
+                raw = Vec::new();
+
+                loop {
+                    let n = reader
+                        .read(&mut buf)
+                        .with_context(|| format!("failed to read {file_path:?}"))?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                    raw.extend_from_slice(&buf[..n]);
+                }
+                hash = format!("{:x}", hasher.finalize());
+            }
 
             // Stage 1: Start
-            log::info!("[INDEX] 开始: {file_name} ({file_ext}, {} bytes)", raw.len());
+            log::info!("[INDEX] 开始: {file_name} ({file_ext}, {file_size} bytes)");
 
             // Dedup: reuse previously extracted text if content already indexed.
             let text = match crate::db::tracker::get_content(&conn, &hash)
@@ -115,12 +162,17 @@ impl IndexerService {
                         }
                         Err(e) => {
                             log::warn!("[INDEX] 提取失败: {e}，尝试纯文本回退");
-                            match std::fs::read_to_string(file_path) {
-                                Ok(t) => {
+                            let fallback = if file_size <= MAX_FILE_SIZE {
+                                std::str::from_utf8(&raw).ok().map(|s| s.to_owned())
+                            } else {
+                                None
+                            };
+                            match fallback {
+                                Some(t) => {
                                     ocr_used = true;
                                     t
                                 }
-                                Err(_) => return Err(anyhow::anyhow!("所有提取方式均失败: {e}")),
+                                None => return Err(anyhow::anyhow!("所有提取方式均失败: {e}")),
                             }
                         }
                     };
@@ -132,16 +184,12 @@ impl IndexerService {
                 }
             };
 
-            // Gather metadata for the Tantivy document.
-            let meta = std::fs::metadata(file_path)
-                .with_context(|| format!("failed to stat {file_path:?}"))?;
             let mtime = meta
                 .modified()
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_micros() as i64)
                 .unwrap_or(0);
-            let file_size = raw.len() as u64;
 
             // Acquire the tantivy writer and add the document.
             let mut guard = self.lock_writer()?;
