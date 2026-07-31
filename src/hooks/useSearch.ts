@@ -1,6 +1,28 @@
 import { useCallback, useEffect, useRef, useState, useDeferredValue } from 'react'
 import { search, suggest, type SearchHit, type SearchResponse } from '../api/search'
 
+const LS_FILTER_DIR_KEY = 'ls_filter_dirs'
+const LS_FILTER_EXT_KEY = 'ls_filter_exts'
+const LS_FILTER_PATH_KEY = 'ls_filter_paths'
+
+function loadFromStorage(key: string, fallback: unknown): unknown {
+  try {
+    const item = localStorage.getItem(key)
+    return item ? JSON.parse(item) : fallback
+  } catch (e) {
+    console.warn('Failed to load from localStorage', e)
+    return fallback
+  }
+}
+
+function saveToStorage(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch (e) {
+    console.warn('Failed to save to localStorage', e)
+  }
+}
+
 interface SearchState {
   status: 'idle' | 'loading' | 'success' | 'error'
   query: string
@@ -27,11 +49,24 @@ export function useSearch() {
   })
   const [sortField, setSortField] = useState<string>('score')
   const [sortOrder, setSortOrder] = useState<string>('desc')
-  const [dirIds, setDirIds] = useState<string[]>([])
-  const [dirPaths, setDirPaths] = useState<string[]>([])
-  const [extFilter, setExtFilter] = useState<string[]>([])
-  const [suggestions, setSuggestions] = useState<string[]>([])
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [dirIds, setDirIds] = useState<string[]>(() => loadFromStorage(LS_FILTER_DIR_KEY, [] as string[]))
+  const [dirPaths, setDirPaths] = useState<string[]>(() => loadFromStorage(LS_FILTER_PATH_KEY, [] as string[]))
+  const [extFilter, setExtFilter] = useState<string[]>(() => loadFromStorage(LS_FILTER_EXT_KEY, [] as string[]))
+const [suggestions, setSuggestions] = useState<string[]>([])
+
+useEffect(() => {
+  saveToStorage(LS_FILTER_DIR_KEY, dirIds)
+}, [dirIds])
+
+useEffect(() => {
+  saveToStorage(LS_FILTER_EXT_KEY, extFilter)
+}, [extFilter])
+
+useEffect(() => {
+  saveToStorage(LS_FILTER_PATH_KEY, dirPaths)
+}, [dirPaths])
+
+const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   // Deferred query for useDeferredValue-based debounce

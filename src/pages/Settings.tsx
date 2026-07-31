@@ -5,7 +5,7 @@ import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { getConfig, migrateData, updateConfig, type ConfigInfo } from '../api/config'
-import { checkDependencies, listOcrEngines, testOcrEngine, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
+import { checkDependencies, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -21,7 +21,7 @@ const LANG_OPTIONS = [
 
 export default function Settings() {
   const { t, lang, setLang } = useI18n()
-  const { settings, loading, saving, error, saveError, setValue, save } = useSettings()
+  const { settings, loading, error, setValue } = useSettings()
   const { theme, setTheme } = useTheme()
   const [ocrEngines, setOcrEngines] = useState<OcrEngineStatus[]>([])
   const [ocrTesting, setOcrTesting] = useState(false)
@@ -30,6 +30,7 @@ export default function Settings() {
   const [appConfig, setAppConfig] = useState<ConfigInfo | null>(null)
   const [migrating, setMigrating] = useState(false)
   const [loPath, setLoPath] = useState<string>('')
+  const [localError, setLocalError] = useState<string | null>(null)
 
   useEffect(() => {
     listOcrEngines().then(setOcrEngines).catch(() => {})
@@ -82,14 +83,13 @@ export default function Settings() {
     await setLang(newLang as 'zh' | 'en')
   }
 
-  const handleChangeLoPath = (path: string) => {
-    setLoPath(path)
-  }
-
   const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'PaddleOCR'))
 
-  const handleSave = async () => {
-    await save()
+  const handleFieldChange = (key: string, value: string) => {
+    setValue(key, value)
+    setLocalError(null)
+    updateSettings({ ...settings, [key]: value })
+      .catch(e => setLocalError(e instanceof Error ? e.message : 'Failed to save setting'))
   }
 
   if (loading) {
@@ -119,19 +119,11 @@ export default function Settings() {
             Configure indexing and search preferences
           </p>
         </div>
-        <button
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
-        >
-          {saving && <LoadingSpinner className="size-4" />}
-          {t('save_settings')}
-        </button>
       </div>
 
-      {saveError && (
+      {localError && (
         <div className="px-4 py-3 mb-4 text-sm text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg">
-          {saveError}
+          {localError}
         </div>
       )}
 
@@ -155,24 +147,16 @@ export default function Settings() {
             <input
               type="text"
               value={loPath}
-              onChange={e => handleChangeLoPath(e.target.value)}
+              onChange={e => {
+                setLoPath(e.target.value)
+                if (appConfig) {
+                  updateConfig({ ...appConfig, lo_binary_path: e.target.value })
+                    .catch(err => setLocalError(err instanceof Error ? err.message : 'Failed to save LO path'))
+                }
+              }}
               placeholder="soffice (or full path)"
               className="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
             />
-            <button
-              onClick={async () => {
-                if (!appConfig) return
-                try {
-                  await updateConfig({ ...appConfig, lo_binary_path: loPath })
-                  getConfig().then(setAppConfig)
-                } catch (e) {
-                  alert(`保存失败: ${e}`)
-                }
-              }}
-              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors disabled:cursor-not-allowed"
-            >
-              保存
-            </button>
           </div>
           {loPath && loPath !== 'soffice' && (
             <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -190,7 +174,7 @@ export default function Settings() {
                   name="ocr_engine"
                   value={engine.engine_type}
                   checked={settings['ocr_engine'] === engine.engine_type}
-                  onChange={() => setValue('ocr_engine', engine.engine_type)}
+                  onChange={() => handleFieldChange('ocr_engine', engine.engine_type)}
                   className="text-blue-600"
                 />
                 <div className="flex-1">
@@ -241,13 +225,13 @@ export default function Settings() {
           <SelectField
             label="Language"
             value={settings['ocr_lang'] ?? 'eng'}
-            onChange={v => setValue('ocr_lang', v)}
+            onChange={v => handleFieldChange('ocr_lang', v)}
             options={OCR_LANGS}
           />
           <NumberField
             label="Concurrency"
             value={parseInt(settings['ocr_concurrency'] ?? '2', 10)}
-            onChange={v => setValue('ocr_concurrency', String(v))}
+            onChange={v => handleFieldChange('ocr_concurrency', String(v))}
             min={1}
             max={16}
             placeholder="Default: 2"
@@ -267,7 +251,7 @@ export default function Settings() {
           <ToggleField
             label="Launch on system startup"
             checked={settings['auto_start'] === 'true'}
-            onChange={v => setValue('auto_start', v ? 'true' : 'false')}
+            onChange={v => handleFieldChange('auto_start', v ? 'true' : 'false')}
           />
         </Section>
 
@@ -275,18 +259,18 @@ export default function Settings() {
           <TextField
             label="Scheduled scan time"
             value={settings['scan_time'] ?? '02:00'}
-            onChange={v => setValue('scan_time', v)}
+            onChange={v => handleFieldChange('scan_time', v)}
             placeholder="Default: 02:00 (2 AM)"
           />
           <ToggleField
             label="Auto backup"
             checked={settings['auto_backup'] === 'true'}
-            onChange={v => setValue('auto_backup', v ? 'true' : 'false')}
+            onChange={v => handleFieldChange('auto_backup', v ? 'true' : 'false')}
           />
           <NumberField
             label="Backup interval (days)"
             value={parseInt(settings['backup_interval'] ?? '7', 10)}
-            onChange={v => setValue('backup_interval', String(v))}
+            onChange={v => handleFieldChange('backup_interval', String(v))}
             min={1}
             max={365}
             placeholder="Default: 7"
@@ -294,7 +278,7 @@ export default function Settings() {
           <NumberField
             label="Maximum search results"
             value={parseInt(settings['max_results'] ?? '1000', 10)}
-            onChange={v => setValue('max_results', String(v))}
+            onChange={v => handleFieldChange('max_results', String(v))}
             min={100}
             max={10000}
             step={100}
@@ -306,7 +290,7 @@ export default function Settings() {
           <TextareaField
             label="Exclude patterns"
             value={settings['exclude_patterns'] ?? ''}
-            onChange={v => setValue('exclude_patterns', v)}
+            onChange={v => handleFieldChange('exclude_patterns', v)}
             placeholder="*.tmp&#10;node_modules&#10;.git"
             rows={4}
           />

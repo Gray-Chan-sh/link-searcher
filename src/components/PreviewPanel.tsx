@@ -16,7 +16,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatTime(ts: number): string {
-  return new Date(ts * 1000).toLocaleString()
+  return new Date(ts / 1000).toLocaleString()
 }
 
 function highlightText(text: string, query: string): React.ReactNode[] {
@@ -36,6 +36,7 @@ function countMatches(text: string, query: string): number {
   if (!query.trim()) return 0
   const terms = query.split(/\s+/).filter(t => t.length > 0)
   if (terms.length === 0) return 0
+  // Single scan: build regex once, then match all at once
   const regex = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi')
   const matches = text.match(regex)
   return matches ? matches.length : 0
@@ -49,6 +50,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const [width, setWidth] = useState(400)
   const [fullscreen, setFullscreen] = useState(false)
   const [matchIndex, setMatchIndex] = useState(0)
+  const [scale, setScale] = useState(1)
   const contentRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
 
@@ -187,6 +189,17 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
         {meta && !loading && !error && (
           <div className="px-4 py-3 space-y-2 border-b border-gray-100 dark:border-gray-800">
+            {preview?.file_type === 'pdf' && (
+              <>
+                <div className="flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400">
+                  <span className="text-sm">📄</span>
+                  <span>PDF 文件</span>
+                </div>
+                <div className="text-xs font-medium text-gray-700 dark:text-gray-300 pt-1 pb-2">
+                  OCR 文字内容:
+                </div>
+              </>
+            )}
             <MetaRow label="Path" value={meta.path} />
             <MetaRow label="Size" value={formatSize(meta.file_size)} />
             <MetaRow label="Modified" value={formatTime(meta.mtime)} />
@@ -195,19 +208,57 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
         )}
 
         {preview?.file_type === 'image' && preview?.image_path && !loading && (
-          <div className="flex items-center justify-center p-4 border-b border-gray-100 dark:border-gray-800">
+          <div className="flex items-center justify-center p-4 border-b border-gray-100 dark:border-gray-800 relative">
+            {/* Zoom controls */}
+            <div className="absolute top-4 left-4 flex gap-1 z-10">
+              <button
+                onClick={() => setScale(Math.max(0.25, scale - 0.25))}
+                className="px-2 py-0.5 text-xs font-medium bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                title="Zoom out"
+              >
+                [-]
+              </button>
+              <button
+                onClick={() => setScale(1)}
+                className="px-2 py-0.5 text-xs font-medium bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                title="100%"
+              >
+                {Math.round(scale * 100)}%
+              </button>
+              <button
+                onClick={() => setScale(Math.min(3, scale + 0.25))}
+                className="px-2 py-0.5 text-xs font-medium bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                title="Zoom in"
+              >
+                [+]
+              </button>
+            </div>
             <img
               src={convertFileSrc(preview.image_path)}
               alt=""
-              className="max-w-full max-h-96 object-contain rounded"
+              className="max-w-full max-h-96 object-contain rounded transition-transform duration-200"
+              style={{ transform: `scale(${scale})` }}
             />
           </div>
         )}
 
         {textContent && !loading && (
-          <pre className="px-4 py-3 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
-            {highlightText(textContent, searchQuery)}
-          </pre>
+          <div className="px-4 py-3">
+            {textContent.length > 50000 ? (
+              <>
+                <pre className="px-4 py-2 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed bg-gray-50 dark:bg-gray-800/50 rounded border border-gray-200 dark:border-gray-700 mb-1 max-h-96 overflow-y-auto">
+                  {highlightText(textContent.substring(0, 50000), searchQuery)}
+                </pre>
+                <div className="text-xs text-gray-500 dark:text-gray-400 py-1">
+                  显示前 50,000 字符，下载完整文件查看全部
+                </div>
+              </>
+            ) : (
+              <pre className="px-4 py-2 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
+                {highlightText(textContent, searchQuery)}
+              </pre>
+            )}
+          </div>
         )}
 
         {preview?.ocr_used && (

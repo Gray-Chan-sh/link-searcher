@@ -28,7 +28,7 @@ export default function App() {
     { to: '/directories', label: t('directories'), icon: FolderIcon },
     { to: '/index', label: t('index_status'), icon: ActivityIcon },
     { to: '/logs', label: t('logs'), icon: FileTextIcon },
-    { to: '/file-types', label: 'File Types', icon: FileTextIcon },
+    { to: '/file-types', label: t('file_types'), icon: FileTextIcon },
     { to: '/settings', label: t('settings'), icon: GearIcon },
   ] as const
 

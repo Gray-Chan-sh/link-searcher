@@ -58,11 +58,18 @@ const handleExport = async () => {
   }
 }
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (search.status !== 'success' || search.hits.length === 0) return
+useEffect(() => {
+  const handleKeyDown = (e: KeyboardEvent) => {
+    // Don't override search input handling - if focused in search, let it process Enter itself
+    const activeEl = document.activeElement
+    if (activeEl instanceof HTMLInputElement && activeEl.placeholder && 
+        activeEl.placeholder.includes('your documents')) {
+      return
+    }
 
-      if (e.key === 'ArrowDown') {
+    if (search.status !== 'success' || search.hits.length === 0) return
+
+    if (e.key === 'ArrowDown') {
         e.preventDefault()
         const next = focusIndex + 1
         if (next < search.hits.length) {
@@ -193,7 +200,31 @@ const handleExport = async () => {
           )}
 
           {search.status === 'success' && search.hits.length === 0 && (
-            <EmptyState title="No results found" description="Try a different query or check your filters" />
+            <div className="flex flex-col items-center justify-center py-16 px-4 text-center space-y-3">
+              <p className="text-lg font-medium text-gray-900 dark:text-gray-100">No results found</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">
+                💡 Try expanding your search range: check filters or clear directory selection
+              </p>
+              <button
+                onClick={() => {
+                  search.setExtFilter([])
+                  search.setDirIds([])
+                  search.setDirPaths([])
+                }}
+                className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap"
+              >
+                Clear Filters
+              </button>
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                📊 Index status:
+                <a
+                  href="/index"
+                  className="text-blue-600 dark:text-blue-500 underline hover:text-blue-700 ml-1"
+                >
+                  Index Status
+                </a>
+              </p>
+            </div>
           )}
         </div>
 
@@ -206,9 +237,35 @@ const handleExport = async () => {
             >
               Previous
             </button>
-            <span className="text-xs text-gray-500 dark:text-gray-400">
-              {search.page} / {totalPages}
-            </span>
+            
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-gray-500 dark:text-gray-400">Go to:</span>
+              <input
+                type="number"
+                value={search.page}
+                onChange={(e) => {
+                  const page = parseInt(e.target.value, 10)
+                  if (!isNaN(page) && page >= 1 && page <= totalPages) {
+                    search.setPage(page)
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    const input = e.target as HTMLInputElement
+                    const page = parseInt(input.value, 10)
+                    if (!isNaN(page) && page >= 1 && page <= totalPages) {
+                      search.setPage(page)
+                      input.blur()
+                    }
+                  }
+                }}
+                className="w-20 px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400 text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+                min={1}
+                max={totalPages}
+              />
+            </div>
+            
             <button
               onClick={() => search.setPage(search.page + 1)}
               disabled={search.page >= totalPages}

@@ -48,6 +48,7 @@ const en: Record<string, string> = {
     search_placeholder: 'Enter keywords to search...',
     filter_by_directory: 'Filter by directory',
     filter_by_type: 'Filter by file type',
+    file_types: 'File Types',
     sort_by: 'Sort by',
     by_relevance: 'Relevance',
     by_date: 'Date',

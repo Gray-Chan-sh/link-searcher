@@ -12,7 +12,7 @@ import { StatsCardSkeleton } from '../components/Skeleton'
 
 function formatTime(ts: number | null): string {
   if (!ts) return 'Never'
-  return new Date(ts * 1000).toLocaleString()
+  return new Date(ts / 1000).toLocaleString()
 }
 
 export default function IndexStatus() {
@@ -225,7 +225,7 @@ export default function IndexStatus() {
                   <div key={err.file_id} className="text-xs p-2 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-900/20 rounded">
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-medium text-red-700 dark:text-red-300">{err.error_type}</span>
-                      <span className="text-gray-400">{new Date(err.created_at * 1000).toLocaleString()}</span>
+                      <span className="text-gray-400">{new Date(err.created_at / 1000).toLocaleString()}</span>
                     </div>
                     <p className="text-gray-600 dark:text-gray-400 truncate" title={err.file_path}>{err.file_path}</p>
                     <p className="text-red-600 dark:text-red-400 mt-0.5">{err.error_msg}</p>

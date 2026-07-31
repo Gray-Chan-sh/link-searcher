@@ -67,9 +67,11 @@ export default function SearchBar({
   }, [onQueryChange, onClearSuggestions])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const dropdown = suggestions.length > 0 && query.trim().length > 0
-      ? suggestions
-      : (query.trim().length === 0 ? history : [])
+    const dropdown = query.trim().length === 0
+      ? history
+      : suggestions.length > 0
+        ? ([] as any[]).concat(suggestions, history)
+        : []
 
     if (!dropdown.length) return
 
@@ -94,7 +96,7 @@ export default function SearchBar({
   }, [suggestions, history, query, selectedIdx, selectSuggestion, selectHistory, onClearSuggestions])
 
   const showSuggestions = focused && suggestions.length > 0 && query.trim().length > 0
-  const showHistory = focused && history.length > 0 && query.trim().length === 0
+  const showHistory = focused && history.length > 0
 
   return (
     <div className="relative">
@@ -122,31 +124,9 @@ export default function SearchBar({
         )}
       </div>
 
-      {showHistory && (
+      {(showSuggestions || showHistory) && (
         <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 overflow-hidden">
-          <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-            Recent searches
-          </div>
-          {history.map((entry, i) => (
-            <button
-              key={entry.id}
-              onMouseDown={() => selectHistory(entry)}
-              className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
-                i === selectedIdx
-                  ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-                  : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'
-              }`}
-            >
-              <span className="truncate">{entry.query}</span>
-              <span className="text-xs text-gray-400 shrink-0 ml-2">{entry.result_count} results</span>
-            </button>
-          ))}
-        </div>
-      )}
-
-      {showSuggestions && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 overflow-hidden">
-          {suggestions.map((s, i) => (
+          {showSuggestions && suggestions.map((s, i) => (
             <button
               key={s}
               onMouseDown={() => selectSuggestion(s)}
@@ -159,6 +139,30 @@ export default function SearchBar({
               {s}
             </button>
           ))}
+          {showSuggestions && showHistory && (
+            <div className="border-t border-gray-200 dark:border-gray-700" />
+          )}
+          {showHistory && (
+            <>
+              <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
+                Recent searches
+              </div>
+              {history.map((entry, i) => (
+                <button
+                  key={entry.id}
+                  onMouseDown={() => selectHistory(entry)}
+                  className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
+                    i === (showSuggestions ? selectedIdx - suggestions.length : selectedIdx)
+                      ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
+                      : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'
+                  }`}
+                >
+                  <span className="truncate">{entry.query}</span>
+                  <span className="text-xs text-gray-400 shrink-0 ml-2">{entry.result_count} results</span>
+                </button>
+              ))}
+            </>
+          )}
         </div>
       )}
     </div>

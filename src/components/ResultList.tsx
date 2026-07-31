@@ -24,7 +24,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatTime(ts: number): string {
-  const d = new Date(ts * 1000)
+  const d = new Date(ts / 1000)
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 

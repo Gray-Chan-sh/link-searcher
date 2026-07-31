@@ -29,7 +29,7 @@ function formatSize(bytes: number): string {
 }
 
 function formatTime(ts: number): string {
-  return new Date(ts * 1000).toLocaleString()
+  return new Date(ts / 1000).toLocaleString()
 }
 
 export default function Browse() {

@@ -59,9 +59,9 @@ export default function StatusBar() {
               )
             )}
             {status.last_scan && (
-              <span>
-                Last scan: {new Date(status.last_scan * 1000).toLocaleTimeString()}
-              </span>
+               <span>
+                 Last scan: {new Date(status.last_scan / 1000).toLocaleTimeString()}
+               </span>
             )}
           </div>
         </>

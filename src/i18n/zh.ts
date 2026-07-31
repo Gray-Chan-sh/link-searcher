@@ -48,6 +48,7 @@ const zh: Record<string, string> = {
     search_placeholder: '输入关键词搜索...',
     filter_by_directory: '按目录筛选',
     filter_by_type: '按文件类型筛选',
+    file_types: '文件类型',
     sort_by: '排序方式',
     by_relevance: '按相关性',
     by_date: '按日期',
