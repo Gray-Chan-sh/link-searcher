@@ -7,6 +7,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
+use crate::db::tracker::FileRecord;
 
 const EXCLUDED_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", ".git", ".svn", "__pycache__"];
 
@@ -126,4 +127,11 @@ pub fn to_relative(dir_root: &str, file_path: &Path) -> Result<String> {
 /// Convert a stored relative path back to an absolute path by joining with dir_root.
 pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(dir_root).join(rel_path)
+}
+
+pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
+    match existing {
+        Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
+        None => true,
+    }
 }

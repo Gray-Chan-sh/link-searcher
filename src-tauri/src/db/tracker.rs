@@ -135,8 +135,8 @@ pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
     for dir in &dirs {
         let prefix = format!("{}/", dir.path.trim_end_matches('/'));
         let updated = conn.execute(
-            "UPDATE file_tracking SET path = REPLACE(path, ?1, '') WHERE dir_id = ?2 AND path LIKE ?3",
-            rusqlite::params![prefix, dir.id, format!("{prefix}%")],
+            "UPDATE file_tracking SET path = SUBSTR(path, ?1) WHERE dir_id = ?2 AND path LIKE ?3",
+            rusqlite::params![prefix.len() as i64 + 1, dir.id, format!("{prefix}%")],
         ).context("migrate path to relative failed")?;
         count += updated as u64;
     }

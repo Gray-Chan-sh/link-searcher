@@ -305,7 +305,7 @@ impl IndexerService {
                     });
                 }
                 Err((file_id, err)) => {
-                    log::error!("[INDEX] 提取失败 ({}): {}", &file_id, err);
+                    log::error!("[INDEX] 提取失败: {}", err);
                     let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
                     results.push(BatchResult {
                         file_id,

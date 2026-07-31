@@ -180,7 +180,7 @@ pub async fn trigger_scan(
                 Ok(r) => {
                     log::info!("[SCAN] {}: {} files, {} indexed, {} errors in {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
-                    added += r.indexed;
+                    added += r.added;
                     deleted += r.deleted;
                     modified += r.modified;
                     total_errors += r.errors;
@@ -308,7 +308,7 @@ pub async fn rebuild_index(
                 Ok(r) => {
                     log::info!("[SCAN] {}: {} files, {} indexed, {} errors, {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
-                    added += r.indexed;
+                    added += r.added;
                     deleted += r.deleted;
                     modified += r.modified;
                     total_errors += r.errors;

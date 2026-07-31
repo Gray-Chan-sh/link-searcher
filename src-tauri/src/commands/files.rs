@@ -324,8 +324,13 @@ pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Resul
                 if let Ok(rel_path) = crate::scanner::helpers::to_relative(&config.path, &entry_path_raw) {
                     match db::tracker::get_file_by_path(&conn, &rel_path) {
                         Ok(Some(file)) => {
-                            indexed = file.indexed;
-                            error_msg = file.error_msg;
+                            if file.status == "deleted" {
+                                indexed = 0;
+                                error_msg = None;
+                            } else {
+                                indexed = file.indexed;
+                                error_msg = file.error_msg;
+                            }
                         }
                         Ok(None) => {
                             indexed = 0;

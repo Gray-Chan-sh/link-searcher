@@ -35,6 +35,7 @@ pub struct ScanProgress {
 pub struct ScanResult {
     pub total_files: u64,
     pub indexed: u64,
+    pub added: u64,
     pub deleted: u64,
     pub modified: u64,
     pub errors: u64,
@@ -142,17 +143,11 @@ impl Scanner {
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
             let existing = tracker::get_file_by_path(&conn, &rel_path)?;
-            let needs_index = match &existing {
-                Some(r) => {
-                    if r.mtime != mtime {
-                        modified += 1;
-                    }
-                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
-                },
-                None => {
-                    added += 1;
-                    true
-                },
+            let needs_index = needs_reindex(&existing, mtime);
+            if let Some(r) = &existing {
+                if r.mtime != mtime { modified += 1; }
+            } else {
+                added += 1;
             };
 
             if needs_index {
@@ -190,7 +185,7 @@ impl Scanner {
         self.indexer.commit().context("failed to commit index after full scan")?;
         let duration_ms = start.elapsed().as_millis() as u64;
         log::info!("[SCAN] 扫描完成: {total} files, {indexed} indexed, {errors} errors in {duration_ms}ms");
-        Ok(ScanResult { total_files: total, indexed, deleted, modified, errors, duration_ms })
+        Ok(ScanResult { total_files: total, indexed, added, deleted, modified, errors, duration_ms })
     }
 
     /// Incremental scan — only processes files whose mtime is newer than
@@ -240,17 +235,11 @@ impl Scanner {
             if mtime <= last_scan { continue; }
 
             let existing = tracker::get_file_by_path(&conn, &rel_path)?;
-            let needs_index = match &existing {
-                Some(r) => {
-                    if r.mtime != mtime {
-                        modified += 1;
-                    }
-                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
-                },
-                None => {
-                    added += 1;
-                    true
-                },
+            let needs_index = needs_reindex(&existing, mtime);
+            if let Some(r) = &existing {
+                if r.mtime != mtime { modified += 1; }
+            } else {
+                added += 1;
             };
 
             if needs_index {
@@ -284,7 +273,7 @@ impl Scanner {
 
         self.indexer.commit().context("failed to commit index after incremental scan")?;
         let duration_ms = start.elapsed().as_millis() as u64;
-        Ok(ScanResult { total_files, indexed, deleted, modified, errors, duration_ms })
+        Ok(ScanResult { total_files, indexed, added, deleted, modified, errors, duration_ms })
     }
 
     pub fn startup_scan(&self, dir_id: &str) -> Result<ScanResult> {
@@ -338,17 +327,11 @@ impl Scanner {
             let size = meta.len();
 
             let existing = tracker::get_file_by_path(&conn, &rel_path)?;
-            let needs_index = match &existing {
-                Some(r) => {
-                    if r.mtime != mtime {
-                        modified += 1;
-                    }
-                    r.mtime != mtime || r.indexed == 0 || r.indexed == 2
-                },
-                None => {
-                    added += 1;
-                    true
-                },
+            let needs_index = needs_reindex(&existing, mtime);
+            if let Some(r) = &existing {
+                if r.mtime != mtime { modified += 1; }
+            } else {
+                added += 1;
             };
 
             if needs_index {
@@ -434,7 +417,7 @@ impl Scanner {
             "[STARTUP] {} 完成: {} files, {} indexed, {} moved, {} errors in {}ms",
             config.path, total_files, indexed, moved, errors, duration_ms
         );
-        Ok(ScanResult { total_files, indexed, deleted, modified, errors, duration_ms })
+        Ok(ScanResult { total_files, indexed, added, deleted, modified, errors, duration_ms })
     }
 }
 
