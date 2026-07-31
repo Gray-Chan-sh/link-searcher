@@ -123,6 +123,27 @@ const CREATE_TABLES_SQL: &str = "
     );
 ";
 
+/// Remove content_index rows whose md5 is no longer referenced by any
+/// active file_tracking row.
+pub fn cleanup_orphan_content(conn: &Connection) -> Result<u64> {
+    let deleted = conn.execute(
+        "DELETE FROM content_index WHERE md5 NOT IN (SELECT DISTINCT md5 FROM file_tracking WHERE md5 IS NOT NULL)",
+        [],
+    )?;
+    if deleted > 0 {
+        log::info!("[DB] cleaned up {deleted} orphan content_index rows");
+    }
+    Ok(deleted as u64)
+}
+
+/// Run VACUUM to reclaim space and defragment the database file.
+/// This is a no-op on an in-memory database.
+pub fn vacuum(conn: &Connection) -> Result<()> {
+    conn.execute_batch("VACUUM;")?;
+    log::info!("[DB] VACUUM completed");
+    Ok(())
+}
+
 fn seed_default_settings(conn: &Connection) -> Result<()> {
     let defaults = [
         ("ocr_lang", "eng"),

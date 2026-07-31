@@ -15,7 +15,7 @@ use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup}
 use crate::commands::config::{get_config, migrate_data, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{check_index_health, get_index_status, rebuild_index, trigger_scan};
+use crate::commands::index::{cancel_scan, check_index_health, get_index_status, rebuild_index, trigger_scan};
 use crate::commands::search::{export_search_results, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, update_settings};
 use crate::commands::logs::{clear_logs, get_logs};
@@ -51,6 +51,7 @@ pub fn run() {
             get_index_status,
             trigger_scan,
             rebuild_index,
+            cancel_scan,
             add_dir,
             get_dir_tree,
             remove_dir,
@@ -85,16 +86,28 @@ pub fn run() {
         ])
         .setup(|app| {
             log::info!("data directory: {:?}", data_dir);
-            std::fs::create_dir_all(&data_dir).expect("failed to create data directory");
+            if let Err(e) = std::fs::create_dir_all(&data_dir) {
+                eprintln!("[FATAL] failed to create data directory {:?}: {}", data_dir, e);
+                return Err(Box::new(e));
+            }
 
             // Initialize file logger
             let log_path = data_dir.join("app.log");
-            let log_file =
-                std::fs::File::create(&log_path).expect("failed to create log file");
+            let log_file: Box<dyn std::io::Write + Send> =
+                match std::fs::File::create(&log_path) {
+                    Ok(f) => Box::new(f),
+                    Err(e) => {
+                        eprintln!(
+                            "[WARN] failed to create log file {:?}: {}, falling back to stderr",
+                            log_path, e
+                        );
+                        Box::new(std::io::stderr())
+                    }
+                };
             env_logger::Builder::from_env(
                 env_logger::Env::default().default_filter_or("info"),
             )
-            .target(env_logger::Target::Pipe(Box::new(log_file)))
+            .target(env_logger::Target::Pipe(log_file))
             .format_timestamp_secs()
             .init();
             log::info!("application started");
@@ -126,6 +139,7 @@ pub fn run() {
 
             let scanner = Arc::new(Scanner::new(db_pool.clone(), indexer.clone()));
             let is_scanning = Arc::new(AtomicBool::new(false));
+            let cancel_scan = Arc::new(AtomicBool::new(false));
 
             let (watcher, event_rx) = FileWatcher::new();
             let watcher_tx = watcher.tx().clone();
@@ -145,6 +159,7 @@ pub fn run() {
                 indexer,
                 scanner.clone(),
                 is_scanning,
+                cancel_scan,
                 data_dir,
                 index_dir,
                 db_path,
@@ -207,6 +222,17 @@ pub fn run() {
                         ),
                         Err(e) => log::error!("[STARTUP] {} 扫描失败: {e}", dir.path),
                     }
+                }
+
+                // Post-scan maintenance
+                if let Ok(conn) = db_ref.get() {
+                    if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
+                        log::error!("[STARTUP] orphan cleanup failed: {e}");
+                    }
+                    if let Err(e) = crate::db::vacuum(&conn) {
+                        log::error!("[STARTUP] VACUUM failed: {e}");
+                    }
+                    drop(conn);
                 }
 
                 for dir in &dirs {

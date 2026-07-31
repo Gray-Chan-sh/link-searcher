@@ -96,9 +96,9 @@ pub async fn search(
         .map_err(|e| format!("index manager lock error: {e}"))?;
     let reader = mgr
         .reader()
-        .map_err(|e| format!("failed to create reader: {e}"))?;
+        .map_err(|e| format!("failed to get reader: {e}"))?;
     let searcher = crate::search::searcher::SearcherWrap::new(
-        reader,
+        reader.clone(),
         mgr.index().as_ref().clone(),
     );
     drop(mgr);
@@ -146,9 +146,9 @@ pub async fn suggest(state: State<'_, AppState>, prefix: String) -> Result<Vec<S
         .map_err(|e| format!("index manager lock error: {e}"))?;
     let reader = mgr
         .reader()
-        .map_err(|e| format!("failed to create reader: {e}"))?;
+        .map_err(|e| format!("failed to get reader: {e}"))?;
     let searcher = crate::search::searcher::SearcherWrap::new(
-        reader,
+        reader.clone(),
         mgr.index().as_ref().clone(),
     );
     drop(mgr);
@@ -239,8 +239,8 @@ pub async fn export_search_results(
         .map_err(|e| format!("index manager lock error: {e}"))?;
     let reader = mgr
         .reader()
-        .map_err(|e| format!("failed to create reader: {e}"))?;
-    let searcher = SearcherWrap::new(reader, mgr.index().as_ref().clone());
+        .map_err(|e| format!("failed to get reader: {e}"))?;
+    let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
 
     let response = searcher
         .search(&params)

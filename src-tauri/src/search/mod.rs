@@ -5,7 +5,7 @@ pub mod searcher;
 use std::path::Path;
 use std::sync::Arc;
 
-use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy};
+use tantivy::{Index, IndexReader, IndexWriter, ReloadPolicy, TantivyError};
 
 use crate::search::schema::{build_schema, register_tokenizers};
 
@@ -14,8 +14,13 @@ use crate::search::schema::{build_schema, register_tokenizers};
 /// Provides controlled access to the index reader and writer, ensuring
 /// that custom tokenizers (jieba, suggest) are registered immediately
 /// after index creation.
+///
+/// The [`IndexReader`] is created once at construction and cached, then
+/// reloaded on each call to [`reader()`](Self::reader) to pick up recent
+/// index commits.
 pub struct IndexManager {
     index: Arc<Index>,
+    reader: IndexReader,
 }
 
 impl IndexManager {
@@ -26,7 +31,7 @@ impl IndexManager {
     ///
     /// Returns `tantivy::TantivyError` if the directory cannot be read or
     /// the schema is incompatible.
-    pub fn open_or_create(path: &Path) -> Result<Self, tantivy::TantivyError> {
+    pub fn open_or_create(path: &Path) -> Result<Self, TantivyError> {
         let schema = build_schema();
         let index = if path.join("meta.json").exists() {
             Index::open_in_dir(path)?
@@ -35,9 +40,12 @@ impl IndexManager {
             Index::create_in_dir(path, schema)?
         };
         register_tokenizers(&index);
-        Ok(Self {
-            index: Arc::new(index),
-        })
+        let index = Arc::new(index);
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()?;
+        Ok(Self { index, reader })
     }
 
     /// Create an in-memory index for testing.
@@ -45,20 +53,20 @@ impl IndexManager {
         let schema = build_schema();
         let index = Index::create_in_ram(schema);
         register_tokenizers(&index);
-        Self {
-            index: Arc::new(index),
-        }
-    }
-
-    /// Return a new [`IndexReader`] with the default reload policy
-    /// (reload on commit with a 1-second delay).
-    pub fn reader(&self) -> Result<IndexReader, tantivy::TantivyError> {
-        let reader = self
-            .index
+        let index = Arc::new(index);
+        let reader = index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
-            .try_into()?;
-        Ok(reader)
+            .try_into()
+            .expect("in-memory reader creation must succeed");
+        Self { index, reader }
+    }
+
+    /// Return a reference to the cached [`IndexReader`], reloading it to
+    /// pick up recent index commits.
+    pub fn reader(&self) -> Result<&IndexReader, TantivyError> {
+        self.reader.reload()?;
+        Ok(&self.reader)
     }
 
     /// Return a new [`IndexWriter`] with the given memory budget (in bytes).

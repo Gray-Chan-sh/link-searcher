@@ -162,10 +162,46 @@ impl SearcherWrap {
                     })
                     .collect()
             }
+            "name" => {
+                // Fetch ALL results, sort by file_name in Rust
+                // (TEXT fields do not support fast-field sorting in Tantivy).
+                let top = searcher.search(
+                    &*query,
+                    &TopDocs::with_limit(total as usize),
+                )?;
+                let file_name_field = schema.get_field("file_name")?;
+                let mut results: Vec<(DocAddress, f64, String)> = top
+                    .into_iter()
+                    .map(|(score, addr)| {
+                        let file_name = searcher
+                            .doc::<TantivyDocument>(addr)
+                            .ok()
+                            .and_then(|d| {
+                                d.get_first(file_name_field)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_lowercase())
+                            })
+                            .unwrap_or_default();
+                        (addr, f64::from(score), file_name)
+                    })
+                    .collect();
+
+                let desc = params.sort_order == "desc";
+                results.sort_by(|a, b| {
+                    if desc {
+                        b.2.cmp(&a.2)
+                    } else {
+                        a.2.cmp(&b.2)
+                    }
+                });
+
+                results
+                    .into_iter()
+                    .map(|(addr, score, _)| (addr, score))
+                    .collect()
+            }
             _ => {
                 // Default: sort by score (BM25 relevance).
-                // "name" sorting falls back to score order since TEXT fields
-                // do not support fast-field sorting.
                 let top = searcher.search(&*query, &TopDocs::with_limit(limit))?;
                 top.into_iter().map(|(score, addr)| (addr, f64::from(score))).collect()
             }
@@ -259,8 +295,8 @@ impl SearcherWrap {
         })
     }
 
-    /// Generate autocomplete suggestions by searching the `content` field
-    /// with a regex prefix query and returning matching file names.
+    /// Generate autocomplete suggestions by searching the `content_suggest`
+    /// field with a regex prefix query and returning matching file names.
     ///
     /// # Errors
     ///
@@ -268,7 +304,7 @@ impl SearcherWrap {
     pub fn suggest(&self, prefix: &str, limit: usize) -> Result<Vec<String>, TantivyError> {
         let searcher: Searcher = self.reader.searcher();
         let schema = build_schema();
-        let content_field = schema.get_field("content")?;
+        let content_suggest_field = schema.get_field("content_suggest")?;
         let file_name_field = schema.get_field("file_name")?;
 
         if prefix.is_empty() {
@@ -277,7 +313,7 @@ impl SearcherWrap {
 
         // Use a regex query to match terms starting with the prefix.
         let pattern = format!("(?i){}.*", regex::escape(prefix));
-        let regex_query = RegexQuery::from_pattern(&pattern, content_field)?;
+        let regex_query = RegexQuery::from_pattern(&pattern, content_suggest_field)?;
         let top_docs = searcher.search(&regex_query, &TopDocs::with_limit(limit))?;
 
         let mut suggestions = Vec::with_capacity(top_docs.len());
@@ -433,53 +469,40 @@ impl SearcherWrap {
     }
 }
 
-/// Extract a `filename:xxx` or `filename:"xxx yyy"` prefix from a query string.
+/// Extract `filename:xxx` or `filename:"xxx yyy"` from a query string using regex.
 ///
-/// Returns `(Some(value), remaining_query)` if a prefix is found, or
-/// `(None, original_query)` otherwise.
+/// Supports occurrences anywhere in the string (not only at the start).
+/// If multiple `filename:` values are present, the last one wins.
+/// Returns `(Some(value), remaining_query)` if found, or `(None, original_query)` otherwise.
 fn parse_filename_prefix(query: &str) -> (Option<String>, String) {
-    let trimmed = query.trim();
-    // Find "filename:" not preceded by alphanumeric (to avoid matching inside words).
-    let pos = trimmed
-        .as_bytes()
-        .windows(9)
-        .position(|w| w == b"filename:")
-        .and_then(|p| {
-            // Ensure it's at start or preceded by whitespace
-            if p == 0 || trimmed.as_bytes()[p - 1] == b' ' {
-                Some(p)
-            } else {
-                None
-            }
-        });
+    let re = regex::Regex::new(r#"(?i)(?:^|\s)filename:("([^"]+)"|(\S+))"#).unwrap();
+    let mut last_value: Option<String> = None;
+    let mut segments: Vec<(usize, usize)> = Vec::new(); // (start, end) byte offsets of each match
 
-    match pos {
-        Some(p) => {
-            let after = &trimmed[p + 9..];
-            let (value, rest) = if after.starts_with('"') {
-                // Quoted: filename:"some file.txt" rest
-                let end = after[1..]
-                    .find('"')
-                    .map(|e| e + 1)
-                    .unwrap_or(after.len());
-                (after[1..end].to_string(), after[end..].trim().to_string())
-            } else {
-                // Unquoted: filename:foo rest
-                let end = after.find(' ').unwrap_or(after.len());
-                (after[..end].to_string(), after[end..].trim().to_string())
-            };
-            let before = trimmed[..p].trim().to_string();
-            let remaining = if before.is_empty() {
-                rest
-            } else if rest.is_empty() {
-                before
-            } else {
-                format!("{before} {rest}")
-            };
-            (Some(value), remaining)
-        }
-        None => (None, query.to_string()),
+    for cap in re.captures_iter(query) {
+        let m = cap.get(0).unwrap();
+        let value = cap.get(2).or_else(|| cap.get(3)).map(|m| m.as_str()).unwrap_or("");
+        last_value = Some(value.to_string());
+        segments.push((m.start(), m.end()));
     }
+
+    if segments.is_empty() {
+        return (None, query.to_string());
+    }
+
+    // Rebuild query without filename: matches
+    let mut remaining = String::new();
+    let mut cursor = 0;
+    for &(start, end) in &segments {
+        remaining.push_str(&query[cursor..start]);
+        cursor = end;
+    }
+    remaining.push_str(&query[cursor..]);
+
+    // Normalize whitespace after removals
+    let remaining = remaining.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    (last_value, remaining)
 }
 
 #[cfg(test)]
@@ -678,7 +701,7 @@ mod tests {
         let searcher = SearcherWrap::new(reader, index);
 
         let suggestions = searcher.suggest("finan", 10).expect("suggest");
-        // Should find at least one matching document (content matches "financial").
+        // Should find at least one matching document (content_suggest matches "financial").
         assert!(
             !suggestions.is_empty(),
             "suggest should find at least one result, got: {suggestions:?}"

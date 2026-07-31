@@ -108,6 +108,7 @@ pub async fn trigger_scan(
     }
 
     let is_scanning = state.is_scanning.clone();
+    let cancel_scan = state.cancel_scan.clone();
     let scanner = state.scanner.clone();
     let db_pool = state.db.clone();
     let app_clone = app.clone();
@@ -118,6 +119,7 @@ pub async fn trigger_scan(
             Err(e) => {
                 log::error!("[SCAN] db connection failed: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -126,6 +128,7 @@ pub async fn trigger_scan(
             Err(e) => {
                 log::error!("[SCAN] failed to list dirs: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -140,12 +143,14 @@ pub async fn trigger_scan(
         if targets.is_empty() {
             log::warn!("[SCAN] no directories configured");
             is_scanning.store(false, Ordering::SeqCst);
+            cancel_scan.store(false, Ordering::SeqCst);
             return;
         }
 
         let full = dir_id.is_none();
         for dir in &targets {
-            if !is_scanning.load(Ordering::Relaxed) {
+            if cancel_scan.load(Ordering::Relaxed) {
+                log::info!("[SCAN] scan cancelled by user");
                 break;
             }
             let result: Result<ScanResult, String> = if full {
@@ -170,6 +175,7 @@ pub async fn trigger_scan(
         }
 
         is_scanning.store(false, Ordering::SeqCst);
+        cancel_scan.store(false, Ordering::SeqCst);
         let _ = app_clone.emit("scan-completed", serde_json::json!({}));
     });
 
@@ -195,6 +201,7 @@ pub async fn rebuild_index(
     let indexer = state.indexer.clone();
     let scanner = state.scanner.clone();
     let is_scanning = state.is_scanning.clone();
+    let cancel_scan = state.cancel_scan.clone();
 
     tokio::task::spawn_blocking(move || {
         // 1. Delete old index directory
@@ -220,6 +227,7 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] failed to create index: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
         }
@@ -233,6 +241,7 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] db connection failed: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
         };
@@ -241,13 +250,15 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] failed to list dirs: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
         };
         drop(conn);
 
         for dir in &dirs {
-            if !is_scanning.load(Ordering::Relaxed) {
+            if cancel_scan.load(Ordering::Relaxed) {
+                log::info!("[SCAN] rebuild cancelled by user");
                 break;
             }
             let p = |prog: ScanProgress| {
@@ -267,9 +278,18 @@ pub async fn rebuild_index(
         }
 
         is_scanning.store(false, Ordering::SeqCst);
+        cancel_scan.store(false, Ordering::SeqCst);
         let _ = app.emit("scan-completed", serde_json::json!({}));
     });
 
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
+    let was_scanning = state.is_scanning.load(Ordering::Relaxed);
+    state.cancel_scan.store(true, Ordering::Relaxed);
+    log::info!("[SCAN] cancel requested (was_scanning={was_scanning})");
     Ok(())
 }
 

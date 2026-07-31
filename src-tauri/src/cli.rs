@@ -1,5 +1,6 @@
 use clap::Parser;
 
+use crate::config;
 use crate::search::searcher::{SearchParams, SearcherWrap};
 use crate::search::IndexManager;
 
@@ -22,14 +23,12 @@ pub fn run_cli() {
     let cli = Cli::parse();
     match cli {
         Cli::Search { query, limit } => {
-            let data_dir = dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("link-searcher");
+            let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join("index");
 
             let index = IndexManager::open_or_create(&index_dir).expect("failed to open index");
             let reader = index.reader().expect("failed to create reader");
-            let searcher = SearcherWrap::new(reader, index.index().as_ref().clone());
+            let searcher = SearcherWrap::new(reader.clone(), index.index().as_ref().clone());
 
             let params = SearchParams {
                 query,
@@ -58,9 +57,7 @@ pub fn run_cli() {
             );
         }
         Cli::Health => {
-            let data_dir = dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("link-searcher");
+            let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join("index");
             let db_path = data_dir.join("data.db");
 

@@ -6,6 +6,7 @@
 //! can batch documents before a single [`commit`](IndexerService::commit).
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use anyhow::{Context, Result};
@@ -23,6 +24,8 @@ pub struct IndexerService {
     db: Pool<SqliteConnectionManager>,
     pub(crate) index_manager: Arc<RwLock<IndexManager>>,
     writer: Mutex<Option<IndexWriter>>,
+    commit_counter: AtomicU64,
+    commit_interval: AtomicU64,
 }
 
 // SAFETY: IndexWriter is `Send` (it holds owned channels + Arc<Mutex<…>>).
@@ -38,6 +41,8 @@ impl IndexerService {
             db,
             index_manager,
             writer: Mutex::new(None),
+            commit_counter: AtomicU64::new(0),
+            commit_interval: AtomicU64::new(100),
         }
     }
 
@@ -162,6 +167,18 @@ impl IndexerService {
             let _ = crate::db::tracker::log_index_error(&conn, file_id, &file_path.to_string_lossy(), error_type, &e.to_string());
             log::error!("[INDEX] 失败: {file_name}: {e}");
         }
+
+        // Periodic auto-commit every N successful files.
+        if result.is_ok() {
+            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let interval = self.commit_interval.load(Ordering::Relaxed);
+            if interval > 0 && count % interval == 0 {
+                if let Err(e) = self.commit() {
+                    log::error!("[INDEX] 定期提交失败: {e}");
+                }
+            }
+        }
+
         result
     }
 
@@ -191,6 +208,12 @@ impl IndexerService {
             Indexer::commit(w).map_err(|e| anyhow::anyhow!("failed to commit index writer: {e}"))?;
         }
         Ok(())
+    }
+
+    /// Set the number of files indexed between automatic commits.
+    /// Pass 0 to disable periodic commits (not recommended).
+    pub fn set_commit_interval(&self, n: usize) {
+        self.commit_interval.store(n as u64, Ordering::Relaxed);
     }
 
     // ------------------------------------------------------------------
@@ -353,11 +376,12 @@ mod tests {
         svc.commit().unwrap();
 
         // Both should be findable.
-        let reader = { svc.index_manager.read().unwrap().reader().unwrap() };
+        let mgr = svc.index_manager.read().unwrap();
+        let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = build_schema();
         let content_f = schema.get_field("content").unwrap();
-        let parser = tantivy::query::QueryParser::for_index(svc.index_manager.read().unwrap().index(), vec![content_f]);
+        let parser = tantivy::query::QueryParser::for_index(mgr.index(), vec![content_f]);
         let query = parser.parse_query("deduplicated").unwrap();
         let top = searcher
             .search(&query, &tantivy::collector::TopDocs::with_limit(10))
@@ -394,11 +418,12 @@ mod tests {
         svc.commit().unwrap();
 
         // Verify it's gone from Tantivy.
-        let reader = { svc.index_manager.read().unwrap().reader().unwrap() };
+        let mgr = svc.index_manager.read().unwrap();
+        let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = build_schema();
         let content = schema.get_field("content").unwrap();
-        let parser = tantivy::query::QueryParser::for_index(svc.index_manager.read().unwrap().index(), vec![content]);
+        let parser = tantivy::query::QueryParser::for_index(mgr.index(), vec![content]);
         let query = parser.parse_query("delete").unwrap();
         let top = searcher
             .search(&query, &tantivy::collector::TopDocs::with_limit(10))
