@@ -315,7 +315,7 @@ export default function Settings() {
                 <p className="text-sm text-gray-900 dark:text-gray-100">{dep.name}</p>
                 <p className="text-xs text-gray-500">{dep.command}</p>
                 {!dep.available && (
-                  <pre className="mt-1 text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 p-2 rounded">{dep.install_guide}</pre>
+                  <pre className="mt-1 text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 p-2 rounded">{filterGuide(dep.install_guide)}</pre>
                 )}
               </div>
             </div>
@@ -343,7 +343,7 @@ export default function Settings() {
                 key={dep.command}
                 name={dep.name}
                 status={dep.available ? '✅' : '❌'}
-                cmd={dep.install_guide}
+                cmd={filterGuide(dep.install_guide)}
               />
             ))}
           </div>
@@ -449,6 +449,15 @@ function ToggleField({ label, checked, onChange }: {
       <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
     </label>
   )
+}
+
+function filterGuide(guide: string): string {
+  return guide.split('\n')
+    .filter(line => {
+      const p = navigator.platform
+      return line.startsWith(`${p.startsWith('Mac') ? 'macOS' : p.startsWith('Win') ? 'Windows' : 'Linux'}:`)
+    })
+    .join('\n') || guide
 }
 
 function DepRow({ name, status, cmd }: { name: string; status: string; cmd: string }) {

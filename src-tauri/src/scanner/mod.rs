@@ -442,6 +442,10 @@ impl Scanner {
 
         match event.kind {
             ChangeKind::Create | ChangeKind::Modify => {
+                let exclude = parse_exclude_patterns(&dir_config.exclude_patterns);
+                if is_excluded(file_path, &exclude) {
+                    return Ok(());
+                }
                 let meta = std::fs::metadata(file_path)
                     .with_context(|| format!("failed to stat {path_str}"))?;
                 let mtime = mtime_micros(&meta).unwrap_or(0);

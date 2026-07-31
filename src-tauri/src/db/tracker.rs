@@ -63,15 +63,15 @@ pub fn upsert_file(
     .context("upsert_file failed")
 }
 
-pub fn mark_deleted(conn: &Connection, path: &str) -> Result<()> {
+pub fn mark_deleted(conn: &Connection, file_id: &str) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET status='deleted', updated_at=?1 WHERE path=?2",
-            rusqlite::params![chrono::Utc::now().timestamp(), path],
+            "UPDATE file_tracking SET status='deleted', updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), file_id],
         )
         .context("mark_deleted failed")?;
     if n == 0 {
-        anyhow::bail!("file not found: {path}");
+        anyhow::bail!("file not found: {file_id}");
     }
     Ok(())
 }
@@ -339,7 +339,7 @@ mod tests {
     fn test_mark_deleted() {
         let conn = db();
         let id = upsert_file(&conn, "/a.txt", "d1", 1000, 1, None).unwrap();
-        mark_deleted(&conn, "/a.txt").unwrap();
+        mark_deleted(&conn, &id).unwrap();
         assert_eq!(get_file_by_id(&conn, &id).unwrap().unwrap().status, "deleted");
         assert!(mark_deleted(&conn, "/nope.txt").is_err());
     }

@@ -176,7 +176,7 @@ export default function IndexStatus() {
           <div className="grid grid-cols-5 gap-4 mb-6">
             <StatCard label="Total Files" value={status.total_files.toLocaleString()} color="gray" />
             <StatCard label="Indexed" value={status.indexed.toLocaleString()} color="green" />
-            <StatCard label="Pending" value={status.pending.toLocaleString()} color="yellow" />
+            <StatCard label="Pending" value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? 'incl. errors' : undefined} />
             <StatCard label="OCR'd" value={status.ocred.toLocaleString()} color="purple" />
             <div
               className={`p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg cursor-pointer hover:border-red-300 dark:hover:border-red-700 transition-colors ${status.errors > 0 ? 'cursor-pointer' : ''}`}
@@ -319,7 +319,7 @@ export default function IndexStatus() {
   )
 }
 
-function StatCard({ label, value, color }: { label: string; value: string; color: 'gray' | 'green' | 'yellow' | 'red' | 'purple' }) {
+function StatCard({ label, value, color, subtitle }: { label: string; value: string; color: 'gray' | 'green' | 'yellow' | 'red' | 'purple'; subtitle?: string }) {
   const colors: Record<string, string> = {
     gray: 'text-gray-900 dark:text-gray-100',
     green: 'text-green-600 dark:text-green-400',
@@ -331,6 +331,7 @@ function StatCard({ label, value, color }: { label: string; value: string; color
     <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
       <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</p>
       <p className={`text-2xl font-semibold ${colors[color]}`}>{value}</p>
+      {subtitle && <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{subtitle}</p>}
     </div>
   )
 }
