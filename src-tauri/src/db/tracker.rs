@@ -49,12 +49,14 @@ pub fn upsert_file(
     let now = chrono::Utc::now().timestamp();
     let id = Uuid::new_v4().to_string();
     conn.query_row(
-        "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,'active',0,NULL,?7,?7)
-         ON CONFLICT(path) DO UPDATE SET
-             mtime=excluded.mtime, size=excluded.size, md5=excluded.md5,
-             status='active', indexed=0, error_msg=NULL, updated_at=excluded.updated_at
-         RETURNING id",
+         "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at)
+          VALUES (?1,?2,?3,?4,?5,?6,'active',0,NULL,?7,?7)
+          ON CONFLICT(path) DO UPDATE SET
+              mtime=excluded.mtime, size=excluded.size, md5=excluded.md5,
+              status='active',
+              indexed=CASE WHEN file_tracking.mtime!=excluded.mtime OR file_tracking.size!=excluded.size THEN 0 ELSE file_tracking.indexed END,
+              error_msg=NULL, updated_at=excluded.updated_at
+          RETURNING id",
         rusqlite::params![id, path, dir_id, mtime, size as i64, md5, now],
         |row| row.get::<_, String>(0),
     )

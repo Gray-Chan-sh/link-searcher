@@ -83,18 +83,20 @@ impl FileWatcher {
                     };
                     for debounced in &events {
                         let Some(kind) = classify_event(&debounced.event) else { continue };
-                        let Some(dir_id) = find_matching_dir(&watches, &debounced.event.paths[0]) else {
-                            continue;
-                        };
-                        if event_tx_cb
-                            .send(FileChangeEvent {
-                                dir_id,
-                                path: debounced.event.paths[0].clone(),
-                                kind,
-                            })
-                            .is_err()
-                        {
-                            return;
+                        for path in &debounced.event.paths {
+                            let Some(dir_id) = find_matching_dir(&watches, path) else {
+                                continue;
+                            };
+                            if event_tx_cb
+                                .send(FileChangeEvent {
+                                    dir_id,
+                                    path: path.clone(),
+                                    kind,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
                         }
                     }
                 },

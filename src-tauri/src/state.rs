@@ -7,7 +7,7 @@ use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use std::sync::mpsc;
 
-use crate::scanner::watcher::WatcherCommand;
+use crate::scanner::watcher::{FileWatcher, WatcherCommand};
 
 use crate::indexer::IndexerService;
 use crate::scanner::Scanner;
@@ -23,6 +23,7 @@ pub struct AppState {
     pub index_dir: PathBuf,
     pub db_path: PathBuf,
     pub watcher_tx: mpsc::Sender<WatcherCommand>,
+    pub watcher: Option<FileWatcher>,
 }
 
 impl AppState {
@@ -36,6 +37,7 @@ impl AppState {
         index_dir: PathBuf,
         db_path: PathBuf,
         watcher_tx: mpsc::Sender<WatcherCommand>,
+        watcher: Option<FileWatcher>,
     ) -> Self {
         Self {
             db,
@@ -47,6 +49,7 @@ impl AppState {
             index_dir,
             db_path,
             watcher_tx,
+            watcher,
         }
     }
 }

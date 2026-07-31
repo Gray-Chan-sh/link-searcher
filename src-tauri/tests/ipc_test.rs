@@ -78,6 +78,7 @@ fn setup_app(
         index_dir,
         db_path,
         dummy_tx,
+        None,
     );
 
     let mut ctx = mock_context(noop_assets());

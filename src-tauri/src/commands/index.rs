@@ -89,14 +89,20 @@ pub async fn trigger_scan(
                 [],
                 |row| row.get(0),
             )
-            .unwrap_or_else(|_| "Tesseract".to_string());
+            .unwrap_or_else(|_| "PaddleOCR".to_string());
         // Drop connection before the long-running scan
         drop(conn);
 
-        if ocr_setting != "None" && !ocr::is_tesseract_available() && ocr_setting == "Tesseract" {
+        if ocr_setting != "None"
+            && !match ocr_setting.as_str() {
+                "PaddleOCR" => true,     // built-in, always available
+                "Tesseract" => ocr::is_tesseract_available(),
+                _ => !ocr::detect_available_engines().is_empty(),
+            }
+        {
             state.is_scanning.store(false, Ordering::SeqCst);
             return Err(
-                "Tesseract 未安装或不可用，请在设置页面检查 OCR 引擎配置".to_string(),
+                "OCR 引擎不可用，请在设置页面检查 OCR 引擎配置".to_string(),
             );
         }
     }

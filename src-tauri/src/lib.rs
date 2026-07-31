@@ -111,8 +111,8 @@ pub fn run() {
 
             std::fs::create_dir_all(&index_dir).ok();
 
-            let db_pool = db::get_pool(db_path.to_str().unwrap()).expect("failed to create DB pool");
-            db::init_db(db_path.to_str().unwrap()).expect("failed to init DB");
+            let db_pool = db::get_pool(db_path.to_string_lossy().as_ref()).expect("failed to create DB pool");
+            db::init_db(db_path.to_string_lossy().as_ref()).expect("failed to init DB");
 
             let index_manager = Arc::new(RwLock::new(
                 IndexManager::open_or_create(&index_dir).expect("failed to open index"),
@@ -149,6 +149,7 @@ pub fn run() {
                 index_dir,
                 db_path,
                 watcher_tx,
+                Some(watcher),
             );
 
             app.manage(app_state);
@@ -277,7 +278,6 @@ pub fn run() {
                 });
             }
 
-            std::mem::forget(watcher);
             Ok(())
         })
         .run(tauri::generate_context!())

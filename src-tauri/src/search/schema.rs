@@ -69,6 +69,7 @@ pub fn build_schema() -> Schema {
     builder.add_text_field("file_name", name_options);
     builder.add_text_field("file_ext", STRING | STORED);
     builder.add_text_field("dir_id", STRING | STORED);
+    builder.add_text_field("path", STRING | STORED);
     builder.add_text_field("content", content_options);
     builder.add_text_field("content_suggest", suggest_options);
     builder.add_date_field("mtime", INDEXED | STORED | FAST);
@@ -239,6 +240,7 @@ mod tests {
         assert!(schema.get_field("file_name").is_ok());
         assert!(schema.get_field("file_ext").is_ok());
         assert!(schema.get_field("dir_id").is_ok());
+        assert!(schema.get_field("path").is_ok());
         assert!(schema.get_field("content").is_ok());
         assert!(schema.get_field("content_suggest").is_ok());
         assert!(schema.get_field("mtime").is_ok());

@@ -40,7 +40,7 @@ pub fn preprocess_image(input_path: &Path) -> Result<PathBuf> {
 
     let cleaned = imageproc::morphology::open(&thresholded, Norm::L1, 1);
 
-    let output_path = std::env::temp_dir().join(format!("ls_pp_{}.png", std::process::id()));
+    let output_path = std::env::temp_dir().join(format!("ls_pp_{}.png", uuid::Uuid::new_v4()));
     cleaned.save(&output_path).context("failed to save preprocessed image")?;
 
     Ok(output_path)

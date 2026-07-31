@@ -144,7 +144,8 @@ impl IndexerService {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
 
-            Indexer::add_document(w, file_id, &file_name, &file_ext, dir_id, &text, mtime, file_size)
+            let file_path_str = file_path.to_string_lossy().to_string();
+            Indexer::add_document(w, file_id, &file_name, &file_ext, dir_id, &file_path_str, &text, mtime, file_size)
                 .map_err(|e| anyhow::anyhow!("failed to add document to index: {e}"))?;
 
             // Update tracking row.

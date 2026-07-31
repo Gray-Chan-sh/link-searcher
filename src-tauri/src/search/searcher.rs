@@ -62,6 +62,7 @@ pub struct SearchHit {
     pub file_id: String,
     pub file_name: String,
     pub file_ext: String,
+    pub path: String,
     pub snippet: String,
     pub score: f64,
     pub mtime: i64,
@@ -179,6 +180,7 @@ impl SearcherWrap {
         let file_id_field = schema.get_field("file_id")?;
         let file_name_field = schema.get_field("file_name")?;
         let file_ext_field = schema.get_field("file_ext")?;
+        let path_field = schema.get_field("path")?;
         let content_field = schema.get_field("content")?;
         let mtime_field = schema.get_field("mtime")?;
         let file_size_field = schema.get_field("file_size")?;
@@ -219,6 +221,11 @@ impl SearcherWrap {
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
+            let path = doc
+                .get_first(path_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let mtime = doc
                 .get_first(mtime_field)
                 .and_then(|v| v.as_datetime())
@@ -233,6 +240,7 @@ impl SearcherWrap {
                 file_id,
                 file_name,
                 file_ext,
+                path,
                 snippet,
                 score: *score,
                 mtime,
@@ -240,7 +248,7 @@ impl SearcherWrap {
             });
         }
 
-        let took_ms = start.elapsed().as_micros() as u64;
+        let took_ms = start.elapsed().as_millis() as u64;
 
         Ok(SearchResponse {
             total: total as u64,
@@ -495,6 +503,7 @@ mod tests {
             "report.pdf",
             "pdf",
             "dir-a",
+            "/home/user/report.pdf",
             "annual financial report for 2024 showing revenue growth",
             1_700_000_000_000_000,
             204800,
@@ -508,6 +517,7 @@ mod tests {
             "notes.txt",
             "txt",
             "dir-a",
+            "/home/user/notes.txt",
             "meeting notes about project planning and resource allocation",
             1_700_000_000_100_000,
             4096,
@@ -521,6 +531,7 @@ mod tests {
             "code.rs",
             "rs",
             "dir-b",
+            "/home/user/code.rs",
             "rust implementation of the search algorithm with efficient indexing",
             1_700_000_000_200_000,
             8192,
@@ -534,6 +545,7 @@ mod tests {
             "中文文档.txt",
             "txt",
             "dir-a",
+            "/home/user/中文文档.txt",
             "这是一个关于搜索引擎的中文测试文档",
             1_700_000_000_300_000,
             1024,

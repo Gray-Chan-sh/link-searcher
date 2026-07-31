@@ -23,6 +23,7 @@ impl Indexer {
         file_name: &str,
         file_ext: &str,
         dir_id: &str,
+        path: &str,
         content: &str,
         mtime: i64,
         file_size: u64,
@@ -33,6 +34,7 @@ impl Indexer {
         let file_name_field = schema.get_field("file_name").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let file_ext_field = schema.get_field("file_ext").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let dir_id_field = schema.get_field("dir_id").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
+        let path_field = schema.get_field("path").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let content_field = schema.get_field("content").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let content_suggest_field = schema.get_field("content_suggest").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let mtime_field = schema.get_field("mtime").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
@@ -43,6 +45,7 @@ impl Indexer {
             file_name_field => file_name,
             file_ext_field => file_ext.to_lowercase(),
             dir_id_field => dir_id,
+            path_field => path,
             content_field => content,
             content_suggest_field => content,
             mtime_field => DateTime::from_timestamp_micros(mtime),
@@ -107,6 +110,7 @@ mod tests {
             "test.txt",
             "txt",
             "dir-1",
+            "/home/user/test.txt",
             "hello world this is a test document",
             1_700_000_000_000_000,
             1024,
@@ -141,6 +145,7 @@ mod tests {
             "delete-me.txt",
             "txt",
             "dir-1",
+            "/home/user/delete-me.txt",
             "content to delete",
             1_700_000_000_000_000,
             512,
@@ -180,6 +185,7 @@ mod tests {
             "permanent.txt",
             "txt",
             "dir-1",
+            "/home/user/permanent.txt",
             "permanent content here",
             1_700_000_000_000_000,
         256,

@@ -96,7 +96,7 @@ pub fn get_last_scan_time(conn: &rusqlite::Connection, dir_id: &str) -> Result<i
 
 /// Record the current timestamp as the last-scan time for a directory.
 pub fn record_last_scan(conn: &rusqlite::Connection, dir_id: &str) -> Result<()> {
-    let now = chrono::Utc::now().timestamp().to_string();
+    let now = chrono::Utc::now().timestamp_micros().to_string();
     conn.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
         rusqlite::params![format!("last_scan_{dir_id}"), now],

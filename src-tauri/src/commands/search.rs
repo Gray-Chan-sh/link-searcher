@@ -251,10 +251,10 @@ pub async fn export_search_results(
             let mut csv = String::from("file_name,file_ext,path,score,mtime,file_size\n");
             for hit in &response.hits {
                 csv.push_str(&format!(
-                    "\"{}\",{},{},{},{},{}\n",
+                    "\"{}\",\"{}\",\"{}\",{},{},{}\n",
                     hit.file_name.replace('"', "\"\""),
-                    hit.file_ext,
-                    hit.file_name.replace('"', "\"\""),
+                    hit.file_ext.replace('"', "\"\""),
+                    hit.path.replace('"', "\"\""),
                     hit.score,
                     hit.mtime,
                     hit.file_size,

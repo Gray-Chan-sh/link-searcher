@@ -419,9 +419,10 @@ fn handle_create_modify(
 
     let file_id = tracker::upsert_file(conn, &path_str, &event.dir_id, mtime, size, None)?;
     let text = crate::extractor::extract_text(&event.path).unwrap_or_default();
-    Indexer::add_document(writer, &file_id, &file_name, &file_ext, &event.dir_id, &text, mtime, size)?;
+    Indexer::add_document(writer, &file_id, &file_name, &file_ext, &event.dir_id, &path_str, &text, mtime, size)?;
 
-    let hash = format!("{:x}", md5::Md5::digest(text.as_bytes()));
+    let raw_bytes = std::fs::read(&event.path).unwrap_or_default();
+    let hash = format!("{:x}", md5::Md5::digest(&raw_bytes));
     tracker::update_indexed(conn, &file_id, Some(&hash))?;
     Ok(())
 }
