@@ -71,9 +71,11 @@ export default function Settings() {
 
     setMigrating(true)
     try {
-      const result = await migrateData(appConfig.data_dir, selected)
-      setAppConfig({ ...appConfig, data_dir: result })
-      await updateConfig({ data_dir: result })
+      const msg = await migrateData(appConfig.data_dir, selected)
+      setAppConfig({ ...appConfig, data_dir: selected })
+      await updateConfig({ data_dir: selected })
+      setLocalError(null)
+      alert(msg)
     } finally {
       setMigrating(false)
     }

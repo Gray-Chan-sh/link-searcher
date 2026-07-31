@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getFilePreview, type FilePreview } from '../api/files'
@@ -11,7 +11,8 @@ interface DirEntry {
   is_supported: boolean
   file_size: number
   mtime: number
-  indexed: boolean
+  indexed: number  // 0=pending, 1=indexed, 2=failed
+  error_msg?: string | null
 }
 
 interface TreeNode {
@@ -35,12 +36,22 @@ function formatTime(ts: number): string {
 export default function Browse() {
   const [trees, setTrees] = useState<TreeNode[]>([])
   const [selectedDir, setSelectedDir] = useState<string | null>(null)
-  const [entries, setEntries] = useState<DirEntry[]>([])
+  const [allEntries, setAllEntries] = useState<DirEntry[]>([])
   const [entriesLoading, setEntriesLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [filter, setFilter] = useState<'all' | 'indexed' | 'pending' | 'failed'>('all')
+
+  const entries = useMemo(() => {
+    return allEntries.filter(e => {
+      if (e.is_dir) return true
+      if (filter === 'all') return true
+      const status = e.indexed === 1 ? 'indexed' : e.indexed === 2 ? 'failed' : 'pending'
+      return status === filter
+    })
+  }, [allEntries, filter])
 
   // Load root directories on mount
   useEffect(() => {
@@ -80,7 +91,7 @@ export default function Browse() {
     }
   }, [])
 
-  const selectDir = useCallback(async (path: string) => {
+const selectDir = useCallback(async (path: string) => {
     setSelectedDir(path)
     setSelectedFile(null)
     setPreview(null)
@@ -88,10 +99,10 @@ export default function Browse() {
     setEntriesLoading(true)
 
     try {
-      const entries: DirEntry[] = await invoke('list_dir_entries', { path })
-      setEntries(entries)
+      const raw: DirEntry[] = await invoke('list_dir_entries', { path })
+      setAllEntries(raw)
     } catch (e) {
-      setEntries([])
+      setAllEntries([])
     }
     setEntriesLoading(false)
   }, [])
@@ -136,10 +147,20 @@ export default function Browse() {
 
       {/* Middle: File list */}
       <div className="w-64 shrink-0 border-r border-gray-200 dark:border-gray-800 overflow-y-auto">
-        <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-800">
+        <div className="px-3 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2">
           <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
             {selectedDir ? selectedDir.split('/').pop() : 'Files'}
           </h3>
+          <select
+            value={filter}
+            onChange={e => setFilter(e.target.value as 'all' | 'indexed' | 'pending' | 'failed')}
+            className="text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-1.5 py-0.5 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+          >
+            <option value="all">All</option>
+            <option value="indexed">Indexed</option>
+            <option value="pending">Pending</option>
+            <option value="failed">Failed</option>
+          </select>
         </div>
         {entriesLoading ? (
           <div className="p-4 text-xs text-gray-400">Loading...</div>
@@ -155,11 +176,29 @@ export default function Browse() {
                     : 'text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800'
                 } ${e.is_dir ? 'font-medium' : ''}`}
               >
-                {e.is_dir ? (
-                  <FolderIcon className="size-3.5 shrink-0 text-amber-500" />
-                ) : (
-                  <FileTextIcon className={`size-3.5 shrink-0 ${e.indexed ? 'text-green-500' : 'text-gray-400'}`} />
-                )}
+              {e.is_dir ? (
+                <FolderIcon className="size-3.5 shrink-0 text-amber-500" />
+              ) : (
+                <>
+                  <FileTextIcon
+                    className={`size-3.5 shrink-0 ${
+                      e.indexed === 1
+                        ? 'text-green-500'
+                        : e.indexed === 2
+                        ? 'text-red-500'
+                        : 'text-gray-400'
+                    }`}
+                  />
+                  {e.indexed === 2 && e.error_msg && (
+                    <span
+                      title={e.error_msg}
+                      className="ml-0.5 text-xs text-red-500 hover:underline"
+                    >
+                      ⚠️
+                    </span>
+                  )}
+                </>
+              )}
                 <span className="truncate flex-1">{e.name}</span>
                 {!e.is_dir && (
                   <span className="text-gray-400 shrink-0">{formatSize(e.file_size)}</span>

@@ -275,30 +275,36 @@ pub struct DirEntry {
     pub is_supported: bool,
     pub file_size: u64,
     pub mtime: i64,
-    pub indexed: bool,
+    pub indexed: i64,
+    pub error_msg: Option<String>,
 }
 
 /// List files and directories at a given filesystem path.
 #[tauri::command]
-pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
+pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
     let dir = std::path::Path::new(&path);
     if !dir.is_dir() {
         return Err("not a directory".to_string());
     }
 
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    let dir_configs = db::dir_config::list_dirs(&conn)
+        .map_err(|e| format!("failed to load dir config: {e}"))?;
+
     let mut entries = Vec::new();
     let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read dir: {e}"))?;
 
     for entry in read_dir.flatten() {
-        let entry_path = entry.path();
-        if crate::scanner::helpers::is_excluded(&entry_path, &[]) {
+        let entry_path_raw = entry.path();
+        if crate::scanner::helpers::is_excluded(&entry_path_raw, &[]) {
             continue;
         }
 
         let ft = entry.file_type().ok();
         let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
         let name = entry.file_name().to_string_lossy().to_string();
-        let entry_path = entry_path.to_string_lossy().to_string();
+        let entry_path = entry_path_raw.to_string_lossy().to_string();
 
         let meta = entry.metadata().ok();
         let file_size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -308,7 +314,30 @@ pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
-        let is_supported = is_dir || crate::extractor::is_supported(&entry.path());
+        let is_supported = is_dir || crate::extractor::is_supported(&entry_path_raw);
+
+        let mut indexed = 0;
+        let mut error_msg: Option<String> = None;
+
+        if !is_dir {
+            for config in &dir_configs {
+                if let Ok(rel_path) = crate::scanner::helpers::to_relative(&config.path, &entry_path_raw) {
+                    match db::tracker::get_file_by_path(&conn, &rel_path) {
+                        Ok(Some(file)) => {
+                            indexed = file.indexed;
+                            error_msg = file.error_msg;
+                        }
+                        Ok(None) => {
+                            indexed = 0;
+                        }
+                        Err(_) => {
+                            indexed = 0;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
 
         entries.push(DirEntry {
             name,
@@ -317,13 +346,14 @@ pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
             is_supported,
             file_size,
             mtime,
-            indexed: false,
+            indexed,
+            error_msg,
         });
     }
 
     entries.sort_by(|a, b| {
         if a.is_dir != b.is_dir {
-            b.is_dir.cmp(&a.is_dir) // directories first
+            b.is_dir.cmp(&a.is_dir)
         } else {
             a.name.to_lowercase().cmp(&b.name.to_lowercase())
         }
@@ -336,11 +366,9 @@ pub fn list_dir_entries(path: String) -> Result<Vec<DirEntry>, String> {
 #[tauri::command]
 pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> Result<FilePreview, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-
-    // Try to find the file in DB first
     if let Ok(Some(file)) = db::tracker::get_file_by_path(&conn, &path) {
         drop(conn);
-        // Delegate to get_file_preview logic
+
         return get_file_preview_inner(&state, &file).await;
     }
     drop(conn);
