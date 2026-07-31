@@ -1,9 +1,12 @@
 //! Shared helper functions for directory scanning.
+//!
+//! Path conversion utilities for storing/retrieving files using relative paths
+//! within a monitored directory root.
 
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 const EXCLUDED_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", ".git", ".svn", "__pycache__"];
 
@@ -102,4 +105,25 @@ pub fn record_last_scan(conn: &rusqlite::Connection, dir_id: &str) -> Result<()>
         rusqlite::params![format!("last_scan_{dir_id}"), now],
     )?;
     Ok(())
+}
+
+
+/// Convert an absolute path to a relative path within the given directory root.
+/// Returns the relative path string, or an error if the file is not under dir_root.
+pub fn to_relative(dir_root: &str, file_path: &Path) -> Result<String> {
+    let path_str = file_path.to_string_lossy().replace("\\", "/");
+    let root_str = dir_root.replace("\\", "/");
+    
+    if !path_str.starts_with(&root_str) {
+        return Err(anyhow::anyhow!("file {} is not under dir root {}", path_str, dir_root));
+    }
+    
+    let rel_str = &path_str[root_str.len()..];
+    let rel_str = rel_str.strip_prefix('/').unwrap_or(rel_str);
+    Ok(rel_str.to_string())
+}
+
+/// Convert a stored relative path back to an absolute path by joining with dir_root.
+pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
+    std::path::PathBuf::from(dir_root).join(rel_path)
 }

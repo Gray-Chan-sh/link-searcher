@@ -65,7 +65,6 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
-        let dir_root = &config.path;
         log::info!("[SCAN] 开始扫描: {}", config.path);
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
@@ -132,16 +131,15 @@ impl Scanner {
             if !entry.file_type().is_file() { continue; }
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
-            let rel_path = to_relative(dir_root, &path)?;
             if !extension_allowed(&path, &include_exts) { continue; }
 
             processed += 1;
-            disk_paths.push(rel_path.clone());
+            disk_paths.push(path_str.clone());
 
             let meta = entry.metadata().context("failed to read metadata")?;
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
-            let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+            let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
                 Some(r) => {
                     if r.mtime != mtime {
@@ -156,8 +154,8 @@ impl Scanner {
             };
 
             if needs_index {
-                let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, size, None)?;
-                jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
+                let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, size, None)?;
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
             }
 
             if processed % 100 == 0 {
@@ -207,7 +205,6 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
-        let dir_root = &config.path;
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
 
@@ -233,13 +230,12 @@ impl Scanner {
             let meta = entry.metadata().context("failed to read metadata")?;
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
-            let rel_path = to_relative(dir_root, &path)?;
-            on_disk.push(rel_path.clone());
+            on_disk.push(path_str.clone());
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
             if mtime <= last_scan { continue; }
 
-            let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+            let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
                 Some(r) => {
                     if r.mtime != mtime {
@@ -254,8 +250,8 @@ impl Scanner {
             };
 
             if needs_index {
-                let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, meta.len(), None)?;
-                jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
+                let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, meta.len(), None)?;
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
             }
         }
 
@@ -293,7 +289,6 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
-        let dir_root = &config.path;
         log::info!("[STARTUP] 启动扫描: {}", config.path);
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
@@ -307,10 +302,7 @@ impl Scanner {
         record_last_scan(&conn, dir_id)?;
 
         struct DiskEntry {
-            // Absolute path - for file system access (reading content during MD5 check)
-            abs_path: String,
-            // Relative path - for DB matching and tracking
-            rel_path: String,
+            path: String,
             size: u64,
             name: String,
         }
@@ -331,13 +323,12 @@ impl Scanner {
             let meta = entry.metadata().context("failed to read metadata")?;
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
-            let rel_path = to_relative(dir_root, &path)?;
             let name = entry.file_name().to_string_lossy().to_string();
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
 
-            let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+            let existing = tracker::get_file_by_path(&conn, &path_str)?;
             let needs_index = match &existing {
                 Some(r) => {
                     if r.mtime != mtime {
@@ -352,11 +343,11 @@ impl Scanner {
             };
 
             if needs_index {
-                let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, size, None)?;
-                jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
+                let file_id = tracker::upsert_file(&conn, &path_str, dir_id, mtime, size, None)?;
+                jobs.push(BatchJob { file_id, file_path: path, dir_id: dir_id.to_string() });
             }
 
-            on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
+            on_disk.push(DiskEntry { path: path_str, size, name });
         }
 
         if !jobs.is_empty() {
@@ -370,7 +361,7 @@ impl Scanner {
         }
 
         let disk_set: std::collections::HashSet<String> =
-            on_disk.iter().map(|e| e.rel_path.clone()).collect();
+            on_disk.iter().map(|e| e.path.clone()).collect();
 
         let mut cleaned = 0u64;
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
@@ -400,19 +391,19 @@ impl Scanner {
             let candidate = on_disk.iter().find(|e| {
                 e.name == old_name
                     && e.size == rec.size
-                    && e.rel_path != rec.path  // different relative path means moved
-                    && tracker::get_file_by_path(&conn, &e.rel_path)  // new file not already tracked
+                    && e.path != rec.path
+                    && tracker::get_file_by_path(&conn, &e.path)
                         .map(|r| r.is_none())
                         .unwrap_or(true)
             });
 
             if let Some(found) = candidate {
                 if let Some(ref expected_md5) = rec.md5 {
-                    if let Ok(raw) = std::fs::read(&found.abs_path) {  // read using absolute path
+                    if let Ok(raw) = std::fs::read(&found.path) {
                         let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));
                         if actual_md5 == *expected_md5 {
-                            tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;  // update with relative path
-                            log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
+                            tracker::update_file_path(&conn, &rec.id, &found.path, dir_id)?;
+                            log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.path);
                             moved += 1;
                             continue;
                         }
@@ -448,22 +439,14 @@ impl Scanner {
         let conn = self.db.get().context("failed to get DB connection")?;
         let file_path = &event.path;
 
-        // Get directory root for this dir_id
-        let dir_config = dir_config::get_dir(&conn, &event.dir_id)?
-            .ok_or_else(|| anyhow::anyhow!("dir config not found: {}", event.dir_id))?;
-        let dir_root = &dir_config.path;
-
-        // Compute relative path
-        let rel_path = to_relative(dir_root, file_path)?;
-        let path_str = file_path.to_string_lossy().to_string();
-
         match event.kind {
             ChangeKind::Create | ChangeKind::Modify => {
+                let path_str = file_path.to_string_lossy().to_string();
                 let meta = std::fs::metadata(file_path)
                     .with_context(|| format!("failed to stat {path_str}"))?;
                 let mtime = mtime_micros(&meta).unwrap_or(0);
                 let size = meta.len();
-                let file_id = tracker::upsert_file(&conn, &rel_path, &event.dir_id, mtime, size, None)?;
+                let file_id = tracker::upsert_file(&conn, &path_str, &event.dir_id, mtime, size, None)?;
                 drop(conn);
                 match self.indexer.index_file(&file_id, file_path, &event.dir_id) {
                     Ok(()) => log::info!("[WATCHER] indexed: {path_str}"),
@@ -471,8 +454,9 @@ impl Scanner {
                 }
             }
             ChangeKind::Delete => {
-                // Look up by relative path since that's how it's stored in DB
-                if let Some(record) = tracker::get_file_by_path(&conn, &rel_path)? {
+                let path_str = file_path.to_string_lossy().to_string();
+                if let Some(record) = tracker::get_file_by_path(&conn, &path_str)? {
+                    drop(conn);
                     self.indexer.delete_file(&record.id)?;
                     log::info!("[WATCHER] deleted: {path_str}");
                 }

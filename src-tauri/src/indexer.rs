@@ -37,6 +37,7 @@ pub struct IndexerService {
 pub struct BatchJob {
     pub file_id: String,
     pub file_path: PathBuf,
+    pub rel_path: String,  // Relative path for storing in Tantivy index
     pub dir_id: String,
 }
 
