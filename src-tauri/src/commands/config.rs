@@ -34,19 +34,26 @@ pub fn migrate_data(old_path: String, new_path: String) -> Result<String, String
     let new = std::path::Path::new(&new_path);
 
     if !old.exists() {
-        return Err("old path does not exist".to_string());
+        return Err("当前数据目录不存在".to_string());
     }
-    if new.exists() {
-        return Err("new path already exists".to_string());
+    // Allow migration to existing directory, but refuse if it already has index data
+    let existing_db = new.join("data.db");
+    if existing_db.exists() {
+        return Err("目标目录已包含 data.db，请选择空目录或新目录".to_string());
     }
+    let existing_index = new.join("index");
+    if existing_index.exists() {
+        return Err("目标目录已包含 index 文件夹，请选择空目录或新目录".to_string());
+    }
+
+    std::fs::create_dir_all(new).map_err(|e| format!("无法创建目标目录: {e}"))?;
 
     // Copy SQLite
     let db_name = "data.db";
     let old_db = old.join(db_name);
     let new_db = new.join(db_name);
     if old_db.exists() {
-        std::fs::create_dir_all(new).map_err(|e| format!("{e}"))?;
-        std::fs::copy(&old_db, &new_db).map_err(|e| format!("{e}"))?;
+        std::fs::copy(&old_db, &new_db).map_err(|e| format!("无法复制数据库: {e}"))?;
     }
 
     // Copy index directory

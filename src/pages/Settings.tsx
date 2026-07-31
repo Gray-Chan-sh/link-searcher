@@ -76,6 +76,10 @@ export default function Settings() {
       await updateConfig({ data_dir: selected })
       setLocalError(null)
       alert(msg)
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e.message : String(e)
+      setLocalError(`迁移失败: ${err}`)
+      alert(`迁移失败:\n${err}`)
     } finally {
       setMigrating(false)
     }
