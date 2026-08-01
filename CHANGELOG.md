@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-01（安全修复：大文件 OOM + ReDoS + unsafe impl）
+
+### P1 级安全修复
+- **P1-2 大文件无大小限制导致 OOM**：`commands/files.rs` 下载时检查 `metadata.len()`，>500MB 直接报错"文件过大，无法下载"；`scanner/mod.rs` 移位检测跳过 >10MB 文件的 MD5 计算；`extractor/text.rs` 用 `.take(10*1024*1024)` 限制纯文本提取读取上限（`src-tauri/src/commands/files.rs`、`src-tauri/src/scanner/mod.rs`、`src-tauri/src/extractor/text.rs`）
+- **P1-3 unsafe impl Send/Sync 加说明**：`paddleocr.rs` 中 `SendEngine` 的 `unsafe impl Send` / `unsafe impl Sync` 注释补充说明原因（`OcrEngine` 含非 Send 内部可变性，Mutex 串行化访问保证安全），保留 unsafe impl 不可移除（`src-tauri/src/extractor/paddleocr.rs`）
+- **P1-4 ReDoS 已知低风险**：`PreviewPanel.tsx` 的 `highlightText` 已有转义 + 限 20 词，加注释说明 ReDoS 风险已评估为低风险，保持现状（`src/components/PreviewPanel.tsx`）
+- **P1-1 JSON.parse 已修复**：`useSearch.ts` 中 `loadFromStorage` 已有 try/catch，无需改动
+
+---
+
 ## 2026-08-01（第七轮：WAL 一致性修复）
 
 ### 🔴 数据库备份/迁移一致性

@@ -20,8 +20,11 @@ impl TextExtractor {
 
 impl Extractor for TextExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
-        let mut data = Vec::new();
-        std::fs::File::open(path)?.read_to_end(&mut data)?;
+        // P1-2: limit to 10MB to avoid OOM on huge text files
+        let mut data = Vec::with_capacity(10 * 1024 * 1024);
+        std::fs::File::open(path)?
+            .take(10 * 1024 * 1024)
+            .read_to_end(&mut data)?;
 
         if data.is_empty() {
             return Ok(String::new());

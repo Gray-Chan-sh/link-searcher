@@ -300,6 +300,11 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
 
         let path = std::path::Path::new(&file_record.path);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        // P1-2: reject files >500MB before reading into memory
+        let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_size > 500 * 1024 * 1024 {
+            return Err(format!("文件过大，无法下载: {}", file_record.path));
+        }
         let data = std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", file_record.path))?;
 
         zip_writer

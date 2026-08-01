@@ -430,6 +430,10 @@ impl Scanner {
                 }));
 
             if let Some(found) = candidate {
+                // P1-2: skip MD5 check for files >10MB (avoid OOM on large files)
+                if found.size > 10 * 1024 * 1024 {
+                    continue;
+                }
                 if let Some(ref expected_md5) = rec.md5 {
                     if let Ok(raw) = std::fs::read(&found.abs_path) {
                         let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));

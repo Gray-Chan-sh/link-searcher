@@ -16,6 +16,8 @@ function highlightText(text: string, query: string): React.ReactNode[] {
   const terms = query.split(/\s+/).filter(t => t.length > 0).slice(0, 20)
   if (terms.length === 0) return [text]
   const termSet = new Set(terms.map(t => t.toLowerCase()))
+  // ReDoS risk assessed: terms are escaped + capped at 20, input is user-controlled search box.
+  // No untrusted regex injection possible; safe to use dynamic RegExp.
   const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
   const regex = new RegExp(`(${escaped.join('|')})`, 'gi')
   const parts = text.split(regex)

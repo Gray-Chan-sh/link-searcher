@@ -9,7 +9,8 @@ static REC_MODEL: &[u8] = include_bytes!("../../models/ppocrv5/rec.onnx");
 static DICT_DATA: &[u8] = include_bytes!("../../models/ppocrv5/ppocrv5_dict.txt");
 
 struct SendEngine(Mutex<OcrEngine>);
-// SAFETY: Mutex serializes all access to the inner OcrEngine, protecting its RefCell interior.
+// SAFETY: OcrEngine contains non-Send interior mutability (RefCell-backed ONNX session).
+// Mutex serializes all access, so SendEngine is safe to share across threads.
 unsafe impl Send for SendEngine {}
 unsafe impl Sync for SendEngine {}
 
