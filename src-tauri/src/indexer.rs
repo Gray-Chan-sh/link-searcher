@@ -138,62 +138,65 @@ impl IndexerService {
         log::info!("[INDEX] 开始: {file_name} ({file_ext}, {file_size} B)");
 
         // Dedup – reuse previously extracted content for the same hash.
-        let text = match crate::db::tracker::get_content(conn, &hash) {
-            Ok(Some(t)) => {
-                log::info!(
-                    "[INDEX] 去重: {file_name} 复用 md5={}& 的已有内容",
-                    &hash[..8.min(hash.len())]
-                );
-                t
-            }
-            Ok(None) => {
-                let mut ocr_used = false;
-                let extracted = match crate::extractor::extract_text(&job.file_path) {
-                    Ok(t) if t.len() > 10 => t,
-                    Ok(t) => {
-                        log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
-                        match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
-                            Ok(ocr) if !ocr.is_empty() => {
-                                ocr_used = true;
-                                ocr
-                            }
-                            _ => {
-                                log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
-                                t
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!("[INDEX] 提取失败: {e}, 尝试纯文本回退");
-                        let fallback = if file_size <= MAX_FILE_SIZE {
-                            std::str::from_utf8(&raw).ok().map(|s| s.to_owned())
-                        } else {
-                            None
-                        };
-                        match fallback {
-                            Some(t) => {
-                                ocr_used = true;
-                                t
-                            }
-                            None => {
-                                return Err((
-                                    job.file_id.clone(),
-                                    format!("{}: 所有提取方式均失败: {e}", job.file_path.display()),
-                                ))
-                            }
-                        }
-                    }
-                };
-                let char_count = extracted.chars().count();
-                log::info!("[INDEX] 提取文字: {file_name} ({char_count} 字符)");
-                if let Err(e) =
-                    crate::db::tracker::store_content(conn, &hash, &extracted, ocr_used, None)
-                {
-                    log::warn!("[INDEX] 存储提取内容失败: {e}");
+        let text = 'dedup: {
+            match crate::db::tracker::get_content(conn, &hash) {
+                Ok(Some(t)) => {
+                    log::info!(
+                        "[INDEX] 去重: {file_name} 复用 md5={}& 的已有内容",
+                        &hash[..8.min(hash.len())]
+                    );
+                    break 'dedup t;
                 }
-                extracted
+                Ok(None) => {}
+                Err(e) => {
+                    log::warn!("[INDEX] dedup query failed, falling back to extraction: {e}");
+                }
             }
-            Err(e) => return Err((job.file_id.clone(), format!("dedup query: {e}"))),
+            let mut ocr_used = false;
+            let extracted = match crate::extractor::extract_text(&job.file_path) {
+                Ok(t) if t.len() > 10 => t,
+                Ok(t) => {
+                    log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
+                    match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
+                        Ok(ocr) if !ocr.is_empty() => {
+                            ocr_used = true;
+                            ocr
+                        }
+                        _ => {
+                            log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
+                            t
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[INDEX] 提取失败: {e}, 尝试纯文本回退");
+                    let fallback = if file_size <= MAX_FILE_SIZE {
+                        std::str::from_utf8(&raw).ok().map(|s| s.to_owned())
+                    } else {
+                        None
+                    };
+                    match fallback {
+                        Some(t) => {
+                            ocr_used = true;
+                            t
+                        }
+                        None => {
+                            return Err((
+                                job.file_id.clone(),
+                                format!("{}: 所有提取方式均失败: {e}", job.file_path.display()),
+                            ))
+                        }
+                    }
+                }
+            };
+            let char_count = extracted.chars().count();
+            log::info!("[INDEX] 提取文字: {file_name} ({char_count} 字符)");
+            if let Err(e) =
+                crate::db::tracker::store_content(conn, &hash, &extracted, ocr_used, None)
+            {
+                log::warn!("[INDEX] 存储提取内容失败: {e}");
+            }
+            extracted
         };
 
         let mtime = meta

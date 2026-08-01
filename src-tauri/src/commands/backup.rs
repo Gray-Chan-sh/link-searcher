@@ -233,14 +233,15 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> 
 
 fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
     let mut total = 0u64;
-    if path.is_dir() {
-        for entry in std::fs::read_dir(path)? {
+    let mut dirs = vec![path.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir)? {
             let entry = entry?;
-            let ty = entry.file_type()?;
-            if ty.is_dir() {
-                total += dir_size(&entry.path())?;
+            let meta = entry.metadata()?;
+            if meta.is_dir() {
+                dirs.push(entry.path());
             } else {
-                total += entry.metadata()?.len();
+                total += meta.len();
             }
         }
     }

@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 use tauri::State;
@@ -71,9 +72,12 @@ pub async fn list_files_db(
     page: Option<usize>,
     page_size: Option<usize>,
 ) -> Result<FileListResponse, String> {
+    if state.is_rebuilding.load(Ordering::SeqCst) {
+        return Err("索引重建中，请稍后再试".to_string());
+    }
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
-    let ps = page_size.unwrap_or(50).max(1);
+    let ps = page_size.unwrap_or(50).max(1).min(1000);
     let p = page.unwrap_or(1).max(1);
     let offset = (p - 1) * ps;
 
@@ -301,7 +305,10 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
         let path = std::path::Path::new(&file_record.path);
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
         // P1-2: reject files >500MB before reading into memory
-        let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        let file_size = match path.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => return Err(format!("无法读取文件信息: {e}")),
+        };
         if file_size > 500 * 1024 * 1024 {
             return Err(format!("文件过大，无法下载: {}", file_record.path));
         }
@@ -434,19 +441,14 @@ pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Resul
             for config in &dir_configs {
                 if let Ok(rel_path) = crate::scanner::helpers::to_relative(&config.path, &entry_path_raw) {
                     match db::tracker::get_file_by_path(&conn, &rel_path) {
+                        Ok(Some(file)) if file.status == "deleted" => {
+                            continue;
+                        }
                         Ok(Some(file)) => {
-                            if file.status == "deleted" {
-                                indexed = 0;
-                                error_msg = None;
-                            } else {
-                                indexed = file.indexed;
-                                error_msg = file.error_msg;
-                            }
+                            indexed = file.indexed;
+                            error_msg = file.error_msg;
                         }
-                        Ok(None) => {
-                            indexed = 0;
-                        }
-                        Err(_) => {
+                        _ => {
                             indexed = 0;
                         }
                     }

@@ -44,7 +44,7 @@ export default function FilterPanel({
   useEffect(() => {
     getFileTypeStats()
       .then(setTypeStats)
-      .catch(() => {})
+      .catch(e => console.error('Failed to load file type stats:', e))
   }, [])
 
   useEffect(() => {

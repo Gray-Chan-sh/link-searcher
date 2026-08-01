@@ -1,10 +1,25 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 8月1日，共 35+ commit，修复 60+ Bug，完成 25+ 功能改进
+> 2026年7月30日 — 8月2日，共 40+ commit，修复 70+ Bug，完成 30+ 功能改进
 
 ---
 
-## 2026-08-02（高危后端安全修复：线程 OOM + 进程无超时 + 路径失配）
+## 2026-08-02（中危修复：栈溢出 + DB 错误致命化 + OOM 风险）
+
+### 🟡 中危修复（MED-1 ~ MED-9）
+- **MED-1 backup dir_size 无界递归**：`backup.rs` 原 `dir_size` 递归遍历深层目录可导致栈溢出。改为迭代式 breadth-first 遍历（`vec` + `while let Some(dir) = dirs.pop()`）（`src-tauri/src/commands/backup.rs`）
+- **MED-2 indexer dedup DB 错误致命化**：`indexer.rs` 原 `get_content` 瞬时 DB 错误直接 `return Err`，导致该文件索引完全放弃。改为 `log::warn!` 后落入提取逻辑（`src-tauri/src/indexer.rs`）
+- **MED-3 export page_size 绕过 max_results**：`search.rs` `export_search_results` 原硬编码 `page_size: 10000`，无视用户设置的最大结果数。改为读取 `app_settings.max_results`，上限钳制至 5000（`src-tauri/src/commands/search.rs`）
+- **MED-4 list_files 全量加载（已废弃）**：`files.rs` `list_files` 命令不再被前端调用（仅 `list_files_db` 使用），保留代码不变，标记废弃（`src-tauri/src/commands/files.rs`）
+- **MED-5 metadata 失败绕过下载检查**：`files.rs` `download_files` 原 `metadata().map(...).unwrap_or(0)` 在权限失败时静默返回 0，绕过 500MB 检查。改为区分"文件不存在"（继续处理）和"权限不足"（报错）（`src-tauri/src/commands/files.rs`）
+- **MED-6 list_files_db 缺重建守卫**：`files.rs` `list_files_db` 原缺少 `is_rebuilding` 检查，索引重建期间可读到空表。补充守卫，与 `search` 命令保持一致（`src-tauri/src/commands/files.rs`）
+- **MED-7 FilterPanel 类型统计静默吞错**：`FilterPanel.tsx` 原 `getFileTypeStats` 失败 `.catch(() => {})` 静默忽略。改为 `.catch(e => console.error(...))` 记录错误（`src/components/FilterPanel.tsx`）
+- **MED-8 list_files_db page_size 无上限**：`files.rs` `list_files_db` 原 `page_size.max(1)` 无上界，极端参数可致 OOM。补充 `.min(1000)` 上限（`src-tauri/src/commands/files.rs`）
+- **MED-9 list_dir_entries 已删除文件仍显示**：`files.rs` `list_dir_entries` 原对软删除文件仍展示状态。改为跳过（`continue`）`status='deleted'` 的记录，不纳入目录列表（`src-tauri/src/commands/files.rs`）
+
+---
+
+## 2026-08-01（高危后端安全修复：线程 OOM + 进程无超时 + 路径失配）
 
 ### 🔴 高危修复（HIGH-1 ~ HIGH-4）
 - **HIGH-1 watcher 无限制线程 spawn**：`lib.rs` 原每个文件事件内层 `std::thread::spawn` 导致大量文件变更时 OOM。改为单线程串行处理（恢复旧行为），`handle_event` 本身很快无需独立线程（`src-tauri/src/lib.rs`）

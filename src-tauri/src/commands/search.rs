@@ -260,6 +260,19 @@ pub async fn export_search_results(
     let dir_ids_opt = if dir_ids.is_empty() { None } else { Some(dir_ids) };
     let ext_filter_opt = if ext_filter.is_empty() { None } else { Some(ext_filter) };
 
+    let export_page_size = {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let max_results: usize = conn.query_row(
+            "SELECT value FROM app_settings WHERE key = 'max_results'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1000);
+        max_results.min(5000)
+    };
+
     let params = SearchParams {
         query,
         dir_ids: dir_ids_opt,
@@ -270,7 +283,7 @@ pub async fn export_search_results(
         sort: SortField::Score,
         sort_order: "desc".to_string(),
         page: 1,
-        page_size: 10000,
+        page_size: export_page_size,
         fuzzy: false,
     };
 
