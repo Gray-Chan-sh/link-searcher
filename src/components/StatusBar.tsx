@@ -49,7 +49,7 @@ export default function StatusBar() {
               scanProgress ? (
                 <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
                   <LoadingSpinner className="size-3" />
-                  Scanning: {scanProgress.processed}/{scanProgress.total > 0 ? scanProgress.total : '?'}
+                  {scanProgress.phase === 'index' ? 'Indexing' : 'Scanning'}: {scanProgress.processed}/{scanProgress.total > 0 ? scanProgress.total : '?'}
                 </span>
               ) : (
                 <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">

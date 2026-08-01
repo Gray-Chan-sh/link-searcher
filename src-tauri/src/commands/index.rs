@@ -166,7 +166,7 @@ pub async fn trigger_scan(
             let result: Result<ScanResult, String> = if full {
                 let p = |prog: ScanProgress| {
                     let _ = app_clone.emit("scan-progress", ScanEventPayload {
-                        phase: "scanning".into(),
+                        phase: prog.phase.into(),
                         current: prog.processed,
                         total: prog.total,
                         current_file: prog.current_file,
@@ -175,7 +175,16 @@ pub async fn trigger_scan(
                 };
                 scanner.full_scan(&dir.id, p).map_err(|e| format!("{e}"))
             } else {
-                scanner.incremental_scan(&dir.id).map_err(|e| format!("{e}"))
+                let p = |prog: ScanProgress| {
+                    let _ = app_clone.emit("scan-progress", ScanEventPayload {
+                        phase: prog.phase.into(),
+                        current: prog.processed,
+                        total: prog.total,
+                        current_file: prog.current_file,
+                        dir_id: dir.id.clone(),
+                    });
+                };
+                scanner.incremental_scan(&dir.id, p).map_err(|e| format!("{e}"))
             };
             match result {
                 Ok(r) => {
@@ -298,7 +307,7 @@ pub async fn rebuild_index(
             }
             let p = |prog: ScanProgress| {
                 let _ = app.emit("scan-progress", ScanEventPayload {
-                    phase: "rebuild".into(),
+                    phase: prog.phase.into(),
                     current: prog.processed,
                     total: prog.total,
                     current_file: prog.current_file,

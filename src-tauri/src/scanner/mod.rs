@@ -28,6 +28,7 @@ pub struct ScanProgress {
     pub processed: u64,
     pub errors: u64,
     pub current_file: String,
+    pub phase: &'static str, // "scan" | "index"
 }
 
 /// Summary returned after a scan completes.
@@ -113,7 +114,7 @@ impl Scanner {
             }
         };
 
-        progress(ScanProgress { total, processed: 0, errors: 0, current_file: String::new() });
+        progress(ScanProgress { total, processed: 0, errors: 0, current_file: String::new(), phase: "scan" });
 
         let mut indexed = 0u64;
         let mut errors = 0u64;
@@ -158,11 +159,19 @@ impl Scanner {
             if processed % 100 == 0 {
                 log::info!("[SCAN] 进度 [{processed}/{total}]");
             }
-            progress(ScanProgress { total, processed, errors, current_file: path_str });
+            progress(ScanProgress { total, processed, errors, current_file: path_str, phase: "scan" });
         }
 
         if !jobs.is_empty() {
-            for r in self.indexer.batch_index(jobs)? {
+            for r in self.indexer.batch_index(jobs, |done, total| {
+                let _ = progress(ScanProgress {
+                    total,
+                    processed: done,
+                    errors: 0,
+                    current_file: String::new(),
+                    phase: "index",
+                });
+            })? {
                 if r.success {
                     indexed += 1;
                 } else {
@@ -191,7 +200,11 @@ impl Scanner {
     /// Incremental scan — only processes files whose mtime is newer than
     /// the last recorded scan time.  Falls back to a full scan when no
     /// previous scan time exists.  Also detects deleted files.
-    pub fn incremental_scan(&self, dir_id: &str) -> Result<ScanResult> {
+    pub fn incremental_scan(
+        &self,
+        dir_id: &str,
+        progress: impl Fn(ScanProgress),
+    ) -> Result<ScanResult> {
         let start = Instant::now();
         let conn = self.db.get().context("failed to get DB connection")?;
 
@@ -220,6 +233,7 @@ impl Scanner {
         let mut jobs: Vec<BatchJob> = Vec::new();
         let mut added = 0u64;
         let mut modified = 0u64;
+        let mut processed = 0u64;
 
         for entry in walker {
             let entry = entry.context("walkdir error")?;
@@ -229,6 +243,8 @@ impl Scanner {
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
+            processed += 1;
+            progress(ScanProgress { total: 0, processed, errors: 0, current_file: path_str, phase: "scan" });
             on_disk.push(rel_path.clone());
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
@@ -249,7 +265,15 @@ impl Scanner {
         }
 
         if !jobs.is_empty() {
-            for r in self.indexer.batch_index(jobs)? {
+            for r in self.indexer.batch_index(jobs, |done, total| {
+                let _ = progress(ScanProgress {
+                    total,
+                    processed: done,
+                    errors: 0,
+                    current_file: String::new(),
+                    phase: "index",
+                });
+            })? {
                 if r.success {
                     indexed += 1;
                 } else {
@@ -276,7 +300,11 @@ impl Scanner {
         Ok(ScanResult { total_files, indexed, added, deleted, modified, errors, duration_ms })
     }
 
-    pub fn startup_scan(&self, dir_id: &str) -> Result<ScanResult> {
+    pub fn startup_scan(
+        &self,
+        dir_id: &str,
+        progress: impl Fn(ScanProgress),
+    ) -> Result<ScanResult> {
         let start = Instant::now();
         let conn = self.db.get().context("failed to get DB connection")?;
 
@@ -312,6 +340,7 @@ impl Scanner {
         let mut modified = 0u64;
         let mut deleted = 0u64;
         let mut jobs: Vec<BatchJob> = Vec::new();
+        let mut processed = 0u64;
 
         for entry in walker {
             let entry = entry.context("walkdir error")?;
@@ -322,6 +351,8 @@ impl Scanner {
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
             let name = entry.file_name().to_string_lossy().to_string();
+            processed += 1;
+            progress(ScanProgress { total: 0, processed, errors: 0, current_file: path_str.clone(), phase: "scan" });
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
@@ -343,7 +374,15 @@ impl Scanner {
         }
 
         if !jobs.is_empty() {
-            for r in self.indexer.batch_index(jobs)? {
+            for r in self.indexer.batch_index(jobs, |done, total| {
+                let _ = progress(ScanProgress {
+                    total,
+                    processed: done,
+                    errors: 0,
+                    current_file: String::new(),
+                    phase: "index",
+                });
+            })? {
                 if r.success {
                     indexed += 1;
                 } else {
@@ -569,7 +608,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::write(dir.join("new.txt"), "new file content").unwrap();
 
-        let r2 = scanner.incremental_scan(&dir_id).unwrap();
+        let r2 = scanner.incremental_scan(&dir_id, |_| {}).unwrap();
         assert_eq!(r2.indexed, 1);
         svc.commit().unwrap();
 

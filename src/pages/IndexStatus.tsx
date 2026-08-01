@@ -3,7 +3,7 @@ import { ask } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, type IndexError, type IndexStatus } from '../api/index'
+import { getIndexErrors, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
 import { getDuplicates, type DuplicateGroup } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -28,6 +28,16 @@ export default function IndexStatus() {
   const [errorsList, setErrorsList] = useState<IndexError[]>([])
   const [retrying, setRetrying] = useState(false)
   const [lastDelta, setLastDelta] = useState<{ added: number; deleted: number; modified: number; errors: number } | null>(null)
+  const [scanPhase, setScanPhase] = useState<string | null>(null)
+
+  useEffect(() => {
+    const unlisten = listenScanProgress(p => setScanPhase(p.phase ?? null))
+    return () => { unlisten.then(f => f()) }
+  }, [])
+
+  useEffect(() => {
+    if (!status?.is_scanning) setScanPhase(null)
+  }, [status?.is_scanning])
 
   const handleScan = async () => {
     setScanError(null)
@@ -209,7 +219,10 @@ export default function IndexStatus() {
 
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Index Progress</span>
+              <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                Index Progress
+                {scanPhase && ` — ${scanPhase === 'index' ? 'Indexing...' : 'Scanning...'}`}
+              </span>
               <span className="text-xs text-gray-500 dark:text-gray-400">{progress}%</span>
             </div>
             <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">

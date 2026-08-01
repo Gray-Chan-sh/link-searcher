@@ -181,6 +181,9 @@
 
 ## 2026-08-01（第四轮：更多 Bug + 文档 + 自动变更日志）
 
+### 🚀 新功能
+- **扫描两阶段进度报告**：`ScanProgress` 增加 `phase` 字段（`"scan"`/`"index"`），`batch_index` 增加进度回调，Phase 2 串行写入时每处理一个文件上报已索引数；三个扫描函数（full/incremental/startup）walk 阶段发 `phase:"scan"`、索引阶段发 `phase:"index"`，前端状态栏和索引状态页据此显示"正在扫描/正在索引"（`scanner/mod.rs`、`indexer.rs`、`commands/index.rs`、`lib.rs`、`tests/integration.rs`、`api/index.ts`、`StatusBar.tsx`、`IndexStatus.tsx`）
+
 ### 🔴 严重 Bug
 - **修复 5 个 UX 缺陷** (`03949ac`)
   - 删除文件无反应：`mark_deleted` SQL `WHERE path=?` 错误接收 UUID，改为 `WHERE id=?`

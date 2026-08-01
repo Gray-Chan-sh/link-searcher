@@ -226,7 +226,7 @@ pub fn run() {
 
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
                 for dir in &dirs {
-                    match scanner_ref.startup_scan(&dir.id) {
+                    match scanner_ref.startup_scan(&dir.id, |_| {}) {
                         Ok(r) => log::info!(
                             "[STARTUP] {}: {} files, {} indexed, {} errors",
                             dir.path, r.total_files, r.indexed, r.errors

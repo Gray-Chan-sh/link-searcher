@@ -46,6 +46,7 @@ export interface ScanProgress {
     total: number
     current_file: string
     dir_id: string
+    phase?: string
 }
 
 export async function listenScanProgress(callback: (progress: ScanProgress) => void): Promise<() => void> {

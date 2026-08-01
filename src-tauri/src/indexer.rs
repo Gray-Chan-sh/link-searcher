@@ -81,9 +81,13 @@ impl IndexerService {
     /// (CPU/IO-bound, fully parallel).
     /// Phase 2 (serial): lock the Tantivy writer once, add every document, and
     /// update DB tracking.
-    pub fn batch_index(&self, jobs: Vec<BatchJob>) -> Result<Vec<BatchResult>> {
+    pub fn batch_index(
+        &self,
+        jobs: Vec<BatchJob>,
+        progress: impl Fn(u64, u64),
+    ) -> Result<Vec<BatchResult>> {
         let db = self.db.clone();
-        let total = jobs.len();
+        let total = jobs.len() as u64;
 
         // ── Phase 1: parallel extraction ──────────────────────────────
         let extracted: Vec<Result<ExtractedData, (String, String)>> = jobs
@@ -247,10 +251,13 @@ impl IndexerService {
             .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
         let conn = self.db.get().context("failed to get DB connection")?;
 
-        let mut results = Vec::with_capacity(total);
+        let mut results = Vec::with_capacity(total as usize);
         let mut success_count = 0u64;
+        let mut done = 0u64;
 
         for extraction in extracted {
+            done += 1;
+            progress(done, total);
             match extraction {
                 Ok(data) => {
                     let file_id = data.file_id;

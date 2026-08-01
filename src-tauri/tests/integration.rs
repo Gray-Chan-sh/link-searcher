@@ -255,7 +255,7 @@ fn test_incremental_scan() -> Result<()> {
     env.create_file("new.txt", "brand new file");
     std::fs::remove_file(env.dir_path.join("delete.txt")).unwrap();
 
-    let result = env.scanner.incremental_scan(&env.dir_id)?;
+    let result = env.scanner.incremental_scan(&env.dir_id, |_| {})?;
     env.indexer.commit()?;
 
     assert_eq!(result.indexed, 2, "modified + new should be indexed");
