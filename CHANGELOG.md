@@ -184,6 +184,14 @@
 
 ---
 
+## 2026-08-01
+
+### 🔒 安全加固（2 项）
+- **Tauri CSP 启用**：`tauri.conf.json` 中 `"csp": null` → 完整 CSP 策略（`default-src 'self'` + 白名单 script/style/img/media/connect/frame/font/worker）。`connect-src` 额外加入 `http://ipc.localhost` 以兼容 Windows/Linux 的 IPC 通道（macOS 走 `ipc://`），防止 IPC 被 CSP 阻断。前端仅本地资源，无远程内容受影响
+- **fs 插件权限收窄 + scope**：`capabilities/default.json` 删除 `fs:allow-mkdir` / `fs:allow-remove` / `fs:allow-rename`（前端未使用）；保留读权限与 `fs:allow-write`（SearchPage.tsx 的 CSV 导出 `writeTextFile` 依赖它，且 `save()` 对话框会自动将选中路径加入 fs scope，导出不受影响）；新增 `fs.scope` 白名单（`$APPDATA` / `$APPLOCALDATA` / `$DOCUMENT` / `$DESKTOP` / `$DOWNLOAD` 递归）
+
+---
+
 ## 统计
 
 | 类别 | 数量 |
