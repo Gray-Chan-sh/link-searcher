@@ -117,7 +117,7 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { navigator.clipboard.writeText(contextMenu.hit.file_name); setContextMenu(null) }}
+            onClick={() => { navigator.clipboard.writeText(contextMenu.hit.file_name).catch(() => {}); setContextMenu(null) }}
           >
             {t('copy_name')}
           </button>

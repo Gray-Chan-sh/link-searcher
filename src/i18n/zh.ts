@@ -38,6 +38,7 @@ const zh: Record<string, string> = {
     not_installed: '未安装',
     retry: '重试',
     clear: '清空',
+    clear_search: '清除搜索',
     refresh: '刷新',
     open: '打开',
     copy_path: '复制路径',

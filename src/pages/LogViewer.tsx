@@ -21,6 +21,10 @@ function filterLogs(logs: string[], filter: Filter): string[] {
   return logs.filter(l => l.includes(tag))
 }
 
+function logKey(line: string, i: number): string {
+  return `${line.slice(0, 24).replace(/\s/g, '-')}-${i}`
+}
+
 function logLineColor(line: string): string {
   if (line.includes('ERROR') || line.includes('error')) return 'text-red-600 dark:text-red-400'
   if (line.includes('ocr')) return 'text-purple-600 dark:text-purple-400'
@@ -180,7 +184,7 @@ export default function LogViewer() {
             className="h-full overflow-y-auto bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg p-4 font-mono text-xs leading-relaxed"
           >
             {filteredLogs.map((line, i) => (
-              <div key={i} className={`whitespace-pre-wrap break-all ${logLineColor(line)}`}>
+              <div key={logKey(line, i)} className={`whitespace-pre-wrap break-all ${logLineColor(line)}`}>
                 {line}
               </div>
             ))}

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { DirConfig, DirTreeNode } from '../api/dirs'
 import { getDirTree } from '../api/dirs'
+import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { useI18n } from '../i18n'
 import DirTree from './DirTree'
 
@@ -38,6 +39,13 @@ export default function FilterPanel({
 }: FilterPanelProps) {
   const { t } = useI18n()
   const [trees, setTrees] = useState<DirTreeNode[]>([])
+  const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
+
+  useEffect(() => {
+    getFileTypeStats()
+      .then(setTypeStats)
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     if (dirs.length === 0) {
@@ -56,7 +64,7 @@ export default function FilterPanel({
     return () => { cancelled = true }
   }, [dirs])
 
-  const selectedSet = new Set(dirPaths)
+  const selectedSet = useMemo(() => new Set(dirPaths), [dirPaths])
   const hasFilters = dirPaths.length > 0 || extFilter.length > 0
 
   const handleToggle = (path: string, checked: boolean) => {
@@ -73,7 +81,7 @@ export default function FilterPanel({
   }
 
   return (
-    <div className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto">
+    <div role="region" aria-label={t('filters')} className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto">
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('filters')}</h3>
         {hasFilters && (
@@ -102,7 +110,11 @@ export default function FilterPanel({
       <div>
         <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('file_type')}</h4>
         <div className="space-y-1">
-          {COMMON_EXTS.map(ext => (
+          {[...new Set(
+            typeStats.length > 0
+              ? typeStats.map(s => s.extension)
+              : COMMON_EXTS
+          )].map(ext => (
             <label key={ext} className="flex items-center gap-2 cursor-pointer group">
               <input
                 type="checkbox"

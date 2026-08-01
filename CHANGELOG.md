@@ -6,6 +6,18 @@
 
 ## 2026-08-01 (今日)
 
+### R4-C 前端质量改进（7 项）
+- **3-21 getDuplicates 高频触发**：`IndexStatus.tsx` 原 useEffect 依赖 `status?.total_files`，total_files 每次变化都重新调用。改为监听 `scan-completed` 事件，仅在扫描完成后调用一次（`src/pages/IndexStatus.tsx`）
+- **3-23 clipboard.writeText 未 catch**：`PreviewPanel.tsx` 和 `ResultList.tsx` 的 `navigator.clipboard.writeText` 调用缺失 `.catch()`，可能未处理拒绝。添加空 catch 处理（`src/components/PreviewPanel.tsx`、`src/components/ResultList.tsx`）
+- **3-26 rebuild setTimeout(1000) 硬编码等待**：`useIndexStatus.ts` 的 `rebuild` 在 `await rebuildIndex()` 后硬编码 `setTimeout(1000)`。删除该等待，由已有 5s/30s 自适应轮询刷新状态（`src/hooks/useIndexStatus.ts`）
+- **3-30 a11y 基础改进**：`SearchBar.tsx` 搜索框加 `aria-label={t('search')}`，清除按钮加 `aria-label={t('clear_search')}`；`FilterPanel.tsx` 面板加 `role="region"` + `aria-label`；同时新增 `clear_search` i18n 键（`src/components/SearchBar.tsx`、`src/components/FilterPanel.tsx`、`src/i18n/en.ts`、`src/i18n/zh.ts`）
+- **3-31 FilterPanel selectedSet 每次渲染重建**：`selectedSet = new Set(dirPaths)` 改为 `useMemo(() => new Set(dirPaths), [dirPaths])`；扩展名列表从 `getFileTypeStats()` 读取真实类型分布，无数据时回退到 `COMMON_EXTS`（`src/components/FilterPanel.tsx`）
+- **3-32 LogViewer key=索引导致 DOM 复用错位**：`LogViewer.tsx` 日志列表原用数组索引作为 key，过滤切换时 React 错误复用 DOM 元素。改为 `logKey(line, i)` 基于行内容前 24 字符生成唯一 key（`src/pages/LogViewer.tsx`）
+
+---
+
+## 2026-08-01 (今日)
+
 ### R4-A 并发与状态修复（5 项）
 - **3-1 PaddleOCR Mutex.lock().unwrap() 中毒 panic**：`with_engine` 内 `lock().unwrap()` 改为 `lock().unwrap_or_else(|e| e.into_inner())`，poisoned mutex 时恢复内层值而非崩溃（`src-tauri/src/extractor/paddleocr.rs`）
 - **3-2 watcher 单线程串行阻塞**：事件循环中 `handle_event` 直接调用会阻塞后续事件接收。改为对每个 event 独立 `std::thread::spawn`，大文件处理不再阻塞 watcher 线程（`src-tauri/src/lib.rs`）

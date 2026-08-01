@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { getIndexErrors, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
@@ -59,14 +60,15 @@ export default function IndexStatus() {
   }
 
   useEffect(() => {
-    if (status?.total_files) {
+    const unlisten = listen('scan-completed', () => {
       setDupesLoading(true)
       getDuplicates()
         .then(setDuplicates)
         .catch(() => {})
         .finally(() => setDupesLoading(false))
-    }
-  }, [status?.total_files])
+    })
+    return () => { unlisten.then(f => f()) }
+  }, [])
 
   // Get file type distribution from backend
   useEffect(() => {

@@ -43,8 +43,6 @@ export function useIndexStatus(): UseIndexStatusReturn {
       // Immediately show scanning state (rebuildIndex spawns background task)
       setStatus(prev => prev ? { ...prev, indexed: 0, pending: 0, errors: 0, is_scanning: true } : null)
       await rebuildIndex()
-      // Wait for background task to start clearing the DB
-      await new Promise(r => setTimeout(r, 1000))
       void refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to rebuild index')

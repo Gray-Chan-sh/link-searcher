@@ -293,7 +293,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       {meta && (
         <div className="flex gap-2 px-4 py-2 border-t border-gray-200 dark:border-gray-800">
           <button
-            onClick={() => navigator.clipboard.writeText(meta.path)}
+            onClick={() => { navigator.clipboard.writeText(meta.path).catch(() => {}) }}
             className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
             {t('copy_path')}

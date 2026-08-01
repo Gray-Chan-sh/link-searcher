@@ -38,6 +38,7 @@ const en: Record<string, string> = {
     not_installed: 'Not Installed',
     retry: 'Retry',
     clear: 'Clear',
+    clear_search: 'Clear search',
     refresh: 'Refresh',
     open: 'Open',
     copy_path: 'Copy Path',
