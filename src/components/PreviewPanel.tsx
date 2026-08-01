@@ -13,10 +13,11 @@ interface PreviewPanelProps {
 
 function highlightText(text: string, query: string): React.ReactNode[] {
   if (!query.trim()) return [text]
-  const terms = query.split(/\s+/).filter(t => t.length > 0)
+  const terms = query.split(/\s+/).filter(t => t.length > 0).slice(0, 20)
   if (terms.length === 0) return [text]
   const termSet = new Set(terms.map(t => t.toLowerCase()))
-  const regex = new RegExp(`(${terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
+  const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  const regex = new RegExp(`(${escaped.join('|')})`, 'gi')
   const parts = text.split(regex)
   return parts.map((part, i) =>
     part.length > 0 && termSet.has(part.toLowerCase())
@@ -27,12 +28,19 @@ function highlightText(text: string, query: string): React.ReactNode[] {
 
 function countMatches(text: string, query: string): number {
   if (!query.trim()) return 0
-  const terms = query.split(/\s+/).filter(t => t.length > 0)
+  const terms = query.split(/\s+/).filter(t => t.length > 0).slice(0, 20)
   if (terms.length === 0) return 0
-  // Single scan: build regex once, then match all at once
-  const regex = new RegExp(terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gi')
-  const matches = text.match(regex)
-  return matches ? matches.length : 0
+  const termSet = new Set(terms.map(t => t.toLowerCase()))
+  const lower = text.toLowerCase()
+  let count = 0
+  for (const term of termSet) {
+    let idx = lower.indexOf(term)
+    while (idx !== -1) {
+      count++
+      idx = lower.indexOf(term, idx + 1)
+    }
+  }
+  return count
 }
 
 export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPanelProps) {
