@@ -196,6 +196,10 @@
 - **Tauri CSP 启用**：`tauri.conf.json` 中 `"csp": null` → 完整 CSP 策略（`default-src 'self'` + 白名单 script/style/img/media/connect/frame/font/worker）。`connect-src` 额外加入 `http://ipc.localhost` 以兼容 Windows/Linux 的 IPC 通道（macOS 走 `ipc://`），防止 IPC 被 CSP 阻断。前端仅本地资源，无远程内容受影响
 - **fs 插件权限收窄 + scope**：`capabilities/default.json` 删除 `fs:allow-mkdir` / `fs:allow-remove` / `fs:allow-rename`（前端未使用）；保留读权限与 `fs:allow-write`（SearchPage.tsx 的 CSV 导出 `writeTextFile` 依赖它，且 `save()` 对话框会自动将选中路径加入 fs scope，导出不受影响）；新增 `fs.scope` 白名单（`$APPDATA` / `$APPLOCALDATA` / `$DOCUMENT` / `$DESKTOP` / `$DOWNLOAD` 递归）
 
+### 🔴 Bug 修复
+- **切换语言清空 data_dir**：`setLang`（`i18n/index.tsx`）调用 `updateConfig({ data_dir: '', language: l })` 把配置里的 data_dir 清空，切换语言即丢全部数据。改为只传 `{ language: l }`；同时在 `updateConfig`（`api/config.ts`）加防呆，拒绝空 `data_dir` 并抛错 `data_dir cannot be empty`，从源头杜绝此类覆盖
+- **上次取消后下次扫描立即被取消**：`cancel_scan` 标志在扫描开始时未复位，上次点过取消后，`trigger_scan`/`rebuild_index` 的循环第一次 `load` 就为 true 直接 break → 两个 `spawn_blocking` 闭包开头先 `cancel_scan.store(false, Ordering::Release)` 复位；循环内 `load(Relaxed)` 改为 `Acquire`，`cancel_scan` 命令 `store(true, ...)` 改为 `Release`，形成 acquire-release 同步对（`commands/index.rs`）
+
 ---
 
 ## 统计

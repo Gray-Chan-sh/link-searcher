@@ -118,6 +118,7 @@ pub async fn trigger_scan(
     let scan_delta = state.scan_delta.clone();
 
     tokio::task::spawn_blocking(move || {
+        cancel_scan.store(false, Ordering::Release);
         let conn = match db_pool.get() {
             Ok(c) => c,
             Err(e) => {
@@ -159,7 +160,7 @@ pub async fn trigger_scan(
 
         let full = dir_id.is_none();
         for dir in &targets {
-            if cancel_scan.load(Ordering::Relaxed) {
+            if cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] scan cancelled by user");
                 break;
             }
@@ -244,6 +245,7 @@ pub async fn rebuild_index(
     let scan_delta = state.scan_delta.clone();
 
         tokio::task::spawn_blocking(move || {
+            cancel_scan.store(false, Ordering::Release);
             let mut added = 0u64;
             let mut deleted = 0u64;
             let mut modified = 0u64;
@@ -314,7 +316,7 @@ pub async fn rebuild_index(
         drop(conn);
 
         for dir in &dirs {
-            if cancel_scan.load(Ordering::Relaxed) {
+            if cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] rebuild cancelled by user");
                 break;
             }
@@ -387,7 +389,7 @@ pub async fn rebuild_index(
 #[tauri::command]
 pub async fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
     let was_scanning = state.is_scanning.load(Ordering::Relaxed);
-    state.cancel_scan.store(true, Ordering::Relaxed);
+    state.cancel_scan.store(true, Ordering::Release);
     log::info!("[SCAN] cancel requested (was_scanning={was_scanning})");
     Ok(())
 }
