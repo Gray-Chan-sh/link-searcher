@@ -10,8 +10,6 @@ interface UseIndexStatusReturn {
   refresh: () => Promise<void>
 }
 
-const POLL_INTERVAL = 5_000
-
 export function useIndexStatus(): UseIndexStatusReturn {
   const [status, setStatus] = useState<IndexStatus | null>(null)
   const [loading, setLoading] = useState(true)
