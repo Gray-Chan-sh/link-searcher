@@ -250,11 +250,16 @@ pub async fn rebuild_index(
             let mut total_errors = 0u64;
             let mut total_duration_ms = 0u64;
 
-        // 1. Delete old index directory
-        if let Err(e) = std::fs::remove_dir_all(&index_dir) {
-            log::error!("[SCAN] failed to remove index dir: {e}");
+        // 1. 建临时索引目录（不删旧索引；扫描完成后再原子替换）
+        let tmp_name = format!("index.tmp-{}", uuid::Uuid::new_v4().simple());
+        let tmp_dir = index_dir.with_file_name(&tmp_name);
+        if let Err(e) = std::fs::create_dir_all(&tmp_dir) {
+            log::error!("[SCAN] failed to create tmp index dir: {e}");
+            is_scanning.store(false, Ordering::SeqCst);
+            is_rebuilding.store(false, Ordering::SeqCst);
+            cancel_scan.store(false, Ordering::SeqCst);
+            return;
         }
-        std::fs::create_dir_all(&index_dir).ok();
 
         // 2. Clear file tracking
         if let Ok(conn) = db_pool.get() {
@@ -263,8 +268,8 @@ pub async fn rebuild_index(
             drop(conn);
         }
 
-        // 3. Create new IndexManager and swap in the RwLock
-        match IndexManager::open_or_create(&index_dir) {
+        // 3. Create new IndexManager on tmp dir and swap in the RwLock
+        match IndexManager::open_or_create(&tmp_dir) {
             Ok(new_mgr) => {
                 if let Ok(mut mgr) = index_manager.write() {
                     *mgr = new_mgr;
@@ -272,6 +277,7 @@ pub async fn rebuild_index(
             }
             Err(e) => {
                 log::error!("[SCAN] failed to create index: {e}");
+                let _ = std::fs::remove_dir_all(&tmp_dir);
                 is_scanning.store(false, Ordering::SeqCst);
                 is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
@@ -287,6 +293,7 @@ pub async fn rebuild_index(
             Ok(c) => c,
             Err(e) => {
                 log::error!("[SCAN] db connection failed: {e}");
+                let _ = std::fs::remove_dir_all(&tmp_dir);
                 is_scanning.store(false, Ordering::SeqCst);
                 is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
@@ -297,6 +304,7 @@ pub async fn rebuild_index(
             Ok(d) => d,
             Err(e) => {
                 log::error!("[SCAN] failed to list dirs: {e}");
+                let _ = std::fs::remove_dir_all(&tmp_dir);
                 is_scanning.store(false, Ordering::SeqCst);
                 is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
@@ -330,6 +338,29 @@ pub async fn rebuild_index(
                     total_duration_ms = r.duration_ms;
                 }
                 Err(e) => log::error!("[SCAN] {} failed: {e}", dir.id),
+            }
+        }
+
+        // 6. 提交，确保 tmp 索引全部落盘
+        if let Err(e) = indexer.commit() {
+            log::error!("[SCAN] failed to commit tmp index: {e}");
+        }
+
+        // 7. 原子替换磁盘目录：旧索引 → backup，tmp → index_dir
+        let backup = index_dir.with_file_name("index.old");
+        if index_dir.exists() {
+            let _ = std::fs::remove_dir_all(&backup);
+            let _ = std::fs::rename(&index_dir, &backup);
+        }
+        match std::fs::rename(&tmp_dir, &index_dir) {
+            Ok(()) => {
+                let _ = std::fs::remove_dir_all(&backup);
+            }
+            Err(e) => {
+                log::error!("[SCAN] failed to swap index dir: {e}");
+                if backup.exists() {
+                    let _ = std::fs::rename(&backup, &index_dir);
+                }
             }
         }
 

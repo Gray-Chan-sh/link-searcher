@@ -186,6 +186,9 @@
 
 ## 2026-08-01
 
+### 🏗️ 索引重建改为原子替换
+- **重建中断不丢旧索引**：`rebuild_index`（`commands/index.rs`）不再先 `remove_dir_all` 删旧索引，改为：① 建临时目录 `index.tmp-<uuid>`（`uuid::Uuid::new_v4().simple()`，同父目录下 `with_file_name`）→ ② 清空 `file_tracking`/`content_index`（保留原逻辑）→ ③ 在 tmp 目录 `IndexManager::open_or_create` 并 swap 内存 → ④ `reset_writer` → ⑤ 全量扫描（逻辑不变，写入 tmp 索引）→ ⑥ `indexer.commit()` 确保落盘 → ⑦ 原子替换：旧目录 rename 为 `index.old`，tmp rename 为 `index_dir`，成功则删 backup，失败则回滚还原旧索引。所有错误退出路径清理 tmp_dir 并复位 `is_scanning`/`is_rebuilding`/`cancel_scan`。搜索已被 `is_rebuilding` 守卫，重建期间读旧索引不受影响
+
 ### 🚀 重建期间搜索守卫
 - **重建索引时搜索返回友好错误**：`AppState` 新增 `is_rebuilding: Arc<AtomicBool>` 标志（`state.rs`），`rebuild_index` 启动时置 true、所有退出路径（含 spawn_blocking 内提前 return 与正常结束）置 false（`commands/index.rs`）；`search` 命令开头检查该标志，重建期间直接返回 `"索引重建中，请稍后再试"`（`commands/search.rs`）。`lib.rs` / `tests/ipc_test.rs` 的 `AppState::new` 调用点传入新参数。未改动 rebuild 的目录删除/重建逻辑（R1-3b 单独处理）
 
