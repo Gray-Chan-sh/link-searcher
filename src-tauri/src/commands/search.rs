@@ -68,11 +68,16 @@ pub async fn search(
             None
         } else {
             let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let likes: Vec<String> = paths.iter().map(|p| format!("{}%", p.replace('%', "%%"))).collect();
-            let placeholders: Vec<String> = (0..likes.len()).map(|i| format!("?{}", i + 1)).collect();
+            let likes: Vec<String> = paths.iter().map(|p| {
+                let escaped = p.replace('%', "\\%").replace('_', "\\_");
+                format!("{}%", escaped)
+            }).collect();
             let sql = format!(
                 "SELECT id FROM file_tracking WHERE status = 'active' AND ({})",
-                placeholders.iter().map(|p| format!("path LIKE {p}")).collect::<Vec<_>>().join(" OR ")
+                std::iter::repeat("path LIKE ? ESCAPE '\\'")
+                    .take(likes.len())
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
             );
             let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
             let params: Vec<&dyn rusqlite::types::ToSql> = likes.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
@@ -225,11 +230,16 @@ pub async fn export_search_results(
             None
         } else {
             let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let likes: Vec<String> = paths.iter().map(|p| format!("{}%", p.replace('%', "%%"))).collect();
-            let placeholders: Vec<String> = (0..likes.len()).map(|i| format!("?{}", i + 1)).collect();
+            let likes: Vec<String> = paths.iter().map(|p| {
+                let escaped = p.replace('%', "\\%").replace('_', "\\_");
+                format!("{}%", escaped)
+            }).collect();
             let sql = format!(
                 "SELECT id FROM file_tracking WHERE status = 'active' AND ({})",
-                placeholders.iter().map(|p| format!("path LIKE {p}")).collect::<Vec<_>>().join(" OR ")
+                std::iter::repeat("path LIKE ? ESCAPE '\\'")
+                    .take(likes.len())
+                    .collect::<Vec<_>>()
+                    .join(" OR ")
             );
             let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
             let params: Vec<&dyn rusqlite::types::ToSql> = likes.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();

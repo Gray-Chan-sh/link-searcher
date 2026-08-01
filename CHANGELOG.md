@@ -6,6 +6,9 @@
 
 ## 2026-08-01
 
+### 搜索目录筛选修复
+- **LIKE `%`/`_` 通配符转义**：dir_paths → file_ids 查询中 `p.replace('%', "%%")` 无效（SQLite LIKE 不识别 `%%`），改用 `ESCAPE '\'` 转义 `%` 和 `_`，避免含特殊字符的目录路径匹配错误。`search` 与 `export_search_results` 两处路径解析均已修复（`src-tauri/src/commands/search.rs`）
+
 ### TypeScript strict 模式
 - **开启 TS strict 模式**：`tsconfig.app.json` 添加 `"strict": true`，符合 AGENTS.md 规范（strict + 禁止 any）。现有 34 个 TS 文件经 `tsc --noEmit -p tsconfig.app.json` 验证零错误
 - **移除 SearchBar 中 `as any[]`**：`dropdown` 合并 suggestions（`string[]`）与 history（`SearchHistoryEntry[]`）改用展开语法 `[...suggestions, ...history]`，类型自然推断为 `(string | SearchHistoryEntry)[]`（`src/components/SearchBar.tsx`）
