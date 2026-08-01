@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use clap::Parser;
 
 use crate::config;
@@ -19,15 +20,15 @@ pub enum Cli {
     Health,
 }
 
-pub fn run_cli() {
+pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli {
         Cli::Search { query, limit } => {
             let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);
 
-            let index = IndexManager::open_or_create(&index_dir).expect("failed to open index");
-            let reader = index.reader().expect("failed to create reader");
+            let index = IndexManager::open_or_create(&index_dir).context("failed to open index")?;
+            let reader = index.reader().context("failed to create reader")?;
             let searcher = SearcherWrap::new(reader.clone(), index.index().as_ref().clone());
 
             let params = SearchParams {
@@ -44,7 +45,7 @@ pub fn run_cli() {
                 fuzzy: false,
             };
 
-            let result = searcher.search(&params).expect("search failed");
+            let result = searcher.search(&params).context("search failed")?;
             for hit in &result.hits {
                 println!(
                     "{} ({}): {:.2}",
@@ -130,4 +131,5 @@ pub fn run_cli() {
             }
         }
     }
+    Ok(())
 }

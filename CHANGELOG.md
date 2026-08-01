@@ -22,9 +22,15 @@
 
 ---
 
-## 2026-08-01 (今日)
+## 2026-08-01（今日）
 
-### R4-C 前端质量改进（7 项）
+### 生产代码 unwrap/expect 清理
+- **lib.rs 启动链 4 处 expect → ?）**：`.setup()` 闭包已返回 `Result`，将 `db::get_pool`、`db_pool.get()`、`db::init_db`、`IndexManager::open_or_create` 四处的 `.expect()` 改为 `?` 传播，启动失败时返回错误而非 panic（`src-tauri/src/lib.rs`）
+- **cli.rs 3 处 expect → ?）**：`run_cli()` 返回类型改为 `Result<()>`，三处 `.expect()` 改 `.context(...)?`，`main.rs` 捕获错误并 `exit(1)` 输出到 stderr（`src-tauri/src/cli.rs`、`src-tauri/src/main.rs`）
+
+---
+
+## 2026-08-01（第七轮：WAL 一致性修复）
 - **3-21 getDuplicates 高频触发**：`IndexStatus.tsx` 原 useEffect 依赖 `status?.total_files`，total_files 每次变化都重新调用。改为监听 `scan-completed` 事件，仅在扫描完成后调用一次（`src/pages/IndexStatus.tsx`）
 - **3-23 clipboard.writeText 未 catch**：`PreviewPanel.tsx` 和 `ResultList.tsx` 的 `navigator.clipboard.writeText` 调用缺失 `.catch()`，可能未处理拒绝。添加空 catch 处理（`src/components/PreviewPanel.tsx`、`src/components/ResultList.tsx`）
 - **3-26 rebuild setTimeout(1000) 硬编码等待**：`useIndexStatus.ts` 的 `rebuild` 在 `await rebuildIndex()` 后硬编码 `setTimeout(1000)`。删除该等待，由已有 5s/30s 自适应轮询刷新状态（`src/hooks/useIndexStatus.ts`）

@@ -136,13 +136,13 @@ pub fn run() {
 
             std::fs::create_dir_all(&index_dir).ok();
 
-            let db_pool = db::get_pool(db_path.to_string_lossy().as_ref()).expect("failed to create DB pool");
-            let init_conn = db_pool.get().expect("failed to get init connection");
-            db::init_db(&init_conn).expect("failed to init DB");
+            let db_pool = db::get_pool(db_path.to_string_lossy().as_ref())?;
+            let init_conn = db_pool.get()?;
+            db::init_db(&init_conn)?;
             drop(init_conn);
 
             let index_manager = Arc::new(RwLock::new(
-                IndexManager::open_or_create(&index_dir).expect("failed to open index"),
+                IndexManager::open_or_create(&index_dir)?,
             ));
 
             // Arc is shared between IndexerService and AppState so rebuild_index can swap the manager

@@ -3,7 +3,10 @@
 
 fn main() {
     if std::env::args().len() > 1 {
-        link_searcher_lib::cli::run_cli();
+        if let Err(e) = link_searcher_lib::cli::run_cli() {
+            eprintln!("link-searcher: {e}");
+            std::process::exit(1);
+        }
     } else {
         link_searcher_lib::run()
     }
