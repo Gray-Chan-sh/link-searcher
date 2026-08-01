@@ -212,3 +212,6 @@
 | **变更文件数** | **60+** |
 
 - **2026-08-01** 添加 `AGENTS.md` 项目规范：变更记录规则、代码规范、关键文件索引
+
+### 🟠 功能修复
+- **删除目录后残留数据**：`remove_dir` 只删 `dir_config` 行，file_tracking 孤儿记录（统计虚高）、Tantivy 文档（仍可搜索）、content_index 引用全部残留 → 增加清理：先按 dir_id 从 Tantivy 删文档，再硬删 `file_tracking` 行，最后 `cleanup_orphan_content` 清理孤儿 content（`commands/dirs.rs`）

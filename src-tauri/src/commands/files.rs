@@ -98,11 +98,11 @@ pub async fn list_files_db(
 
     let count_sql = format!("SELECT COUNT(*) FROM file_tracking WHERE {where_clause}");
     let total: u64 = conn
-        .query_row(&count_sql, [], |row| row.get(0))
+        .query_row(&count_sql, rusqlite::params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| row.get(0))
         .map_err(|e| format!("count query error: {e}"))?;
 
     let sort_col = match sort.as_deref().unwrap_or("path") {
-        "name" => "file_name".to_string(),
+        "name" => "path".to_string(),
         "path" => "path".to_string(),
         "ext" => "file_ext".to_string(),
         "size" => "size".to_string(),
@@ -111,18 +111,25 @@ pub async fn list_files_db(
     };
     let order_dir = if order.as_deref() == Some("desc") { "DESC" } else { "ASC" };
 
-    let data_sql = format!(
+    // Build data SQL with named params to avoid positional conflicts
+    let mut data_sql = format!(
         "SELECT id, path, size, mtime, indexed, error_msg \
          FROM file_tracking WHERE {where_clause} \
          ORDER BY {sort_col} {order_dir} \
-         LIMIT ? OFFSET ?",
+         LIMIT ?{} OFFSET ?{}",
+        params.len() + 1,
+        params.len() + 2,
     );
+    let mut data_params: Vec<Box<dyn rusqlite::ToSql + Send>> = params;
+    data_params.push(Box::new(ps as i64));
+    data_params.push(Box::new(offset as i64));
+
     let mut stmt = conn
         .prepare(&data_sql)
         .map_err(|e| format!("prepare error: {e}"))?;
 
     let rows = stmt
-        .query_map(rusqlite::params![ps as i64, offset as i64], |row| Ok(FileItem {
+        .query_map(rusqlite::params_from_iter(data_params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| Ok(FileItem {
             file_id: row.get("id")?,
             file_name: std::path::Path::new(&row.get::<_, String>("path")?)
                 .file_name()

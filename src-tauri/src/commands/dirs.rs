@@ -100,6 +100,20 @@ pub async fn remove_dir(state: State<'_, AppState>, id: String) -> Result<(), St
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     db::dir_config::remove_dir(&conn, &id).map_err(|e| format!("failed to remove directory: {e}"))?;
 
+    // Clean up the directory's files from Tantivy index, file_tracking, and content_index.
+    let files = db::tracker::get_files_by_dir(&conn, &id)
+        .map_err(|e| format!("failed to list dir files: {e}"))?;
+    for file in &files {
+        let _ = state.indexer.delete_file(&file.id);
+    }
+    conn.execute("DELETE FROM file_tracking WHERE dir_id = ?1", rusqlite::params![id])
+        .map_err(|e| format!("failed to delete file records: {e}"))?;
+    let _ = db::cleanup_orphan_content(&conn);
+
+    drop(conn);
+
+    let _ = state.indexer.commit();
+
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
         dir_id: id.clone(),
     });
