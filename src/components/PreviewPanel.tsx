@@ -3,21 +3,12 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getFile, getFilePreview, openFile, revealInFolder, type FileDetail, type FilePreview } from '../api/files'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
+import { formatSize, formatTime } from '../utils/format'
 
 interface PreviewPanelProps {
   fileId: string | null
   searchQuery: string
   onClose: () => void
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts / 1000).toLocaleString()
 }
 
 function highlightText(text: string, query: string): React.ReactNode[] {

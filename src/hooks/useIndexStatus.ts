@@ -51,12 +51,12 @@ export function useIndexStatus(): UseIndexStatusReturn {
     }
   }, [refresh])
 
-  // Initial fetch + always poll at 5s
+  // Adaptive polling: 5s while scanning, 30s when idle
   useEffect(() => {
     refresh()
-    const interval = setInterval(refresh, POLL_INTERVAL)
+    const interval = setInterval(refresh, (status?.is_scanning ?? false) ? 5_000 : 30_000)
     return () => clearInterval(interval)
-  }, [refresh])
+  }, [refresh, status?.is_scanning])
 
   return { status, loading, error, scan, rebuild, refresh }
 }

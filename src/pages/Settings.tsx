@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { ask, open } from '@tauri-apps/plugin-dialog'
+import { ask, open, message } from '@tauri-apps/plugin-dialog'
 import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
@@ -82,7 +82,7 @@ export default function Settings() {
     } catch (e: unknown) {
       const err = e instanceof Error ? e.message : String(e)
       setLocalError(`迁移失败: ${err}`)
-      alert(`迁移失败:\n${err}`)
+      await message(`迁移失败:\n${err}`, { title: '迁移失败', kind: 'error' })
     } finally {
       setMigrating(false)
     }

@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 
 type Theme = 'light' | 'dark' | 'system'
 
@@ -16,13 +16,17 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     if (stored === 'light' || stored === 'dark' || stored === 'system') return stored
     return 'system'
   })
-  const [resolved, setResolved] = useState<'light' | 'dark'>('light')
+  const resolved = useMemo<'light' | 'dark'>(() => {
+    if (theme === 'system') {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+    }
+    return theme
+  }, [theme])
 
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const update = () => {
       const isDark = theme === 'dark' || (theme === 'system' && mq.matches)
-      setResolved(isDark ? 'dark' : 'light')
       document.documentElement.classList.toggle('dark', isDark)
     }
     update()

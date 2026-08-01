@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { SearchHit } from '../api/search'
 import { openFile, revealInFolder } from '../api/files'
 import { useI18n } from '../i18n'
+import { formatSize, formatTime } from '../utils/format'
 
 const ITEM_HEIGHT = 72
 const OVERSCAN = 5
@@ -16,17 +17,6 @@ interface ResultListProps {
   hits: SearchHit[]
   selectedId: string | null
   onSelect: (hit: SearchHit) => void
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function formatTime(ts: number): string {
-  const d = new Date(ts / 1000)
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
 }
 
 function highlightSnippet(snippet: string): React.ReactNode {

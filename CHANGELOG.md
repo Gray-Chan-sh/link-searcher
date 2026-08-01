@@ -6,6 +6,19 @@
 
 ## 2026-08-01 (今日)
 
+### R4-C 前端质量改进
+- **3-19 焦点判断改用 data-search-input**：SearchPage.tsx 原用 `placeholder.includes()` 判断焦点在搜索框，中文模式下失效。改为 `activeEl?.closest('[data-search-input]')`，与 SearchBar.tsx 的 `data-search-input="true"` 属性匹配（`src/pages/SearchPage.tsx`）
+- **3-20 useIndexStatus 动态轮询间隔**：原固定 5s 轮询，改为 `is_scanning` 时 5s、空闲时 30s，减少索引空闲时的无效请求（`src/hooks/useIndexStatus.ts`）
+- **3-22 SearchPage setTimeout 泄漏修复**：handleExport 内 3 个 `setTimeout` 无清理，用 `timersRef` + unmount effect 统一清理，防止组件卸载后状态更新崩溃（`src/pages/SearchPage.tsx`）
+- **3-24 添加 ErrorBoundary**：新建 `src/components/ErrorBoundary.tsx`，在 App.tsx 外层包裹，渲染错误时显示"应用出错了，请重启或查看日志"而非白屏（`src/components/ErrorBoundary.tsx`、`src/App.tsx`）
+- **3-25 暗色模式闪烁修复**：theme.tsx 原 `useState('light')` 初始值导致首次渲染闪烁。改为 `useMemo` 同步计算 resolved 值，DOM 初次渲染即正确（`src/theme.tsx`）
+- **3-27 formatSize/formatTime 去重**：新建 `src/utils/format.ts` 统一工具函数，删除 PreviewPanel.tsx、ResultList.tsx 中的重复定义，减少维护成本（`src/utils/format.ts`、`src/components/PreviewPanel.tsx`、`src/components/ResultList.tsx`）
+- **3-29 alert() 替换为 Tauri message()**：Settings.tsx 迁移失败提示原用浏览器 `alert()`，改为 `@tauri-apps/plugin-dialog` 的 `message()`，保持应用内 Dialog 风格一致（`src/pages/Settings.tsx`）
+
+---
+
+## 2026-08-01 (今日)
+
 ### 全量 i18n 改造
 - **前端硬编码字符串全部提取到 en.ts / zh.ts**（`src/i18n/`）：新增 ~112 个翻译 key，覆盖 SearchPage、Browse、IndexStatus、DirManager、LogViewer、FileTypes、SearchBar、ResultList、PreviewPanel、FilterPanel、StatusBar、OnboardingWizard 共 12 个组件/页面
 - **t() 支持参数**：`src/i18n/index.tsx` 扩展 `t(key, params?)` 签名，支持 `{placeholder}` 模板替换（如 `t('saved_to', { path })`、`t('results_count', { total })` 等）

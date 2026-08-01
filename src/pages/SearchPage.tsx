@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useSearch } from '../hooks/useSearch'
 import { useDirs } from '../hooks/useDirs'
@@ -24,6 +24,9 @@ export default function SearchPage() {
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(search.total / search.pageSize)),
@@ -46,7 +49,7 @@ const handleExport = async () => {
 
     if (!savedPath) {
       setExportMsg(t('export_cancelled'))
-      setTimeout(() => setExportMsg(null), 3000)
+      timersRef.current.push(setTimeout(() => setExportMsg(null), 3000))
       return
     }
 
@@ -54,10 +57,10 @@ const handleExport = async () => {
     await writeTextFile(savedPath, content)
 
     setExportMsg(t('saved_to', { path: savedPath }))
-    setTimeout(() => setExportMsg(null), 3000)
+    timersRef.current.push(setTimeout(() => setExportMsg(null), 3000))
   } catch (e) {
     setExportMsg(t('export_failed', { error: e instanceof Error ? e.message : t('unknown_error') }))
-    setTimeout(() => setExportMsg(null), 5000)
+    timersRef.current.push(setTimeout(() => setExportMsg(null), 5000))
   }
 }
 
@@ -65,9 +68,7 @@ useEffect(() => {
   const handleKeyDown = (e: KeyboardEvent) => {
     // Don't override search input handling - if focused in search, let it process Enter itself
     const activeEl = document.activeElement
-    if (activeEl instanceof HTMLInputElement && activeEl.dataset.searchInput) {
-      return
-    }
+    if (activeEl?.closest('[data-search-input]')) return
 
     if (search.status !== 'success' || search.hits.length === 0) return
 

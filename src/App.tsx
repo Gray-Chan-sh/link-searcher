@@ -16,6 +16,7 @@ import FileTypes from './pages/FileTypes'
 import Browse from './pages/Browse'
 import StatusBar from './components/StatusBar'
 import OnboardingWizard from './components/OnboardingWizard'
+import { ErrorBoundary } from './components/ErrorBoundary'
 
 export default function App() {
   const { theme, setTheme } = useTheme()
@@ -52,7 +53,8 @@ export default function App() {
   const themeLabel = theme === 'light' ? t('light') : theme === 'dark' ? t('dark') : t('system')
 
   return (
-    <div className="flex h-screen overflow-hidden bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
+    <ErrorBoundary>
+      <div className="flex h-screen overflow-hidden bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
       <aside className="flex flex-col w-56 border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 shrink-0">
         <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
           <h1 className="text-lg font-semibold tracking-tight">{t('app_name')}</h1>
@@ -106,5 +108,6 @@ export default function App() {
 
       {showOnboarding && <OnboardingWizard onClose={handleOnboardingClose} />}
     </div>
+    </ErrorBoundary>
   )
 }
