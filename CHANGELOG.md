@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-02（测试修复：绝对路径→相对路径重构后集成测试）
+
+- **test_incremental_scan 查询路径格式错误**：`file_tracking` 表 `path` 字段已改为存相对路径，但 `integration.rs` 的 `test_incremental_scan` 仍用 `env.dir_path.join("<filename>")` 绝对路径查询，导致 `None.unwrap()` panic。改为传相对路径字符串（`src-tauri/tests/integration.rs`）
+
+---
+
 ## 2026-08-02（性能测试套件）
 
 - **新增 perf_scan.sh**：`scripts/perf_scan.sh` 提供扫描性能基准测试能力，自动清理临时数据目录、启动应用、监控 RSS 内存（每 5s），扫描完成后输出文件数、索引/DB 大小、内存峰值/均值报告（`scripts/perf_scan.sh`）；同步更新 README 测试章节（`README.md`、`CHANGELOG.md`）

@@ -263,17 +263,15 @@ fn test_incremental_scan() -> Result<()> {
 
     // Modified file has new md5, is indexed.
     let c = env.pool.get().unwrap();
-    let modified =
-        tracker::get_file_by_path(&c, env.dir_path.join("modify.txt").to_str().unwrap())?.unwrap();
+    let modified = tracker::get_file_by_path(&c, "modify.txt")?.unwrap();
     assert_eq!(modified.indexed, 1, "modified should be indexed");
     assert_ne!(modified.md5.as_deref(), Some("original content"));
 
     // New file tracked and indexed.
-    let new = tracker::get_file_by_path(&c, env.dir_path.join("new.txt").to_str().unwrap())?.unwrap();
+    let new = tracker::get_file_by_path(&c, "new.txt")?.unwrap();
     assert_eq!(new.indexed, 1);
 
-    let deleted =
-            tracker::get_file_by_path(&c, env.dir_path.join("delete.txt").to_str().unwrap())?;
+    let deleted = tracker::get_file_by_path(&c, "delete.txt")?;
     assert!(deleted.is_some(), "deleted file should still be tracked in DB");
     let d = deleted.unwrap();
     let deleted_or_cleared = d.status == "deleted" || d.md5.is_none();
