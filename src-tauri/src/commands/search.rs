@@ -122,7 +122,7 @@ pub async fn search(
         sort: sort.unwrap_or_default(),
         sort_order: sort_order.unwrap_or_else(|| "desc".to_string()),
         page: page.unwrap_or(1),
-        page_size: page_size.unwrap_or(20).min(max_results),
+        page_size: page_size.unwrap_or(20).min(max_results).min(1000),
         fuzzy: fuzzy.unwrap_or(false),
     };
 

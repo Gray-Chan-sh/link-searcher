@@ -82,6 +82,13 @@ pub async fn add_dir(
         path: std::path::PathBuf::from(&dir.path),
     });
 
+    // Trigger initial scan for the newly added directory
+    let scanner = state.scanner.clone();
+    let dir_id = dir.id.clone();
+    tokio::task::spawn_blocking(move || {
+        let _ = scanner.incremental_scan(&dir_id, |_| {});
+    });
+
     Ok(DirConfigResponse {
         id: dir.id,
         path: dir.path,
@@ -165,7 +172,21 @@ pub async fn update_dir(
         recursive,
     };
     db::dir_config::update_dir(&conn, &id, updates)
-        .map_err(|e| format!("failed to update directory: {e}"))
+        .map_err(|e| format!("failed to update directory: {e}"))?;
+
+    // Restart watcher to pick up new config (exclude/include patterns)
+    let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
+        dir_id: id.clone(),
+    });
+    let dir = db::dir_config::get_dir(&conn, &id).map_err(|e| format!("failed to reload dir: {e}"))?
+        .ok_or_else(|| format!("dir not found: {id}"))?;
+    drop(conn);
+    let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StartWatch {
+        dir_id: id,
+        path: std::path::PathBuf::from(&dir.path),
+    });
+
+    Ok(())
 }
 
 #[derive(Serialize, Clone)]

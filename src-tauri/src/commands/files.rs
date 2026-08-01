@@ -340,18 +340,8 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
-    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
-    let is_pdf = ext == "pdf";
-    let is_office = matches!(ext.as_str(), "docx"|"xlsx"|"pptx");
-
-    let file_type = if is_image { "image" }
-        else if is_pdf { "pdf" }
-        else if is_office { "office" }
-        else if is_text { "text" }
-        else { "unknown" }.to_string();
-
-    let image_path = if is_image { Some(file.path.clone()) } else { None };
+    let file_type = crate::extractor::classify_ext(&ext).to_string();
+    let image_path = if file_type == "image" { Some(file.path.clone()) } else { None };
 
     let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
         if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
@@ -503,18 +493,10 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
-    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
-    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
-    let is_pdf = ext == "pdf";
+    let file_type = crate::extractor::classify_ext(&ext).to_string();
+    let image_path = if file_type == "image" { Some(path.clone()) } else { None };
 
-    let file_type = if is_image { "image" }
-        else if is_pdf { "pdf" }
-        else if is_text { "text" }
-        else { "unknown" }.to_string();
-
-    let image_path = if is_image { Some(path.clone()) } else { None };
-
-    let content = if is_text {
+    let content = if file_type == "text" {
         std::fs::read_to_string(&path).ok()
     } else {
         None
@@ -540,18 +522,8 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    let is_image = matches!(ext.as_str(), "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff");
-    let is_text = matches!(ext.as_str(), "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"log"|"py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat");
-    let is_pdf = ext == "pdf";
-    let is_office = matches!(ext.as_str(), "docx"|"xlsx"|"pptx");
-
-    let file_type = if is_image { "image" }
-        else if is_pdf { "pdf" }
-        else if is_office { "office" }
-        else if is_text { "text" }
-        else { "unknown" }.to_string();
-
-    let image_path = if is_image { Some(file.path.clone()) } else { None };
+    let file_type = crate::extractor::classify_ext(&ext).to_string();
+    let image_path = if file_type == "image" { Some(file.path.clone()) } else { None };
 
     let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
         if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {

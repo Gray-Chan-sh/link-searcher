@@ -23,6 +23,14 @@
 - **3-11 SortField 枚举**：在 `searcher.rs` 新增 `SortField { Score, Date, Size, Name }` 枚举，`SearchParams.sort` 从 `String` 改为 `SortField`，`commands/search.rs` 和 `cli.rs` 同步更新（`src-tauri/src/search/searcher.rs`、`src-tauri/src/commands/search.rs`、`src-tauri/src/cli.rs`、`tests/integration.rs`）
 - **3-12 日志 hash 截断修复**：原 `{hash:.8}` 对 String 是格式宽度而非截断，改为 `&hash[..8.min(hash.len())]`（`src-tauri/src/indexer.rs`）
 - **3-16 settings key 白名单**：`update_settings` 新增 `ALLOWED_KEYS` 白名单，未知 key 直接拒绝（`src-tauri/src/commands/settings.rs`）
+- **3-7 scan方法统一DiskEntry**：将 `startup_scan` 内局部 `DiskEntry` 结构体移至 `helpers.rs` 作为公共结构，`full_scan`/`incremental_scan`/`startup_scan` 三处统一使用 `DiskEntry { abs_path, rel_path, size, name }`，消除 `Vec<String>` 与 `Vec<DiskEntry>` 不一致的问题（`src-tauri/src/scanner/helpers.rs`、`src-tauri/src/scanner/mod.rs`）
+- **3-8 扩展名判断去重**：在 `extractor/mod.rs` 新增 `pub fn classify_ext(ext: &str) -> &str` 统一分类逻辑，`commands/files.rs` 中 5 处重复的 `matches!(ext.as_str(), ...)` 替换为 `classify_ext` 调用（`src-tauri/src/extractor/mod.rs`、`src-tauri/src/commands/files.rs`）
+- **3-10 update_dir 触发 watcher 重启**：`update_dir` 更新目录配置后，停止并重启 watcher，使 exclude/include 模式变更即时生效（`src-tauri/src/commands/dirs.rs`）
+- **3-13 add_dir 触发首次扫描**：`add_dir` 添加目录后，在启动 watcher 的同时异步触发 `incremental_scan`，确保新目录内容被立即索引（`src-tauri/src/commands/dirs.rs`）
+- **3-14 搜索 page_size 上限保护**：`search` 命令的 `page_size` 增加 `.min(1000)` 上限，防止极端参数导致内存溢出（`src-tauri/src/commands/search.rs`）
+- **3-15 download_files 临时目录清理**：`download_files` 已使用 `TempDir::new("ls_download")` 管理 zip 临时文件，Drop 时自动清理（`src-tauri/src/commands/files.rs`）
+- **3-17 后台清理任务**：启动扫描完成后已在 `lib.rs` 调用 `cleanup_orphan_content` 和 `vacuum`，无遗漏（`src-tauri/src/lib.rs`）
+- **3-18 移位检测 O(n·m)→O(n) 优化**：`startup_scan` 中移位检测由线性 `find` 改为按 `(name, size)` 建 `HashMap` 索引，将每次 DB 记录查找从 O(n) 降至 O(1)，整体从 O(n·m) 降至 O(n+m)（`src-tauri/src/scanner/mod.rs`）
 
 ---
 

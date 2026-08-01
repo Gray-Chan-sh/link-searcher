@@ -9,6 +9,17 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow};
 use crate::db::tracker::{FileRecord, IndexedState};
 
+/// A discovered disk file entry carrying both absolute and relative paths.
+#[derive(Debug, Clone)]
+pub struct DiskEntry {
+    /// Absolute path — used for filesystem access (reading content, MD5).
+    pub abs_path: String,
+    /// Relative path — used for DB matching and tracking.
+    pub rel_path: String,
+    pub size: u64,
+    pub name: String,
+}
+
 const EXCLUDED_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", ".git", ".svn", "__pycache__"];
 
 const EXCLUDED_PREFIXES: &[char] = &['#', '$', '.', '~'];

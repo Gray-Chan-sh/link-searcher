@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use md5::Digest;
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
+use std::collections::HashMap;
 
 use crate::db::dir_config;
 use crate::db::tracker;
@@ -119,7 +120,7 @@ impl Scanner {
         let mut indexed = 0u64;
         let mut errors = 0u64;
         let mut processed = 0u64;
-        let mut disk_paths: Vec<String> = Vec::new();
+        let mut on_disk: Vec<DiskEntry> = Vec::new();
         let mut jobs: Vec<BatchJob> = Vec::new();
         let mut added = 0u64;
         let mut modified = 0u64;
@@ -138,7 +139,7 @@ impl Scanner {
             if !extension_allowed(&path, &include_exts) { continue; }
 
             processed += 1;
-            disk_paths.push(rel_path.clone());
+            let name = entry.file_name().to_string_lossy().to_string();
 
             let meta = entry.metadata().context("failed to read metadata")?;
             let mtime = mtime_micros(&meta).unwrap_or(0);
@@ -156,10 +157,12 @@ impl Scanner {
                 jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
             }
 
+            on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
+
             if processed % 100 == 0 {
                 log::info!("[SCAN] 进度 [{processed}/{total}]");
             }
-            progress(ScanProgress { total, processed, errors, current_file: path_str, phase: "scan" });
+            progress(ScanProgress { total, processed, errors, current_file: String::new(), phase: "scan" });
         }
 
         if !jobs.is_empty() {
@@ -181,9 +184,9 @@ impl Scanner {
         }
 
         // Mark files in DB but absent from disk as deleted.
-        let disk_set: std::collections::HashSet<String> = disk_paths.into_iter().collect();
+        let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
-            if rec.status == "active" && !disk_set.contains(&rec.path) {
+            if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
                 let _ = self.indexer.delete_file(&rec.id);
                 deleted += 1;
             }
@@ -227,7 +230,7 @@ impl Scanner {
         // Record last scan time BEFORE walking the main loop.
         record_last_scan(&conn, dir_id)?;
 
-        let mut on_disk: Vec<String> = Vec::new();
+        let mut on_disk: Vec<DiskEntry> = Vec::new();
         let mut indexed = 0u64;
         let mut errors = 0u64;
         let mut jobs: Vec<BatchJob> = Vec::new();
@@ -243,9 +246,10 @@ impl Scanner {
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
+            let name = entry.file_name().to_string_lossy().to_string();
             processed += 1;
-            progress(ScanProgress { total: 0, processed, errors: 0, current_file: path_str, phase: "scan" });
-            on_disk.push(rel_path.clone());
+            progress(ScanProgress { total: 0, processed, errors: 0, current_file: path_str.clone(), phase: "scan" });
+            on_disk.push(DiskEntry { abs_path: path_str, rel_path: rel_path.clone(), size: meta.len(), name });
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
             if mtime <= last_scan { continue; }
@@ -283,10 +287,10 @@ impl Scanner {
         }
 
         // Detect and remove deleted files.
-        let disk_set: std::collections::HashSet<String> = on_disk.into_iter().collect();
+        let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
         let mut deleted = 0u64;
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
-            if rec.status == "active" && !disk_set.contains(&rec.path) {
+            if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
                 let _ = self.indexer.delete_file(&rec.id);
                 deleted += 1;
             }
@@ -322,15 +326,6 @@ impl Scanner {
 
         // Record last scan time BEFORE walking the main loop.
         record_last_scan(&conn, dir_id)?;
-
-        struct DiskEntry {
-            // Absolute path - for file system access (reading content during MD5 check)
-            abs_path: String,
-            // Relative path - for DB matching and tracking
-            rel_path: String,
-            size: u64,
-            name: String,
-        }
 
         let mut on_disk: Vec<DiskEntry> = Vec::new();
         let mut indexed = 0u64;
@@ -409,6 +404,12 @@ impl Scanner {
             log::info!("[STARTUP] 清理排除文件: {} 个", cleaned);
         }
 
+        // Build HashMap index: (name, size) -> Vec<DiskEntry> for O(1) move detection.
+        let mut by_name_size: HashMap<(String, u64), Vec<DiskEntry>> = HashMap::new();
+        for entry in &on_disk {
+            by_name_size.entry((entry.name.clone(), entry.size)).or_default().push(entry.clone());
+        }
+
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status != "active" || disk_set.contains(&rec.path) {
                 continue;
@@ -419,21 +420,21 @@ impl Scanner {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            let candidate = on_disk.iter().find(|e| {
-                e.name == old_name
-                    && e.size == rec.size
-                    && e.rel_path != rec.path  // different relative path means moved
-                    && tracker::get_file_by_path(&conn, &e.rel_path)  // new file not already tracked
+            let candidate = by_name_size
+                .get(&(old_name, rec.size))
+                .and_then(|candidates| candidates.iter().find(|e| {
+                    e.rel_path != rec.path  // different relative path means moved
+                    && tracker::get_file_by_path(&conn, &e.rel_path)
                         .map(|r| r.is_none())
                         .unwrap_or(true)
-            });
+                }));
 
             if let Some(found) = candidate {
                 if let Some(ref expected_md5) = rec.md5 {
-                    if let Ok(raw) = std::fs::read(&found.abs_path) {  // read using absolute path
+                    if let Ok(raw) = std::fs::read(&found.abs_path) {
                         let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));
                         if actual_md5 == *expected_md5 {
-                            tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;  // update with relative path
+                            tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
                             log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
                             moved += 1;
                             continue;

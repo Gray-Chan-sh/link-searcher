@@ -50,6 +50,19 @@ pub fn extract_text(path: &Path) -> Result<String> {
     }
 }
 
+/// Classify a file extension into a high-level type string.
+pub fn classify_ext(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => "image",
+        "pdf" => "pdf",
+        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => "office",
+        "txt" | "md" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini"
+        | "cfg" | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql"
+        | "sh" | "bat" | "ps1" | "env" | "conf" | "properties" => "text",
+        _ => "unknown",
+    }
+}
+
 /// Return all supported file extensions (without leading dot).
 pub fn get_supported_extensions() -> Vec<&'static str> {
     vec![
