@@ -137,7 +137,9 @@ pub fn run() {
             std::fs::create_dir_all(&index_dir).ok();
 
             let db_pool = db::get_pool(db_path.to_string_lossy().as_ref()).expect("failed to create DB pool");
-            db::init_db(db_path.to_string_lossy().as_ref()).expect("failed to init DB");
+            let init_conn = db_pool.get().expect("failed to get init connection");
+            db::init_db(&init_conn).expect("failed to init DB");
+            drop(init_conn);
 
             let index_manager = Arc::new(RwLock::new(
                 IndexManager::open_or_create(&index_dir).expect("failed to open index"),
@@ -161,7 +163,10 @@ pub fn run() {
             std::thread::spawn(move || {
                 while let Ok(event) = event_rx.recv() {
                     log::info!("[WATCHER] file {:?}: {:?}", event.kind, event.path);
-                    let _ = scanner_for_watcher.handle_event(event);
+                    let sc = scanner_for_watcher.clone();
+                    std::thread::spawn(move || {
+                        let _ = sc.handle_event(event);
+                    });
                 }
             });
 
@@ -177,7 +182,7 @@ pub fn run() {
                 Arc::new(Mutex::new(ScanDelta::default())),
                 data_dir,
                 index_dir,
-                db_path,
+                db_path.clone(),
                 watcher_tx,
                 Some(watcher),
             );
@@ -271,12 +276,17 @@ pub fn run() {
                     drop(conn);
                 }
 
-                // VACUUM after watchers started
-                if let Ok(conn) = db_ref.get() {
-                    if let Err(e) = crate::db::vacuum(&conn) {
-                        log::error!("[STARTUP] VACUUM failed: {e}");
+                // VACUUM after watchers started — only if DB > 100 MiB
+                let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
+                if db_size > 100 * 1024 * 1024 {
+                    if let Ok(conn) = db_ref.get() {
+                        if let Err(e) = crate::db::vacuum(&conn) {
+                            log::error!("[STARTUP] VACUUM failed: {e}");
+                        }
+                        drop(conn);
                     }
-                    drop(conn);
+                } else {
+                    log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold=100 MiB)");
                 }
 
                 app_handle.emit("scan-completed", serde_json::json!({}))

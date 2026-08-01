@@ -6,6 +6,17 @@
 
 ## 2026-08-01 (今日)
 
+### R4-A 并发与状态修复（5 项）
+- **3-1 PaddleOCR Mutex.lock().unwrap() 中毒 panic**：`with_engine` 内 `lock().unwrap()` 改为 `lock().unwrap_or_else(|e| e.into_inner())`，poisoned mutex 时恢复内层值而非崩溃（`src-tauri/src/extractor/paddleocr.rs`）
+- **3-2 watcher 单线程串行阻塞**：事件循环中 `handle_event` 直接调用会阻塞后续事件接收。改为对每个 event 独立 `std::thread::spawn`，大文件处理不再阻塞 watcher 线程（`src-tauri/src/lib.rs`）
+- **3-3 init_db 重复创建连接池**：原 `init_db` 内部调用 `get_pool` 新建独立池，与主池隔离。改为接收 `&Connection` 参数，由调用方传入主池连接（`src-tauri/src/db/mod.rs`、`src-tauri/src/lib.rs`）
+- **3-4 启动 VACUUM 无条件执行**：VACUUM 持有 SQLite 独占锁，对小于 100 MiB 的 DB 是浪费。改为先 `std::fs::metadata` 检查文件大小，仅超过 100 MiB 时才执行 VACUUM（`src-tauri/src/lib.rs`）
+- **3-5 PRAGMA foreign_keys 仅首个连接生效**：原 `get_pool` 在初始连接上 `execute_batch` 设置 WAL+FK，新池连接不继承。改为 r2d2 `connection_customizer` + `CustomizeConnection::on_acquire`，每个新连接自动执行 `PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;`（`src-tauri/src/db/mod.rs`）
+
+---
+
+## 2026-08-01 (今日)
+
 ### R4-B 后端代码质量改进
 - **3-6 batch_index/index_file 去重**：抽 `extract_and_index_single` 共享函数，消除 `batch_index` Phase 1 与 `index_file` 间约 150 行重复的读文件→MD5→去重→提取逻辑（`src-tauri/src/indexer.rs`）
 - **3-9 IndexedState / FileStatus 枚举**：在 `tracker.rs` 新增 `IndexedState { Pending=0, Indexed=1, Failed=2 }` 和 `FileStatus { Active, Deleted }` 枚举，替换散落的字面量比较（`helpers.rs`、`scanner/mod.rs`、`commands/files.rs`）

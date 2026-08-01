@@ -5,26 +5,34 @@ pub mod search_history;
 pub mod tracker;
 
 use anyhow::{Context, Result};
-use r2d2::Pool;
+use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
 const SCHEMA_VERSION: &str = "1";
 
-/// Create a connection pool with WAL mode and foreign keys enabled.
+/// Connection customizer that enables WAL mode and foreign keys on every
+/// pooled connection.  r2d2 calls this right after a new connection is created,
+/// so all connections start with the correct pragmas.
+#[derive(Debug)]
+struct PragmaCustomizer;
+
+impl CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
+    fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
+        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+    }
+}
+
+/// Create a connection pool with WAL mode and foreign keys enabled on every
+/// connection via the customizer.
 pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
         .max_size(32)
         .connection_timeout(std::time::Duration::from_secs(10))
+        .connection_customizer(Box::new(PragmaCustomizer))
         .build(manager)
         .context("failed to create connection pool")?;
-
-    // Enable WAL mode and foreign keys on the initial connection;
-    // all pooled connections inherit these pragmas from the same file.
-    let conn = pool.get().context("failed to get initial connection")?;
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-        .context("failed to set database pragmas")?;
 
     Ok(pool)
 }
@@ -32,10 +40,11 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
 /// Initialize the database: create tables, seed defaults, record schema version.
 ///
 /// Safe to call multiple times — all DDL uses IF NOT EXISTS.
-pub fn init_db(db_path: &str) -> Result<()> {
-    let pool = get_pool(db_path)?;
-    let conn = pool.get().context("failed to get connection for init")?;
-    run_migrations(&conn)
+///
+/// Callers must ensure the connection's pragmas (WAL, foreign keys) are set,
+/// typically via [`get_pool`] with [`PragmaCustomizer`].
+pub fn init_db(conn: &Connection) -> Result<()> {
+    run_migrations(conn)
 }
 
 /// Run all pending migrations. Exposed as `pub(crate)` for testing.
@@ -210,10 +219,10 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("ls_init_test_{}.db", std::process::id()));
         let path = tmp.to_str().unwrap().to_string();
 
-        init_db(&path).unwrap();
-
         let pool = get_pool(&path).unwrap();
         let conn = pool.get().unwrap();
+        init_db(&conn).unwrap();
+
         let count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM app_settings WHERE key='schema_version'",

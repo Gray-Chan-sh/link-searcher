@@ -63,7 +63,7 @@ where
         }
     };
 
-    let guard = engine.0.lock().unwrap();
+    let guard = engine.0.lock().unwrap_or_else(|e| e.into_inner());
     f(&*guard)
 }
 
