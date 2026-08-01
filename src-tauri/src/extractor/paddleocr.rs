@@ -1,5 +1,7 @@
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
@@ -86,9 +88,32 @@ pub fn recognize_from_path(path: &Path) -> Result<String> {
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Run a closure that holds the OCR engine lock, with a 120s timeout.
+/// Prevents the global Mutex from being held indefinitely if OCR hangs.
+fn with_engine_timed<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&OcrEngine) -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = thread::spawn(move || {
+        let result = with_engine(f);
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = handle.join();
+            Err("PaddleOCR timed out after 120s".to_string())
+        }
+    }
+}
+
 pub fn recognize_from_image(image: &image::DynamicImage) -> Result<String> {
-    with_engine(|eng| {
-        eng.run_from_image(image)
+    // Clone image so the closure owns it (needed for thread send + 'static)
+    let image = image.clone();
+    with_engine_timed(move |eng| {
+        eng.run_from_image(&image)
             .map(|results| results.into_iter().map(|r| r.text).collect::<Vec<_>>().join(" "))
             .map_err(|e| format!("OCR 引擎无法处理此图片（模型可能不支持该输入格式）: {}", e))
     })

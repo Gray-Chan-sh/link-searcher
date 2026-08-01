@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
@@ -72,15 +73,20 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
     let tmp_dir = TempDir::new("ls_pdf_ocr")?;
 
     let output_prefix = tmp_dir.path().join("page");
-    let status = std::process::Command::new("pdftoppm")
-        .args(["-png", "-r", "300"])
-        .arg(path)
-        .arg(&output_prefix)
-        .status()
+    let mut cmd = Command::new("pdftoppm");
+    cmd.args(["-png", "-r", "300"]).arg(path).arg(&output_prefix);
+    let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
-
-    if !status.success() {
-        return Err(anyhow::anyhow!("pdftoppm failed to render PDF"));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(child.wait()); });
+    match rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(_)) => return Err(anyhow::anyhow!("pdftoppm failed to render PDF")),
+        Ok(Err(e)) => return Err(anyhow::anyhow!("pdftoppm error: {e}")),
+        Err(_) => {
+            let _ = Command::new("pkill").arg("-f").arg("pdftoppm").status();
+            return Err(anyhow::anyhow!("pdftoppm timed out after 120s"));
+        }
     }
 
     let mut full_text = String::new();

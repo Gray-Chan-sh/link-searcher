@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-02（高危后端安全修复：线程 OOM + 进程无超时 + 路径失配）
+
+### 🔴 高危修复（HIGH-1 ~ HIGH-4）
+- **HIGH-1 watcher 无限制线程 spawn**：`lib.rs` 原每个文件事件内层 `std::thread::spawn` 导致大量文件变更时 OOM。改为单线程串行处理（恢复旧行为），`handle_event` 本身很快无需独立线程（`src-tauri/src/lib.rs`）
+- **HIGH-2 pdftoppm 无超时阻塞扫描**：`pdf.rs` 原用 `.status()` 无限等待大 PDF 渲染。改为 `.spawn()` + 后台线程 `recv_timeout(120s)`，超时后用 `pkill -f pdftoppm` 终止进程（`src-tauri/src/extractor/pdf.rs`）
+- **HIGH-3 PaddleOCR/Tesseract 无超时锁死全局 Mutex**：`paddleocr.rs` 新增 `with_engine_timed`（后台线程 + 120s channel timeout），`recognize_from_image` 改用；`ocr.rs` Tesseract 同样改为 spawn + 后台线程 wait + 120s timeout，超时 pkill（`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/extractor/ocr.rs`）
+- **HIGH-4 Windows 路径分隔符 mismatch**：`watcher.rs` `find_matching_dir` 原用 `Path::starts_with`，DB 存 `/` 但 watcher 给 `\` 导致失配。改为两边均 normalize 为 `/` 后比较（`src-tauri/src/scanner/watcher.rs`、`src-tauri/src/scanner/helpers.rs`）
+
+---
+
 ## 2026-08-01（错误处理与内存序修复）
 
 ### 前端

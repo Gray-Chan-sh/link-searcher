@@ -179,12 +179,15 @@ fn classify_event(event: &Event) -> Option<ChangeKind> {
 }
 
 /// Find the first watched directory that is an ancestor of `path`.
+/// Normalizes both sides to forward slashes so DB-stored paths match on Windows.
 fn find_matching_dir(
     watches: &HashMap<String, PathBuf>,
     path: &Path,
 ) -> Option<String> {
+    let normalized = path.to_string_lossy().replace('\\', "/");
     for (dir_id, dir_path) in watches {
-        if path.starts_with(dir_path) {
+        let dir_normalized = dir_path.to_string_lossy().replace('\\', "/");
+        if normalized.starts_with(&dir_normalized) {
             return Some(dir_id.clone());
         }
     }

@@ -127,6 +127,7 @@ pub fn to_relative(dir_root: &str, file_path: &Path) -> Result<String> {
     let rel = file_path
         .strip_prefix(&root)
         .map_err(|_| anyhow!("file {} is not under dir root {}", file_path.display(), dir_root))?;
+    // Store with forward slashes so DB/IPC matches on Windows too.
     Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 

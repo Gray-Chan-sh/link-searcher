@@ -163,10 +163,7 @@ pub fn run() {
             std::thread::spawn(move || {
                 while let Ok(event) = event_rx.recv() {
                     log::info!("[WATCHER] file {:?}: {:?}", event.kind, event.path);
-                    let sc = scanner_for_watcher.clone();
-                    std::thread::spawn(move || {
-                        let _ = sc.handle_event(event);
-                    });
+                    let _ = scanner_for_watcher.handle_event(event);
                 }
             });
 

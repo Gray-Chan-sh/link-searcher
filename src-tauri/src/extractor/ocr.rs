@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -119,26 +120,30 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
     // Preprocess image for better OCR accuracy
     let pp_path = preprocess_image(image_path)?;
 
-    let output = Command::new("tesseract")
-        .arg(pp_path.as_os_str())
+    let mut cmd = Command::new("tesseract");
+    cmd.arg(pp_path.as_os_str())
         .arg("stdout")
         .arg("-l")
         .arg(effective_lang)
         .stderr(std::process::Stdio::null())
-        .output()
-        .context("failed to execute tesseract — is it installed?")?;
-
-    let _ = std::fs::remove_file(&pp_path);
-
-    if !output.status.success() {
-        anyhow::bail!(
-            "tesseract exited with code {:?}",
-            output.status.code()
-        );
+        .stdout(std::process::Stdio::piped());
+    let child = cmd.spawn().context("failed to execute tesseract — is it installed?")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
+    match rx.recv_timeout(Duration::from_secs(120)).context("tesseract wait failed")? {
+        Ok(output) => {
+            let _ = std::fs::remove_file(&pp_path);
+            if !output.status.success() {
+                anyhow::bail!("tesseract exited with code {:?}", output.status.code());
+            }
+            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok(text)
+        }
+        Err(_) => {
+            let _ = Command::new("pkill").arg("-f").arg("tesseract").status();
+            anyhow::bail!("tesseract timed out after 120s");
+        }
     }
-
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(text)
 }
 
 /// Extract text from an image using the best available engine.
