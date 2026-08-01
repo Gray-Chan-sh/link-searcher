@@ -31,7 +31,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
     const setLang = useCallback(async (l: Lang) => {
         setLangState(l)
-        await updateConfig({ data_dir: '', language: l })
+        await updateConfig({ language: l })
     }, [])
 
     const t = useCallback((key: string) => {

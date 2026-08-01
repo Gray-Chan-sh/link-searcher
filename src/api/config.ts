@@ -11,6 +11,9 @@ export async function getConfig(): Promise<ConfigInfo> {
 }
 
 export async function updateConfig(config: Partial<ConfigInfo>): Promise<void> {
+    if ('data_dir' in config && config.data_dir === '') {
+        throw new Error('data_dir cannot be empty')
+    }
     const current = await getConfig()
     return invoke('update_config', {
         newConfig: { ...current, ...config } as ConfigInfo,

@@ -202,6 +202,16 @@
 
 ---
 
+## 2026-08-01
+
+### 🏗️ 临时目录 RAII 工具 TempDir
+- **临时目录并发冲突与泄漏**：4 处用 `ls_*_{pid}` 命名系统临时目录的代码，并发/多实例运行时共享同一路径互相覆盖，且提前 return 时遗留垃圾目录。新增 `scanner/helpers.rs` 的 `TempDir`（`{prefix}_{pid}_{uuid}` 唯一路径 + Drop 自动 `remove_dir_all`），替换 4 处：
+  - `commands/files.rs` `download_files`：`ls_download_{pid}` → `TempDir::new("ls_download")`（zip 打包）
+  - `commands/search.rs` `export_search_results`：`ls_export_{pid}.{format}` → `TempDir::new("ls_export")`（CSV/文本导出）
+  - `extractor/office/mod.rs` `extract_via_libreoffice`：`ls_lo_{pid}` → `TempDir::new("ls_lo")`（guard 留在函数作用域，路径 clone 进线程，移除手动 `remove_dir_all`）
+  - `extractor/pdf.rs` `ocr_pdf_via_pdftoppm`：`ls_pdf_ocr_{pid}` → `TempDir::new("ls_pdf_ocr")`（移除手动 `remove_dir_all`）
+  - 新增 2 个单测：drop 后目录被删除、路径唯一（`cargo test --lib scanner::helpers` 通过）
+
 ## 统计
 
 | 类别 | 数量 |

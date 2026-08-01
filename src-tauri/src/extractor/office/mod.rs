@@ -10,6 +10,7 @@ use quick_xml::Reader as XmlReader;
 
 use super::Extractor;
 use crate::config::load_config;
+use crate::scanner::helpers::TempDir;
 
 pub fn is_libreoffice_available() -> bool {
     if let Ok(lo_bin) = std::env::var("LO_BINARY") {
@@ -119,12 +120,11 @@ pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
         None
     };
 
-    let tmp_dir = std::env::temp_dir().join(format!("ls_lo_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).context("failed to create LO temp dir")?;
+    let tmp_dir = TempDir::new("ls_lo").context("failed to create LO temp dir")?;
 
     let (tx, rx) = mpsc::channel();
     let path = path.to_path_buf();
-    let out_dir = tmp_dir.clone();
+    let out_dir = tmp_dir.path().to_path_buf();
 
     std::thread::spawn(move || {
         let result = (|| -> Result<String> {
@@ -162,7 +162,6 @@ pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
         .recv_timeout(Duration::from_secs(60))
         .map_err(|_| anyhow::anyhow!("LibreOffice timed out (60s)"))??;
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(result)
 }
 

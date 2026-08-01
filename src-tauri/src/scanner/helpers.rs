@@ -135,3 +135,55 @@ pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
         None => true,
     }
 }
+
+/// RAII temporary directory. Unique per instance (pid + uuid), removed
+/// including contents when dropped. Solves concurrent runs sharing the same
+/// temp dir and leaking leftovers on early returns.
+pub struct TempDir {
+    path: std::path::PathBuf,
+}
+
+impl TempDir {
+    pub fn new(prefix: &str) -> Result<Self> {
+        let path = std::env::temp_dir().join(format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_dir_removed_on_drop() {
+        let path = {
+            let td = TempDir::new("test_tmp").unwrap();
+            assert!(td.path().exists());
+            td.path().to_path_buf()
+        };
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn temp_dir_names_are_unique() {
+        let a = TempDir::new("test_tmp").unwrap().path().to_path_buf();
+        let b = TempDir::new("test_tmp").unwrap().path().to_path_buf();
+        assert_ne!(a, b);
+    }
+}

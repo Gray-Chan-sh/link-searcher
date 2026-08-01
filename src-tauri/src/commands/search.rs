@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 use crate::db;
+use crate::scanner::helpers::TempDir;
 use crate::search::searcher::{SearchParams, SearchResponse, SearcherWrap};
 use crate::state::AppState;
 
@@ -304,7 +305,8 @@ pub async fn export_search_results(
     drop(searcher);
     drop(mgr);
 
-    let tmp_path = std::env::temp_dir().join(format!("ls_export_{}.{}", std::process::id(), format));
+    let tmp_dir = TempDir::new("ls_export").map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let tmp_path = tmp_dir.path().join(format!("export.{}", format));
     std::fs::write(&tmp_path, &output).map_err(|e| format!("failed to write export: {e}"))?;
     Ok(tmp_path.to_string_lossy().to_string())
 }

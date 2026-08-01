@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::db;
+use crate::scanner::helpers::TempDir;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -284,10 +285,8 @@ pub async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), Str
 pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Result<String, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
-    let tmp_dir = std::env::temp_dir().join(format!("ls_download_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("failed to create temp dir: {e}"))?;
-
-    let zip_path = tmp_dir.join("download.zip");
+    let tmp_dir = TempDir::new("ls_download").map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let zip_path = tmp_dir.path().join("download.zip");
     let file = std::fs::File::create(&zip_path).map_err(|e| format!("failed to create zip: {e}"))?;
     let mut zip_writer = zip::ZipWriter::new(file);
     let options = zip::write::FileOptions::<()>::default()

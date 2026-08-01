@@ -5,6 +5,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 use super::Extractor;
+use crate::scanner::helpers::TempDir;
 
 pub struct PdfExtractor;
 
@@ -68,11 +69,9 @@ pub fn is_watermark_text(pages: &[String]) -> bool {
 /// Render PDF pages to images using pdftoppm and run OCR.
 /// Returns extracted text from all pages.
 pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
-    let tmp_dir =
-        std::env::temp_dir().join(format!("ls_pdf_ocr_{}", std::process::id()));
-    std::fs::create_dir_all(&tmp_dir)?;
+    let tmp_dir = TempDir::new("ls_pdf_ocr")?;
 
-    let output_prefix = tmp_dir.join("page");
+    let output_prefix = tmp_dir.path().join("page");
     let status = std::process::Command::new("pdftoppm")
         .args(["-png", "-r", "300"])
         .arg(path)
@@ -87,7 +86,7 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
     let mut full_text = String::new();
     let mut page_num = 1;
     loop {
-        let page_path = tmp_dir.join(format!("page-{page_num}.png"));
+        let page_path = tmp_dir.path().join(format!("page-{page_num}.png"));
         if !page_path.exists() {
             break;
         }
@@ -103,7 +102,6 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
         page_num += 1;
     }
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
     Ok(full_text)
 }
 
