@@ -32,9 +32,27 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
     let index_dest = dest.join(INDEX_DIR_NAME);
     copy_dir(&state.index_dir, &index_dest)?;
 
-    // Backup SQLite database
+    // Backup SQLite database（在线备份 API，保证 WAL 一致性，不直接 fs::copy 活跃 DB）
     let db_dest = dest.join("data.db");
-    std::fs::copy(&state.db_path, &db_dest).map_err(|e| format!("failed to backup db: {e}"))?;
+    let src_conn = Connection::open(&state.db_path)
+        .map_err(|e| format!("failed to open source db: {e}"))?;
+    let mut dst_conn = Connection::open(&db_dest)
+        .map_err(|e| format!("failed to open backup db: {e}"))?;
+    let backup = Backup::new(&src_conn, &mut dst_conn)
+        .map_err(|e| format!("failed to init backup: {e}"))?;
+    let mut r = backup.step(-1).map_err(|e| format!("backup failed: {e}"))?;
+    let mut busy = 0;
+    while r == StepResult::Busy || r == StepResult::Locked {
+        busy += 1;
+        if busy >= 3 {
+            return Err("数据库繁忙，备份未完成，请重试".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        r = backup.step(-1).map_err(|e| format!("backup failed: {e}"))?;
+    }
+    if r != StepResult::Done {
+        return Err("数据库繁忙，备份未完成，请重试".to_string());
+    }
 
     // Cleanup old backups: keep only the 10 most recent
     cleanup_old_backups(&backup_dir, 10);

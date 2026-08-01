@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-01（第七轮：WAL 一致性修复）
+
+### 🔴 数据库备份/迁移一致性
+- **trigger_backup 直接 fs::copy 活跃 WAL DB**：`backup.rs` 原用 `std::fs::copy(&state.db_path, &db_dest)` 复制活跃 SQLite 数据库，WAL 模式下源文件与 WAL/SHM 分离，产生数据撕裂。改为 `rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)` + `step(-1)` 在线备份，Busy/Locked 重试 3 次（与 `restore_backup` 模式一致，`backup.rs`）
+- **migrate_data 直接 fs::copy 活跃 WAL DB**：`config.rs` 迁移时同样 `fs::copy` 活跃 DB。改为相同 Backup API 模式，目标 DB 由 `Connection::open` 创建（新文件），源 DB 保持活跃，Busy/Locked 重试 3 次（`config.rs`）
+
+---
+
 ## 2026-08-01 (今日)
 
 ### R4-C 前端质量改进（7 项）

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
+use rusqlite::backup::{Backup, StepResult};
+use rusqlite::Connection;
 use crate::config::{AppConfig, INDEX_DIR_NAME, load_config, save_config};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -49,12 +51,30 @@ pub fn migrate_data(old_path: String, new_path: String) -> Result<String, String
 
     std::fs::create_dir_all(new).map_err(|e| format!("无法创建目标目录: {e}"))?;
 
-    // Copy SQLite
+    // Copy SQLite（在线备份 API，保证 WAL 一致性）
     let db_name = "data.db";
     let old_db = old.join(db_name);
     let new_db = new.join(db_name);
     if old_db.exists() {
-        std::fs::copy(&old_db, &new_db).map_err(|e| format!("无法复制数据库: {e}"))?;
+        let src_conn = Connection::open(&old_db)
+            .map_err(|e| format!("无法打开源数据库: {e}"))?;
+        let mut dst_conn = Connection::open(&new_db)
+            .map_err(|e| format!("无法打开目标数据库: {e}"))?;
+        let backup = Backup::new(&src_conn, &mut dst_conn)
+            .map_err(|e| format!("初始化备份失败: {e}"))?;
+        let mut r = backup.step(-1).map_err(|e| format!("备份数据库失败: {e}"))?;
+        let mut busy = 0;
+        while r == StepResult::Busy || r == StepResult::Locked {
+            busy += 1;
+            if busy >= 3 {
+                return Err("数据库繁忙，迁移未完成，请重试".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            r = backup.step(-1).map_err(|e| format!("备份数据库失败: {e}"))?;
+        }
+        if r != StepResult::Done {
+            return Err("数据库繁忙，迁移未完成，请重试".to_string());
+        }
     }
 
     // Copy index directory
