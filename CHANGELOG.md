@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-01 (今日)
+
+### 全量 i18n 改造
+- **前端硬编码字符串全部提取到 en.ts / zh.ts**（`src/i18n/`）：新增 ~112 个翻译 key，覆盖 SearchPage、Browse、IndexStatus、DirManager、LogViewer、FileTypes、SearchBar、ResultList、PreviewPanel、FilterPanel、StatusBar、OnboardingWizard 共 12 个组件/页面
+- **t() 支持参数**：`src/i18n/index.tsx` 扩展 `t(key, params?)` 签名，支持 `{placeholder}` 模板替换（如 `t('saved_to', { path })`、`t('results_count', { total })` 等）
+- **SearchPage 键盘检查修复**：原检查 `placeholder.includes('your documents')` 在中文模式下失效，改为 `dataset.searchInput` 属性（`src/components/SearchBar.tsx` 加 `data-search-input="true"`，`src/pages/SearchPage.tsx` 改查该属性）
+- **涉及文件**：`src/i18n/en.ts`、`src/i18n/zh.ts`、`src/i18n/index.tsx`、`src/pages/SearchPage.tsx`、`src/pages/Browse.tsx`、`src/pages/IndexStatus.tsx`、`src/pages/DirManager.tsx`、`src/pages/LogViewer.tsx`、`src/pages/FileTypes.tsx`、`src/components/SearchBar.tsx`、`src/components/ResultList.tsx`、`src/components/PreviewPanel.tsx`、`src/components/FilterPanel.tsx`、`src/components/StatusBar.tsx`、`src/components/OnboardingWizard.tsx`
+
+---
+
 ## 2026-08-01
 
 ### 路径处理修复

@@ -7,7 +7,7 @@ type Lang = 'zh' | 'en'
 const translations: Record<Lang, Record<string, string>> = { zh, en }
 
 interface I18nContextType {
-    t: (key: string) => string
+    t: (key: string, params?: Record<string, string | number>) => string
     lang: Lang
     setLang: (lang: Lang) => void
 }
@@ -34,8 +34,14 @@ export function I18nProvider({ children }: { children: ReactNode }) {
         await updateConfig({ language: l })
     }, [])
 
-    const t = useCallback((key: string) => {
-        return translations[lang][key] ?? key
+    const t = useCallback((key: string, params?: Record<string, string | number>) => {
+        let str = translations[lang][key] ?? key
+        if (params) {
+            for (const [k, v] of Object.entries(params)) {
+                str = str.replace(`{${k}}`, String(v))
+            }
+        }
+        return str
     }, [lang])
 
     return (

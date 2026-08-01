@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { getFile, getFilePreview, openFile, revealInFolder, type FileDetail, type FilePreview } from '../api/files'
+import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 
 interface PreviewPanelProps {
@@ -44,6 +45,7 @@ function countMatches(text: string, query: string): number {
 }
 
 export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPanelProps) {
+  const { t } = useI18n()
   const [meta, setMeta] = useState<FileDetail | null>(null)
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -78,9 +80,9 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
           setPreview(p)
         }
       })
-      .catch(e => {
-        if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load preview')
-      })
+        .catch(e => {
+          if (!cancelled) setError(e instanceof Error ? e.message : t('failed_load_preview'))
+        })
       .finally(() => {
         if (!cancelled) setLoading(false)
       })
@@ -145,13 +147,13 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
         <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
-          {meta?.file_name ?? 'Preview'}
+          {meta?.file_name ?? t('preview')}
         </h3>
         <div className="flex items-center gap-1">
           <button
             onClick={() => setFullscreen(v => !v)}
             className="p-0.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-            title={fullscreen ? 'Shrink panel' : 'Expand panel'}
+            title={fullscreen ? t('shrink_panel') : t('expand_panel')}
           >
             <svg
               className="size-3.5 text-gray-400"
@@ -194,17 +196,17 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
               <>
                 <div className="flex items-center gap-1.5 text-xs font-medium text-blue-600 dark:text-blue-400">
                   <span className="text-sm">📄</span>
-                  <span>PDF 文件</span>
+                  <span>{t('pdf_file')}</span>
                 </div>
                 <div className="text-xs font-medium text-gray-700 dark:text-gray-300 pt-1 pb-2">
-                  OCR 文字内容:
+                  {t('ocr_text_content')}
                 </div>
               </>
             )}
-            <MetaRow label="Path" value={meta.path} />
-            <MetaRow label="Size" value={formatSize(meta.file_size)} />
-            <MetaRow label="Modified" value={formatTime(meta.mtime)} />
-            <MetaRow label="Type" value={meta.file_ext.toUpperCase()} />
+            <MetaRow label={t('path')} value={meta.path} />
+            <MetaRow label={t('size')} value={formatSize(meta.file_size)} />
+            <MetaRow label={t('modified')} value={formatTime(meta.mtime)} />
+            <MetaRow label={t('type')} value={meta.file_ext.toUpperCase()} />
           </div>
         )}
 
@@ -215,7 +217,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
               <button
                 onClick={() => setScale(Math.max(0.25, scale - 0.25))}
                 className="px-2 py-0.5 text-xs font-medium bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                title="Zoom out"
+                title={t('zoom_out')}
               >
                 [-]
               </button>
@@ -229,7 +231,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
               <button
                 onClick={() => setScale(Math.min(3, scale + 0.25))}
                 className="px-2 py-0.5 text-xs font-medium bg-white/90 dark:bg-gray-800/90 backdrop-blur-sm border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
-                title="Zoom in"
+                title={t('zoom_in')}
               >
                 [+]
               </button>
@@ -251,7 +253,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
                   {highlightText(textContent.substring(0, 50000), searchQuery)}
                 </pre>
                 <div className="text-xs text-gray-500 dark:text-gray-400 py-1">
-                  显示前 50,000 字符，下载完整文件查看全部
+                  {t('truncated_notice')}
                 </div>
               </>
             ) : (
@@ -264,7 +266,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
         {preview?.ocr_used && (
           <div className="px-4 py-2 text-xs text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-t border-amber-200 dark:border-amber-800/30">
-            OCR was applied to extract text from this image
+            {t('ocr_applied_notice')}
           </div>
         )}
       </div>
@@ -275,7 +277,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
           <button
             onClick={() => scrollToMatch('prev')}
             className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-            title="Previous match"
+            title={t('previous_match')}
           >
             <svg className="size-3.5 text-gray-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m18 15-6-6-6 6" />
@@ -287,7 +289,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
           <button
             onClick={() => scrollToMatch('next')}
             className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-            title="Next match"
+            title={t('next_match')}
           >
             <svg className="size-3.5 text-gray-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="m6 9 6 6 6-6" />
@@ -303,19 +305,19 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
             onClick={() => navigator.clipboard.writeText(meta.path)}
             className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
-            Copy Path
+            {t('copy_path')}
           </button>
           <button
             onClick={() => revealInFolder(meta.id)}
             className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
-            Show in Folder
+            {t('show_in_folder')}
           </button>
           <button
             onClick={() => openFile(meta.id)}
             className="flex-1 px-2 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/40 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
           >
-            Open
+            {t('open')}
           </button>
         </div>
       )}

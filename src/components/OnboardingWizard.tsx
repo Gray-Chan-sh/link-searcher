@@ -1,19 +1,15 @@
 import { useState } from 'react'
-
-interface Step {
-    title: string
-    description: string
-    action: string
-}
-
-const steps: Step[] = [
-    { title: '添加资料库', description: '选择要搜索的文件夹，可以将整个磁盘或指定目录添加进来', action: '打开资料库页面' },
-    { title: '构建索引', description: '扫描文件并建立全文索引，搜索文件内容（不仅仅是文件名）', action: '开始扫描' },
-    { title: '搜索文件', description: '输入关键词，立刻找到包含该内容的文件，支持中文分词', action: '去搜索' },
-]
+import { useI18n } from '../i18n'
 
 export default function OnboardingWizard({ onClose }: { onClose: () => void }) {
+    const { t } = useI18n()
     const [step, setStep] = useState(0)
+
+    const steps: { title: string; description: string }[] = [
+        { title: t('ob_step1_title'), description: t('ob_step1_desc') },
+        { title: t('ob_step2_title'), description: t('ob_step2_desc') },
+        { title: t('ob_step3_title'), description: t('ob_step3_desc') },
+    ]
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
@@ -29,9 +25,9 @@ export default function OnboardingWizard({ onClose }: { onClose: () => void }) {
                     <p className="text-sm text-gray-500 dark:text-gray-400">{steps[step].description}</p>
                 </div>
                 <div className="flex gap-3">
-                    <button onClick={onClose} className="flex-1 px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg">Skip</button>
+                    <button onClick={onClose} className="flex-1 px-4 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg">{t('skip')}</button>
                     <button onClick={() => step < 2 ? setStep(s => s + 1) : onClose()} className="flex-1 px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-700 rounded-lg">
-                        {step < 2 ? 'Next' : 'Get Started'}
+                        {step < 2 ? t('next') : t('get_started')}
                     </button>
                 </div>
             </div>

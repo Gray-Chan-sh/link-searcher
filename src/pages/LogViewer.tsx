@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getLogs, clearLogs } from '../api/logs'
+import { useI18n } from '../i18n'
 import { LoadingSpinner, RefreshIcon } from '../icons'
 
 type Filter = 'all' | 'index' | 'ocr' | 'scan' | 'search' | 'error'
 
-const FILTERS: { value: Filter; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'index', label: 'Index' },
-  { value: 'ocr', label: 'OCR' },
-  { value: 'scan', label: 'Scan' },
-  { value: 'search', label: 'Search' },
-  { value: 'error', label: 'Error' },
+const FILTERS: { value: Filter; labelKey: string }[] = [
+  { value: 'all', labelKey: 'all' },
+  { value: 'index', labelKey: 'index' },
+  { value: 'ocr', labelKey: 'ocr' },
+  { value: 'scan', labelKey: 'scan' },
+  { value: 'search', labelKey: 'search' },
+  { value: 'error', labelKey: 'error' },
 ]
 
 function filterLogs(logs: string[], filter: Filter): string[] {
@@ -28,6 +29,7 @@ function logLineColor(line: string): string {
 }
 
 export default function LogViewer() {
+  const { t } = useI18n()
   const [logs, setLogs] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -46,7 +48,7 @@ export default function LogViewer() {
       const result = await getLogs(500)
       setLogs(result)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load logs')
+      setError(e instanceof Error ? e.message : t('failed_load_logs'))
     } finally {
       setLoading(false)
     }
@@ -78,7 +80,7 @@ export default function LogViewer() {
       setLogs([])
       prevLogCountRef.current = 0
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to clear logs')
+      setError(e instanceof Error ? e.message : t('failed_clear_logs'))
     }
   }
 
@@ -93,9 +95,9 @@ export default function LogViewer() {
     <div className="h-full flex flex-col p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Logs</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('logs')}</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Application activity log
+            {t('log_activity')}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -104,13 +106,13 @@ export default function LogViewer() {
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
             <RefreshIcon className="size-4" />
-            Refresh
+            {t('refresh')}
           </button>
           <button
             onClick={handleClear}
             className="px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
           >
-            Clear
+            {t('clear')}
           </button>
         </div>
       </div>
@@ -126,7 +128,7 @@ export default function LogViewer() {
                 : 'text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
             }`}
           >
-            {f.label}
+            {t(f.labelKey)}
           </button>
         ))}
         <button
@@ -142,7 +144,7 @@ export default function LogViewer() {
               : 'text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
           }`}
         >
-          Auto-scroll {autoScroll ? 'ON' : 'OFF'}
+          {t('auto_scroll')} {autoScroll ? t('on') : t('off')}
         </button>
       </div>
 
@@ -161,12 +163,12 @@ export default function LogViewer() {
       {!loading && filteredLogs.length === 0 && (
         <div className="flex flex-col items-center justify-center py-16 text-center">
           <p className="text-sm text-gray-500 dark:text-gray-400">
-            {logs.length === 0 ? 'No log entries yet' : 'No logs match the filter'}
+            {logs.length === 0 ? t('no_log_entries') : t('no_logs_match')}
           </p>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
             {logs.length === 0
-              ? 'Logs appear after indexing or searching'
-              : 'Try selecting a different filter'}
+              ? t('logs_appear_hint')
+              : t('try_other_filter')}
           </p>
         </div>
       )}
@@ -189,7 +191,7 @@ export default function LogViewer() {
               onClick={scrollToBottom}
               className="absolute bottom-3 right-3 px-3 py-1.5 text-xs font-medium text-white bg-blue-500 rounded-full shadow-lg hover:bg-blue-600 transition-colors animate-pulse"
             >
-              ↓ New logs
+              ↓ {t('new_logs')}
             </button>
           )}
         </div>

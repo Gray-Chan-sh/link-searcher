@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { DirConfig, DirTreeNode } from '../api/dirs'
 import { getDirTree } from '../api/dirs'
+import { useI18n } from '../i18n'
 import DirTree from './DirTree'
 
 interface FilterPanelProps {
@@ -35,6 +36,7 @@ export default function FilterPanel({
   onExtToggle,
   onClearFilters,
 }: FilterPanelProps) {
+  const { t } = useI18n()
   const [trees, setTrees] = useState<DirTreeNode[]>([])
 
   useEffect(() => {
@@ -73,17 +75,17 @@ export default function FilterPanel({
   return (
     <div className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Filters</h3>
+        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('filters')}</h3>
         {hasFilters && (
           <button onClick={onClearFilters} className="text-xs text-blue-600 dark:text-blue-400 hover:underline">
-            Clear
+            {t('clear')}
           </button>
         )}
       </div>
 
       {trees.length > 0 && (
         <div className="mb-4">
-          <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">Directories</h4>
+          <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('directories')}</h4>
           <div className="space-y-0.5">
             {trees.map(tree => (
               <DirTree
@@ -98,7 +100,7 @@ export default function FilterPanel({
       )}
 
       <div>
-        <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">File Type</h4>
+        <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('file_type')}</h4>
         <div className="space-y-1">
           {COMMON_EXTS.map(ext => (
             <label key={ext} className="flex items-center gap-2 cursor-pointer group">

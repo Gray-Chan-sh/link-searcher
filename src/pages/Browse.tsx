@@ -2,17 +2,19 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { useI18n } from '../i18n'
 import { type FilePreview } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb } from '../api/files'
 import { LoadingSpinner } from '../icons'
 
-function statusBadge(indexed: number, error_msg: string | null | undefined) {
-  if (indexed === 1) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ Indexed</span>
-  if (indexed === 2) return <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400" title={error_msg ?? undefined}>✗ Failed</span>
-  return <span className="inline-flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">○ Pending</span>
+function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
+  if (indexed === 1) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
+  if (indexed === 2) return <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400" title={error_msg ?? undefined}>✗ {t('failed')}</span>
+  return <span className="inline-flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">○ {t('pending')}</span>
 }
 
 export default function Browse() {
+  const { t } = useI18n()
   const [params, setParams] = useSearchParams()
   const [items, setItems] = useState<FileItem[]>([])
   const [total, setTotal] = useState(0)
@@ -83,7 +85,7 @@ export default function Browse() {
       setPreview(result)
     } catch (e) {
       if (previewVersionRef.current !== localVersion) return
-      setPreviewError(typeof e === 'string' ? e : 'Failed to load preview')
+      setPreviewError(typeof e === 'string' ? e : t('failed_load_preview'))
     }
     if (previewVersionRef.current !== localVersion) return
     setPreviewLoading(false)
@@ -102,10 +104,10 @@ export default function Browse() {
             onChange={e => { setFilter(e.target.value as FilterType); setPage(1) }}
             className="text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
           >
-            <option value="all">All</option>
-            <option value="indexed">Indexed</option>
-            <option value="pending">Pending</option>
-            <option value="failed">Failed</option>
+            <option value="all">{t('all')}</option>
+            <option value="indexed">{t('indexed')}</option>
+            <option value="pending">{t('pending')}</option>
+            <option value="failed">{t('failed')}</option>
           </select>
 
           <select
@@ -113,7 +115,7 @@ export default function Browse() {
             onChange={e => { setExt(e.target.value); setPage(1) }}
             className="text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
           >
-            <option value="">All Types</option>
+            <option value="">{t('all_types')}</option>
             <option value="pdf">PDF</option>
             <option value="docx">DOCX</option>
             <option value="doc">DOC</option>
@@ -133,7 +135,7 @@ export default function Browse() {
               value={search}
               onChange={e => { setSearch(e.target.value); setPage(1) }}
               onKeyDown={e => e.key === 'Enter' && setPage(1)}
-              placeholder="Search filename..."
+              placeholder={t('search_filename')}
               className="w-full text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 pr-7 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
             />
             {search && (
@@ -153,16 +155,16 @@ export default function Browse() {
             }}
             className="text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
           >
-            <option value="name-asc">Name A-Z</option>
-            <option value="name-desc">Name Z-A</option>
-            <option value="size-desc">Size ↓</option>
-            <option value="size-asc">Size ↑</option>
-            <option value="mtime-desc">Newest</option>
-            <option value="mtime-asc">Oldest</option>
-            <option value="ext-asc">Ext A-Z</option>
+            <option value="name-asc">{t('name_az')}</option>
+            <option value="name-desc">{t('name_za')}</option>
+            <option value="size-desc">{t('size_desc')}</option>
+            <option value="size-asc">{t('size_asc')}</option>
+            <option value="mtime-desc">{t('newest')}</option>
+            <option value="mtime-asc">{t('oldest')}</option>
+            <option value="ext-asc">{t('ext_az')}</option>
           </select>
 
-          <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{total.toLocaleString()} files</span>
+          <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{total.toLocaleString()} {t('files')}</span>
         </div>
 
         {/* Table */}
@@ -175,10 +177,10 @@ export default function Browse() {
             <table className="w-full text-xs">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 backdrop-blur z-10">
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
-                  <th className="px-4 py-2 font-medium w-48">Filename</th>
-                  <th className="px-4 py-2 font-medium">Path</th>
-                  <th className="px-4 py-2 font-medium w-16">Type</th>
-                  <th className="px-4 py-2 font-medium w-28">Status</th>
+                  <th className="px-4 py-2 font-medium w-48">{t('filename')}</th>
+                  <th className="px-4 py-2 font-medium">{t('path')}</th>
+                  <th className="px-4 py-2 font-medium w-16">{t('type')}</th>
+                  <th className="px-4 py-2 font-medium w-28">{t('status')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,13 +208,13 @@ export default function Browse() {
                     <td className="px-4 py-2">
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>
                     </td>
-                    <td className="px-4 py-2">{statusBadge(item.indexed, item.error_msg)}</td>
+                    <td className="px-4 py-2">{statusBadge(item.indexed, item.error_msg, t)}</td>
                   </tr>
                 ))}
                 {!loading && items.length === 0 && (
                   <tr>
                     <td colSpan={4} className="px-4 py-16 text-center text-gray-400 dark:text-gray-500">
-                      No files found
+                      {t('no_files_found')}
                     </td>
                   </tr>
                 )}
@@ -228,17 +230,17 @@ export default function Browse() {
             disabled={page <= 1}
             className="px-3 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            ← Prev
+            ← {t('prev_page')}
           </button>
           <span className="text-xs text-gray-500 dark:text-gray-400">
-            Page {page} / {totalPages} · {((page - 1) * pageSize) + 1}-{Math.min(page * pageSize, total)} of {total}
+            {t('page_info', { page, total: totalPages, start: ((page - 1) * pageSize) + 1, end: Math.min(page * pageSize, total), totalAll: total })}
           </span>
           <button
             onClick={() => setPage(p => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages}
             className="px-3 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-100 dark:hover:bg-gray-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
-            Next →
+            {t('next_page')} →
           </button>
         </div>
       </div>
@@ -272,21 +274,21 @@ export default function Browse() {
               </pre>
             )}
             {!preview.content && preview.file_type !== 'image' && (
-              <p className="text-sm text-gray-400">No preview available</p>
+              <p className="text-sm text-gray-400">{t('no_preview_available')}</p>
             )}
             {preview.char_count > 0 && (
               <p className="mt-3 text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
-                {preview.char_count} characters {preview.ocr_used ? '(OCR)' : ''}
+                {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
               </p>
             )}
           </div>
         )}
         {!preview && !previewLoading && !previewError && selectedFile && (
-          <p className="p-4 text-sm text-gray-400">Loading preview...</p>
+          <p className="p-4 text-sm text-gray-400">{t('loading_preview')}</p>
         )}
         {!selectedFile && !previewLoading && (
           <div className="flex items-center justify-center h-full text-sm text-gray-400">
-            Select a file to preview
+            {t('select_file_preview')}
           </div>
         )}
       </div>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getSearchHistory, type SearchHistoryEntry } from '../api/search'
+import { useI18n } from '../i18n'
 import { SearchIcon, XIcon, LoadingSpinner } from '../icons'
 
 interface SearchBarProps {
@@ -19,6 +20,7 @@ export default function SearchBar({
   onFetchSuggestions,
   onClearSuggestions,
 }: SearchBarProps) {
+  const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
   const [focused, setFocused] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(-1)
@@ -114,7 +116,8 @@ export default function SearchBar({
           onKeyDown={handleKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => setFocused(false), 150)}
-          placeholder="Search your documents...  (⌘K)"
+          placeholder={`${t('search_placeholder')} (⌘K)`}
+          data-search-input="true"
           className="w-full pl-9 pr-8 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
         />
         {query && (
@@ -145,7 +148,7 @@ export default function SearchBar({
           {showHistory && (
             <>
               <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-                Recent searches
+              {t('recent_searches')}
               </div>
               {history.map((entry, i) => (
                 <button
@@ -158,7 +161,7 @@ export default function SearchBar({
                   }`}
                 >
                   <span className="truncate">{entry.query}</span>
-                  <span className="text-xs text-gray-400 shrink-0 ml-2">{entry.result_count} results</span>
+                  <span className="text-xs text-gray-400 shrink-0 ml-2">{t('results_count', { total: entry.result_count })}</span>
                 </button>
               ))}
             </>

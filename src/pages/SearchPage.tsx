@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useSearch } from '../hooks/useSearch'
 import { useDirs } from '../hooks/useDirs'
+import { useI18n } from '../i18n'
 import SearchBar from '../components/SearchBar'
 import FilterPanel from '../components/FilterPanel'
 import ResultList from '../components/ResultList'
@@ -16,6 +17,7 @@ import { save } from '@tauri-apps/plugin-dialog'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 
 export default function SearchPage() {
+  const { t } = useI18n()
   const search = useSearch()
   const { dirs } = useDirs()
   const [selectedHit, setSelectedHit] = useState<SearchHit | null>(null)
@@ -43,7 +45,7 @@ const handleExport = async () => {
     })
 
     if (!savedPath) {
-      setExportMsg('Export cancelled')
+      setExportMsg(t('export_cancelled'))
       setTimeout(() => setExportMsg(null), 3000)
       return
     }
@@ -51,10 +53,10 @@ const handleExport = async () => {
     const content = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
     await writeTextFile(savedPath, content)
 
-    setExportMsg(`Saved to ${savedPath}`)
+    setExportMsg(t('saved_to', { path: savedPath }))
     setTimeout(() => setExportMsg(null), 3000)
   } catch (e) {
-    setExportMsg(`Export failed: ${e instanceof Error ? e.message : 'Unknown error'}`)
+    setExportMsg(t('export_failed', { error: e instanceof Error ? e.message : t('unknown_error') }))
     setTimeout(() => setExportMsg(null), 5000)
   }
 }
@@ -63,8 +65,7 @@ useEffect(() => {
   const handleKeyDown = (e: KeyboardEvent) => {
     // Don't override search input handling - if focused in search, let it process Enter itself
     const activeEl = document.activeElement
-    if (activeEl instanceof HTMLInputElement && activeEl.placeholder && 
-        activeEl.placeholder.includes('your documents')) {
+    if (activeEl instanceof HTMLInputElement && activeEl.dataset.searchInput) {
       return
     }
 
@@ -133,14 +134,14 @@ useEffect(() => {
               onClick={() => setShowFilters(v => !v)}
               className="px-2.5 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0"
             >
-              Filters
+              {t('filters')}
             </button>
           </div>
 
           {search.status === 'success' && (
             <div className="flex items-center justify-between">
               <div className="text-xs text-gray-500 dark:text-gray-400">
-                {search.total} results ({search.tookMs}ms) — Page {search.page} of {totalPages}
+                {t('results_count', { total: search.total })} ({search.tookMs}ms) — {t('page_of', { page: search.page, total: totalPages })}
               </div>
               <div className="flex items-center gap-2">
                 <select
@@ -148,10 +149,10 @@ useEffect(() => {
                   onChange={e => search.setSort(e.target.value)}
                   className="text-xs px-2 py-1 border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400"
                 >
-                  <option value="score">By Relevance</option>
-                  <option value="date">By Date</option>
-                  <option value="name">By Name</option>
-                  <option value="size">By Size</option>
+                  <option value="score">{t('by_relevance')}</option>
+                  <option value="date">{t('by_date')}</option>
+                  <option value="name">{t('by_name')}</option>
+                  <option value="size">{t('by_size')}</option>
                 </select>
                 {exportMsg && (
                   <span className="text-xs text-gray-500 dark:text-gray-400 max-w-48 truncate">{exportMsg}</span>
@@ -160,7 +161,7 @@ useEffect(() => {
                   onClick={handleExport}
                   className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0"
                 >
-                  Export CSV
+                  {t('export_csv')}
                 </button>
               </div>
             </div>
@@ -171,8 +172,8 @@ useEffect(() => {
           {search.status === 'idle' && (
             <EmptyState
               icon={<SearchIcon className="size-12" />}
-              title="Search your documents"
-              description="Type a query above to search across your indexed files"
+              title={t('search_your_documents')}
+              description={t('search_description')}
             />
           )}
 
@@ -187,7 +188,7 @@ useEffect(() => {
                 onClick={search.retry}
                 className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
               >
-                Retry
+                {t('retry')}
               </button>
             </div>
           )}
@@ -202,9 +203,9 @@ useEffect(() => {
 
           {search.status === 'success' && search.hits.length === 0 && (
             <div className="flex flex-col items-center justify-center py-16 px-4 text-center space-y-3">
-              <p className="text-lg font-medium text-gray-900 dark:text-gray-100">No results found</p>
+              <p className="text-lg font-medium text-gray-900 dark:text-gray-100">{t('no_results_found')}</p>
               <p className="text-sm text-gray-500 dark:text-gray-400">
-                💡 Try expanding your search range: check filters or clear directory selection
+                {t('no_results_hint')}
               </p>
               <button
                 onClick={() => {
@@ -214,15 +215,15 @@ useEffect(() => {
                 }}
                 className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors whitespace-nowrap"
               >
-                Clear Filters
+                {t('clear_filters')}
               </button>
               <p className="text-xs text-gray-500 dark:text-gray-400">
-                📊 Index status:
+                📊 {t('index_status')}:
                 <Link
                   to="/index"
                   className="text-blue-600 dark:text-blue-500 underline hover:text-blue-700 ml-1"
                 >
-                  Index Status
+                  {t('index_status')}
                 </Link>
               </p>
             </div>
@@ -236,11 +237,11 @@ useEffect(() => {
               disabled={search.page <= 1}
               className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
-              Previous
+              {t('prev_page')}
             </button>
             
             <div className="flex items-center gap-2">
-              <span className="text-xs text-gray-500 dark:text-gray-400">Go to:</span>
+              <span className="text-xs text-gray-500 dark:text-gray-400">{t('go_to')}</span>
               <input
                 type="number"
                 value={search.page}
@@ -272,7 +273,7 @@ useEffect(() => {
               disabled={search.page >= totalPages}
               className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
             >
-              Next
+              {t('next_page')}
             </button>
           </div>
         )}

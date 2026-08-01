@@ -8,15 +8,17 @@ import { getDuplicates, type DuplicateGroup } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
+import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { StatsCardSkeleton } from '../components/Skeleton'
 
-function formatTime(ts: number | null): string {
-  if (!ts) return 'Never'
+function formatTime(ts: number | null, t: (k: string) => string): string {
+  if (!ts) return t('never')
   return new Date(ts / 1000).toLocaleString()
 }
 
 export default function IndexStatus() {
+  const { t } = useI18n()
   const navigate = useNavigate()
   const { status, loading, error, scan, rebuild } = useIndexStatus()
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
@@ -44,13 +46,13 @@ export default function IndexStatus() {
     const settings = await getSettings()
     const engineType = settings['ocr_engine']
     if (!engineType) {
-      setScanError('请先在设置页面选择 OCR 引擎')
+      setScanError(t('scan_error_no_engine'))
       return
     }
     const engines = await listOcrEngines()
     const selected = engines.find(e => e.engine_type === engineType)
     if (selected && !selected.available) {
-      setScanError(`OCR 引擎 "${selected.name}" 不可用，请检查安装`)
+      setScanError(t('scan_error_engine_unavailable', { name: selected.name }))
       return
     }
     scan()
@@ -84,8 +86,8 @@ export default function IndexStatus() {
 
   const handleRebuild = async () => {
     const confirmed = await ask(
-        '重建索引将删除所有现有索引数据并重新扫描所有目录。此操作不可撤销，确定继续吗？',
-        { title: '重建索引', kind: 'warning' }
+        t('confirm_rebuild'),
+        { title: t('rebuild_index'), kind: 'warning' }
     )
     if (!confirmed) return
     setRebuilding(true)
@@ -129,9 +131,9 @@ export default function IndexStatus() {
     <div className="h-full p-6 overflow-y-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
-          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">Index Status</h2>
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('index_status')}</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Overview of the document index and scanning status
+            {t('index_status_overview')}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -141,14 +143,14 @@ export default function IndexStatus() {
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
           >
             <RefreshIcon className="size-4" />
-            Scan Now
+            {t('scan_now')}
           </button>
           {status?.is_scanning && (
             <button
               onClick={handleCancelScan}
               className="px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
             >
-              Cancel Scan
+              {t('cancel_scan')}
             </button>
           )}
           <button
@@ -157,7 +159,7 @@ export default function IndexStatus() {
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg disabled:opacity-50 transition-colors"
           >
             {rebuilding && <LoadingSpinner className="size-4" />}
-            Rebuild Index
+            {t('rebuild_index')}
           </button>
         </div>
       </div>
@@ -186,31 +188,31 @@ export default function IndexStatus() {
       {status && (
         <>
           <div className="grid grid-cols-5 gap-4 mb-6">
-            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label="Total Files" value={status.total_files.toLocaleString()} color="gray" /></div>
-            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label="Indexed" value={status.indexed.toLocaleString()} color="green" /></div>
-            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label="Pending" value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? 'incl. errors' : undefined} /></div>
-            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label="OCR'd" value={status.ocred.toLocaleString()} color="purple" /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('total_files')} value={status.total_files.toLocaleString()} color="gray" /></div>
+            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" /></div>
+            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('ocred')} value={status.ocred.toLocaleString()} color="purple" /></div>
             <div
               className={`p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg cursor-pointer hover:border-red-300 dark:hover:border-red-700 transition-colors ${status.errors > 0 ? 'cursor-pointer' : ''}`}
               onClick={status.errors > 0 ? handleShowErrors : undefined}
             >
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Errors</p>
+              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('errors')}</p>
               <p className={`text-2xl font-semibold ${status.errors > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
                 {status.errors.toLocaleString()}
               </p>
               {status.errors > 0 && (
-                <div className="flex items-center gap-2 mt-2">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); retryFailed() }}
-                    disabled={retrying || status.is_scanning}
-                    className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
-                  >
-                    {retrying ? <LoadingSpinner className="size-3" /> : <RefreshIcon className="size-3" />}
-                    Retry
-                  </button>
+               <div className="flex items-center gap-2 mt-2">
+                 <button
+                   onClick={(e) => { e.stopPropagation(); retryFailed() }}
+                   disabled={retrying || status.is_scanning}
+                   className="flex items-center gap-1 text-xs text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+                 >
+                   {retrying ? <LoadingSpinner className="size-3" /> : <RefreshIcon className="size-3" />}
+                   {t('retry')}
+                 </button>
                   <span className="text-xs text-gray-400 dark:text-gray-500">|</span>
                   <span className="text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300" onClick={(e) => { e.stopPropagation(); handleShowErrors() }}>
-                    Details
+                    {t('details')}
                   </span>
                 </div>
               )}
@@ -220,8 +222,8 @@ export default function IndexStatus() {
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                Index Progress
-                {scanPhase && ` — ${scanPhase === 'index' ? 'Indexing...' : 'Scanning...'}`}
+                {t('index_progress')}
+                {scanPhase && ` — ${scanPhase === 'index' ? `${t('indexing')}...` : `${t('scanning')}...`}`}
               </span>
               <span className="text-xs text-gray-500 dark:text-gray-400">{progress}%</span>
             </div>
@@ -236,8 +238,8 @@ export default function IndexStatus() {
           {showErrors && errorsList.length > 0 && (
             <div className="mb-6 p-4 bg-white dark:bg-gray-900 border border-red-200 dark:border-red-900 rounded-lg">
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">Error Details</h3>
-                <button onClick={() => setShowErrors(false)} className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">Close</button>
+                <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('error_details')}</h3>
+                <button onClick={() => setShowErrors(false)} className="text-xs text-gray-400 hover:text-gray-600 dark:hover:text-gray-300">{t('close')}</button>
               </div>
               <div className="max-h-64 overflow-y-auto space-y-2">
                 {errorsList.map((err) => (
@@ -251,7 +253,7 @@ export default function IndexStatus() {
                   </div>
                 ))}
                 {errorsList.length === 0 && (
-                  <p className="text-sm text-gray-400 dark:text-gray-500">No error details available.</p>
+                  <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_error_details')}</p>
                 )}
               </div>
             </div>
@@ -261,18 +263,18 @@ export default function IndexStatus() {
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">Scan Info</h3>
               <dl className="space-y-2 text-sm">
-                <InfoRow label="Last scan" value={formatTime(status.last_scan)} />
-                <InfoRow label="Status" value={status.is_scanning ? 'Scanning...' : 'Idle'} />
-                <InfoRow label="Total indexed" value={`${status.indexed} / ${status.total_files}`} />
+                <InfoRow label={t('last_scan')} value={formatTime(status.last_scan, t)} />
+                <InfoRow label={t('status')} value={status.is_scanning ? `${t('scanning')}...` : t('idle')} />
+                <InfoRow label={t('total_indexed')} value={`${status.indexed} / ${status.total_files}`} />
               </dl>
             </div>
 
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
-                File Types
+                {t('file_types')}
               </h3>
               {typeStats.length === 0 ? (
-                <p className="text-sm text-gray-400 dark:text-gray-500">暂无数据</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_data')}</p>
               ) : (
                 <div className="space-y-1.5">
                   {typeStats.map((t) => (
@@ -295,26 +297,26 @@ export default function IndexStatus() {
 
           <div className="grid grid-cols-2 gap-6 mt-6">
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
-              <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">Recent Changes</h3>
+              <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">{t('recent_changes')}</h3>
               {!lastDelta ? (
-                <p className="text-sm text-gray-400 dark:text-gray-500">暂无数据</p>
+                <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_data')}</p>
               ) : (
                 <div className="space-y-2">
-                  <DeltaRow label="Added" value={lastDelta.added} color="green" />
-                  <DeltaRow label="Modified" value={lastDelta.modified} color="yellow" />
-                  <DeltaRow label="Deleted" value={lastDelta.deleted} color="red" />
-                  <DeltaRow label="Errors" value={lastDelta.errors} color="red" />
+                  <DeltaRow label={t('added')} value={lastDelta.added} color="green" />
+                  <DeltaRow label={t('modified')} value={lastDelta.modified} color="yellow" />
+                  <DeltaRow label={t('deleted')} value={lastDelta.deleted} color="red" />
+                  <DeltaRow label={t('errors')} value={lastDelta.errors} color="red" />
                 </div>
               )}
             </div>
 
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
-                Duplicates
+                {t('duplicates')}
                 {dupesLoading && <LoadingSpinner className="size-3 ml-2 inline" />}
               </h3>
               {duplicates.length === 0 && !dupesLoading && (
-                <EmptyState title="No duplicates found" />
+                <EmptyState title={t('no_duplicates')} />
               )}
               {duplicates.length > 0 && (
                 <div className="space-y-2 max-h-48 overflow-y-auto">

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SearchHit } from '../api/search'
 import { openFile, revealInFolder } from '../api/files'
+import { useI18n } from '../i18n'
 
 const ITEM_HEIGHT = 72
 const OVERSCAN = 5
@@ -42,6 +43,7 @@ function highlightSnippet(snippet: string): React.ReactNode {
 }
 
 export default function ResultList({ hits, selectedId, onSelect }: ResultListProps) {
+  const { t } = useI18n()
   const containerRef = useRef<HTMLDivElement>(null)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 20 })
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
@@ -106,7 +108,7 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
               <div className="flex items-center gap-3 text-xs text-gray-400">
                 <span className="truncate">{hit.path}</span>
                 <span className="shrink-0">{formatSize(hit.file_size)}</span>
-                <span className="shrink-0">Score: {hit.score.toFixed(2)}</span>
+                <span className="shrink-0">{t('score', { score: hit.score.toFixed(2) })}</span>
               </div>
             </button>
           )
@@ -121,19 +123,19 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => { openFile(contextMenu.hit.file_id); setContextMenu(null) }}
           >
-            Open
+            {t('open')}
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => { navigator.clipboard.writeText(contextMenu.hit.file_name); setContextMenu(null) }}
           >
-            Copy Name
+            {t('copy_name')}
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => { revealInFolder(contextMenu.hit.file_id); setContextMenu(null) }}
           >
-            Show in Folder
+            {t('show_in_folder')}
           </button>
         </div>
       )}
