@@ -203,7 +203,7 @@ export default function Browse() {
                       </div>
                     </td>
                     <td className="px-4 py-2">
-                      <span className="text-gray-500 dark:text-gray-400 truncate block max-w-[280px]" title={item.rel_path}>{item.rel_path}</span>
+                      <span className="text-gray-500 dark:text-gray-400 truncate block max-w-[200px]" title={item.rel_path}>{item.rel_path}</span>
                     </td>
                     <td className="px-4 py-2">
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>

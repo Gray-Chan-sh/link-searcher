@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-02（UX 修复：Onboarding 重复 + 路径溢出 + ESC 关闭 + 大小写 + 导出 + 加载态）
+
+- **OnboardingWizard 反复出现**：`App.tsx` 原来只检查 settings 中的 `onboarding_done`，清空目录后 settings 可能被重置导致弹窗重现。改为优先读 `localStorage['onboarding_completed']`，关闭时同时写入 localStorage 和 settings（`src/App.tsx`）
+- **Browse 路径列溢出**：`Browse.tsx` 路径 `<td>` 的 `max-w-[280px]` 改为 `max-w-[200px]`，配合已有的 `truncate` 和 `title` 属性（`src/pages/Browse.tsx`）
+- **PreviewPanel 全屏无 ESC 退出**：`PreviewPanel.tsx` 新增 `useEffect` 监听 `keydown Escape`，`fullscreen` 为 true 时调用 `onClose()`（`src/components/PreviewPanel.tsx`）
+- **搜索英文大小写敏感**：`useSearch.ts` `setQuery` 统一 `toLowerCase()` 后再存 state；`search.rs` 两个 `SearchParams`（搜索/导出）构造时均 `query.to_lowercase()`，Tantivy 查询完全大小写不敏感（`src/hooks/useSearch.ts`、`src-tauri/src/commands/search.rs`）
+- **导出失败无具体原因**：`SearchPage.tsx` 已有 `export_failed` 带 `error` 占位符，确认无需改动（`src/pages/SearchPage.tsx`）
+- **搜索中导出按钮可重复触发**：`SearchPage.tsx` 导出按钮加 `disabled={search.status === 'loading'}` 防止并发（`src/pages/SearchPage.tsx`）
+
+---
+
 ## 2026-08-02（中危修复：栈溢出 + DB 错误致命化 + OOM 风险）
 
 ### 🟡 中危修复（MED-1 ~ MED-9）

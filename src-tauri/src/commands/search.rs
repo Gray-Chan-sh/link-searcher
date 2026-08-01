@@ -113,7 +113,7 @@ pub async fn search(
     };
 
     let params = SearchParams {
-        query,
+        query: query.to_lowercase(),
         dir_ids,
         file_ids,
         ext_filter,
@@ -274,7 +274,7 @@ pub async fn export_search_results(
     };
 
     let params = SearchParams {
-        query,
+        query: query.to_lowercase(),
         dir_ids: dir_ids_opt,
         file_ids,
         ext_filter: ext_filter_opt,

@@ -34,15 +34,21 @@ export default function App() {
   ] as const
 
   useEffect(() => {
+    if (localStorage.getItem('onboarding_completed') === 'true') return
     getSettings().then(s => {
       if (s['onboarding_done'] !== 'true') {
         setShowOnboarding(true)
       }
-    }).catch(() => {})
+    }).catch(() => {
+      if (localStorage.getItem('onboarding_completed') !== 'true') {
+        setShowOnboarding(true)
+      }
+    })
   }, [])
 
   const handleOnboardingClose = () => {
     setShowOnboarding(false)
+    localStorage.setItem('onboarding_completed', 'true')
     updateSettings({ onboarding_done: 'true' }).catch(() => {})
   }
 

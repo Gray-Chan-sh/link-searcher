@@ -152,7 +152,7 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // setQuery: only updates query state. Debounced search is triggered separately.
   const setQuery = useCallback((q: string) => {
-    setState(s => ({ ...s, query: q }))
+    setState(s => ({ ...s, query: q.toLowerCase() }))
   }, [])
 
   // Immediate search (for Enter key) – uses latest filters from ref

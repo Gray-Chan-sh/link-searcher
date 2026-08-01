@@ -61,6 +61,15 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const effectiveWidth = fullscreen ? Math.max(400, window.innerWidth * 0.6) : width
 
   useEffect(() => {
+    if (!fullscreen) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', handler)
+    return () => document.removeEventListener('keydown', handler)
+  }, [fullscreen, onClose])
+
+  useEffect(() => {
     if (!fileId) {
       setMeta(null)
       setPreview(null)
