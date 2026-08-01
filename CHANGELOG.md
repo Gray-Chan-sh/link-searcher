@@ -214,6 +214,15 @@
   - `extractor/pdf.rs` `ocr_pdf_via_pdftoppm`：`ls_pdf_ocr_{pid}` → `TempDir::new("ls_pdf_ocr")`（移除手动 `remove_dir_all`）
   - 新增 2 个单测：drop 后目录被删除、路径唯一（`cargo test --lib scanner::helpers` 通过）
 
+## 2026-08-01
+
+### 🏗️ Tantivy path 字段改为相对路径
+- **索引内 path 存绝对路径、与 DB 不一致**：`batch_index` 和 `index_file` 用 `file_path.to_string_lossy()`（绝对路径）写入 Tantivy 的 `path` 字段，而 `file_tracking.path` 存相对路径，搜索结果路径与 Browse 页不一致。修复：
+  - `batch_index`：`ExtractedData.file_path_str` 改用 `job.rel_path`（`BatchJob.rel_path` 已由 scanner 传入，DB 也用它做 upsert）
+  - `index_file`：调用方未传 rel_path 时，从 `dir_config::get_dir` 取目录根 + `helpers::to_relative` 补算相对路径；读文件内容仍用绝对路径（`file_path` 参数），仅写索引用相对路径（`indexer.rs`）
+  - 存量绝对路径：无需单独迁移——`startup_scan` 每次启动会用 rel_path 重写索引；若搜索结果路径仍显示绝对路径，在索引状态页重建索引一次
+
+
 ## 统计
 
 | 类别 | 数量 |

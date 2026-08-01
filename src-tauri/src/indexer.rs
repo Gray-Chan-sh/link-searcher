@@ -235,7 +235,7 @@ impl IndexerService {
                     file_name,
                     file_ext,
                     dir_id: job.dir_id.clone(),
-                    file_path_str: job.file_path.to_string_lossy().to_string(),
+                    file_path_str: job.rel_path.clone(),
                     text,
                     mtime,
                     file_size,
@@ -488,7 +488,13 @@ impl IndexerService {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
 
-            let file_path_str = file_path.to_string_lossy().to_string();
+            // Tantivy stores the relative path (consistent with file_tracking.path);
+            // the absolute file_path is only used above for reading content.
+            let file_path_str = match crate::db::dir_config::get_dir(&conn, dir_id) {
+                Ok(Some(cfg)) => crate::scanner::helpers::to_relative(&cfg.path, file_path)
+                    .unwrap_or_else(|_| file_path.to_string_lossy().to_string()),
+                _ => file_path.to_string_lossy().to_string(),
+            };
             Indexer::add_document(w, file_id, &file_name, &file_ext, dir_id, &file_path_str, &text, mtime, file_size)
                 .map_err(|e| anyhow::anyhow!("failed to add document to index: {e}"))?;
 
