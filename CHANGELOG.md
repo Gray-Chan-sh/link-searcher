@@ -6,6 +6,15 @@
 
 ## 2026-08-01
 
+### 路径处理修复
+- **to_relative 前缀误匹配**：原实现用 `path_str.starts_with(&root_str)` 字符串前缀比较，会把 `/tmp/foobar` 误认为 `/tmp/foo` 的子路径。改用 `Path::strip_prefix`（组件感知），并新增回归测试 `to_relative_respects_component_boundary`（`src-tauri/src/scanner/helpers.rs`）
+- **路径迁移字节语义**：`migrate_paths_to_relative` 原用 SQL `SUBSTR(path, ?)` 按字节长度截断，中文等多字节路径会截错。改为 Rust 侧逐行迁移：按 `dir_id + prefix%` 查询后用 `path.strip_prefix(prefix)`（带 `/` 边界安全）更新（`src-tauri/src/db/tracker.rs`）
+
+### 扫描统计与启动流程修复
+- **扫描总耗时被覆盖**：`trigger_scan` 与 `rebuild_index` 中多目录扫描累加 `total_duration_ms = r.duration_ms` 每次都覆盖为最后一个目录的耗时，改为 `+=` 累加（`src-tauri/src/commands/index.rs`）
+- **watcher 启动窗口期丢事件**：原启动流程先启动扫描线程、扫描完成后才发 `StartWatch`，扫描期间的文件变更因 watcher 未启动而丢失。改为先在主线程读取目录列表并发送 `StartWatch`，再启动扫描线程（`src-tauri/src/lib.rs`）
+- **delete_file 静默吞错**：`mark_deleted` 失败被 `match` 静默忽略，改为 `if let Err(e)` 记录 `log::warn!`（`src-tauri/src/indexer.rs`）
+
 ### 搜索目录筛选修复
 - **LIKE `%`/`_` 通配符转义**：dir_paths → file_ids 查询中 `p.replace('%', "%%")` 无效（SQLite LIKE 不识别 `%%`），改用 `ESCAPE '\'` 转义 `%` 和 `_`，避免含特殊字符的目录路径匹配错误。`search` 与 `export_search_results` 两处路径解析均已修复（`src-tauri/src/commands/search.rs`）
 

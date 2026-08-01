@@ -3,7 +3,7 @@
 //! Path conversion utilities for storing/retrieving files using relative paths
 //! within a monitored directory root.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
@@ -112,16 +112,11 @@ pub fn record_last_scan(conn: &rusqlite::Connection, dir_id: &str) -> Result<()>
 /// Convert an absolute path to a relative path within the given directory root.
 /// Returns the relative path string, or an error if the file is not under dir_root.
 pub fn to_relative(dir_root: &str, file_path: &Path) -> Result<String> {
-    let path_str = file_path.to_string_lossy().replace("\\", "/");
-    let root_str = dir_root.replace("\\", "/");
-    
-    if !path_str.starts_with(&root_str) {
-        return Err(anyhow::anyhow!("file {} is not under dir root {}", path_str, dir_root));
-    }
-    
-    let rel_str = &path_str[root_str.len()..];
-    let rel_str = rel_str.strip_prefix('/').unwrap_or(rel_str);
-    Ok(rel_str.to_string())
+    let root = PathBuf::from(dir_root);
+    let rel = file_path
+        .strip_prefix(&root)
+        .map_err(|_| anyhow!("file {} is not under dir root {}", file_path.display(), dir_root))?;
+    Ok(rel.to_string_lossy().replace('\\', "/"))
 }
 
 /// Convert a stored relative path back to an absolute path by joining with dir_root.
@@ -185,5 +180,14 @@ mod tests {
         let a = TempDir::new("test_tmp").unwrap().path().to_path_buf();
         let b = TempDir::new("test_tmp").unwrap().path().to_path_buf();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn to_relative_respects_component_boundary() {
+        let root = "/tmp/foo";
+        assert_eq!(to_relative(root, Path::new("/tmp/foo/bar.txt")).unwrap(), "bar.txt");
+        assert_eq!(to_relative(root, Path::new("/tmp/foo/sub/deep.txt")).unwrap(), "sub/deep.txt");
+        // sibling with shared prefix must NOT match
+        assert!(to_relative(root, Path::new("/tmp/foobar/x.txt")).is_err());
     }
 }

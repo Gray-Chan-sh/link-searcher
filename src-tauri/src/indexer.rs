@@ -538,10 +538,8 @@ impl IndexerService {
             .map_err(|e| anyhow::anyhow!("failed to delete document from index: {e}"))?;
 
         // 文件已从 Tantivy 索引移除，标记为 deleted 使统计准确。
-        // 记录不存在时（已被 upsert 覆盖或清理）静默忽略。
-        match crate::db::tracker::mark_deleted(&conn, file_id) {
-            Ok(()) => {}
-            Err(_) => { /* 记录可能已不存在，忽略 */ }
+        if let Err(e) = crate::db::tracker::mark_deleted(&conn, file_id) {
+            log::warn!("[INDEX] mark_deleted failed {}: {e}", file_id);
         }
 
         Ok(())

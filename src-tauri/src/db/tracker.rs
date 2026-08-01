@@ -134,11 +134,26 @@ pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
     let mut count = 0u64;
     for dir in &dirs {
         let prefix = format!("{}/", dir.path.trim_end_matches('/'));
-        let updated = conn.execute(
-            "UPDATE file_tracking SET path = SUBSTR(path, ?1) WHERE dir_id = ?2 AND path LIKE ?3",
-            rusqlite::params![prefix.len() as i64 + 1, dir.id, format!("{prefix}%")],
-        ).context("migrate path to relative failed")?;
-        count += updated as u64;
+        let mut stmt = conn
+            .prepare("SELECT id, path FROM file_tracking WHERE dir_id=?1 AND path LIKE ?2")
+            .context("prepare migration select")?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![dir.id, format!("{prefix}%")],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .context("query migration rows")?;
+        for row in rows {
+            let (id, path) = row.context("read migration row")?;
+            if let Some(rel) = path.strip_prefix(&prefix) {
+                conn.execute(
+                    "UPDATE file_tracking SET path=?1 WHERE id=?2",
+                    rusqlite::params![rel, id],
+                )
+                .context("update migrated path")?;
+                count += 1;
+            }
+        }
     }
     log::info!("[DB] 路径迁移: {} 条记录", count);
     Ok(count)

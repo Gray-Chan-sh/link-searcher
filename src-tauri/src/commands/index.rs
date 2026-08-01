@@ -195,7 +195,7 @@ pub async fn trigger_scan(
                     deleted += r.deleted;
                     modified += r.modified;
                     total_errors += r.errors;
-                    total_duration_ms = r.duration_ms;
+                    total_duration_ms += r.duration_ms;
                 }
                 Err(e) => log::error!("[SCAN] {} failed: {e}", dir.id),
             }
@@ -337,7 +337,7 @@ pub async fn rebuild_index(
                     deleted += r.deleted;
                     modified += r.modified;
                     total_errors += r.errors;
-                    total_duration_ms = r.duration_ms;
+                    total_duration_ms += r.duration_ms;
                 }
                 Err(e) => log::error!("[SCAN] {} failed: {e}", dir.id),
             }

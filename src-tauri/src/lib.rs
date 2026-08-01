@@ -188,6 +188,50 @@ pub fn run() {
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
             let watch_tx = watcher_tx_for_startup;
+
+            // R3-11: StartWatch 必须先于扫描线程，否则扫描期间的变更会丢失
+            let dirs = {
+                let conn = match db_ref.get() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::error!("[STARTUP] 无法获取数据库连接: {e}");
+                        return Ok(());
+                    }
+                };
+                let dirs = match crate::db::dir_config::list_dirs(&conn) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::error!("[STARTUP] 无法读取目录列表: {e}");
+                        return Ok(());
+                    }
+                };
+                drop(conn);
+                dirs
+            };
+
+            if dirs.is_empty() {
+                log::info!("[STARTUP] 无已配置目录，跳过启动扫描");
+                return Ok(());
+            }
+
+            // One-time migration: convert absolute paths to relative
+            if let Ok(conn) = db_ref.get() {
+                let _ = crate::db::tracker::migrate_paths_to_relative(&conn);
+            }
+
+            for dir in &dirs {
+                let path = std::path::PathBuf::from(&dir.path);
+                if path.exists() {
+                    let _ = watch_tx.send(
+                        crate::scanner::watcher::WatcherCommand::StartWatch {
+                            dir_id: dir.id.clone(),
+                            path,
+                        },
+                    );
+                    log::info!("[STARTUP] 启动文件监控: {}", dir.path);
+                }
+            }
+
             std::thread::spawn(move || {
                 use crate::extractor::{office, pdf};
 
@@ -208,32 +252,6 @@ pub fn run() {
                     log::error!("[STARTUP] PaddleOCR 引擎不可用，图片 OCR 将无法工作");
                 }
 
-                let conn = match db_ref.get() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::error!("[STARTUP] 无法获取数据库连接: {e}");
-                        return;
-                    }
-                };
-                let dirs = match crate::db::dir_config::list_dirs(&conn) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        log::error!("[STARTUP] 无法读取目录列表: {e}");
-                        return;
-                    }
-                };
-                drop(conn);
-
-                if dirs.is_empty() {
-                    log::info!("[STARTUP] 无已配置目录，跳过启动扫描");
-                    return;
-                }
-
-                // One-time migration: convert absolute paths to relative
-                if let Ok(conn) = db_ref.get() {
-                    let _ = crate::db::tracker::migrate_paths_to_relative(&conn);
-                }
-
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
                 for dir in &dirs {
                     match scanner_ref.startup_scan(&dir.id, |_| {}) {
@@ -251,19 +269,6 @@ pub fn run() {
                         log::error!("[STARTUP] orphan cleanup failed: {e}");
                     }
                     drop(conn);
-                }
-
-                for dir in &dirs {
-                    let path = std::path::PathBuf::from(&dir.path);
-                    if path.exists() {
-                        let _ = watch_tx.send(
-                            crate::scanner::watcher::WatcherCommand::StartWatch {
-                                dir_id: dir.id.clone(),
-                                path,
-                            },
-                        );
-                        log::info!("[STARTUP] 启动文件监控: {}", dir.path);
-                    }
                 }
 
                 // VACUUM after watchers started
