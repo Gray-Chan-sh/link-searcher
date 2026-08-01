@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-02（性能测试套件）
+
+- **新增 perf_scan.sh**：`scripts/perf_scan.sh` 提供扫描性能基准测试能力，自动清理临时数据目录、启动应用、监控 RSS 内存（每 5s），扫描完成后输出文件数、索引/DB 大小、内存峰值/均值报告（`scripts/perf_scan.sh`）；同步更新 README 测试章节（`README.md`、`CHANGELOG.md`）
+
+---
+
 ## 2026-08-02（UX 修复：Onboarding 重复 + 路径溢出 + ESC 关闭 + 大小写 + 导出 + 加载态）
 
 - **OnboardingWizard 反复出现**：`App.tsx` 原来只检查 settings 中的 `onboarding_done`，清空目录后 settings 可能被重置导致弹窗重现。改为优先读 `localStorage['onboarding_completed']`，关闭时同时写入 localStorage 和 settings（`src/App.tsx`）

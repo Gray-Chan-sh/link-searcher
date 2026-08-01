@@ -225,11 +225,26 @@ link-searcher/
 
 ## 测试
 
+### 单元测试与集成测试
+
 ```bash
 cd src-tauri && cargo test
 ```
 
 当前测试：81 个（80 单元 + 9 集成 + 6 IPC），全部通过。
+
+### 性能测试套件
+
+```bash
+# 生成测试数据（需要 Python 依赖：reportlab, python-docx, openpyxl, Pillow）
+python3 scripts/gen_test_data.py /tmp/ls-test-1k 1000
+
+# 运行性能测试（需先构建：npm run tauri build）
+./scripts/perf_scan.sh /tmp/ls-test-1k 1k-files
+```
+
+`perf_scan.sh` 输出：文件数、数据大小、索引大小、DB 大小、内存峰值/均值、采样日志。
+测试期间需在 GUI 中手动添加目录并触发全量扫描，完成后按 Enter 生成报告。
 
 ---
 
