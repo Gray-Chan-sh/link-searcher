@@ -5,7 +5,7 @@
 //! need a real window or full app config.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock, atomic::AtomicBool};
+use std::sync::{Arc, Mutex, RwLock, atomic::AtomicBool};
 
 use serde_json::{json, Value};
 use tauri::ipc::CallbackFn;
@@ -16,7 +16,7 @@ use link_searcher_lib::db;
 use link_searcher_lib::indexer::IndexerService;
 use link_searcher_lib::scanner::Scanner;
 use link_searcher_lib::search::IndexManager;
-use link_searcher_lib::state::AppState;
+use link_searcher_lib::state::{AppState, ScanDelta};
 
 // ---------------------------------------------------------------------------
 // Temp dir with automatic cleanup
@@ -74,8 +74,11 @@ fn setup_app(
         indexer,
         scanner,
         is_scanning,
-        Arc::new(AtomicBool::new(false)),
-        tmp.path().to_path_buf(),
+        Arc::new(AtomicBool::new(false)),           // is_rebuilding
+        Arc::new(AtomicBool::new(false)),           // cancel_scan
+        Arc::new(AtomicBool::new(false)),           // is_restoring
+        Arc::new(Mutex::new(ScanDelta::default())), // scan_delta
+        tmp.path().to_path_buf(),                   // data_dir
         index_dir,
         db_path,
         dummy_tx,

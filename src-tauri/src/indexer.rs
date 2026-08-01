@@ -563,30 +563,22 @@ impl IndexerService {
     /// Lock the writer mutex and return the guard.  Creates the writer on
     /// first access.
     fn lock_writer(&self) -> Result<MutexGuard<'_, Option<IndexWriter>>> {
-        let guard = self
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("index writer lock poisoned: {e}"))?;
-
-        if guard.is_some() {
-            return Ok(guard);
-        }
-        drop(guard); // release before creating
-
-        let mgr = self
-            .index_manager
-            .read()
-            .map_err(|e| anyhow::anyhow!("index manager lock poisoned: {e}"))?;
-        let new_w = mgr
-            .writer(50_000_000)
-            .map_err(|e| anyhow::anyhow!("failed to create index writer: {e}"))?;
-        drop(mgr);
-
         let mut guard = self
             .writer
             .lock()
             .map_err(|e| anyhow::anyhow!("index writer lock poisoned: {e}"))?;
-        *guard = Some(new_w);
+
+        if guard.is_none() {
+            // Hold the lock across creation; releasing it would let two threads each create a writer.
+            let mgr = self
+                .index_manager
+                .read()
+                .map_err(|e| anyhow::anyhow!("index manager lock poisoned: {e}"))?;
+            let new_w = mgr
+                .writer(50_000_000)
+                .map_err(|e| anyhow::anyhow!("failed to create index writer: {e}"))?;
+            *guard = Some(new_w);
+        }
         Ok(guard)
     }
 

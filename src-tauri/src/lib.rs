@@ -173,6 +173,7 @@ pub fn run() {
                 is_scanning,
                 Arc::new(AtomicBool::new(false)),
                 cancel_scan,
+                Arc::new(AtomicBool::new(false)),
                 Arc::new(Mutex::new(ScanDelta::default())),
                 data_dir,
                 index_dir,

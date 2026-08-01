@@ -197,8 +197,10 @@
 - **fs 插件权限收窄 + scope**：`capabilities/default.json` 删除 `fs:allow-mkdir` / `fs:allow-remove` / `fs:allow-rename`（前端未使用）；保留读权限与 `fs:allow-write`（SearchPage.tsx 的 CSV 导出 `writeTextFile` 依赖它，且 `save()` 对话框会自动将选中路径加入 fs scope，导出不受影响）；新增 `fs.scope` 白名单（`$APPDATA` / `$APPLOCALDATA` / `$DOCUMENT` / `$DESKTOP` / `$DOWNLOAD` 递归）
 
 ### 🔴 Bug 修复
+- **lock_writer 并发丢索引**：`lock_writer`（`indexer.rs`）先释放 writer 锁再创建 `IndexWriter`，两个线程并发首次写入时各建一个 writer，后写者覆盖前者、丢文档。改为全程持锁创建（`index_manager` 是 RwLock 读锁、不依赖 writer 锁，不会死锁）
 - **切换语言清空 data_dir**：`setLang`（`i18n/index.tsx`）调用 `updateConfig({ data_dir: '', language: l })` 把配置里的 data_dir 清空，切换语言即丢全部数据。改为只传 `{ language: l }`；同时在 `updateConfig`（`api/config.ts`）加防呆，拒绝空 `data_dir` 并抛错 `data_dir cannot be empty`，从源头杜绝此类覆盖
 - **上次取消后下次扫描立即被取消**：`cancel_scan` 标志在扫描开始时未复位，上次点过取消后，`trigger_scan`/`rebuild_index` 的循环第一次 `load` 就为 true 直接 break → 两个 `spawn_blocking` 闭包开头先 `cancel_scan.store(false, Ordering::Release)` 复位；循环内 `load(Relaxed)` 改为 `Acquire`，`cancel_scan` 命令 `store(true, ...)` 改为 `Release`，形成 acquire-release 同步对（`commands/index.rs`）
+- **restore_backup 直接覆盖活跃 data.db 损坏数据库**：WAL 模式下连接池仍持有 data.db，`fs::copy` 覆盖与 WAL 冲突可能导致损坏。改为 SQLite 在线备份 API（`rusqlite::backup::Backup::new(&src, &mut dst)` + `step(-1)`，`step_to` 在 0.32 已改名；Busy/Locked 重试 3 次）从备份的 data.db 恢复到活跃连接，不再直接覆盖文件。索引目录改为 rebuild_index 的 tmp→rename 原子替换 + 切换 IndexManager。恢复完成 emit `restore-completed` 后自动重启生效。`AppState` 新增 `is_restoring: Arc<AtomicBool>` 防重入（`state.rs`/`lib.rs`/`tests/ipc_test.rs`，顺带修复 ipc_test 缺参编译错误）；`Cargo.toml` 启用 rusqlite `backup` feature（`commands/backup.rs`）
 
 ---
 

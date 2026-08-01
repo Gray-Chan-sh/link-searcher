@@ -1,9 +1,12 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rusqlite::backup::{Backup, StepResult};
+use rusqlite::Connection;
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::config::INDEX_DIR_NAME;
+use crate::search::IndexManager;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -79,28 +82,117 @@ pub async fn get_backup_status(state: State<'_, AppState>) -> Result<BackupInfo,
 }
 
 #[tauri::command]
-pub async fn restore_backup(state: State<'_, AppState>, backup_name: String) -> Result<(), String> {
+pub async fn restore_backup(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    backup_name: String,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    if state
+        .is_restoring
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("正在恢复中，请稍候".to_string());
+    }
+
     let backup_dir = state.data_dir.join("backups").join(&backup_name);
-    if !backup_dir.is_dir() {
-        return Err(format!("backup not found: {backup_name}"));
-    }
+    let index_dir = state.index_dir.clone();
+    let index_manager = state.index_manager.clone();
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    let is_restoring = state.is_restoring.clone();
+    let backup_name_in = backup_name.clone();
 
-    // Restore index
-    let index_src = backup_dir.join(INDEX_DIR_NAME);
-    if index_src.is_dir() {
-        let _ = std::fs::remove_dir_all(&state.index_dir);
-        copy_dir(&index_src, &state.index_dir)?;
-    }
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        if !backup_dir.is_dir() {
+            return Err(format!("备份不存在: {backup_name_in}"));
+        }
+        // 1. 恢复索引：复制到临时目录 → 切换 IndexManager → 原子替换（同 rebuild_index 的 tmp→rename 模式）
+        let index_src = backup_dir.join(INDEX_DIR_NAME);
+        if index_src.is_dir() {
+            let tmp_name = format!("index.restore-{}", uuid::Uuid::new_v4().simple());
+            let tmp_dir = index_dir.with_file_name(&tmp_name);
+            copy_dir(&index_src, &tmp_dir)?;
 
-    // Restore database
-    let db_src = backup_dir.join("data.db");
-    if db_src.is_file() {
-        std::fs::copy(&db_src, &state.db_path)
-            .map_err(|e| format!("failed to restore db: {e}"))?;
-    }
+            match IndexManager::open_or_create(&tmp_dir) {
+                Ok(new_mgr) => {
+                    if let Ok(mut mgr) = index_manager.write() {
+                        *mgr = new_mgr;
+                    }
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return Err(format!("无法打开恢复的索引: {e}"));
+                }
+            }
+            // 后续写入落到恢复后的索引，而不是已删除的旧目录
+            indexer.reset_writer();
 
+            let old = index_dir.with_file_name("index.old");
+            if index_dir.exists() {
+                let _ = std::fs::remove_dir_all(&old);
+                let _ = std::fs::rename(&index_dir, &old);
+            }
+            if let Err(e) = std::fs::rename(&tmp_dir, &index_dir) {
+                if old.exists() {
+                    let _ = std::fs::rename(&old, &index_dir);
+                }
+                return Err(format!("切换索引目录失败: {e}"));
+            }
+            let _ = std::fs::remove_dir_all(&old);
+        }
+
+        // 2. 恢复数据库：SQLite 在线备份 API 写入活跃连接，不直接覆盖 data.db（WAL 模式安全）
+        let db_src = backup_dir.join("data.db");
+        if db_src.is_file() {
+            // 备份的 data.db 是 WAL 库的静态副本，先复制到可写临时文件再打开：
+            // 只读打开 WAL 库会因缺少 -wal/-shm 失败，直接读备份目录又会污染备份文件
+            let staging = std::env::temp_dir().join(format!(
+                "ls-restore-{}.db",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::copy(&db_src, &staging).map_err(|e| format!("复制备份数据库失败: {e}"))?;
+            let restore_result = (|| -> Result<(), String> {
+                let src = Connection::open(&staging)
+                    .map_err(|e| format!("打开备份数据库失败: {e}"))?;
+                let mut dst = db_pool
+                    .get()
+                    .map_err(|e| format!("获取数据库连接失败: {e}"))?;
+                let backup = Backup::new(&src, &mut dst)
+                    .map_err(|e| format!("初始化恢复失败: {e}"))?;
+                // step(-1) 一次性备份全部页；Busy/Locked 为瞬时错误，重试（同 rusqlite::Connection::restore）
+                let mut r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
+                let mut busy = 0;
+                while r == StepResult::Busy || r == StepResult::Locked {
+                    busy += 1;
+                    if busy >= 3 {
+                        return Err("数据库繁忙，恢复未完成，请重试".to_string());
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
+                }
+                if r != StepResult::Done {
+                    return Err("数据库繁忙，恢复未完成，请重试".to_string());
+                }
+                Ok(())
+            })();
+            let _ = std::fs::remove_file(&staging);
+            restore_result?;
+        }
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("恢复任务异常: {e}"))?;
+    result?;
+
+    is_restoring.store(false, Ordering::SeqCst);
     log::info!("restored backup: {backup_name}");
-    Ok(())
+
+    let _ = app.emit("restore-completed", serde_json::json!({ "name": backup_name }));
+    app.restart()
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
@@ -148,5 +240,46 @@ fn cleanup_old_backups(backup_dir: &std::path::Path, keep: usize) {
             let _ = std::fs::remove_dir_all(old.path());
             entries.remove(0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 镜像 restore_backup 的核心机制：从 WAL 格式的备份副本在线恢复到活跃连接，
+    // 验证数据完整、无需关闭连接池（直接 fs::copy 覆盖活跃 data.db 会损坏库）。
+    #[test]
+    fn test_backup_api_restore_from_wal_copy() {
+        let src_path = std::env::temp_dir().join(format!("ls_bk_src_{}.db", std::process::id()));
+        let dst_path = std::env::temp_dir().join(format!("ls_bk_dst_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
+
+        // 备份副本：WAL 模式的 data.db（模拟 trigger_backup 的 fs::copy 产物）
+        {
+            let src = Connection::open(&src_path).unwrap();
+            src.execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(42);",
+            )
+            .unwrap();
+        }
+
+        // 活跃连接：已打开并持有（模拟连接池连接）
+        let mut dst = Connection::open(&dst_path).unwrap();
+        dst.execute_batch("CREATE TABLE t(x INTEGER);").unwrap();
+
+        let src = Connection::open(&src_path).unwrap();
+        let backup = Backup::new(&src, &mut dst).unwrap();
+        assert_eq!(backup.step(-1).unwrap(), StepResult::Done);
+        drop(backup);
+        drop(src);
+        drop(dst);
+
+        let check = Connection::open(&dst_path).unwrap();
+        let x: i64 = check.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(x, 42);
+        let _ = std::fs::remove_file(&src_path);
+        let _ = std::fs::remove_file(&dst_path);
     }
 }
