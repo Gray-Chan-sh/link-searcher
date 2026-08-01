@@ -64,7 +64,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         ocred,
         total_images,
         last_scan,
-        is_scanning: state.is_scanning.load(Ordering::Relaxed),
+        is_scanning: state.is_scanning.load(Ordering::Acquire),
         scan_delta: Some({ let d = state.scan_delta.lock().unwrap_or_else(|e| e.into_inner()); d.clone() }),
     })
 }
@@ -388,7 +388,7 @@ pub async fn rebuild_index(
 
 #[tauri::command]
 pub async fn cancel_scan(state: State<'_, AppState>) -> Result<(), String> {
-    let was_scanning = state.is_scanning.load(Ordering::Relaxed);
+    let was_scanning = state.is_scanning.load(Ordering::Acquire);
     state.cancel_scan.store(true, Ordering::Release);
     log::info!("[SCAN] cancel requested (was_scanning={was_scanning})");
     Ok(())

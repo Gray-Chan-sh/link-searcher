@@ -467,6 +467,7 @@ function ToggleField({ label, checked, onChange }: {
 function filterGuide(guide: string): string {
   return guide.split('\n')
     .filter(line => {
+      // navigator.platform is deprecated; use @tauri-apps/plugin-os platform() when available.
       const p = navigator.platform
       return line.startsWith(`${p.startsWith('Mac') ? 'macOS' : p.startsWith('Win') ? 'Windows' : 'Linux'}:`)
     })

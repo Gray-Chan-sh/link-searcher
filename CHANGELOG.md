@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-01（错误处理与内存序修复）
+
+### 前端
+- **clipboard 复制静默吞错**：`PreviewPanel.tsx`、`ResultList.tsx` 中 `.catch(() => {})` 改为 `.catch(e => console.warn('复制失败:', e))`，失败时记录警告而非静默忽略；启动加载/i18n 等合理静默降级路径保留不变
+- **navigator.platform 弃用注释**：`Settings.tsx:470` 保留 `navigator.platform` 判断（项目未引入 `@tauri-apps/plugin-os`），加注释说明弃用状态及升级路径
+
+### 后端
+- **is_scanning 原子序加强**：`commands/index.rs` 两处 `load(Ordering::Relaxed)` 改为 `Ordering::Acquire`（线程序列化读取扫描状态），`cancel_scan` 已有 `Release`/`Acquire` 无需改动；`commit_counter`/`commit_interval` 保留 `Relaxed`（纯统计无同步语义）（`src-tauri/src/commands/index.rs`）
+
+---
+
 ## 2026-08-01（安全修复：大文件 OOM + ReDoS + unsafe impl）
 
 ### P1 级安全修复
