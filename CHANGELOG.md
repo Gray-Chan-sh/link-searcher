@@ -22,6 +22,15 @@
 - **开启 TS strict 模式**：`tsconfig.app.json` 添加 `"strict": true`，符合 AGENTS.md 规范（strict + 禁止 any）。现有 34 个 TS 文件经 `tsc --noEmit -p tsconfig.app.json` 验证零错误
 - **移除 SearchBar 中 `as any[]`**：`dropdown` 合并 suggestions（`string[]`）与 history（`SearchHistoryEntry[]`）改用展开语法 `[...suggestions, ...history]`，类型自然推断为 `(string | SearchHistoryEntry)[]`（`src/components/SearchBar.tsx`）
 
+### 前端功能正确性修复
+- **R3-2 预览高亮奇数次错乱**：`highlightText` 用带 `g` 标志的 `regex.test(part)` 判断是否高亮，`lastIndex` 状态导致奇数个匹配时高亮错乱。改用 `Set`（术语小写集合）做成员判断，正则仅用于切分（`src/components/PreviewPanel.tsx`）
+- **R3-3 NumberField 清空输入回退异常**：`parseInt(e.target.value, 10) || min` 把空串/`NaN` 静默写成 `min` 且在输入过程中无法清空，改为 `Number.isNaN(v) ? min : Math.max(min, v)` NaN 安全钳制（`src/pages/Settings.tsx`）
+- **R3-4 No Results 页 `<a href>` 整页跳转**：HashRouter 下 `<a href="/index">` 触发整页刷新，改用 `react-router-dom` 的 `<Link to="/index">`（`src/pages/SearchPage.tsx`）
+- **R3-5 Enter 提交后 debounce 重复请求**：`submitSearch` 立即执行搜索后，300ms debounce effect 又因 query 变化触发一次同参数请求。新增 `lastSubmittedRef` 记录最近一次提交键 `query|page|sortField|sortOrder`，debounce effect 命中即跳过（`src/hooks/useSearch.ts`）
+- **R3-14 Browse 搜索无防抖**：搜索框每个字符都触发一次 `listFilesDb` 请求。新增 `debouncedSearch` state + 300ms setTimeout 防抖，`loadFiles` 改用防抖后的值（`src/pages/Browse.tsx`）
+- **R3-15 快速点击文件预览竞态**：慢返回覆盖快返回。新增 `previewVersionRef` 版本号，`selectFile` 每次自增并捕获本地版本，await 返回后版本不匹配则丢弃（`src/pages/Browse.tsx`）
+- **R3-16 设置项每键写库**：`handleFieldChange` 每个字符都调 `updateSettings`，改用 `saveTimerRef` 300ms 防抖合并写入，卸载时清理未落盘的定时器（`src/pages/Settings.tsx`）
+
 ---
 
 ## 2026-07-30

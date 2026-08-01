@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { useSearch } from '../hooks/useSearch'
 import { useDirs } from '../hooks/useDirs'
 import SearchBar from '../components/SearchBar'
@@ -217,12 +218,12 @@ useEffect(() => {
               </button>
               <p className="text-xs text-gray-500 dark:text-gray-400">
                 📊 Index status:
-                <a
-                  href="/index"
+                <Link
+                  to="/index"
                   className="text-blue-600 dark:text-blue-500 underline hover:text-blue-700 ml-1"
                 >
                   Index Status
-                </a>
+                </Link>
               </p>
             </div>
           )}

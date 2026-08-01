@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { ask, open } from '@tauri-apps/plugin-dialog'
 import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
@@ -31,6 +31,7 @@ export default function Settings() {
   const [migrating, setMigrating] = useState(false)
   const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     listOcrEngines().then(setOcrEngines).catch(() => {})
@@ -96,9 +97,18 @@ export default function Settings() {
   const handleFieldChange = (key: string, value: string) => {
     setValue(key, value)
     setLocalError(null)
-    updateSettings({ ...settings, [key]: value })
-      .catch(e => setLocalError(e instanceof Error ? e.message : 'Failed to save setting'))
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = setTimeout(() => {
+      updateSettings({ ...settings, [key]: value })
+        .catch(e => setLocalError(e instanceof Error ? e.message : 'Failed to save setting'))
+    }, 300)
   }
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    }
+  }, [])
 
   if (loading) {
     return (
@@ -407,7 +417,10 @@ function NumberField({ label, value, onChange, min, max, step, placeholder }: {
       <input
         type="number"
         value={value}
-        onChange={e => onChange(parseInt(e.target.value, 10) || min)}
+        onChange={e => {
+          const v = parseInt(e.target.value, 10)
+          onChange(Number.isNaN(v) ? min : Math.max(min, v))
+        }}
         min={min}
         max={max}
         step={step}

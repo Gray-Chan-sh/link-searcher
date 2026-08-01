@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
@@ -21,6 +21,7 @@ export default function Browse() {
   const [filter, setFilter] = useState<FilterType>(params.get('filter') as FilterType || 'all')
   const [ext, setExt] = useState(params.get('ext') || '')
   const [search, setSearch] = useState(params.get('search') || '')
+  const [debouncedSearch, setDebouncedSearch] = useState(search)
   const [sort, setSort] = useState<SortKey>(params.get('sort') as SortKey || 'name')
   const [order, setOrder] = useState<SortOrder>(params.get('order') as SortOrder || 'asc')
   const [loading, setLoading] = useState(false)
@@ -43,7 +44,7 @@ export default function Browse() {
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await listFilesDb({ filter, ext: ext || undefined, search: search || undefined, sort, order, page, page_size: pageSize })
+      const res = await listFilesDb({ filter, ext: ext || undefined, search: debouncedSearch || undefined, sort, order, page, page_size: pageSize })
       setItems(res.items)
       setTotal(res.total)
     } catch {
@@ -52,7 +53,12 @@ export default function Browse() {
     } finally {
       setLoading(false)
     }
-  }, [filter, ext, search, sort, order, page, pageSize])
+  }, [filter, ext, debouncedSearch, sort, order, page, pageSize])
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search), 300)
+    return () => clearTimeout(t)
+  }, [search])
 
   useEffect(() => {
     loadFiles()
@@ -64,17 +70,22 @@ export default function Browse() {
     if (f) setFilter(f as FilterType)
   }, [])
 
+  const previewVersionRef = useRef(0)
   const selectFile = useCallback(async (path: string) => {
+    const localVersion = ++previewVersionRef.current
     setSelectedFile(path)
     setPreviewLoading(true)
     setPreviewError(null)
     setPreview(null)
     try {
       const result: FilePreview = await invoke('preview_file_by_path', { path })
+      if (previewVersionRef.current !== localVersion) return
       setPreview(result)
     } catch (e) {
+      if (previewVersionRef.current !== localVersion) return
       setPreviewError(typeof e === 'string' ? e : 'Failed to load preview')
     }
+    if (previewVersionRef.current !== localVersion) return
     setPreviewLoading(false)
   }, [])
 

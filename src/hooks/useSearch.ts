@@ -68,6 +68,7 @@ useEffect(() => {
 
 const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const lastSubmittedRef = useRef('')
 
   // Deferred query for useDeferredValue-based debounce
   const deferredQuery = useDeferredValue(state.query)
@@ -157,6 +158,7 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Immediate search (for Enter key) – uses latest filters from ref
   const submitSearch = useCallback(() => {
     const f = filtersRef.current
+    lastSubmittedRef.current = `${state.query}|1|${f.sortField}|${f.sortOrder}`
     executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
   }, [executeSearch, state.query, filtersRef])
 
@@ -212,6 +214,8 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     const timer = setTimeout(() => {
       const f = filtersRef.current
+      const key = `${deferredQuery}|1|${f.sortField}|${f.sortOrder}`
+      if (key === lastSubmittedRef.current) return
       executeSearch(deferredQuery, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
     }, 300)
     return () => clearTimeout(timer)

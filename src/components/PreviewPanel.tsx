@@ -23,10 +23,11 @@ function highlightText(text: string, query: string): React.ReactNode[] {
   if (!query.trim()) return [text]
   const terms = query.split(/\s+/).filter(t => t.length > 0)
   if (terms.length === 0) return [text]
+  const termSet = new Set(terms.map(t => t.toLowerCase()))
   const regex = new RegExp(`(${terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi')
   const parts = text.split(regex)
   return parts.map((part, i) =>
-    regex.test(part)
+    part.length > 0 && termSet.has(part.toLowerCase())
       ? <mark key={i} className="bg-yellow-200 dark:bg-yellow-700/50 rounded px-0.5">{part}</mark>
       : part,
   )
