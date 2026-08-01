@@ -65,7 +65,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         total_images,
         last_scan,
         is_scanning: state.is_scanning.load(Ordering::Relaxed),
-        scan_delta: Some({ let d = state.scan_delta.lock().unwrap(); d.clone() }),
+        scan_delta: Some({ let d = state.scan_delta.lock().unwrap_or_else(|e| e.into_inner()); d.clone() }),
     })
 }
 
@@ -202,7 +202,7 @@ pub async fn trigger_scan(
         }
 
         {
-            let mut delta = scan_delta.lock().unwrap();
+            let mut delta = scan_delta.lock().unwrap_or_else(|e| e.into_inner());
             *delta = ScanDelta {
                 added,
                 deleted,
@@ -367,7 +367,7 @@ pub async fn rebuild_index(
         }
 
         {
-            let mut delta = scan_delta.lock().unwrap();
+            let mut delta = scan_delta.lock().unwrap_or_else(|e| e.into_inner());
             *delta = ScanDelta {
                 added,
                 deleted,
@@ -404,7 +404,6 @@ pub async fn check_index_health(state: State<'_, AppState>) -> Result<IndexHealt
     let searcher = reader.searcher();
     let num_segments = searcher.segment_readers().len();
     let num_docs = searcher.num_docs();
-    drop(reader);
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let db_integrity: String = conn

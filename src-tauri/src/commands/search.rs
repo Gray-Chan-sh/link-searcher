@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db;
 use crate::scanner::helpers::TempDir;
-use crate::search::searcher::{SearchParams, SearchResponse, SearcherWrap};
+use crate::search::searcher::{SearchParams, SearchResponse, SortField, SearcherWrap};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -53,7 +53,7 @@ pub async fn search(
     dir_ids: Option<Vec<String>>,
     dir_paths: Option<Vec<String>>,
     ext_filter: Option<Vec<String>>,
-    sort: Option<String>,
+    sort: Option<SortField>,
     sort_order: Option<String>,
     date_from: Option<i64>,
     date_to: Option<i64>,
@@ -119,7 +119,7 @@ pub async fn search(
         ext_filter,
         date_from,
         date_to,
-        sort: sort.unwrap_or_else(|| "score".to_string()),
+        sort: sort.unwrap_or_default(),
         sort_order: sort_order.unwrap_or_else(|| "desc".to_string()),
         page: page.unwrap_or(1),
         page_size: page_size.unwrap_or(20).min(max_results),
@@ -267,7 +267,7 @@ pub async fn export_search_results(
         ext_filter: ext_filter_opt,
         date_from: None,
         date_to: None,
-        sort: "score".to_string(),
+        sort: SortField::Score,
         sort_order: "desc".to_string(),
         page: 1,
         page_size: 10000,

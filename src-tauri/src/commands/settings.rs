@@ -4,6 +4,19 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// Whitelisted keys that may be modified through [`update_settings`].
+const ALLOWED_KEYS: &[&str] = &[
+    "ocr_engine",
+    "ocr_lang",
+    "ocr_concurrent",
+    "max_results",
+    "exclude_patterns",
+    "scan_time",
+    "auto_backup",
+    "backup_interval",
+    "auto_start",
+];
+
 #[tauri::command]
 pub async fn get_settings(state: State<'_, AppState>) -> Result<HashMap<String, String>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -30,6 +43,9 @@ pub async fn update_settings(
 ) -> Result<(), String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     for (key, value) in &settings {
+        if !ALLOWED_KEYS.contains(&key.as_str()) {
+            return Err(format!("unknown setting key: {key}"));
+        }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
             rusqlite::params![key, value],

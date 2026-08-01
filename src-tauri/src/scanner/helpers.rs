@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use crate::db::tracker::FileRecord;
+use crate::db::tracker::{FileRecord, IndexedState};
 
 const EXCLUDED_NAMES: &[&str] = &[".DS_Store", "Thumbs.db", ".git", ".svn", "__pycache__"];
 
@@ -126,7 +126,7 @@ pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
 
 pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
     match existing {
-        Some(r) => r.mtime != mtime || r.indexed == 0 || r.indexed == 2,
+        Some(r) => r.mtime != mtime || r.indexed == IndexedState::Pending as i64 || r.indexed == IndexedState::Failed as i64,
         None => true,
     }
 }

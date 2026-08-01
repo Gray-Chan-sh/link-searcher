@@ -6,6 +6,17 @@
 
 ## 2026-08-01 (今日)
 
+### R4-B 后端代码质量改进
+- **3-6 batch_index/index_file 去重**：抽 `extract_and_index_single` 共享函数，消除 `batch_index` Phase 1 与 `index_file` 间约 150 行重复的读文件→MD5→去重→提取逻辑（`src-tauri/src/indexer.rs`）
+- **3-9 IndexedState / FileStatus 枚举**：在 `tracker.rs` 新增 `IndexedState { Pending=0, Indexed=1, Failed=2 }` 和 `FileStatus { Active, Deleted }` 枚举，替换散落的字面量比较（`helpers.rs`、`scanner/mod.rs`、`commands/files.rs`）
+- **3-11 SortField 枚举**：在 `searcher.rs` 新增 `SortField { Score, Date, Size, Name }` 枚举，`SearchParams.sort` 从 `String` 改为 `SortField`，`commands/search.rs` 和 `cli.rs` 同步更新（`src-tauri/src/search/searcher.rs`、`src-tauri/src/commands/search.rs`、`src-tauri/src/cli.rs`、`tests/integration.rs`）
+- **3-12 日志 hash 截断修复**：原 `{hash:.8}` 对 String 是格式宽度而非截断，改为 `&hash[..8.min(hash.len())]`（`src-tauri/src/indexer.rs`）
+- **3-16 settings key 白名单**：`update_settings` 新增 `ALLOWED_KEYS` 白名单，未知 key 直接拒绝（`src-tauri/src/commands/settings.rs`）
+
+---
+
+## 2026-08-01 (今日)
+
 ### R4-C 前端质量改进
 - **3-19 焦点判断改用 data-search-input**：SearchPage.tsx 原用 `placeholder.includes()` 判断焦点在搜索框，中文模式下失效。改为 `activeEl?.closest('[data-search-input]')`，与 SearchBar.tsx 的 `data-search-input="true"` 属性匹配（`src/pages/SearchPage.tsx`）
 - **3-20 useIndexStatus 动态轮询间隔**：原固定 5s 轮询，改为 `is_scanning` 时 5s、空闲时 30s，减少索引空闲时的无效请求（`src/hooks/useIndexStatus.ts`）

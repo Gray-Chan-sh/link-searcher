@@ -15,7 +15,7 @@ use link_searcher_lib::db::{self, dir_config, tracker};
 use link_searcher_lib::extractor;
 use link_searcher_lib::indexer::IndexerService;
 use link_searcher_lib::scanner::Scanner;
-use link_searcher_lib::search::searcher::{SearchParams, SearcherWrap};
+use link_searcher_lib::search::searcher::{SearchParams, SearcherWrap, SortField};
 use link_searcher_lib::search::IndexManager;
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ impl TestEnv {
         // Use a file-based DB inside the temp dir so we can init via public API.
         let db_path = dir_path.join("test.db");
         let db_str = db_path.to_str().unwrap();
-        db::init_db(db_str).unwrap();
+        db::init_db(&db::get_pool(db_str).unwrap().get().unwrap()).unwrap();
         let pool = db::get_pool(db_str).unwrap();
 
         let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
@@ -111,8 +111,9 @@ impl TestEnv {
         dir_ids: Option<Vec<String>>,
         ext_filter: Option<Vec<String>>,
     ) -> Vec<String> {
-        let reader = self.index_mgr.read().unwrap().reader().unwrap();
-        let idx = self.index_mgr.read().unwrap().index().clone();
+        let mgr = self.index_mgr.read().unwrap();
+        let reader = mgr.reader().unwrap().clone();
+        let idx = mgr.index().clone();
         let searcher = SearcherWrap::new(reader, (*idx).clone());
         let params = SearchParams {
             query: query.to_string(),
@@ -121,7 +122,7 @@ impl TestEnv {
             ext_filter,
             date_from: None,
             date_to: None,
-            sort: "score".to_string(),
+            sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
             page_size: 100,

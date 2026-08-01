@@ -11,6 +11,22 @@ use tantivy::{
 
 use crate::search::schema::build_schema;
 
+/// Field to sort search results by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SortField {
+    Score,
+    Date,
+    Size,
+    Name,
+}
+
+impl Default for SortField {
+    fn default() -> Self {
+        Self::Score
+    }
+}
+
 /// Cap for the number of results loaded into memory for name sorting.
 /// Beyond this cap, only the first 10_000 matching results are sorted by
 /// file_name; users can narrow the search scope to see more.
@@ -34,9 +50,8 @@ pub struct SearchParams {
     /// Enable fuzzy search with edit distance 1 (single-word queries only).
     #[serde(default)]
     pub fuzzy: bool,
-    /// Sort field: "score", "date", "name", "size".
-    #[serde(default = "default_sort")]
-    pub sort: String,
+    /// Sort field.
+    pub sort: SortField,
     /// Sort order: "asc" or "desc".
     #[serde(default = "default_sort_order")]
     pub sort_order: String,
@@ -48,9 +63,6 @@ pub struct SearchParams {
     pub page_size: usize,
 }
 
-fn default_sort() -> String {
-    "score".to_string()
-}
 fn default_sort_order() -> String {
     "desc".to_string()
 }
@@ -128,8 +140,7 @@ impl SearcherWrap {
             });
         }
 
-        // Build the appropriate collector with sorting.
-        let sort_field = params.sort.as_str();
+        // Determine sort field and order.
         let sort_order = if params.sort_order == "asc" {
             Order::Asc
         } else {
@@ -137,8 +148,8 @@ impl SearcherWrap {
         };
 
         // TopDocs returns different types depending on the sort method.
-        let doc_addrs_and_scores: Vec<(DocAddress, f64)> = match sort_field {
-            "date" => {
+        let doc_addrs_and_scores: Vec<(DocAddress, f64)> = match params.sort {
+            SortField::Date => {
                 let top = searcher.search(
                     &*query,
                     &TopDocs::with_limit(limit)
@@ -153,7 +164,7 @@ impl SearcherWrap {
                     })
                     .collect()
             }
-            "size" => {
+            SortField::Size => {
                 let top = searcher.search(
                     &*query,
                     &TopDocs::with_limit(limit).order_by_u64_field("file_size", sort_order),
@@ -167,7 +178,7 @@ impl SearcherWrap {
                     })
                     .collect()
             }
-            "name" => {
+            SortField::Name => {
                 // Fetch ALL results, sort by file_name in Rust
                 // (TEXT fields do not support fast-field sorting in Tantivy).
                 let top = searcher.search(
@@ -205,7 +216,7 @@ impl SearcherWrap {
                     .map(|(addr, score, _)| (addr, score))
                     .collect()
             }
-            _ => {
+            SortField::Score => {
                 // Default: sort by score (BM25 relevance).
                 let top = searcher.search(&*query, &TopDocs::with_limit(limit))?;
                 top.into_iter().map(|(score, addr)| (addr, f64::from(score))).collect()
@@ -599,7 +610,7 @@ mod tests {
             ext_filter: None,
             date_from: None,
             date_to: None,
-            sort: "score".to_string(),
+            sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
             page_size: 20,
@@ -626,7 +637,7 @@ mod tests {
             ext_filter: None,
             date_from: None,
             date_to: None,
-            sort: "score".to_string(),
+            sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
             page_size: 20,
@@ -650,7 +661,7 @@ mod tests {
             ext_filter: Some(vec!["pdf".to_string()]),
             date_from: None,
             date_to: None,
-            sort: "score".to_string(),
+            sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
             page_size: 20,
@@ -675,7 +686,7 @@ mod tests {
             ext_filter: None,
             date_from: None,
             date_to: None,
-            sort: "date".to_string(),
+            sort: SortField::Date,
             sort_order: "asc".to_string(),
             page: 1,
             page_size: 2,
@@ -725,7 +736,7 @@ mod tests {
             ext_filter: None,
             date_from: None,
             date_to: None,
-            sort: "score".to_string(),
+            sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
             page_size: 20,

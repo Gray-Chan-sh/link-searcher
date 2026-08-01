@@ -5,6 +5,40 @@ use rusqlite::Connection;
 use serde::Serialize;
 use uuid::Uuid;
 
+/// Indexed state stored in `file_tracking.indexed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexedState {
+    Pending = 0,
+    Indexed = 1,
+    Failed = 2,
+}
+
+impl std::fmt::Display for IndexedState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Indexed => write!(f, "indexed"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// File status stored in `file_tracking.status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileStatus {
+    Active,
+    Deleted,
+}
+
+impl std::fmt::Display for FileStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Active => write!(f, "active"),
+            Self::Deleted => write!(f, "deleted"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct FileRecord {
     pub id: String,

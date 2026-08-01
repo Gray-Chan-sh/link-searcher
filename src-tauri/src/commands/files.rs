@@ -4,6 +4,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::db;
+use crate::db::tracker::IndexedState;
 use crate::scanner::helpers::TempDir;
 use crate::state::AppState;
 
@@ -113,7 +114,7 @@ pub async fn list_files_db(
     let order_dir = if order.as_deref() == Some("desc") { "DESC" } else { "ASC" };
 
     // Build data SQL with named params to avoid positional conflicts
-    let mut data_sql = format!(
+    let data_sql = format!(
         "SELECT id, path, size, mtime, indexed, error_msg \
          FROM file_tracking WHERE {where_clause} \
          ORDER BY {sort_col} {order_dir} \
@@ -173,7 +174,7 @@ pub async fn get_file(state: State<'_, AppState>, id: String) -> Result<FileDeta
         .unwrap_or("")
         .to_string();
     Ok(FileDetail {
-        indexed: file.indexed == 1,
+        indexed: file.indexed == IndexedState::Indexed as i64,
         id: file.id,
         path: file.path.clone(),
         dir_id: file.dir_id,
@@ -222,7 +223,7 @@ pub async fn list_files(
                 let file_name = p.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string();
                 let file_ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
                 FileDetail {
-                    indexed: f.indexed == 1,
+                    indexed: f.indexed == IndexedState::Indexed as i64,
                     id: f.id,
                     path: f.path,
                     dir_id: f.dir_id,

@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use crate::config;
-use crate::search::searcher::{SearchParams, SearcherWrap};
+use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 use crate::search::IndexManager;
 
 #[derive(Parser)]
@@ -37,7 +37,7 @@ pub fn run_cli() {
                 ext_filter: None,
                 date_from: None,
                 date_to: None,
-                sort: "score".to_string(),
+                sort: SortField::Score,
                 sort_order: "desc".to_string(),
                 page: 1,
                 page_size: limit,
