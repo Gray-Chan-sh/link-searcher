@@ -160,7 +160,7 @@ useEffect(() => {
                 )}
                 <button
                   onClick={handleExport}
-                  disabled={search.status === 'loading'}
+                  disabled={false}
                   className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {t('export_csv')}
