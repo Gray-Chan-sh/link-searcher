@@ -70,7 +70,7 @@ export default function SearchBar({
     const dropdown = query.trim().length === 0
       ? history
       : suggestions.length > 0
-        ? ([] as any[]).concat(suggestions, history)
+        ? [...suggestions, ...history]
         : []
 
     if (!dropdown.length) return
