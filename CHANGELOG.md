@@ -179,6 +179,9 @@
 - **`1b06f2c`** 添加完整 CHANGELOG.md
 - **`03684db`** 修复 CHANGELOG 格式
 
+### 🏗️ 索引目录命名重构
+- **索引目录撞车**：data_dir 名为 "index" 时与硬编码索引子目录 `data_dir/index` 撞车，产生双重 `index/index`。新增共享常量 `INDEX_DIR_NAME = ".ls-index"`，替换全部硬编码 `join("index")`（`lib.rs`/`cli.rs`/`commands/config.rs`/`commands/backup.rs`）。启动时检测旧布局 `data_dir/index` 并重命名为 `.ls-index`（幂等）。`phase: "index"` 扫描标记与 `data.db` 路径逻辑不受影响
+
 ---
 
 ## 统计

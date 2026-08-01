@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use tauri::State;
 
+use crate::config::INDEX_DIR_NAME;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -25,7 +26,7 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
     std::fs::create_dir_all(&dest).map_err(|e| format!("failed to create backup dir: {e}"))?;
 
     // Backup Tantivy index
-    let index_dest = dest.join("index");
+    let index_dest = dest.join(INDEX_DIR_NAME);
     copy_dir(&state.index_dir, &index_dest)?;
 
     // Backup SQLite database
@@ -85,7 +86,7 @@ pub async fn restore_backup(state: State<'_, AppState>, backup_name: String) -> 
     }
 
     // Restore index
-    let index_src = backup_dir.join("index");
+    let index_src = backup_dir.join(INDEX_DIR_NAME);
     if index_src.is_dir() {
         let _ = std::fs::remove_dir_all(&state.index_dir);
         copy_dir(&index_src, &state.index_dir)?;

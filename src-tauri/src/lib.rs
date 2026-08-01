@@ -123,7 +123,15 @@ pub fn run() {
                 log::info!("OCR 引擎自检通过");
             }
 
-            let index_dir = data_dir.join("index");
+            // One-time migration: rename legacy `index` dir to `.ls-index`
+            let legacy_index = data_dir.join("index");
+            let new_index = data_dir.join(config::INDEX_DIR_NAME);
+            if !new_index.exists() && legacy_index.exists() && legacy_index.is_dir() {
+                std::fs::rename(&legacy_index, &new_index).ok();
+                log::info!("[STARTUP] 索引目录迁移: index -> {}", config::INDEX_DIR_NAME);
+            }
+
+            let index_dir = new_index;
             let db_path = data_dir.join("data.db");
 
             std::fs::create_dir_all(&index_dir).ok();

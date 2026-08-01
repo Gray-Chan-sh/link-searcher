@@ -24,7 +24,7 @@ pub fn run_cli() {
     match cli {
         Cli::Search { query, limit } => {
             let data_dir = config::load_config().data_dir;
-            let index_dir = data_dir.join("index");
+            let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);
 
             let index = IndexManager::open_or_create(&index_dir).expect("failed to open index");
             let reader = index.reader().expect("failed to create reader");
@@ -58,7 +58,7 @@ pub fn run_cli() {
         }
         Cli::Health => {
             let data_dir = config::load_config().data_dir;
-            let index_dir = data_dir.join("index");
+            let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);
             let db_path = data_dir.join("data.db");
 
             println!("Link-Searcher index health check");

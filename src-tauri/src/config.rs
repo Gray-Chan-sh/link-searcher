@@ -4,6 +4,9 @@ use serde::{Serialize, Deserialize};
 const CONFIG_DIR: &str = ".link-searcher";
 const CONFIG_FILE: &str = "config.json";
 
+/// 索引子目录名（Tantivy 数据）。用点开头避免与用户 data_dir 名为 "index" 时撞车。
+pub const INDEX_DIR_NAME: &str = ".ls-index";
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     pub data_dir: PathBuf,

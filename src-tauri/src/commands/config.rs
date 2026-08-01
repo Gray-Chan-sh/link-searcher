@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use crate::config::{AppConfig, load_config, save_config};
+use crate::config::{AppConfig, INDEX_DIR_NAME, load_config, save_config};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ConfigInfo {
@@ -42,9 +42,9 @@ pub fn migrate_data(old_path: String, new_path: String) -> Result<String, String
     if existing_db.exists() {
         return Err("目标目录已包含 data.db，请选择空目录或新目录".to_string());
     }
-    let existing_index = new.join("index");
+    let existing_index = new.join(INDEX_DIR_NAME);
     if existing_index.exists() {
-        return Err("目标目录已包含 index 文件夹，请选择空目录或新目录".to_string());
+        return Err("目标目录已包含索引文件夹，请选择空目录或新目录".to_string());
     }
 
     std::fs::create_dir_all(new).map_err(|e| format!("无法创建目标目录: {e}"))?;
@@ -58,9 +58,8 @@ pub fn migrate_data(old_path: String, new_path: String) -> Result<String, String
     }
 
     // Copy index directory
-    let index_name = "index";
-    let old_index = old.join(index_name);
-    let new_index = new.join(index_name);
+    let old_index = old.join(INDEX_DIR_NAME);
+    let new_index = new.join(INDEX_DIR_NAME);
     if old_index.exists() {
         copy_dir_recursive(&old_index, &new_index)?;
     }
