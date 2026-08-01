@@ -171,6 +171,7 @@ pub fn run() {
                 indexer,
                 scanner.clone(),
                 is_scanning,
+                Arc::new(AtomicBool::new(false)),
                 cancel_scan,
                 Arc::new(Mutex::new(ScanDelta::default())),
                 data_dir,

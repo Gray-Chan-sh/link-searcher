@@ -231,6 +231,7 @@ pub async fn rebuild_index(
     {
         return Err("a scan is already in progress".to_string());
     }
+    state.is_rebuilding.store(true, Ordering::SeqCst);
 
     let index_dir = state.index_dir.clone();
     let db_pool = state.db.clone();
@@ -238,6 +239,7 @@ pub async fn rebuild_index(
     let indexer = state.indexer.clone();
     let scanner = state.scanner.clone();
     let is_scanning = state.is_scanning.clone();
+    let is_rebuilding = state.is_rebuilding.clone();
     let cancel_scan = state.cancel_scan.clone();
     let scan_delta = state.scan_delta.clone();
 
@@ -271,6 +273,7 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] failed to create index: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
@@ -285,6 +288,7 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] db connection failed: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
@@ -294,6 +298,7 @@ pub async fn rebuild_index(
             Err(e) => {
                 log::error!("[SCAN] failed to list dirs: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
+                is_rebuilding.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
                 return;
             }
@@ -340,6 +345,7 @@ pub async fn rebuild_index(
         }
 
         is_scanning.store(false, Ordering::SeqCst);
+        is_rebuilding.store(false, Ordering::SeqCst);
         cancel_scan.store(false, Ordering::SeqCst);
         let _ = app.emit("scan-completed", serde_json::json!({}));
     });

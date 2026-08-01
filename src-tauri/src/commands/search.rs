@@ -1,5 +1,6 @@
 use tauri::State;
 use serde::Serialize;
+use std::sync::atomic::Ordering;
 
 use crate::db;
 use crate::search::searcher::{SearchParams, SearchResponse, SearcherWrap};
@@ -57,6 +58,9 @@ pub async fn search(
     date_to: Option<i64>,
     fuzzy: Option<bool>,
 ) -> Result<SearchResponse, String> {
+    if state.is_rebuilding.load(Ordering::SeqCst) {
+        return Err("索引重建中，请稍后再试".to_string());
+    }
     // Resolve dir_paths to file_ids via SQLite path prefix matching.
     let file_ids = if let Some(paths) = &dir_paths {
         if paths.is_empty() {

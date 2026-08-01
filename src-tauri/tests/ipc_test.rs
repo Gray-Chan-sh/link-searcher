@@ -74,6 +74,7 @@ fn setup_app(
         indexer,
         scanner,
         is_scanning,
+        Arc::new(AtomicBool::new(false)),
         tmp.path().to_path_buf(),
         index_dir,
         db_path,

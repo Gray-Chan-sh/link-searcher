@@ -186,6 +186,9 @@
 
 ## 2026-08-01
 
+### 🚀 重建期间搜索守卫
+- **重建索引时搜索返回友好错误**：`AppState` 新增 `is_rebuilding: Arc<AtomicBool>` 标志（`state.rs`），`rebuild_index` 启动时置 true、所有退出路径（含 spawn_blocking 内提前 return 与正常结束）置 false（`commands/index.rs`）；`search` 命令开头检查该标志，重建期间直接返回 `"索引重建中，请稍后再试"`（`commands/search.rs`）。`lib.rs` / `tests/ipc_test.rs` 的 `AppState::new` 调用点传入新参数。未改动 rebuild 的目录删除/重建逻辑（R1-3b 单独处理）
+
 ### 🔒 安全加固（2 项）
 - **Tauri CSP 启用**：`tauri.conf.json` 中 `"csp": null` → 完整 CSP 策略（`default-src 'self'` + 白名单 script/style/img/media/connect/frame/font/worker）。`connect-src` 额外加入 `http://ipc.localhost` 以兼容 Windows/Linux 的 IPC 通道（macOS 走 `ipc://`），防止 IPC 被 CSP 阻断。前端仅本地资源，无远程内容受影响
 - **fs 插件权限收窄 + scope**：`capabilities/default.json` 删除 `fs:allow-mkdir` / `fs:allow-remove` / `fs:allow-rename`（前端未使用）；保留读权限与 `fs:allow-write`（SearchPage.tsx 的 CSV 导出 `writeTextFile` 依赖它，且 `save()` 对话框会自动将选中路径加入 fs scope，导出不受影响）；新增 `fs.scope` 白名单（`$APPDATA` / `$APPLOCALDATA` / `$DOCUMENT` / `$DESKTOP` / `$DOWNLOAD` 递归）
