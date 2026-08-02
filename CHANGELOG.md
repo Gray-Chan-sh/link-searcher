@@ -15,7 +15,14 @@
 
 - **batch_index 定期 auto-commit 持有 MutexGuard 时调用 self.commit() 导致自死锁**：`batch_index`（263 行）获取 `self.writer` Mutex 后，`guard` 存活期间调用 `self.commit()`（347 行），`commit()` 内部再次 `self.lock_writer()` 拿同一把锁 → `std::sync::Mutex` 不可重入 → 自己等自己永久卡死。修复：`self.commit()` 改为 `Indexer::commit(writer)` 直接复用已持有的 writer。同样修复 `index_file`（`src-tauri/src/indexer.rs`）
 
-## 2026-08-02（Batch 1：取消扫描 + 失败重试 + 水印 OCR）
+## 2026-08-02（Batch 2+3：浏览页右键菜单 + 列宽拖拽 + 页码输入 + 复制修复）
+
+- **浏览页右键菜单**：文件行新增 `onContextMenu`，弹出菜单含 **打开**（`openFile`）、**在 Finder 中显示**（`revealInFolder`）、**手动索引**（调 `reindex_file` 后刷新列表）。移植自 `ResultList.tsx` 的右键模式，document click 自动关闭（`src/pages/Browse.tsx`）
+- **新增 `reindex_file` 命令**：支持手动逐文件重索引，查 DB 记录 → 解析绝对路径 → 调用 `indexer.index_file`。已注册 invoke_handler，前端封装 `reindexFile`（`src-tauri/src/commands/index.rs`、`lib.rs`、`src/api/index.ts`）。i18n 新增 `reindex` 键
+- **列宽可拖拽**：每列独立 width 状态，表头间加 `cursor-col-resize` 拖拽手柄（onMouseDown → mousemove → mouseup），最低 80px。移植自 `PreviewPanel.tsx` 的 drag resize 模式（`src/pages/Browse.tsx`）
+- **页码输入框**：前后翻页按钮间插入 `go_to` 数字输入框，Enter/失焦跳转，1..totalPages 校验。移植自 `SearchPage.tsx` 模式（`src/pages/Browse.tsx`）
+- **复制命令去除平台前缀**：`Settings.tsx` `filterGuide` 现在 strip 了 `"macOS:"`/`"Windows:"`/`"Linux:"` 前缀，复制的是纯命令（`src/pages/Settings.tsx`）
+- **分页空页确认**：`b1ba768` 已修复 SQL 参数错位，count/data 查询共享同一 WHERE，当前 HEAD 代码正确，无需修改
 
 - **取消扫描无效**：`cancel_scan` 标志只在 commands/index.rs 的目录边界检查，scanner 和 indexer 的 walk 循环从不读取。修复：`Scanner`/`IndexerService` 加 `cancel_scan: Arc<AtomicBool>` 字段，通过 `with_cancel()` 构造注入；三个 walk 循环（full/incremental/startup）每文件检查标志，`batch_index` Phase 1 par_iter + Phase 2 循环均检查，取消后跳过剩余文件并提交已完成部分。取消触发的文件不会标记 failed（`src-tauri/src/scanner/mod.rs`、`indexer.rs`、`lib.rs`）
 - **增量扫描不重试失败文件**：`incremental_scan` 的 `if mtime <= last_scan { continue; }` 门在 `needs_reindex` 之前，失败文件（indexed=2）mtime 未变 → 永久跳过。修复：门移到 `needs_reindex` 之后，`if mtime <= last_scan && !needs_index { continue; }`。同时改用 HashMap 批量加载 dir 记录避免行级 SQL（`src-tauri/src/scanner/mod.rs`）

@@ -25,6 +25,10 @@ export async function rebuildIndex(): Promise<void> {
   return invoke('rebuild_index')
 }
 
+export async function reindexFile(fileId: string): Promise<void> {
+  return invoke('reindex_file', { fileId })
+}
+
 export async function cancelScan(): Promise<void> {
   return invoke('cancel_scan')
 }

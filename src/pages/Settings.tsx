@@ -496,13 +496,12 @@ function ToggleField({ label, checked, onChange }: {
 }
 
 function filterGuide(guide: string): string {
-  return guide.split('\n')
-    .filter(line => {
-      // navigator.platform is deprecated; use @tauri-apps/plugin-os platform() when available.
-      const p = navigator.platform
-      return line.startsWith(`${p.startsWith('Mac') ? 'macOS' : p.startsWith('Win') ? 'Windows' : 'Linux'}:`)
-    })
-    .join('\n') || guide
+  const platform = navigator.platform.startsWith('Mac') ? 'macOS'
+    : navigator.platform.startsWith('Win') ? 'Windows'
+    : 'Linux'
+  const prefix = `${platform}:`
+  const line = guide.split('\n').find(l => l.startsWith(prefix))
+  return line ? line.slice(prefix.length).trimStart() : guide
 }
 
 function DepRow({ name, status, cmd }: { name: string; status: string; cmd: string }) {

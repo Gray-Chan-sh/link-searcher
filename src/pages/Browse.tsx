@@ -3,8 +3,9 @@ import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { useI18n } from '../i18n'
-import { type FilePreview } from '../api/files'
+import { type FilePreview, openFile, revealInFolder } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb } from '../api/files'
+import { reindexFile } from '../api/index'
 import { LoadingSpinner } from '../icons'
 
 function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
@@ -31,6 +32,35 @@ export default function Browse() {
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
+  const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
+  type ColKey = keyof typeof colWidths
+  const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
+
+  useEffect(() => {
+    const close = () => setContextMenu(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [])
+
+  const handleResizeStart = useCallback((e: React.MouseEvent, col: ColKey) => {
+    e.preventDefault()
+    resizingRef.current = { col, startX: e.clientX, startWidth: colWidths[col] }
+
+    const onMouseMove = (ev: MouseEvent) => {
+      const r = resizingRef.current
+      if (!r) return
+      const newWidth = Math.max(80, r.startWidth + (ev.clientX - r.startX))
+      setColWidths(prev => ({ ...prev, [r.col]: newWidth }))
+    }
+    const onMouseUp = () => {
+      resizingRef.current = null
+      document.removeEventListener('mousemove', onMouseMove)
+      document.removeEventListener('mouseup', onMouseUp)
+    }
+    document.addEventListener('mousemove', onMouseMove)
+    document.addEventListener('mouseup', onMouseUp)
+  }, [colWidths])
 
   // Sync URL params
   useEffect(() => {
@@ -174,13 +204,22 @@ export default function Browse() {
               <LoadingSpinner className="size-5" />
             </div>
           ) : (
-            <table className="w-full text-xs">
+            <table className="w-full text-xs select-none">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 backdrop-blur z-10">
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
-                  <th className="px-4 py-2 font-medium w-48">{t('filename')}</th>
-                  <th className="px-4 py-2 font-medium">{t('path')}</th>
-                  <th className="px-4 py-2 font-medium w-16">{t('type')}</th>
-                  <th className="px-4 py-2 font-medium w-28">{t('status')}</th>
+                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.filename }}>
+                    {t('filename')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'filename')} />
+                  </th>
+                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.path }}>
+                    {t('path')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} />
+                  </th>
+                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.type }}>
+                    {t('type')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'type')} />
+                  </th>
+                  <th className="px-4 py-2 font-medium" style={{ width: colWidths.status }}>{t('status')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -188,6 +227,7 @@ export default function Browse() {
                   <tr
                     key={item.file_id}
                     onClick={() => selectFile(item.rel_path)}
+                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, item }) }}
                     className={`border-b border-gray-100 dark:border-gray-800/50 cursor-pointer transition-colors ${
                       selectedFile === item.rel_path
                         ? 'bg-blue-50 dark:bg-blue-900/20'
@@ -232,6 +272,28 @@ export default function Browse() {
           >
             ← {t('prev_page')}
           </button>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-gray-500 dark:text-gray-400">{t('go_to')}</span>
+            <input
+              type="number"
+              value={page}
+              onChange={(e) => {
+                const p = parseInt(e.target.value, 10)
+                if (!isNaN(p) && p >= 1 && p <= totalPages) setPage(p)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  const input = e.target as HTMLInputElement
+                  const p = parseInt(input.value, 10)
+                  if (!isNaN(p) && p >= 1 && p <= totalPages) { setPage(p); input.blur() }
+                }
+              }}
+              className="w-16 px-2 py-1 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-600 dark:text-gray-400 text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
+              min={1}
+              max={totalPages}
+            />
+          </div>
           <span className="text-xs text-gray-500 dark:text-gray-400">
             {t('page_info', { page, total: totalPages, start: ((page - 1) * pageSize) + 1, end: Math.min(page * pageSize, total), totalAll: total })}
           </span>
@@ -292,6 +354,35 @@ export default function Browse() {
           </div>
         )}
       </div>
+
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => { openFile(contextMenu.item.file_id); setContextMenu(null) }}
+          >
+            {t('open')}
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => { revealInFolder(contextMenu.item.file_id); setContextMenu(null) }}
+          >
+            {t('show_in_folder')}
+          </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => {
+              reindexFile(contextMenu.item.file_id).catch(() => {}).finally(() => loadFiles())
+              setContextMenu(null)
+            }}
+          >
+            {t('reindex')}
+          </button>
+        </div>
+      )}
     </div>
   )
 }

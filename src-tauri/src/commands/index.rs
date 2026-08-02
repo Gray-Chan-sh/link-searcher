@@ -428,3 +428,23 @@ pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Res
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     tracker::get_index_errors(&conn, limit.unwrap_or(50)).map_err(|e| format!("{e}"))
 }
+
+/// Manual re-index of a single file. Looks up the DB record, resolves the
+/// full disk path from dir_config, and re-extracts + re-indexes.
+#[tauri::command]
+pub async fn reindex_file(
+    state: State<'_, AppState>,
+    file_id: String,
+) -> Result<(), String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let rec = tracker::get_file_by_id(&conn, &file_id)
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "file not found".to_string())?;
+    let dir = db::dir_config::get_dir(&conn, &rec.dir_id)
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "dir config not found".to_string())?;
+    let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+    drop(conn);
+    state.indexer.index_file(&file_id, &full_path, &rec.dir_id)
+        .map_err(|e| format!("{e}"))
+}
