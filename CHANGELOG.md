@@ -4,7 +4,11 @@
 
 ---
 
-## 2026-08-02（Semgrep CI 集成 + 代码规范）
+## 2026-08-02（Bug 修复：添加目录后双重扫描并发死锁）
+
+- **add_dir 内部触发扫描 + 前端 triggerScan 并发导致 IndexWriter 死锁**：`add_dir` 命令内部 `spawn_blocking(incremental_scan)`（扫描 A）和前端 `useDirs.ts` 的 `triggerScan()`（扫描 B）并发执行，两个 `full_scan` 竞争同一个 Tantivy `IndexWriter` Mutex → 两者都卡在 `lock_writer()` 上，Tantivy 线程全部 idle，扫描永远不会打印"扫描完成"。修复：去掉 `add_dir` 内部的 `incremental_scan`，仅保留 watcher 启动；扫描由前端 `triggerScan()` 独占执行（已有 `compare_exchange` 并发保护）。根因使用 `sample` 命令栈分析确认（`src-tauri/src/commands/dirs.rs`）
+
+---
 
 - **Semgrep 静态分析集成**：新增 `.semgrep/custom.yml`（13 条自定义规则：Rust 锁中毒/panic/fs::copy/错误吞没 + TS JSON.parse/setInterval/clipboard）；叠加官方规则集 p/rust、p/typescript、p/react、p/owasp-top-ten、p/secrets；分 ERROR/WARNING/INFO 三级，ERROR 阻塞提交零容忍；`rust-unwrap-panic`/`rust-expect-panic` 排除测试目录；`rust-rwlock-read-unwrap` 在 5 处内联测试加 `nosemgrep` 注释（`.semgrep/custom.yml`、`AGENTS.md`、`src-tauri/src/indexer.rs`、`src-tauri/src/scanner/mod.rs`）
 - **AGENTS.md 提交流程**：新增步骤 3.5 "Semgrep 检查 → semgrep scan --severity ERROR 零发现" + "静态分析节"三级体系说明 + 子任务禁止改规则声明（`AGENTS.md`）

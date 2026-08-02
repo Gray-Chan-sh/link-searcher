@@ -87,13 +87,6 @@ pub async fn add_dir(
         path: std::path::PathBuf::from(&dir.path),
     });
 
-    // Trigger initial scan for the newly added directory
-    let scanner = state.scanner.clone();
-    let dir_id = dir.id.clone();
-    tokio::task::spawn_blocking(move || {
-        let _ = scanner.incremental_scan(&dir_id, |_| {});
-    });
-
     Ok(DirConfigResponse {
         id: dir.id,
         path: dir.path,
