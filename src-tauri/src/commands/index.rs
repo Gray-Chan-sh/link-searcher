@@ -119,6 +119,8 @@ pub async fn trigger_scan(
 
     tokio::task::spawn_blocking(move || {
         cancel_scan.store(false, Ordering::Release);
+        // Suppress LibreOffice Dock icons for the duration of this scan session.
+        let _lo_guard = crate::extractor::office::LoBackgroundGuard::enter();
         let conn = match db_pool.get() {
             Ok(c) => c,
             Err(e) => {
@@ -246,6 +248,8 @@ pub async fn rebuild_index(
 
         tokio::task::spawn_blocking(move || {
             cancel_scan.store(false, Ordering::Release);
+            // Suppress LibreOffice Dock icons for the duration of this rebuild.
+            let _lo_guard = crate::extractor::office::LoBackgroundGuard::enter();
             let mut added = 0u64;
             let mut deleted = 0u64;
             let mut modified = 0u64;

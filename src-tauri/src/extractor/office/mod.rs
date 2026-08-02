@@ -114,72 +114,135 @@ fn determine_lo_binary() -> String {
     "soffice".to_string()
 }
 
-/// Ensure LibreOffice.app has LSUIElement=true in Info.plist so Dock icons
-/// don't flash during headless conversions. Best-effort — non-fatal if it
-/// fails (no write permission, non-standard install, etc.).
+/// Suppress LibreOffice Dock icons during a scan session.
+/// Sets LSUIElement=true in LO's Info.plist, restores on drop.
 #[cfg(target_os = "macos")]
-pub fn ensure_lo_background_mode() {
-    let binary = determine_lo_binary();
-    if binary.is_empty() {
-        return;
+pub struct LoBackgroundGuard {
+    plist: std::path::PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl LoBackgroundGuard {
+    pub fn enter() -> Option<Self> {
+        let binary = determine_lo_binary();
+        if binary.is_empty() {
+            return None;
+        }
+
+        // Resolve binary to .app bundle
+        let binary_path = std::path::PathBuf::from(&binary);
+        let app_dir = match find_lo_app_dir(&binary_path) {
+            Some(d) => d,
+            None => return None,
+        };
+
+        let plist = app_dir.join("Contents").join("Info.plist");
+        if !plist.exists() {
+            return None;
+        }
+
+        // Check if already set (e.g., left over from a crash)
+        let already_set = std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :LSUIElement", plist.to_str()?])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("true"))
+            .unwrap_or(false);
+
+        if !already_set {
+            let ok = std::process::Command::new("/usr/libexec/PlistBuddy")
+                .args(["-c", "Add :LSUIElement bool true", plist.to_str()?])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                log::info!("[LO] Dock icon suppressed for scan session");
+            }
+        }
+
+        Some(LoBackgroundGuard { plist })
     }
 
-    // Resolve the binary to find the .app bundle directory.
-    // /opt/homebrew/bin/soffice → /Applications/LibreOffice.app/Contents/MacOS/soffice
-    let binary_path = if let Ok(canon) = std::fs::canonicalize(&binary) {
-        canon
-    } else if binary.contains("LibreOffice.app") {
-        std::path::PathBuf::from(&binary)
-    } else {
-        return; // can't resolve
-    };
-
-    // Walk up from Contents/MacOS/soffice to the .app bundle
-    let mut app_dir = binary_path.clone();
-    // Find "Contents" in the path
-    while app_dir.file_name().map(|n| n != "Contents").unwrap_or(false) {
-        if !app_dir.pop() {
+    /// On startup, clean up any LSUIElement left over from a crash
+    pub fn recover() {
+        let binary = determine_lo_binary();
+        if binary.is_empty() {
             return;
         }
+        let binary_path = std::path::PathBuf::from(&binary);
+        let app_dir = match find_lo_app_dir(&binary_path) {
+            Some(d) => d,
+            None => return,
+        };
+        let plist = app_dir.join("Contents").join("Info.plist");
+        if !plist.exists() {
+            return;
+        }
+        let is_set = std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :LSUIElement", plist.to_str().unwrap_or("")])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("true"))
+            .unwrap_or(false);
+        if is_set {
+            let ok = std::process::Command::new("/usr/libexec/PlistBuddy")
+                .args(["-c", "Delete :LSUIElement", plist.to_str().unwrap_or("")])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok {
+                log::warn!("[LO] Restored Dock icon after crash recovery");
+            }
+        }
     }
-    if app_dir.file_name().map(|n| n != "Contents").unwrap_or(true) {
-        return;
-    }
-    if !app_dir.pop() {
-        return;
-    } // pop "Contents" to get the .app directory
+}
 
-    let plist = app_dir.join("Contents").join("Info.plist");
-    if !plist.exists() {
-        return;
+#[cfg(target_os = "macos")]
+impl Drop for LoBackgroundGuard {
+    fn drop(&mut self) {
+        let ok = std::process::Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Delete :LSUIElement", self.plist.to_str().unwrap_or("")])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            log::info!("[LO] Dock icon restored");
+        }
     }
+}
 
-    let plistbuddy = "/usr/libexec/PlistBuddy";
-    // Check if already patched
-    if let Ok(output) = std::process::Command::new(plistbuddy)
-        .args(["-c", "Print :LSUIElement", plist.to_str().unwrap_or("")])
-        .output()
-    {
-        if String::from_utf8_lossy(&output.stdout).contains("true") {
-            return; // already done
-        }
-    }
+#[cfg(not(target_os = "macos"))]
+pub struct LoBackgroundGuard;
 
-    // Add LSUIElement
-    match std::process::Command::new(plistbuddy)
-        .args(["-c", "Add :LSUIElement bool true", plist.to_str().unwrap_or("")])
-        .status()
-    {
-        Ok(s) if s.success() => {
-            log::info!("[LO] Added LSUIElement to LibreOffice.app Info.plist — Dock icons suppressed");
-        }
-        Ok(s) => {
-            log::warn!("[LO] Failed to add LSUIElement to Info.plist (exit {}) — Dock icons may flash during indexing. Fix manually: /usr/libexec/PlistBuddy -c \"Add :LSUIElement bool true\" /Applications/LibreOffice.app/Contents/Info.plist", s.code().unwrap_or(-1));
-        }
-        Err(e) => {
-            log::warn!("[LO] Could not run PlistBuddy: {e} — Dock icons may flash");
+#[cfg(not(target_os = "macos"))]
+impl LoBackgroundGuard {
+    pub fn enter() -> Option<Self> {
+        Some(LoBackgroundGuard)
+    }
+    pub fn recover() {}
+}
+
+/// Resolve a LibreOffice binary path to its .app bundle directory.
+#[cfg(target_os = "macos")]
+fn find_lo_app_dir(binary_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canon = std::fs::canonicalize(binary_path).ok()?;
+    let mut dir = canon;
+    // Walk up to find "Contents" directory
+    while dir.file_name().map(|n| n != "Contents").unwrap_or(false) {
+        if !dir.pop() {
+            return None;
         }
     }
+    if dir.file_name().map(|n| n != "Contents").unwrap_or(true) {
+        return None;
+    }
+    dir.pop(); // pop "Contents" to get .app
+    Some(dir)
+}
+
+/// On startup, clean up any LSUIElement left over from a crash. Does NOT set
+/// LSUIElement — Dock icons are suppressed per-scan via [`LoBackgroundGuard`].
+#[cfg(target_os = "macos")]
+pub fn ensure_lo_background_mode() {
+    LoBackgroundGuard::recover();
 }
 
 #[cfg(not(target_os = "macos"))]

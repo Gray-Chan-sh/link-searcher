@@ -6,7 +6,7 @@
 
 ## 2026-08-02（Bug 修复：macOS LibreOffice headless 调用失败）
 
-- **索引期间 Dock 图标闪烁**：Rayon `par_iter` 并发 soffice 进程各自激活 NSApplication → N 个 LibreOffice Dock 图标同时闪现。根因：macOS 把 .app bundle 当普通前台应用。修复：新增 `ensure_lo_background_mode()`，启动时用 PlistBuddy 给 Info.plist 写 `LSUIElement=true`（幂等，仅一次），让 macOS 将 LibreOffice 视为后台应用；路径从 `determine_lo_binary()` 解析（支持 Homebrew 软链 / 非标准安装），非 macOS 为 no-op，失败仅告警不阻塞。调用点：`lib.rs` 启动线程 OCR 自检后（`src-tauri/src/extractor/office/mod.rs`、`src-tauri/src/lib.rs`）
+- **扫描会话级 LibreOffice Dock 图标抑制（revert 持久写入）**：`自启动时持久注入 LSUIElement=true` 改为 `LoBackgroundGuard` RAII guard——仅在扫描会话期间临时设置，扫描完成后自动恢复。避免持久写入导致用户正常使用 LO 时无 Dock 图标。新增 crash recovery：启动时若检测到残留 LSUIElement（上次扫描崩溃），自动清除。Guard 覆盖 `trigger_scan`、`rebuild_index`、`startup_scan` 三个入口（`src-tauri/src/extractor/office/mod.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`）
 
 - **并发 soffice 共享默认 profile 锁竞争**：`batch_index` Rayon `par_iter` 并发提取 .doc/.xls/.ppt 时多个 `soffice` 进程争用同一用户 profile `.lock` → 超时/崩溃。修复：每次调用使用独立 temp profile（`-env:UserInstallation=file://{unique}` + `--norestore --nolockcheck --nofirststartwizard`）
 - **超时后子进程不 kill**：`extract_via_libreoffice` 60s 超时后 orphan 进程继续持锁 → 后续调用全挂。修复：`Arc<Mutex<Child>>` 跟踪子进程，超时时 kill + wait
