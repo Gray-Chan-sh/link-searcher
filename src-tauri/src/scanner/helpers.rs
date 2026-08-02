@@ -138,7 +138,7 @@ pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
 
 pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
     match existing {
-        Some(r) => r.mtime != mtime || r.indexed == IndexedState::Pending as i64 || r.indexed == IndexedState::Failed as i64,
+        Some(r) => r.mtime != mtime || r.indexed == IndexedState::Pending as i64,
         None => true,
     }
 }

@@ -298,8 +298,8 @@ impl Scanner {
             } else {
                 added += 1;
             };
-            // Skip only when mtime unchanged AND no reindex needed — failed
-            // files (indexed=2) keep needs_index=true and get retried.
+            // Skip only when mtime unchanged AND no reindex needed — this
+            // excludes failed files (handled via manual re-index only).
             if mtime <= last_scan && !needs_index { continue; }
 
             if needs_index {
