@@ -4,7 +4,12 @@
 
 ---
 
-## 2026-08-02（Bug 修复：IndexWriter Mutex 不可重入自死锁）
+## 2026-08-02（Bug 修复：macOS LibreOffice headless 调用失败）
+
+- **并发 soffice 共享默认 profile 锁竞争**：`batch_index` Rayon `par_iter` 并发提取 .doc/.xls/.ppt 时多个 `soffice` 进程争用同一用户 profile `.lock` → 超时/崩溃。修复：每次调用使用独立 temp profile（`-env:UserInstallation=file://{unique}` + `--norestore --nolockcheck --nofirststartwizard`）
+- **超时后子进程不 kill**：`extract_via_libreoffice` 60s 超时后 orphan 进程继续持锁 → 后续调用全挂。修复：`Arc<Mutex<Child>>` 跟踪子进程，超时时 kill + wait
+- **移除无用的 LSUIElement guard**：`defaults write org.libreoffice.script LSUIElement 1` 写 preferences 域不会影响 LaunchServices（只读 Info.plist）。`SAL_USE_VCLPLUGIN=svp` 已绕过 AppKit，故删除死代码（`src-tauri/src/extractor/office/mod.rs`）
+- **`check_binary` 无超时**：首次运行 profile 创建可超过默认超时。改为 `spawn + try_wait` 轮询 + 15s 超时 kill（`src-tauri/src/extractor/office/mod.rs`）
 
 - **batch_index 定期 auto-commit 持有 MutexGuard 时调用 self.commit() 导致自死锁**：`batch_index`（263 行）获取 `self.writer` Mutex 后，`guard` 存活期间调用 `self.commit()`（347 行），`commit()` 内部再次 `self.lock_writer()` 拿同一把锁 → `std::sync::Mutex` 不可重入 → 自己等自己永久卡死。修复：`self.commit()` 改为 `Indexer::commit(writer)` 直接复用已持有的 writer。同样修复 `index_file`（`src-tauri/src/indexer.rs`）
 

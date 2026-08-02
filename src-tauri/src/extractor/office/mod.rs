@@ -39,14 +39,44 @@ fn check_binary(path: &str) -> bool {
     if !is_bare_name && !Path::new(path).exists() {
         return false;
     }
-    std::process::Command::new(path)
+    // First-run profile creation can take a while, so don't block forever.
+    let mut child = match std::process::Command::new(path)
         .arg("--headless")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    match wait_timeout(&mut child, Duration::from_secs(15)) {
+        Ok(Some(status)) => status.success(),
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn wait_timeout(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(Some(status)),
+            None => {
+                if start.elapsed() >= timeout {
+                    return Ok(None);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+    }
 }
 
 fn common_lo_paths() -> Vec<String> {
@@ -84,85 +114,106 @@ fn determine_lo_binary() -> String {
     "soffice".to_string()
 }
 
-#[cfg(target_os = "macos")]
-struct LsuiElementGuard;
-
-#[cfg(target_os = "macos")]
-impl LsuiElementGuard {
-    fn suppress() -> Self {
-        let _ = std::process::Command::new("defaults")
-            .args(["write", "org.libreoffice.script", "LSUIElement", "1"])
-            .status();
-        LsuiElementGuard
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for LsuiElementGuard {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("defaults")
-            .args(["delete", "org.libreoffice.script", "LSUIElement"])
-            .status();
-    }
-}
-
 pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
     let binary = determine_lo_binary();
     if binary.is_empty() {
         return Err(anyhow::anyhow!("LibreOffice 未配置且不可用"));
     }
 
-    // macOS only: hide LibreOffice Dock icon for headless conversion
-    #[cfg(target_os = "macos")]
-    let _lsu_guard = if binary.contains("LibreOffice") {
-        Some(LsuiElementGuard::suppress())
-    } else {
-        None
-    };
-
     let tmp_dir = TempDir::new("ls_lo").context("failed to create LO temp dir")?;
-
-    let (tx, rx) = mpsc::channel();
-    let path = path.to_path_buf();
     let out_dir = tmp_dir.path().to_path_buf();
 
+    // Isolated profile per invocation: concurrent soffice processes (Rayon
+    // par_iter) would otherwise contend on the shared default profile .lock.
+    let profile_dir = out_dir.join("lo_profile");
+    std::fs::create_dir_all(&profile_dir).context("failed to create LO profile dir")?;
+    let profile_display = profile_dir.display().to_string();
+    let profile_uri = if profile_display.starts_with('/') {
+        format!("file://{profile_display}")
+    } else {
+        format!("file:///{profile_display}")
+    };
+
+    let stderr_log = out_dir.join("lo_stderr.log");
+    let stderr_file = std::fs::File::create(&stderr_log).context("failed to create LO stderr log")?;
+
+    let child = std::process::Command::new(&binary)
+        .env("SAL_USE_VCLPLUGIN", "svp")
+        .arg(format!("-env:UserInstallation={profile_uri}"))
+        .args([
+            "--headless",
+            "--nologo",
+            "--nodefault",
+            "--norestore",
+            "--nolockcheck",
+            "--nofirststartwizard",
+        ])
+        .arg("--convert-to")
+        .arg("txt:Text")
+        .arg("--outdir")
+        .arg(&out_dir)
+        .arg(path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(stderr_file))
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("{binary} not available: {e}"))?;
+
+    let child_handle = std::sync::Arc::new(std::sync::Mutex::new(child));
+    let child_for_thread = std::sync::Arc::clone(&child_handle);
+    let (tx, rx) = mpsc::channel();
+
     std::thread::spawn(move || {
-        let result = (|| -> Result<String> {
-            let output = std::process::Command::new(&binary)
-                .env("SAL_USE_VCLPLUGIN", "svp")
-                .args(["--headless", "--convert-to", "txt:Text"])
-                .arg("--outdir")
-                .arg(&out_dir)
-                .arg(&path)
-                .output()
-                .map_err(|e| anyhow::anyhow!("{} not available: {e}", binary))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("{} --convert-to txt failed (code {:?}): {}", binary, output.status.code(), stderr.trim());
+        // Poll without holding the lock while sleeping so the timeout
+        // branch below can acquire it to kill an orphaned process.
+        let result = loop {
+            let mut child = child_for_thread.lock().unwrap_or_else(|e| e.into_inner());
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) => {
+                    drop(child);
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+                Err(e) => break Err(e),
             }
-
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-            let out_path = out_dir.join(format!("{}.txt", stem));
-
-            if !out_path.exists() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("LibreOffice 转换失败: {}", if stderr.trim().is_empty() { "未生成输出文件" } else { stderr.trim() });
-            }
-
-            let text = std::fs::read_to_string(&out_path)
-                .map_err(|e| anyhow::anyhow!("failed to read LO output: {e}"))?;
-
-            Ok(text)
-        })();
+        };
         let _ = tx.send(result);
     });
 
-    let result = rx
-        .recv_timeout(Duration::from_secs(60))
-        .map_err(|_| anyhow::anyhow!("LibreOffice timed out (60s)"))??;
+    let status = match rx.recv_timeout(Duration::from_secs(60)) {
+        Ok(Ok(status)) => status,
+        Ok(Err(e)) => return Err(anyhow::anyhow!("LibreOffice wait failed: {e}")),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let mut child = child_handle.lock().unwrap_or_else(|e| e.into_inner());
+            log::warn!("[OFFICE] killed soffice after 60s timeout");
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(anyhow::anyhow!(
+                "LibreOffice timed out (60s) and was killed (pid {})",
+                child.id()
+            ));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(anyhow::anyhow!("LibreOffice thread panicked"));
+        }
+    };
 
-    Ok(result)
+    let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+
+    if !status.success() {
+        anyhow::bail!("{binary} --convert-to txt failed (code {:?}): {}", status.code(), stderr.trim());
+    }
+
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let out_path = out_dir.join(format!("{stem}.txt"));
+
+    if !out_path.exists() {
+        anyhow::bail!("LibreOffice 转换失败: {}", if stderr.trim().is_empty() { "未生成输出文件" } else { stderr.trim() });
+    }
+
+    let text = std::fs::read_to_string(&out_path)
+        .map_err(|e| anyhow::anyhow!("failed to read LO output: {e}"))?;
+
+    Ok(text)
 }
 
 pub struct OfficeExtractor;
