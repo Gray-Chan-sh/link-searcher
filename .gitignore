@@ -32,3 +32,4 @@ src-tauri/index/
 
 # Local session data
 .omo/
+scripts/

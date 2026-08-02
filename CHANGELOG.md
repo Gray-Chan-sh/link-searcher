@@ -4,9 +4,27 @@
 
 ---
 
+## 2026-08-02（Semgrep CI 集成 + 代码规范）
+
+- **Semgrep 静态分析集成**：新增 `.semgrep/custom.yml`（13 条自定义规则：Rust 锁中毒/panic/fs::copy/错误吞没 + TS JSON.parse/setInterval/clipboard）；叠加官方规则集 p/rust、p/typescript、p/react、p/owasp-top-ten、p/secrets；分 ERROR/WARNING/INFO 三级，ERROR 阻塞提交零容忍；`rust-unwrap-panic`/`rust-expect-panic` 排除测试目录；`rust-rwlock-read-unwrap` 在 5 处内联测试加 `nosemgrep` 注释（`.semgrep/custom.yml`、`AGENTS.md`、`src-tauri/src/indexer.rs`、`src-tauri/src/scanner/mod.rs`）
+- **AGENTS.md 提交流程**：新增步骤 3.5 "Semgrep 检查 → semgrep scan --severity ERROR 零发现" + "静态分析节"三级体系说明 + 子任务禁止改规则声明（`AGENTS.md`）
+
+---
+
+## 2026-08-02（三项安全加固：原子迁移 + 单实例 + 交叠检测）
+
+- **原子化迁移**：`migrate_data` 重写为 async，采用 tmp→fsync→原子 rename 模式（先拷到 `.migrate-tmp-{uuid}`，完整落盘后 `fs::rename` 到目标）。迁移期间暂停扫描+watcher，emit 进度事件（前端显示进度条）。拷贝失败则回退清理 tmp（旧目录不动）；拷贝成功+删除旧目录失败仅弹警告，迁移仍算完成。新增「目标不能是旧目录子目录」防护。`save_config` 在 `remove_dir_all` 之前执行，防止删除后写配置失败导致指向空目录（`src-tauri/src/commands/config.rs`、`src/pages/Settings.tsx`、`src/api/config.ts`）
+- **单实例限制**：新增 `tauri-plugin-single-instance` v2，注册在 Builder 最前面。第二实例启动时激活已有窗口（show+set_focus）后自动退出。`--data-dir` 实例同样受限制（`src-tauri/Cargo.toml`、`src-tauri/src/lib.rs`）
+- **数据目录与监控目录交叠检测**：新增 `commands/helpers.rs` `check_data_dir_overlap`（canonicalize + 组件感知 `starts_with`，带非存在路径词法回退 + macOS `/tmp`→`/private/tmp` symlink 一致化）。三个入口全部检测——`add_dir` 拒绝、`migrate_data`/`update_config` 拒绝、`--data-dir` 启动拒绝。启动时对已存在交叠仅 `log::warn` 不阻断（`src-tauri/src/commands/helpers.rs`、`dirs.rs`、`config.rs`、`main.rs`、`lib.rs`）
+- **ipc_test 适配**：fixture data_dir 改为子目录，避免 TempDir 与 add_dir 目标碰撞新交叠检查（`src-tauri/tests/ipc_test.rs`）
+
+---
+
 ## 2026-08-02（测试修复：绝对路径→相对路径重构后集成测试）
 
 - **test_incremental_scan 查询路径格式错误**：`file_tracking` 表 `path` 字段已改为存相对路径，但 `integration.rs` 的 `test_incremental_scan` 仍用 `env.dir_path.join("<filename>")` 绝对路径查询，导致 `None.unwrap()` panic。改为传相对路径字符串（`src-tauri/tests/integration.rs`）
+- **test_pdf_multiple_pages OCR 断言不稳定**：PaddleOCR（PP-OCRv5）对程序化 PDF 渲染页识别存在大小写/空格误差（"PageTwo"→"PageTWo"），原精确匹配断言导致测试失败。新增 `contains_ignore_case` 辅助函数（大小写+空白归一化后子串匹配），断言改用该函数（`src-tauri/src/extractor/pdf.rs`）
+- **ipc_test init_db 签名未同步**：`init_db` 改为 `&Connection` 参数后，`ipc_test.rs` 仍按旧签名传 `db_str` 导致编译错误。改为先 `Connection::open(db_str)` 再传 `&conn`（`src-tauri/tests/ipc_test.rs`）
 
 ---
 

@@ -1,0 +1,104 @@
+rules:
+  - id: rust-rwlock-read-unwrap
+    pattern: |
+      $LOCK.read().unwrap()
+    message: RwLock read unwrap poisoning risk
+    languages: [rust]
+    severity: ERROR
+
+  - id: rust-rwlock-write-unwrap
+    pattern: |
+      $LOCK.write().unwrap()
+    message: RwLock write unwrap poisoning risk
+    languages: [rust]
+    severity: ERROR
+
+  - id: rust-mutex-lock-unwrap
+    pattern: |
+      $LOCK.lock().unwrap()
+    message: Mutex lock unwrap poisoning risk
+    languages: [rust]
+    severity: ERROR
+
+  - id: rust-unwrap-panic
+    pattern: |
+      $X.unwrap()
+    message: unwrap panic risk
+    languages: [rust]
+    severity: WARNING
+    paths:
+      exclude:
+        - "src-tauri/tests/**"
+        - "**/tests/**"
+
+  - id: rust-expect-panic
+    pattern: |
+      $X.expect(...)
+    message: expect panic risk
+    languages: [rust]
+    severity: WARNING
+    paths:
+      exclude:
+        - "src-tauri/tests/**"
+        - "**/tests/**"
+
+  - id: rust-fs-copy-sqlite
+    pattern-either:
+      - pattern: |
+          std::fs::copy($SRC, $DST)
+      - pattern: |
+          fs::copy($SRC, $DST)
+    message: fs::copy - check if copying SQLite/live file
+    languages: [rust]
+    severity: WARNING
+
+  - id: rust-let-underscore
+    pattern: |
+      let _ = $X;
+    message: >-
+      let _ 静默丢弃返回值 —— 生产代码中请确认是否有意忽略（测试代码中的 let _ 属
+      于标准写法，可忽略本告警）
+    languages: [rust]
+    severity: INFO
+
+  - id: rust-ok-swallow
+    pattern: |
+      $X.ok()
+    message: ok() swallows error info
+    languages: [rust]
+    severity: INFO
+
+  - id: rust-unsafe-send-sync
+    pattern: |
+      unsafe impl $TRAIT for $TYPE {}
+    message: unsafe impl Send/Sync - verify thread safety
+    languages: [rust]
+    severity: WARNING
+
+  - id: rust-atomic-relaxed
+    pattern: |
+      $ATOMIC.load(Ordering::Relaxed)
+    message: Relaxed atomic ordering - visibility concern
+    languages: [rust]
+    severity: INFO
+
+  - id: ts-json-parse
+    pattern: |
+      JSON.parse($X)
+    message: JSON.parse without try/catch
+    languages: [typescript]
+    severity: WARNING
+
+  - id: ts-setinterval
+    pattern: |
+      setInterval($FN, $MS)
+    message: setInterval - ensure cleanup
+    languages: [typescript]
+    severity: INFO
+
+  - id: ts-clipboard-write
+    pattern: |
+      navigator.clipboard.writeText($X)
+    message: clipboard.writeText without catch
+    languages: [typescript]
+    severity: INFO

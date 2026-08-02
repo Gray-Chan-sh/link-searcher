@@ -578,7 +578,7 @@ mod tests {
         assert_eq!(result.errors, 0);
 
         svc.commit().unwrap();
-        let mgr = svc.index_manager.read().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
         let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = crate::search::schema::build_schema();
@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(r2.indexed, 1);
         svc.commit().unwrap();
 
-        let mgr = svc.index_manager.read().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
         let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = crate::search::schema::build_schema();

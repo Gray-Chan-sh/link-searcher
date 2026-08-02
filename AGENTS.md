@@ -10,9 +10,41 @@
 1. 更新 CHANGELOG.md   → 记录本次变更（根因、怎么修、涉及哪些文件）
 2. 更新 README.md       → 如涉及功能/架构变化，同步文档
 3. 更新 USER_MANUAL.md  → 如涉及用户可见行为变化，同步手册
+3.5. Semgrep 检查 → semgrep scan --severity ERROR 零发现
 4. 编译验证             → cargo check / npx tsc 零错误
 5. 提交并推送           → git commit + git push
 ```
+
+## 静态分析（Semgrep）
+
+每次提交前，必须运行阻塞级检查，**零发现**才可提交：
+
+```bash
+semgrep scan \
+  --config .semgrep/custom.yml \
+  --config p/owasp-top-ten \
+  --config p/secrets \
+  --severity ERROR
+```
+
+| 级别 | 含义 | 包含规则 |
+|:---:|------|------|
+| **ERROR** | 🔴 阻塞提交，必须修复 | OWASP Top 10、密钥泄露、RwLock/Mutex 锁中毒 |
+| WARNING | 🟡 不阻塞，需定期 review | p/rust、p/typescript、p/react、unwrap/expect、fs::copy |
+| INFO | ⚫ 仅记录，参考用 | let_ 静默丢弃、ok() 吞错误 |
+
+完整扫描（含 WARNING 级）：
+```bash
+semgrep scan \
+  --config .semgrep/custom.yml \
+  --config p/rust \
+  --config p/typescript \
+  --config p/react \
+  --config p/owasp-top-ten \
+  --config p/secrets
+```
+
+⚠️ 子任务**不应修改**此节或自行追加 semgrep 规则。规则变更由主 Agent 统一管理。
 
 ## 变更记录（CHANGELOG.md）
 

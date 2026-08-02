@@ -34,10 +34,26 @@ use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
-    let app_config = config::load_config();
+    run_with_config(config::load_config());
+}
+
+pub fn run_with_data_dir(data_dir: std::path::PathBuf) {
+    let mut app_config = config::load_config();
+    app_config.data_dir = data_dir;
+    run_with_config(app_config);
+}
+
+fn run_with_config(app_config: config::AppConfig) {
     let data_dir = app_config.data_dir.clone();
 
     tauri::Builder::default()
+        // Must precede other plugins so the second instance exits before they initialize.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -140,6 +156,25 @@ pub fn run() {
             let init_conn = db_pool.get()?;
             db::init_db(&init_conn)?;
             drop(init_conn);
+
+            // Warn (don't block) if any monitored dir already overlaps the data dir.
+            if let Ok(conn) = db_pool.get() {
+                if let Ok(dirs) = crate::db::dir_config::list_dirs(&conn) {
+                    for dir in &dirs {
+                        if let Err(msg) = crate::commands::helpers::check_data_dir_overlap(
+                            &data_dir,
+                            std::path::Path::new(&dir.path),
+                        ) {
+                            log::warn!(
+                                "检测到数据目录 {} 与监控目录 {} 存在交叠，请尽快修正 ({msg})",
+                                data_dir.display(),
+                                dir.path
+                            );
+                        }
+                    }
+                }
+                drop(conn);
+            }
 
             let index_manager = Arc::new(RwLock::new(
                 IndexManager::open_or_create(&index_dir)?,

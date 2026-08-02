@@ -58,9 +58,13 @@ fn setup_app(
 ) -> (tauri::App<tauri::test::MockRuntime>, tauri::WebviewWindow<tauri::test::MockRuntime>) {
     let db_path = tmp.path().join("test.db");
     let db_str = db_path.to_str().unwrap();
-    db::init_db(db_str).unwrap();
+    let conn = rusqlite::Connection::open(db_str).unwrap();
+    db::init_db(&conn).unwrap();
+    drop(conn);
     let pool = db::get_pool(db_str).unwrap();
+    let data_dir = tmp.path().join("data");
     let index_dir = tmp.path().join("index");
+    std::fs::create_dir_all(&data_dir).unwrap();
 
     let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
     let indexer = Arc::new(IndexerService::new(pool.clone(), im.clone()));
@@ -78,7 +82,7 @@ fn setup_app(
         Arc::new(AtomicBool::new(false)),           // cancel_scan
         Arc::new(AtomicBool::new(false)),           // is_restoring
         Arc::new(Mutex::new(ScanDelta::default())), // scan_delta
-        tmp.path().to_path_buf(),                   // data_dir
+        tmp.path().join("data"),               // data_dir (subdir so add_dir targets don't overlap)
         index_dir,
         db_path,
         dummy_tx,

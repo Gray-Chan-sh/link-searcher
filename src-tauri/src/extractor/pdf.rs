@@ -173,6 +173,14 @@ mod tests {
     use super::*;
     use lopdf::{Dictionary, Document, Object, Stream};
 
+    /// 大小写与空白不敏感的子串匹配（OCR 识别可能存在大小写/空格误差）
+    fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
+        let norm = |s: &str| -> String {
+            s.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect()
+        };
+        norm(haystack).contains(&norm(needle))
+    }
+
     fn create_test_pdf(path: &Path, text: &str) -> Result<()> {
         let mut doc = Document::new();
 
@@ -365,8 +373,8 @@ mod tests {
 
         let extractor = PdfExtractor::new();
         let result = extractor.extract(&path)?;
-        assert!(result.contains("Page One"), "result: {:?}", result);
-        assert!(result.contains("Page Two"), "result: {:?}", result);
+        assert!(contains_ignore_case(&result, "Page One"), "result: {:?}", result);
+        assert!(contains_ignore_case(&result, "Page Two"), "result: {:?}", result);
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())

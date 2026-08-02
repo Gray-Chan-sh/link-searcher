@@ -66,6 +66,11 @@ pub async fn add_dir(
         }
     }
 
+    // Reject directories that overlap the data dir (contains it or is inside it).
+    if crate::commands::helpers::check_data_dir_overlap(&state.data_dir, &canonical).is_err() {
+        return Err("此目录与数据目录存在交叠，不允许监控".to_string());
+    }
+
     let dir = db::dir_config::add_dir(
         &conn,
         &path,

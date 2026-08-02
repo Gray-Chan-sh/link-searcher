@@ -590,7 +590,7 @@ mod tests {
         svc.commit().unwrap();
 
         // Verify Tantivy has the document.
-        let mgr = svc.index_manager.read().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
         let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = build_schema();
@@ -627,7 +627,7 @@ mod tests {
         svc.commit().unwrap();
 
         // Both should be findable.
-        let mgr = svc.index_manager.read().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
         let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = build_schema();
@@ -669,7 +669,7 @@ mod tests {
         svc.commit().unwrap();
 
         // Verify it's gone from Tantivy.
-        let mgr = svc.index_manager.read().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
         let reader = mgr.reader().unwrap();
         let searcher = reader.searcher();
         let schema = build_schema();

@@ -6,6 +6,19 @@ export interface ConfigInfo {
     lo_binary_path: string
 }
 
+export interface MigrationProgress {
+    stage: string
+    progress: number
+}
+
+export interface MigrationWarning {
+    message: string
+}
+
+export interface MigrationCompleted {
+    message: string
+}
+
 export async function getConfig(): Promise<ConfigInfo> {
     return invoke<ConfigInfo>('get_config')
 }

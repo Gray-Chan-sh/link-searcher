@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { ask, open, message } from '@tauri-apps/plugin-dialog'
+import { listen } from '@tauri-apps/api/event'
 import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo } from '../api/config'
+import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
 import { checkDependencies, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
 
 const OCR_LANGS = [
@@ -29,6 +30,8 @@ export default function Settings() {
   const [deps, setDeps] = useState<DependencyStatus[]>([])
   const [appConfig, setAppConfig] = useState<ConfigInfo | null>(null)
   const [migrating, setMigrating] = useState(false)
+  const [migrationStage, setMigrationStage] = useState<string | null>(null)
+  const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -43,6 +46,20 @@ export default function Settings() {
 
   useEffect(() => {
     getConfig().then(setAppConfig).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    const unlisteners: (() => void)[] = []
+    listen<MigrationProgress>('migration-progress', e => {
+      setMigrationProgress(e.payload.progress)
+      setMigrationStage(e.payload.stage)
+    }).then(u => unlisteners.push(u))
+    listen<MigrationWarning>('migration-warning', e => {
+      void message(e.payload.message, { title: '迁移警告', kind: 'warning' })
+    }).then(u => unlisteners.push(u))
+    return () => {
+      unlisteners.forEach(u => u())
+    }
   }, [])
 
   useEffect(() => {
@@ -71,6 +88,8 @@ export default function Settings() {
     if (selected === appConfig.data_dir) return
 
     setMigrating(true)
+    setMigrationProgress(0)
+    setMigrationStage('preparing')
     try {
       const msg = await migrateData(appConfig.data_dir, selected)
       setAppConfig({ ...appConfig, data_dir: selected })
@@ -85,6 +104,7 @@ export default function Settings() {
       await message(`迁移失败:\n${err}`, { title: '迁移失败', kind: 'error' })
     } finally {
       setMigrating(false)
+      setMigrationStage(null)
     }
   }
 
@@ -158,6 +178,17 @@ export default function Settings() {
             {migrating && <LoadingSpinner className="size-3" />}
             {t('migrate_data')}
           </button>
+          {migrating && (
+            <div className="mt-2">
+              <div className="w-full h-1.5 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all"
+                  style={{ width: `${migrationProgress}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{migrationStage}</p>
+            </div>
+          )}
         </Section>
 
         <Section title={t('libreoffice_path')}>

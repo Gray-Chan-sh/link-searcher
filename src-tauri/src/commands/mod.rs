@@ -2,6 +2,7 @@ pub mod backup;
 pub mod config;
 pub mod dirs;
 pub mod files;
+pub mod helpers;
 pub mod index;
 pub mod logs;
 pub mod search;
