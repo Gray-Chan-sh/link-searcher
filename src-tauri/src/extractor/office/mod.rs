@@ -114,6 +114,79 @@ fn determine_lo_binary() -> String {
     "soffice".to_string()
 }
 
+/// Ensure LibreOffice.app has LSUIElement=true in Info.plist so Dock icons
+/// don't flash during headless conversions. Best-effort — non-fatal if it
+/// fails (no write permission, non-standard install, etc.).
+#[cfg(target_os = "macos")]
+pub fn ensure_lo_background_mode() {
+    let binary = determine_lo_binary();
+    if binary.is_empty() {
+        return;
+    }
+
+    // Resolve the binary to find the .app bundle directory.
+    // /opt/homebrew/bin/soffice → /Applications/LibreOffice.app/Contents/MacOS/soffice
+    let binary_path = if let Ok(canon) = std::fs::canonicalize(&binary) {
+        canon
+    } else if binary.contains("LibreOffice.app") {
+        std::path::PathBuf::from(&binary)
+    } else {
+        return; // can't resolve
+    };
+
+    // Walk up from Contents/MacOS/soffice to the .app bundle
+    let mut app_dir = binary_path.clone();
+    // Find "Contents" in the path
+    while app_dir.file_name().map(|n| n != "Contents").unwrap_or(false) {
+        if !app_dir.pop() {
+            return;
+        }
+    }
+    if app_dir.file_name().map(|n| n != "Contents").unwrap_or(true) {
+        return;
+    }
+    if !app_dir.pop() {
+        return;
+    } // pop "Contents" to get the .app directory
+
+    let plist = app_dir.join("Contents").join("Info.plist");
+    if !plist.exists() {
+        return;
+    }
+
+    let plistbuddy = "/usr/libexec/PlistBuddy";
+    // Check if already patched
+    if let Ok(output) = std::process::Command::new(plistbuddy)
+        .args(["-c", "Print :LSUIElement", plist.to_str().unwrap_or("")])
+        .output()
+    {
+        if String::from_utf8_lossy(&output.stdout).contains("true") {
+            return; // already done
+        }
+    }
+
+    // Add LSUIElement
+    match std::process::Command::new(plistbuddy)
+        .args(["-c", "Add :LSUIElement bool true", plist.to_str().unwrap_or("")])
+        .status()
+    {
+        Ok(s) if s.success() => {
+            log::info!("[LO] Added LSUIElement to LibreOffice.app Info.plist — Dock icons suppressed");
+        }
+        Ok(s) => {
+            log::warn!("[LO] Failed to add LSUIElement to Info.plist (exit {}) — Dock icons may flash during indexing. Fix manually: /usr/libexec/PlistBuddy -c \"Add :LSUIElement bool true\" /Applications/LibreOffice.app/Contents/Info.plist", s.code().unwrap_or(-1));
+        }
+        Err(e) => {
+            log::warn!("[LO] Could not run PlistBuddy: {e} — Dock icons may flash");
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn ensure_lo_background_mode() {
+    // No-op on non-macOS
+}
+
 pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
     let binary = determine_lo_binary();
     if binary.is_empty() {

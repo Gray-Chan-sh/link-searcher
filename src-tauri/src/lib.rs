@@ -276,6 +276,12 @@ fn run_with_config(app_config: config::AppConfig) {
 
                 let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
                 let lo_ok = office::is_libreoffice_available();
+
+                // ────── LibreOffice Dock icon suppression ──────
+                // One-time: LSUIElement=true on Info.plist stops Dock icons
+                // flashing during parallel headless conversions.
+                crate::extractor::office::ensure_lo_background_mode();
+
                 let pdf_ok = pdf::is_pdftoppm_available();
 
                 log::info!(
