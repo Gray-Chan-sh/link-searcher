@@ -8,6 +8,7 @@ pub mod helpers;
 
 use self::helpers::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -49,11 +50,22 @@ pub struct ScanResult {
 pub struct Scanner {
     db: Pool<SqliteConnectionManager>,
     indexer: Arc<IndexerService>,
+    cancel_scan: Arc<AtomicBool>,
 }
 
 impl Scanner {
     pub fn new(db: Pool<SqliteConnectionManager>, indexer: Arc<IndexerService>) -> Self {
-        Self { db, indexer }
+        Self::with_cancel(db, indexer, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Same as [`new`], but shares the app-wide cancel flag so the
+    /// `cancel_scan` command interrupts the walk and batch index.
+    pub fn with_cancel(
+        db: Pool<SqliteConnectionManager>,
+        indexer: Arc<IndexerService>,
+        cancel_scan: Arc<AtomicBool>,
+    ) -> Self {
+        Self { db, indexer, cancel_scan }
     }
 
     /// Full scan of a single directory — walk every file, index
@@ -133,6 +145,10 @@ impl Scanner {
         {
             let entry = entry.context("walkdir error")?;
             if !entry.file_type().is_file() { continue; }
+            if self.cancel_scan.load(Ordering::Acquire) {
+                log::info!("[SCAN] 扫描已取消, 停止遍历");
+                break;
+            }
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
@@ -165,7 +181,7 @@ impl Scanner {
             progress(ScanProgress { total, processed, errors, current_file: String::new(), phase: "scan" });
         }
 
-        if !jobs.is_empty() {
+        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
             for r in self.indexer.batch_index(jobs, |done, total| {
                 let _ = progress(ScanProgress {
                     total,
@@ -181,6 +197,15 @@ impl Scanner {
                     errors += 1;
                 }
             }
+        }
+
+        // Cancelled — skip the delete-detection pass, commit partial results.
+        if self.cancel_scan.load(Ordering::Acquire) {
+            log::info!("[SCAN] 已取消, 提交部分结果并返回");
+            drop(conn);
+            self.indexer.commit().context("failed to commit index after cancelled scan")?;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(ScanResult { total_files: total, indexed, added, deleted, modified, errors, duration_ms });
         }
 
         // Mark files in DB but absent from disk as deleted.
@@ -230,6 +255,16 @@ impl Scanner {
         // Record last scan time BEFORE walking the main loop.
         record_last_scan(&conn, dir_id)?;
 
+        // Load all tracked records once. The old mtime gate skipped every
+        // unchanged file's DB lookup; we now need the record for every file
+        // to retry previously-failed ones, so a single bulk query + in-memory
+        // lookup beats a per-file indexed SELECT.
+        let records: HashMap<String, crate::db::tracker::FileRecord> =
+            tracker::get_files_by_dir(&conn, dir_id)?
+                .into_iter()
+                .map(|r| (r.path.clone(), r))
+                .collect();
+
         let mut on_disk: Vec<DiskEntry> = Vec::new();
         let mut indexed = 0u64;
         let mut errors = 0u64;
@@ -242,6 +277,10 @@ impl Scanner {
             let entry = entry.context("walkdir error")?;
             if !entry.file_type().is_file() { continue; }
             if !extension_allowed(entry.path(), &include_exts) { continue; }
+            if self.cancel_scan.load(Ordering::Acquire) {
+                log::info!("[SCAN] 扫描已取消, 停止遍历");
+                break;
+            }
             let meta = entry.metadata().context("failed to read metadata")?;
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
@@ -252,15 +291,16 @@ impl Scanner {
             on_disk.push(DiskEntry { abs_path: path_str, rel_path: rel_path.clone(), size: meta.len(), name });
 
             let mtime = mtime_micros(&meta).unwrap_or(0);
-            if mtime <= last_scan { continue; }
-
-            let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+            let existing = records.get(&rel_path).cloned();
             let needs_index = needs_reindex(&existing, mtime);
             if let Some(r) = &existing {
                 if r.mtime != mtime { modified += 1; }
             } else {
                 added += 1;
             };
+            // Skip only when mtime unchanged AND no reindex needed — failed
+            // files (indexed=2) keep needs_index=true and get retried.
+            if mtime <= last_scan && !needs_index { continue; }
 
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, meta.len(), None)?;
@@ -268,7 +308,7 @@ impl Scanner {
             }
         }
 
-        if !jobs.is_empty() {
+        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
             for r in self.indexer.batch_index(jobs, |done, total| {
                 let _ = progress(ScanProgress {
                     total,
@@ -284,6 +324,16 @@ impl Scanner {
                     errors += 1;
                 }
             }
+        }
+
+        // Cancelled — skip the delete-detection pass, commit partial results.
+        if self.cancel_scan.load(Ordering::Acquire) {
+            log::info!("[SCAN] 已取消, 提交部分结果并返回");
+            let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
+            drop(conn);
+            self.indexer.commit().context("failed to commit index after cancelled scan")?;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(ScanResult { total_files, indexed, added, deleted: 0, modified, errors, duration_ms });
         }
 
         // Detect and remove deleted files.
@@ -341,6 +391,10 @@ impl Scanner {
             let entry = entry.context("walkdir error")?;
             if !entry.file_type().is_file() { continue; }
             if !extension_allowed(entry.path(), &include_exts) { continue; }
+            if self.cancel_scan.load(Ordering::Acquire) {
+                log::info!("[SCAN] 启动扫描已取消, 停止遍历");
+                break;
+            }
             let meta = entry.metadata().context("failed to read metadata")?;
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
@@ -368,7 +422,7 @@ impl Scanner {
             on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
         }
 
-        if !jobs.is_empty() {
+        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
             for r in self.indexer.batch_index(jobs, |done, total| {
                 let _ = progress(ScanProgress {
                     total,
@@ -384,6 +438,16 @@ impl Scanner {
                     errors += 1;
                 }
             }
+        }
+
+        // Cancelled — skip cleanup/move detection, commit partial results.
+        if self.cancel_scan.load(Ordering::Acquire) {
+            log::info!("[SCAN] 启动扫描已取消, 提交部分结果并返回");
+            let total_files = tracker::get_files_by_dir(&conn, dir_id)?.len() as u64;
+            drop(conn);
+            self.indexer.commit().context("failed to commit index after cancelled scan")?;
+            let duration_ms = start.elapsed().as_millis() as u64;
+            return Ok(ScanResult { total_files, indexed, added, deleted, modified, errors, duration_ms });
         }
 
         let disk_set: std::collections::HashSet<String> =

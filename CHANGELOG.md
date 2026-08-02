@@ -15,7 +15,11 @@
 
 - **batch_index 定期 auto-commit 持有 MutexGuard 时调用 self.commit() 导致自死锁**：`batch_index`（263 行）获取 `self.writer` Mutex 后，`guard` 存活期间调用 `self.commit()`（347 行），`commit()` 内部再次 `self.lock_writer()` 拿同一把锁 → `std::sync::Mutex` 不可重入 → 自己等自己永久卡死。修复：`self.commit()` 改为 `Indexer::commit(writer)` 直接复用已持有的 writer。同样修复 `index_file`（`src-tauri/src/indexer.rs`）
 
-## 2026-08-02（Bug 修复：添加目录后双重扫描并发死锁）
+## 2026-08-02（Batch 1：取消扫描 + 失败重试 + 水印 OCR）
+
+- **取消扫描无效**：`cancel_scan` 标志只在 commands/index.rs 的目录边界检查，scanner 和 indexer 的 walk 循环从不读取。修复：`Scanner`/`IndexerService` 加 `cancel_scan: Arc<AtomicBool>` 字段，通过 `with_cancel()` 构造注入；三个 walk 循环（full/incremental/startup）每文件检查标志，`batch_index` Phase 1 par_iter + Phase 2 循环均检查，取消后跳过剩余文件并提交已完成部分。取消触发的文件不会标记 failed（`src-tauri/src/scanner/mod.rs`、`indexer.rs`、`lib.rs`）
+- **增量扫描不重试失败文件**：`incremental_scan` 的 `if mtime <= last_scan { continue; }` 门在 `needs_reindex` 之前，失败文件（indexed=2）mtime 未变 → 永久跳过。修复：门移到 `needs_reindex` 之后，`if mtime <= last_scan && !needs_index { continue; }`。同时改用 HashMap 批量加载 dir 记录避免行级 SQL（`src-tauri/src/scanner/mod.rs`）
+- **水印扫描件 PDF 不触发 OCR**：`pdf.rs` 的"干净文本"判定仅用 >50 字符 + 水印/乱码检测，单页或页间变化水印被漏过。修复：新增 `is_repetitive()`（≥100 字符 + ≥3 行 + >60% 重复行 ratio），阈值提至 100 字符，加 `is_rep` 条件。同时修复 `indexer.rs` 的 OCR 回退对 PDF 的错误调用（`ocr_image` 不解码 PDF → 统一跳过，PDF 内已有 OCR 逻辑）（`src-tauri/src/extractor/pdf.rs`、`indexer.rs`）
 
 - **add_dir 内部触发扫描 + 前端 triggerScan 并发导致 IndexWriter 死锁**：`add_dir` 命令内部 `spawn_blocking(incremental_scan)`（扫描 A）和前端 `useDirs.ts` 的 `triggerScan()`（扫描 B）并发执行，两个 `full_scan` 竞争同一个 Tantivy `IndexWriter` Mutex → 两者都卡在 `lock_writer()` 上，Tantivy 线程全部 idle，扫描永远不会打印"扫描完成"。修复：去掉 `add_dir` 内部的 `incremental_scan`，仅保留 watcher 启动；扫描由前端 `triggerScan()` 独占执行（已有 `compare_exchange` 并发保护）。根因使用 `sample` 命令栈分析确认（`src-tauri/src/commands/dirs.rs`）
 

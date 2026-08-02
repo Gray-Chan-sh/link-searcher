@@ -67,6 +67,21 @@ pub fn is_watermark_text(pages: &[String]) -> bool {
     total > 0 && (similar as f64 / total as f64) > 0.8
 }
 
+/// Returns true if text is highly repetitive — e.g. a watermark repeated
+/// verbatim across lines/pages, which character-set Jaccard misses when
+/// pages vary or only one page exists.
+fn is_repetitive(text: &str) -> bool {
+    if text.len() < 100 {
+        return false;
+    }
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 3 {
+        return false;
+    }
+    let distinct: HashSet<&str> = lines.iter().copied().collect();
+    (lines.len() - distinct.len()) as f64 / lines.len() as f64 > 0.6
+}
+
 /// Render PDF pages to images using pdftoppm and run OCR.
 /// Returns extracted text from all pages.
 pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
@@ -142,9 +157,12 @@ impl Extractor for PdfExtractor {
         let merged = page_texts.join("\n");
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
+        let is_rep = is_repetitive(&merged);
 
-        // Clean text: >50 chars, not garbled, not watermark
-        if merged.len() > 50 && !is_garbled && !is_wm {
+        // Clean text: >100 chars, not garbled, not watermark, not repetitive.
+        // Raised 50 → 100 so mid-length watermarks fall through to OCR;
+        // is_repetitive catches repeating watermark lines on single pages.
+        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep {
             return Ok(merged);
         }
 
@@ -406,5 +424,14 @@ mod tests {
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_is_repetitive() {
+        assert!(!is_repetitive("short"));
+        let wm = "This document is confidential and for internal use only\n".repeat(3);
+        assert!(is_repetitive(&wm), "repeated watermark line should be detected");
+        let varied = (0..20).map(|i| format!("Line {i} of real content")).collect::<Vec<_>>().join("\n");
+        assert!(!is_repetitive(&varied), "distinct lines should not be flagged");
     }
 }

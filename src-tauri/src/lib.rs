@@ -181,14 +181,19 @@ fn run_with_config(app_config: config::AppConfig) {
             ));
 
             // Arc is shared between IndexerService and AppState so rebuild_index can swap the manager
-            let indexer = Arc::new(IndexerService::new(
+            let cancel_scan = Arc::new(AtomicBool::new(false));
+            let indexer = Arc::new(IndexerService::with_cancel(
                 db_pool.clone(),
                 index_manager.clone(),
+                cancel_scan.clone(),
             ));
 
-            let scanner = Arc::new(Scanner::new(db_pool.clone(), indexer.clone()));
+            let scanner = Arc::new(Scanner::with_cancel(
+                db_pool.clone(),
+                indexer.clone(),
+                cancel_scan.clone(),
+            ));
             let is_scanning = Arc::new(AtomicBool::new(false));
-            let cancel_scan = Arc::new(AtomicBool::new(false));
 
             let (watcher, event_rx) = FileWatcher::new();
             let watcher_tx = watcher.tx().clone();

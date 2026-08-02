@@ -7,7 +7,7 @@
 
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use anyhow::{Context, Result};
@@ -28,6 +28,7 @@ pub struct IndexerService {
     writer: Mutex<Option<IndexWriter>>,
     commit_counter: AtomicU64,
     commit_interval: AtomicU64,
+    cancel_scan: Arc<AtomicBool>,
 }
 
 // SAFETY: IndexWriter is `Send` (it holds owned channels + Arc<Mutex<…>>).
@@ -156,15 +157,24 @@ impl IndexerService {
             let extracted = match crate::extractor::extract_text(&job.file_path) {
                 Ok(t) if t.len() > 10 => t,
                 Ok(t) => {
-                    log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
-                    match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
-                        Ok(ocr) if !ocr.is_empty() => {
-                            ocr_used = true;
-                            ocr
-                        }
-                        _ => {
-                            log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
-                            t
+                    if file_ext.eq_ignore_ascii_case("pdf") {
+                        // PDF extraction already runs its own OCR fallback
+                        // internally; short text means the text layer is
+                        // genuinely minimal — OCR-ing the PDF as an image
+                        // would just fail.
+                        log::info!("[INDEX] PDF text short ({}), using as-is", t.len());
+                        t
+                    } else {
+                        log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
+                        match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
+                            Ok(ocr) if !ocr.is_empty() => {
+                                ocr_used = true;
+                                ocr
+                            }
+                            _ => {
+                                log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
+                                t
+                            }
                         }
                     }
                 }
@@ -224,12 +234,23 @@ impl IndexerService {
         db: Pool<SqliteConnectionManager>,
         index_manager: Arc<RwLock<IndexManager>>,
     ) -> Self {
+        Self::with_cancel(db, index_manager, Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Same as [`new`], but shares the app-wide cancel flag so a cancelled
+    /// scan can interrupt an in-flight [`batch_index`](Self::batch_index).
+    pub fn with_cancel(
+        db: Pool<SqliteConnectionManager>,
+        index_manager: Arc<RwLock<IndexManager>>,
+        cancel_scan: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             db,
             index_manager,
             writer: Mutex::new(None),
             commit_counter: AtomicU64::new(0),
             commit_interval: AtomicU64::new(100),
+            cancel_scan,
         }
     }
 
@@ -251,6 +272,9 @@ impl IndexerService {
         let extracted: Vec<Result<ExtractedData, (String, String)>> = jobs
             .par_iter()
             .map(|job| {
+                if self.cancel_scan.load(Ordering::Acquire) {
+                    return Err((job.file_id.clone(), "scan cancelled".to_string()));
+                }
                 let conn = match db.get() {
                     Ok(c) => c,
                     Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
@@ -271,6 +295,10 @@ impl IndexerService {
         let mut done = 0u64;
 
         for extraction in extracted {
+            if self.cancel_scan.load(Ordering::Acquire) {
+                log::info!("[INDEX] 批处理已取消, 跳过剩余 {} 项", total as usize - done as usize);
+                break;
+            }
             done += 1;
             progress(done, total);
             match extraction {
@@ -369,6 +397,10 @@ impl IndexerService {
         file_path: &Path,
         dir_id: &str,
     ) -> Result<()> {
+        if self.cancel_scan.load(Ordering::Acquire) {
+            log::info!("[INDEX] 跳过 {file_id}: 扫描已取消");
+            return Ok(());
+        }
         let file_name = file_path
             .file_name()
             .and_then(|n| n.to_str())
