@@ -4,6 +4,10 @@
 
 ---
 
+## 2026-08-02（Bug 修复：IndexWriter Mutex 不可重入自死锁）
+
+- **batch_index 定期 auto-commit 持有 MutexGuard 时调用 self.commit() 导致自死锁**：`batch_index`（263 行）获取 `self.writer` Mutex 后，`guard` 存活期间调用 `self.commit()`（347 行），`commit()` 内部再次 `self.lock_writer()` 拿同一把锁 → `std::sync::Mutex` 不可重入 → 自己等自己永久卡死。修复：`self.commit()` 改为 `Indexer::commit(writer)` 直接复用已持有的 writer。同样修复 `index_file`（`src-tauri/src/indexer.rs`）
+
 ## 2026-08-02（Bug 修复：添加目录后双重扫描并发死锁）
 
 - **add_dir 内部触发扫描 + 前端 triggerScan 并发导致 IndexWriter 死锁**：`add_dir` 命令内部 `spawn_blocking(incremental_scan)`（扫描 A）和前端 `useDirs.ts` 的 `triggerScan()`（扫描 B）并发执行，两个 `full_scan` 竞争同一个 Tantivy `IndexWriter` Mutex → 两者都卡在 `lock_writer()` 上，Tantivy 线程全部 idle，扫描永远不会打印"扫描完成"。修复：去掉 `add_dir` 内部的 `incremental_scan`，仅保留 watcher 启动；扫描由前端 `triggerScan()` 独占执行（已有 `compare_exchange` 并发保护）。根因使用 `sample` 命令栈分析确认（`src-tauri/src/commands/dirs.rs`）

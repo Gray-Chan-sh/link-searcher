@@ -344,7 +344,7 @@ impl IndexerService {
             let current = prev + success_count;
             let interval = self.commit_interval.load(Ordering::Relaxed);
             if interval > 0 && current / interval > prev / interval {
-                if let Err(e) = self.commit() {
+                if let Err(e) = Indexer::commit(writer) {
                     log::error!("[INDEX] 定期提交失败: {e}");
                 }
             }
@@ -416,6 +416,16 @@ impl IndexerService {
                 .context("failed to update indexed status")?;
 
             log::info!("[INDEX] 完成: {}", data.file_name);
+
+            // Periodic auto-commit every N successful files (reuse held writer).
+            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let interval = self.commit_interval.load(Ordering::Relaxed);
+            if interval > 0 && count % interval == 0 {
+                if let Err(e) = Indexer::commit(w) {
+                    log::error!("[INDEX] 定期提交失败: {e}");
+                }
+            }
+
             Ok(())
         })();
 
@@ -423,17 +433,6 @@ impl IndexerService {
             let error_type = classify_error(e, &file_ext);
             let _ = crate::db::tracker::log_index_error(&conn, file_id, &file_path.to_string_lossy(), error_type, &e.to_string());
             log::error!("[INDEX] 失败: {file_name}: {e}");
-        }
-
-        // Periodic auto-commit every N successful files.
-        if result.is_ok() {
-            let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            let interval = self.commit_interval.load(Ordering::Relaxed);
-            if interval > 0 && count % interval == 0 {
-                if let Err(e) = self.commit() {
-                    log::error!("[INDEX] 定期提交失败: {e}");
-                }
-            }
         }
 
         result
