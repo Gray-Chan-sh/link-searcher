@@ -10,12 +10,21 @@ use crate::scanner::helpers::TempDir;
 
 pub struct PdfExtractor;
 
+fn default_engine() -> super::ocr::OcrEngineType {
+    super::ocr::OcrEngineType::PaddleOCR
+}
+
 impl PdfExtractor {
     pub fn new() -> Self {
         Self
     }
 
-    pub fn extract_with_lang(&self, path: &Path, lang: &str) -> Result<String> {
+    pub fn extract_with_lang(
+        &self,
+        path: &Path,
+        lang: &str,
+        engine: Option<super::ocr::OcrEngineType>,
+    ) -> Result<String> {
         log::info!("[PDF] extracting {:?}", path.file_name());
         let doc = lopdf::Document::load(path).context("failed to load PDF")?;
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
@@ -45,7 +54,8 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
         if is_pdftoppm_available() {
-            match ocr_pdf_via_pdftoppm(path, lang) {
+            let engine = engine.unwrap_or_else(default_engine);
+            match ocr_pdf_via_pdftoppm(path, lang, &engine) {
                 Ok(ocr_text) if !ocr_text.is_empty() => {
                     log::info!(
                         "[PDF] OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
@@ -131,7 +141,11 @@ fn is_repetitive(text: &str) -> bool {
 
 /// Render PDF pages to images using pdftoppm and run OCR.
 /// Returns extracted text from all pages.
-pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
+pub fn ocr_pdf_via_pdftoppm(
+    path: &Path,
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Result<String> {
     let tmp_dir = TempDir::new("ls_pdf_ocr")?;
     log::info!("[PDF] pdftoppm: rendering {:?}", path.file_name());
 
@@ -155,11 +169,11 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
     let page_files: Vec<_> = (1..).map(|n| tmp_dir.path().join(format!("page-{n}.png")))
         .take_while(|p| p.exists()).collect();
     log::info!(
-        "[PDF] {:?}: {} page images, starting OCR ({}) [pool={}]",
+        "[PDF] {:?}: {} page images, starting OCR ({}) [engine={:?}]",
         path.file_name(),
         page_files.len(),
         lang,
-        crate::extractor::paddleocr::active_pool_size(),
+        engine,
     );
 
     use rayon::prelude::*;
@@ -172,7 +186,7 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
                 .unwrap_or("?")
                 .to_owned();
             let started = std::time::Instant::now();
-            let result = crate::extractor::paddleocr::recognize_from_path_with_regions(page_path);
+            let result = crate::extractor::ocr::ocr_image_with_regions(page_path, engine, lang);
             match result {
                 Ok((text, regions)) => {
                     log::info!(
@@ -215,7 +229,7 @@ pub fn is_pdftoppm_available() -> bool {
 
 impl Extractor for PdfExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
-        self.extract_with_lang(path, "eng")
+        self.extract_with_lang(path, "eng", None)
     }
 }
 

@@ -78,6 +78,18 @@ pub fn detect_available_engines() -> Vec<OcrEngineType> {
     engines
 }
 
+/// Map a settings string to its [`OcrEngineType`] variant.
+/// Unknown values default to PaddleOCR.
+pub fn map_engine(value: &str) -> OcrEngineType {
+    match value {
+        "AppleVision" => OcrEngineType::AppleVision,
+        "Tesseract" => OcrEngineType::Tesseract,
+        "WindowsOcr" => OcrEngineType::WindowsOcr,
+        "None" => OcrEngineType::None,
+        _ => OcrEngineType::PaddleOCR,
+    }
+}
+
 /// Run OCR against an image using a specific engine.
 ///
 /// # Errors
@@ -97,6 +109,35 @@ pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) ->
             paddleocr::recognize_from_path(path)
         }
         OcrEngineType::None => Ok(String::new()),
+    }
+}
+
+/// Like [`ocr_image_with_engine`], but also returns the number of detected
+/// text regions, used for per-page performance diagnostics in PDF OCR.
+pub fn ocr_image_with_regions(
+    path: &Path,
+    engine: &OcrEngineType,
+    lang: &str,
+) -> Result<(String, usize)> {
+    match engine {
+        OcrEngineType::PaddleOCR => {
+            paddleocr::recognize_from_path_with_regions(path)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        OcrEngineType::AppleVision => {
+            super::apple_vision::recognize_from_path_with_regions(path, lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        OcrEngineType::Tesseract => {
+            let text = ocr_image_tesseract(path, lang)?;
+            let regions = text.lines().filter(|l| !l.trim().is_empty()).count();
+            Ok((text, regions))
+        }
+        OcrEngineType::WindowsOcr => {
+            paddleocr::recognize_from_path_with_regions(path)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        OcrEngineType::None => Ok((String::new(), 0)),
     }
 }
 

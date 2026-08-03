@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-03（PDF OCR 接入引擎分发：不再硬编码 PaddleOCR）
+
+- **PDF OCR 始终走 PaddleOCR，忽略用户引擎选择**：`pdf.rs` 的 `ocr_pdf_via_pdftoppm` 硬编码 `paddleocr::recognize_from_path_with_regions`，完全绕过 `ocr.rs` 的引擎分发。即使设置页选了 Apple Vision，PDF OCR 仍跑 PaddleOCR → 用户无法感知 Vision 加速。修复：`ocr_pdf_via_pdftoppm`/`extract_with_lang`/`extract_text` 新增 `engine: Option<OcrEngineType>` 参数；`indexer.rs` 从 `app_settings.ocr_engine` 读取配置传入；`ocr.rs` 新增 `ocr_image_with_regions` 调度函数（PaddleOCR/AppleVision/Tesseract 三路）；`apple_vision.rs` 新增 `recognize_from_path_with_regions` 输出 region 数（`src-tauri/src/extractor/pdf.rs`、`mod.rs`、`ocr.rs`、`apple_vision.rs`、`indexer.rs`、`test_pdf_ocr.rs`）
+
+---
+
 ## 2026-08-03（Apple Vision OCR 引擎：macOS 原生 OCR，ANE 推理）
 
 - **Apple Vision OCR 实现**：新增 `apple_vision.rs` 模块，使用 macOS 10.15+ 原生 `VNRecognizeTextRequest`（Accurate 级别），运行在 ANE（Neural Engine）上独立于 CPU。与 tract 单线程 CPU 推理相比，预期单区域 0.05-0.2s（当前 1.5-5s），无需手动引擎池管理。实现参考 thuki（Tauri 2 + Vision OCR）和 Pointra-Pub（缓存请求 + 启动预热）生产级项目，`performRequests_error:` 同步调用模式，`autoreleasepool` 包裹防 ObjC 临时对象泄漏（`src-tauri/src/extractor/apple_vision.rs`）

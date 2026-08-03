@@ -159,7 +159,15 @@ impl IndexerService {
                 .flatten()
                 .map(|c| c.ocr_lang)
                 .unwrap_or_else(|| "eng".to_string());
-            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang) {
+            let ocr_engine =
+                conn.query_row(
+                    "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+                .map(|v| crate::extractor::ocr::map_engine(&v));
+            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang, ocr_engine) {
                 Ok(t) if t.len() > 10 => t,
                 Ok(t) => {
                     if file_ext.eq_ignore_ascii_case("pdf") {

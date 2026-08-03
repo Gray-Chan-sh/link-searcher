@@ -36,10 +36,23 @@ const VISION_LANG_MAP: &[(&str, &str)] = &[
 /// Run Apple Vision OCR on a single image file.
 ///
 /// Falls back to `en-US` if `lang` is not in the map.
-/// The Vision framework's Accurate mode supports CJK; Fast mode does not,
-/// so Accurate is hard-coded here.
 #[cfg(target_os = "macos")]
 pub fn recognize_from_path(path: &Path, lang: &str) -> Result<String, String> {
+    recognize_from_path_inner(path, lang).map(|(text, _)| text)
+}
+
+/// Like `recognize_from_path`, but also returns the number of detected
+/// text observations (regions), used for per-page performance diagnostics.
+#[cfg(target_os = "macos")]
+pub fn recognize_from_path_with_regions(
+    path: &Path,
+    lang: &str,
+) -> Result<(String, usize), String> {
+    recognize_from_path_inner(path, lang)
+}
+
+#[cfg(target_os = "macos")]
+fn recognize_from_path_inner(path: &Path, lang: &str) -> Result<(String, usize), String> {
     let path_str = path
         .to_str()
         .ok_or_else(|| "Path contains non-UTF-8 characters".to_string())?;
@@ -75,8 +88,10 @@ pub fn recognize_from_path(path: &Path, lang: &str) -> Result<String, String> {
             .map_err(|e| format!("Apple Vision OCR failed: {e}"))?;
 
         let mut text = String::new();
+        let mut region_count = 0usize;
         if let Some(results) = request.results() {
             for obs in results.iter() {
+                region_count += 1;
                 let candidates = obs.topCandidates(1);
                 if let Some(best) = candidates.firstObject() {
                     if !text.is_empty() {
@@ -86,7 +101,7 @@ pub fn recognize_from_path(path: &Path, lang: &str) -> Result<String, String> {
                 }
             }
         }
-        Ok(text)
+        Ok((text, region_count))
     })
 }
 
