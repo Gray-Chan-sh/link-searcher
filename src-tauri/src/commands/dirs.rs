@@ -71,11 +71,19 @@ pub async fn add_dir(
         return Err("此目录与数据目录存在交叠，不允许监控".to_string());
     }
 
+    let ocr_lang = conn
+        .query_row(
+            "SELECT value FROM app_settings WHERE key='ocr_lang'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "eng".to_string());
+
     let dir = db::dir_config::add_dir(
         &conn,
         &path,
         alias.as_deref(),
-        None,
+        Some(&ocr_lang),
         None,
         None,
         recursive.unwrap_or(true),
