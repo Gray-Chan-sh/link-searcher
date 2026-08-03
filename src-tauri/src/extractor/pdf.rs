@@ -154,16 +154,43 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
 
     let page_files: Vec<_> = (1..).map(|n| tmp_dir.path().join(format!("page-{n}.png")))
         .take_while(|p| p.exists()).collect();
-    log::info!("[PDF] {:?}: {} page images, starting OCR ({})", path.file_name(), page_files.len(), lang);
+    log::info!(
+        "[PDF] {:?}: {} page images, starting OCR ({}) [pool={}]",
+        path.file_name(),
+        page_files.len(),
+        lang,
+        crate::extractor::paddleocr::active_pool_size(),
+    );
 
     use rayon::prelude::*;
     let page_texts: Vec<Option<String>> = page_files
         .par_iter()
         .map(|page_path| {
-            crate::extractor::ocr::ocr_image(page_path, lang)
-                .ok()
-                .map(|text| text.trim().to_owned())
-                .filter(|t| !t.is_empty())
+            let page_no = page_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("?")
+                .to_owned();
+            let started = std::time::Instant::now();
+            let result = crate::extractor::paddleocr::recognize_from_path_with_regions(page_path);
+            match result {
+                Ok((text, regions)) => {
+                    log::info!(
+                        "[PDF] page {}: {} chars from {} regions in {:.1}s",
+                        page_no,
+                        text.len(),
+                        regions,
+                        started.elapsed().as_secs_f64(),
+                    );
+                    Some(text)
+                        .map(|t| t.trim().to_owned())
+                        .filter(|t| !t.is_empty())
+                }
+                Err(e) => {
+                    log::warn!("[PDF] page {} OCR failed: {e}", page_no);
+                    None
+                }
+            }
         })
         .collect();
 

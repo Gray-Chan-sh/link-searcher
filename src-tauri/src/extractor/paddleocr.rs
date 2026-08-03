@@ -135,6 +135,30 @@ pub fn recognize_from_path(path: &Path) -> Result<String> {
     .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+/// Number of engines currently built in the pool (0 if not yet built).
+/// Used for per-page OCR performance diagnosis in `pdf.rs`.
+pub fn active_pool_size() -> usize {
+    POOL.get().map(|p| p.engines.len()).unwrap_or(0)
+}
+
+/// Like `recognize_from_path`, but also returns the number of detected text
+/// regions, so callers can log per-page workload (regions, time) for diagnosis.
+pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), String> {
+    with_engine(|eng| {
+        let run = eng
+            .run_with_metrics_from_path(path)
+            .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))?;
+        let text = run
+            .results
+            .iter()
+            .map(|r| r.text.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
+        Ok((text, run.results.len()))
+    })
+    .map_err(|e| format!("{e}"))
+}
+
 /// Run a closure that holds the OCR engine lock, with a 120s timeout.
 /// Prevents the global Mutex from being held indefinitely if OCR hangs.
 fn with_engine_timed<F, T>(f: F) -> Result<T, String>

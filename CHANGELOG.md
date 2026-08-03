@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-03（PDF OCR 每页诊断日志 + 池大小暴露）
+
+- **PDF OCR 性能疑点定位**：9 页扫描件 OCR 耗时 319s（平均 35s/页），接近串行耗时（9×35s），与 2 引擎并行预期（~175s）不符。原因待定：可能是引擎被 Rayon 调度到 E-core（效率核）拖慢，或池实际大小非预期。此前日志无池大小与每页耗时，无法区分。修复：`paddleocr.rs` 新增 `active_pool_size()`（惰性池未构建时为 0）和 `recognize_from_path_with_regions()`（返回文本 + 区域数）；`pdf.rs` OCR 循环每页记录耗时/区域数/字符数，起始日志打印池大小（`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/extractor/pdf.rs`）
+
+---
+
 ## 2026-08-03（PDF OCR 提速：引擎池 + 多页并行 + 渲染 DPI 300→200）
 
 - **PDF OCR 每页 30-60 秒过慢（实测验证）**：用 `pure_onnx_ocr::run_with_metrics_from_path` 对 200 DPI 单页实测：总 54.4s = 检测推理 16.5s（30%）+ 识别推理 34.9s（64%）+ 缩放/后处理 ~3s。识别批张量恒为 `[N,3,48,320]`（`RecPreProcessor` 满宽 320 分配），tract 无 intra-op 并行且 batch 线性展开，故「分块降 3-5 倍」对 tract 不成立。确定性的收益来自两处：
