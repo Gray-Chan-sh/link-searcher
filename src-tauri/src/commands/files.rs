@@ -281,9 +281,13 @@ pub async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), Str
     let file = db::tracker::get_file_by_id(&conn, &id)
         .map_err(|e| format!("query error: {e}"))?
         .ok_or_else(|| format!("file not found: {id}"))?;
+    let dir = db::dir_config::get_dir(&conn, &file.dir_id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("dir config not found: {}", file.dir_id))?;
     drop(conn);
 
-    opener::open(&file.path).map_err(|e| format!("failed to open file: {e}"))
+    let abs = std::path::Path::new(&dir.path).join(&file.path);
+    opener::open(&abs).map_err(|e| format!("failed to open file: {e}"))
 }
 
 #[tauri::command]
@@ -376,9 +380,13 @@ pub async fn reveal_in_folder(state: State<'_, AppState>, id: String) -> Result<
     let file = db::tracker::get_file_by_id(&conn, &id)
         .map_err(|e| format!("query error: {e}"))?
         .ok_or_else(|| format!("file not found: {id}"))?;
+    let dir = db::dir_config::get_dir(&conn, &file.dir_id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("dir config not found: {}", file.dir_id))?;
     drop(conn);
 
-    let parent = std::path::Path::new(&file.path)
+    let abs = std::path::Path::new(&dir.path).join(&file.path);
+    let parent = abs
         .parent()
         .ok_or_else(|| "no parent directory".to_string())?;
 
