@@ -133,13 +133,6 @@ fn run_with_config(app_config: config::AppConfig) {
             .init();
             log::info!("application started");
 
-            if let Err(e) = crate::extractor::paddleocr::health_check() {
-                log::error!("OCR 引擎自检失败: {e}");
-                eprintln!("[OCR] 引擎自检失败: {e}");
-            } else {
-                log::info!("OCR 引擎自检通过");
-            }
-
             // One-time migration: rename legacy `index` dir to `.ls-index`
             let legacy_index = data_dir.join("index");
             let new_index = data_dir.join(config::INDEX_DIR_NAME);
@@ -157,6 +150,27 @@ fn run_with_config(app_config: config::AppConfig) {
             let init_conn = db_pool.get()?;
             db::init_db(&init_conn)?;
             drop(init_conn);
+
+            // Apply OCR concurrency setting before the engine pool is built
+            // (health_check below lazily constructs the pool).
+            if let Ok(conn) = db_pool.get() {
+                if let Ok(v) = conn.query_row(
+                    "SELECT value FROM app_settings WHERE key = 'ocr_concurrent'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    if let Ok(n) = v.parse::<usize>() {
+                        crate::extractor::paddleocr::set_pool_size(n);
+                    }
+                }
+            }
+
+            if let Err(e) = crate::extractor::paddleocr::health_check() {
+                log::error!("OCR 引擎自检失败: {e}");
+                eprintln!("[OCR] 引擎自检失败: {e}");
+            } else {
+                log::info!("OCR 引擎自检通过");
+            }
 
             // Warn (don't block) if any monitored dir already overlaps the data dir.
             if let Ok(conn) = db_pool.get() {

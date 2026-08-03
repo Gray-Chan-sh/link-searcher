@@ -156,23 +156,23 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
         .take_while(|p| p.exists()).collect();
     log::info!("[PDF] {:?}: {} page images, starting OCR ({})", path.file_name(), page_files.len(), lang);
 
-    let mut full_text = String::new();
-    let mut page_num = 1;
-    loop {
-        let page_path = tmp_dir.path().join(format!("page-{page_num}.png"));
-        if !page_path.exists() {
-            break;
-        }
+    use rayon::prelude::*;
+    let page_texts: Vec<Option<String>> = page_files
+        .par_iter()
+        .map(|page_path| {
+            crate::extractor::ocr::ocr_image(page_path, lang)
+                .ok()
+                .map(|text| text.trim().to_owned())
+                .filter(|t| !t.is_empty())
+        })
+        .collect();
 
-        if let Ok(text) = crate::extractor::ocr::ocr_image(&page_path, lang) {
-            if !text.trim().is_empty() {
-                if !full_text.is_empty() {
-                    full_text.push('\n');
-                }
-                full_text.push_str(text.trim());
-            }
+    let mut full_text = String::new();
+    for text in page_texts.into_iter().flatten() {
+        if !full_text.is_empty() {
+            full_text.push('\n');
         }
-        page_num += 1;
+        full_text.push_str(&text);
     }
 
     Ok(full_text)

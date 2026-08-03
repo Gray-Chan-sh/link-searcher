@@ -204,7 +204,8 @@ npm run tauri dev
 **PaddleOCR**（PP-OCRv5 模型），纯 Rust ONNX 推理，零依赖，模型编译进二进制（~21MB）。
 
 - 图片：直接 OCR 识别
-- 扫描件 PDF：pdftoppm 渲染 → 逐页 OCR
+- 扫描件 PDF：pdftoppm 渲染（200 DPI）→ 多页并行 OCR（引擎池，页面按序汇总）
+- 多页 PDF 的 OCR 并发度由设置 → OCR 并发数控制（默认 2，上限 8）
 
 ### 6.2 引擎选择
 

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
@@ -12,11 +13,59 @@ static DICT_DATA: &[u8] = include_bytes!("../../models/ppocrv5/ppocrv5_dict.txt"
 
 struct SendEngine(Mutex<OcrEngine>);
 // SAFETY: OcrEngine contains non-Send interior mutability (RefCell-backed ONNX session).
-// Mutex serializes all access, so SendEngine is safe to share across threads.
+// Each engine's Mutex serializes all access, so SendEngine is safe to share across threads.
 unsafe impl Send for SendEngine {}
 unsafe impl Sync for SendEngine {}
 
-static ENGINE: OnceLock<SendEngine> = OnceLock::new();
+/// Pool of OCR engines, one Mutex per engine, round-robin access.
+/// Each engine is single-threaded (tract has no intra-op parallelism), so a
+/// pool lets concurrent OCR calls (multi-page PDFs, Rayon batch_index) run on
+/// multiple cores instead of serializing on one global Mutex.
+struct EnginePool {
+    engines: Vec<SendEngine>,
+    next: AtomicUsize,
+}
+
+impl EnginePool {
+    fn new(count: usize) -> Result<Self, String> {
+        let mut engines = Vec::with_capacity(count);
+        for _ in 0..count {
+            engines.push(try_build_engine()?);
+        }
+        Ok(Self {
+            engines,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    fn with_engine<F, T>(&self, f: F) -> Result<T, String>
+    where
+        F: FnOnce(&OcrEngine) -> Result<T, String>,
+    {
+        let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.engines.len();
+        let guard = self.engines[idx].0.lock().unwrap_or_else(|e| e.into_inner());
+        f(&*guard)
+    }
+}
+
+static CONFIGURED_POOL_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+/// Set the OCR engine pool size from the `ocr_concurrent` user setting.
+/// Must be called before the first OCR use (pool is built lazily). 0 = auto.
+pub fn set_pool_size(size: usize) {
+    CONFIGURED_POOL_SIZE.store(size.clamp(1, 8), Ordering::Relaxed);
+}
+
+fn pool_size() -> usize {
+    let configured = CONFIGURED_POOL_SIZE.load(Ordering::Relaxed);
+    if configured > 0 {
+        return configured;
+    }
+    let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
+    cores.clamp(1, 4)
+}
+
+static POOL: OnceLock<EnginePool> = OnceLock::new();
 
 fn write_if_missing(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     if !path.exists() {
@@ -57,17 +106,15 @@ fn with_engine<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce(&OcrEngine) -> Result<T, String>,
 {
-    let engine = match ENGINE.get() {
-        Some(engine) => engine,
+    let pool = match POOL.get() {
+        Some(pool) => pool,
         None => {
-            let engine = try_build_engine()?;
-            let _ = ENGINE.set(engine); // race loser's engine is dropped
-            ENGINE.get().expect("just set")
+            let pool = EnginePool::new(pool_size())?;
+            let _ = POOL.set(pool); // race loser's engines are dropped
+            POOL.get().expect("just set")
         }
     };
-
-    let guard = engine.0.lock().unwrap_or_else(|e| e.into_inner());
-    f(&*guard)
+    pool.with_engine(f)
 }
 
 pub fn health_check() -> Result<(), String> {
@@ -107,6 +154,31 @@ where
             Err("PaddleOCR timed out after 120s".to_string())
         }
     }
+}
+
+/// Run OCR on an image file, returning a human-readable timing breakdown
+/// (image decode, detection preprocess/inference/postprocess, recognition
+/// preprocess/inference/postprocess). Used for performance diagnosis.
+pub fn recognize_with_metrics_from_path(path: &Path) -> Result<String, String> {
+    with_engine(|eng| {
+        let run = eng
+            .run_with_metrics_from_path(path)
+            .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))?;
+        let t = &run.timings;
+        Ok(format!(
+            "decode={:.2}s det(pre={:.2}s inf={:.2}s post={:.2}s) rec(pre={:.2}s inf={:.2}s post={:.2}s) total={:.2}s regions={}",
+            t.image_decode.as_secs_f64(),
+            t.detection.preprocess.as_secs_f64(),
+            t.detection.inference.as_secs_f64(),
+            t.detection.postprocess.as_secs_f64(),
+            t.recognition.preprocess.as_secs_f64(),
+            t.recognition.inference.as_secs_f64(),
+            t.recognition.postprocess.as_secs_f64(),
+            t.total.as_secs_f64(),
+            run.results.len(),
+        ))
+    })
+    .map_err(|e| format!("{e}"))
 }
 
 pub fn recognize_from_image(image: &image::DynamicImage) -> Result<String> {

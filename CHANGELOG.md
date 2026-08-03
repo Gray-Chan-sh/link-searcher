@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-08-03（PDF OCR 提速：引擎池 + 多页并行 + 渲染 DPI 300→200）
+
+- **PDF OCR 每页 30-60 秒过慢（实测验证）**：用 `pure_onnx_ocr::run_with_metrics_from_path` 对 200 DPI 单页实测：总 54.4s = 检测推理 16.5s（30%）+ 识别推理 34.9s（64%）+ 缩放/后处理 ~3s。识别批张量恒为 `[N,3,48,320]`（`RecPreProcessor` 满宽 320 分配），tract 无 intra-op 并行且 batch 线性展开，故「分块降 3-5 倍」对 tract 不成立。确定性的收益来自两处：
+  - **全局单引擎 Mutex 串行化**：`paddleocr.rs` 原为 `OnceLock<SendEngine>`，所有 OCR 调用（多页 PDF 逐页、Rayon batch_index 多文件）在同一个 Mutex 上排队，多核闲置。修复：改为 `EnginePool`（N = min(可用核数, 4)，每个引擎独立 Mutex + round-robin 负载均衡），并发 OCR 调用分散到多核
+  - **多页 PDF 逐页串行 OCR**：`pdf.rs` 原来 `loop` 逐页 `ocr_image`，N 页线性累加 54.4s/页。修复：改为 Rayon `par_iter` 并行处理全部页面，按页码顺序收集结果，多页 PDF 总耗时接近单页耗时 × 页数/核数
+  - **渲染 DPI 300→200**：`-r 300` 渲染 870 万像素（A4 2480×3508），检测模型 `det_limit_side_len=960` 只消费 960px，剩余像素浪费在 Lanczos3 下采样。降到 200（1654×2339），缩放计算减少 ~2.25 倍，仍高于 960px 需求（150 仅再省 ~1s，准确率风险不值得）
+  - **新增分阶段耗时诊断**：`paddleocr::recognize_with_metrics_from_path` 输出 decode/det(pre,inf,post)/rec(pre,inf,post) 各阶段秒数；`tests/test_pdf_ocr.rs` 新增 `test_ocr_bench_single_page` 实测基准
+  - **修复 `extract_text` 签名变更遗漏**：`b688d1c` 将 `extract_text(path)` 改为 `extract_text(path, lang)`，但 `tests/integration.rs` 5 处调用未同步 → 编译错误。补上 `"eng"` 参数（`src-tauri/tests/integration.rs`）
+  - **引擎池大小尊重 `ocr_concurrent` 设置**：新增 `paddleocr::set_pool_size(n)`（0=自动，上限 8），`lib.rs` 启动时在 DB 初始化后、health_check 前读取 `app_settings.ocr_concurrent` 注入（health_check 会惰性构建池，必须提前注入）。顺带修复前后端键名不一致：前端 `Settings.tsx` 用 `ocr_concurrency` 但后端白名单 + DB 种子均为 `ocr_concurrent` → 保存被后端以 "unknown setting key" 拒绝，该设置从未生效（`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/lib.rs`、`src/pages/Settings.tsx`）
+  - 涉及文件：`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/lib.rs`、`src-tauri/tests/integration.rs`、`src-tauri/tests/test_pdf_ocr.rs`、`src/pages/Settings.tsx`、`CHANGELOG.md`
+
+---
+
 ## 2026-08-03（PDF OCR 提速：渲染 DPI 300→200）
 
 - **PDF OCR 每页 30-60 秒过慢**：根因是 `ocr_pdf_via_pdftoppm` 硬编码 `-r 300` 渲染 870 万像素大图（A4 2480×3508），而检测模型 `det_limit_side_len=960` 只消费 960px，剩余像素全浪费在 Lanczos3 下采样上。修复：渲染 DPI 降到 200（A4 1654×2339），缩放计算量减少约 2.25 倍，仍高于检测模型所需 960px。实测各阶段耗时验证见 `tests/test_pdf_ocr.rs`（`src-tauri/src/extractor/pdf.rs`）

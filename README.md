@@ -188,7 +188,7 @@ link-searcher/
 │   │   ├── extractor/         # 文本提取
 │   │   │   ├── mod.rs         # 格式路由
 │   │   │   ├── ocr.rs         # OCR 引擎调度
-│   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型内嵌 + Mutex 安全包装）
+│   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型内嵌 + 引擎池并行）
 │   │   │   ├── pdf.rs         # PDF 提取 + pdftoppm OCR
 │   │   │   ├── office/        # Office 提取 + LibreOffice 集成
 │   │   │   ├── image.rs       # 图片 OCR

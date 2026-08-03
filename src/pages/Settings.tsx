@@ -279,8 +279,8 @@ export default function Settings() {
           />
           <NumberField
             label="Concurrency"
-            value={parseInt(settings['ocr_concurrency'] ?? '2', 10)}
-            onChange={v => handleFieldChange('ocr_concurrency', String(v))}
+            value={parseInt(settings['ocr_concurrent'] ?? '2', 10)}
+            onChange={v => handleFieldChange('ocr_concurrent', String(v))}
             min={1}
             max={16}
             placeholder="Default: 2"
