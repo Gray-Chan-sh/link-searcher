@@ -218,22 +218,22 @@ export default function Browse() {
               <LoadingSpinner className="size-5" />
             </div>
           ) : (
-            <table className="w-full text-xs select-none">
+            <table className="w-full text-xs select-none table-fixed">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 backdrop-blur z-10">
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
-                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.filename }}>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.filename }}>
                     {t('filename')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'filename')} />
                   </th>
-                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.path }}>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.path }}>
                     {t('path')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} />
                   </th>
-                  <th className="px-4 py-2 font-medium relative" style={{ width: colWidths.type }}>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.type }}>
                     {t('type')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'type')} />
                   </th>
-                  <th className="px-4 py-2 font-medium" style={{ width: colWidths.status }}>{t('status')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: colWidths.status }}>{t('status')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -248,7 +248,7 @@ export default function Browse() {
                         : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
                     }`}
                   >
-                    <td className="px-4 py-2">
+                    <td className="px-2 py-1">
                       <div className="flex items-center gap-2">
                         <span className={`size-2 rounded-full shrink-0 ${
                           item.indexed === 1 ? 'bg-green-500' : item.indexed === 2 ? 'bg-red-500' : 'bg-yellow-500'
@@ -256,13 +256,13 @@ export default function Browse() {
                         <span className="truncate" title={item.file_name}>{item.file_name}</span>
                       </div>
                     </td>
-                    <td className="px-4 py-2">
+                    <td className="px-2 py-1">
                       <span className="text-gray-500 dark:text-gray-400 truncate block" title={item.rel_path}>{item.rel_path}</span>
                     </td>
-                    <td className="px-4 py-2">
+                    <td className="px-2 py-1">
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>
                     </td>
-                    <td className="px-4 py-2">{statusBadge(item.indexed, item.error_msg, t)}</td>
+                    <td className="px-2 py-1">{statusBadge(item.indexed, item.error_msg, t)}</td>
                   </tr>
                 ))}
                 {!loading && items.length === 0 && (
