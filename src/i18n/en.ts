@@ -44,6 +44,7 @@ const en: Record<string, string> = {
     copy_path: 'Copy Path',
     show_in_folder: 'Show in Folder',
     reindex: 'Manual Re-index',
+    confirm_reindex: 'This file is already indexed. Re-indexing will re-extract and overwrite the existing index data. Continue?',
     export_csv: 'Export CSV',
     confirm_rebuild: 'Rebuilding the index will delete all existing index data and rescan all directories. This action cannot be undone. Are you sure you want to continue?',
     ocr_engine_required: 'An engine must be selected and pass testing before indexing can start',

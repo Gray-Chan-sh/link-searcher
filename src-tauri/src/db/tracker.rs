@@ -82,16 +82,18 @@ pub fn upsert_file(
 ) -> Result<String> {
     let now = chrono::Utc::now().timestamp();
     let id = Uuid::new_v4().to_string();
+    let file_ext = extension_of(path);
     conn.query_row(
-         "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at)
-          VALUES (?1,?2,?3,?4,?5,?6,'active',0,NULL,?7,?7)
+         "INSERT INTO file_tracking (id,path,file_ext,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,'active',0,NULL,?8,?8)
           ON CONFLICT(path) DO UPDATE SET
+              file_ext=excluded.file_ext,
               mtime=excluded.mtime, size=excluded.size, md5=excluded.md5,
               status='active',
               indexed=CASE WHEN file_tracking.mtime!=excluded.mtime OR file_tracking.size!=excluded.size THEN 0 ELSE file_tracking.indexed END,
               error_msg=NULL, updated_at=excluded.updated_at
           RETURNING id",
-        rusqlite::params![id, path, dir_id, mtime, size as i64, md5, now],
+        rusqlite::params![id, path, file_ext, dir_id, mtime, size as i64, md5, now],
         |row| row.get::<_, String>(0),
     )
     .context("upsert_file failed")
@@ -111,14 +113,42 @@ pub fn mark_deleted(conn: &Connection, file_id: &str) -> Result<()> {
 }
 
 pub fn update_file_path(conn: &Connection, file_id: &str, new_path: &str, new_dir_id: &str) -> Result<()> {
+    let file_ext = extension_of(new_path);
     let n = conn
         .execute(
-            "UPDATE file_tracking SET path=?1, dir_id=?2, updated_at=?3 WHERE id=?4",
-            rusqlite::params![new_path, new_dir_id, chrono::Utc::now().timestamp(), file_id],
+            "UPDATE file_tracking SET path=?1, dir_id=?2, file_ext=?3, updated_at=?4 WHERE id=?5",
+            rusqlite::params![new_path, new_dir_id, file_ext, chrono::Utc::now().timestamp(), file_id],
         )
         .context("update_file_path failed")?;
     if n == 0 {
         anyhow::bail!("file not found: {file_id}");
+    }
+    Ok(())
+}
+
+fn extension_of(path: &str) -> String {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase()
+}
+
+pub(crate) fn backfill_file_ext(conn: &Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("SELECT id, path FROM file_tracking WHERE file_ext IS NULL OR file_ext = ''")
+        .context("prepare ext backfill")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .context("query ext backfill rows")?;
+    for row in rows {
+        let (id, path) = row.context("read ext backfill row")?;
+        let file_ext = extension_of(&path);
+        conn.execute(
+            "UPDATE file_tracking SET file_ext=?1 WHERE id=?2",
+            rusqlite::params![file_ext, id],
+        )
+        .context("update ext backfill")?;
     }
     Ok(())
 }
@@ -180,9 +210,10 @@ pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
         for row in rows {
             let (id, path) = row.context("read migration row")?;
             if let Some(rel) = path.strip_prefix(&prefix) {
+                let file_ext = extension_of(rel);
                 conn.execute(
-                    "UPDATE file_tracking SET path=?1 WHERE id=?2",
-                    rusqlite::params![rel, id],
+                    "UPDATE file_tracking SET path=?1, file_ext=?2 WHERE id=?3",
+                    rusqlite::params![rel, file_ext, id],
                 )
                 .context("update migrated path")?;
                 count += 1;

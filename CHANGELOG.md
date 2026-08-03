@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-03（浏览页扩展名排序修复 + 已索引文件手动重索引确认 + macOS LibreOffice 路径探测）
+
+- **浏览页「扩展名 A-Z」排序失效 + FileTypes 类型统计为空**：根因是 `file_tracking` 表从未存在 `file_ext` 列，但 `list_files_db` 的 `ORDER BY file_ext` 和 `get_file_type_stats` 的 `GROUP BY file_ext` 都引用了它 → 两个查询直接报错（前端 `.catch` 静默吞掉）。修复：schema 升级到 v2，新增 `file_ext` 列 + `ensure_file_ext_column` 幂等迁移（ALTER TABLE + Rust 侧 `Path::extension()` 回填，避免目录名含点误判）；`upsert_file`/`update_file_path`/`migrate_paths_to_relative` 同步维护该列（`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）
+- **已索引文件手动重索引无确认**：右键菜单「手动索引」对已索引（indexed=1）文件直接执行，可能覆盖现有索引。修复：前端 `handleReindex` 用 `ask()` 弹确认框「该文件已索引，重新索引将重新提取并覆盖现有索引数据」，确认后才执行；新增 `confirm_reindex` i18n 键。失败/待索引文件仍直接执行（`src/pages/Browse.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`）
+- **浏览页页码越界空白**：当结果集缩小时（如重扫后失败文件减少），`page` 可能超过 `totalPages`，停留在空页。修复：新增 effect 将 `page` 钳制到有效范围（`src/pages/Browse.tsx`）
+- **macOS 默认 soffice 路径不可解析**：`determine_lo_binary` 先返回 config 中默认的裸 `"soffice"`，macOS GUI 应用 PATH 不含 brew 路径 → 永远找不到真路径。修复：config 默认改为空（自动探测）；`determine_lo_binary` 在 config 为默认值时跳过，按顺序探测 `/opt/homebrew/bin/soffice` → `/usr/local/bin/soffice` → `/Applications/LibreOffice.app/...`；新增 `resolved_lo_binary()`，依赖面板显示真实解析路径而非 `soffice`（`src-tauri/src/extractor/office/mod.rs`、`src-tauri/src/config.rs`、`src-tauri/src/commands/tesseract.rs`）
+- **新增分页回归测试**：`tests/test_pagination.rs` 验证 507 行数据时第 11 页返回 20 行、带 ext 参数时 LIMIT/OFFSET 绑定正确（`src-tauri/tests/test_pagination.rs`）
+
+---
+
 ## 2026-08-02（Bug 修复：macOS LibreOffice headless 调用失败）
 
 - **扫描会话级 LibreOffice Dock 图标抑制（revert 持久写入）**：`自启动时持久注入 LSUIElement=true` 改为 `LoBackgroundGuard` RAII guard——仅在扫描会话期间临时设置，扫描完成后自动恢复。避免持久写入导致用户正常使用 LO 时无 Dock 图标。新增 crash recovery：启动时若检测到残留 LSUIElement（上次扫描崩溃），自动清除。Guard 覆盖 `trigger_scan`、`rebuild_index`、`startup_scan` 三个入口（`src-tauri/src/extractor/office/mod.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`）

@@ -64,7 +64,7 @@ export default function Settings() {
 
   useEffect(() => {
     if (appConfig) {
-      setLoPath(appConfig.lo_binary_path || 'soffice')
+      setLoPath(appConfig.lo_binary_path)
     }
   }, [appConfig])
 

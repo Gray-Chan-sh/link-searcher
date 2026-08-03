@@ -44,6 +44,7 @@ const zh: Record<string, string> = {
     copy_path: '复制路径',
     show_in_folder: '在文件夹中显示',
     reindex: '手动索引',
+    confirm_reindex: '该文件已索引，重新索引将重新提取并覆盖现有索引数据，确定继续吗？',
     export_csv: '导出 CSV',
     confirm_rebuild: '重建索引将删除所有现有索引数据并重新扫描所有目录。此操作不可撤销，确定继续吗？',
     ocr_engine_required: '必须选择一个引擎并通过测试才能开始索引',

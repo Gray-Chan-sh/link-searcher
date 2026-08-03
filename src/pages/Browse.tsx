@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb } from '../api/files'
@@ -87,6 +88,21 @@ export default function Browse() {
     }
   }, [filter, ext, debouncedSearch, sort, order, page, pageSize])
 
+  // Clamp page to a valid range when the result set shrinks (e.g. after a
+  // re-scan fixes failures), so the user is never left on an empty page.
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages)
+  }, [page, totalPages])
+
+  const handleReindex = useCallback(async (item: FileItem) => {
+    if (item.indexed === 1) {
+      const confirmed = await ask(t('confirm_reindex'), { title: t('reindex'), kind: 'warning' })
+      if (!confirmed) return
+    }
+    reindexFile(item.file_id).catch(() => {}).finally(() => loadFiles())
+  }, [t, loadFiles])
+
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300)
     return () => clearTimeout(t)
@@ -120,8 +136,6 @@ export default function Browse() {
     if (previewVersionRef.current !== localVersion) return
     setPreviewLoading(false)
   }, [])
-
-  const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
   return (
     <div className="flex h-full">
@@ -374,10 +388,7 @@ export default function Browse() {
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => {
-              reindexFile(contextMenu.item.file_id).catch(() => {}).finally(() => loadFiles())
-              setContextMenu(null)
-            }}
+            onClick={() => { handleReindex(contextMenu.item); setContextMenu(null) }}
           >
             {t('reindex')}
           </button>

@@ -82,9 +82,9 @@ fn wait_timeout(
 fn common_lo_paths() -> Vec<String> {
     let mut paths = Vec::new();
     if cfg!(target_os = "macos") {
-        paths.push("/Applications/LibreOffice.app/Contents/MacOS/soffice".into());
         paths.push("/opt/homebrew/bin/soffice".into());
         paths.push("/usr/local/bin/soffice".into());
+        paths.push("/Applications/LibreOffice.app/Contents/MacOS/soffice".into());
     } else if cfg!(target_os = "windows") {
         paths.push("C:\\Program Files\\LibreOffice\\program\\soffice.exe".into());
         paths.push("C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe".into());
@@ -103,7 +103,9 @@ fn determine_lo_binary() -> String {
         }
     }
     let config = load_config();
-    if !config.lo_binary_path.is_empty() {
+    // A bare "soffice" (the default) is not resolvable on macOS GUI apps, so
+    // probe the known install paths first and only fall back to it.
+    if !config.lo_binary_path.is_empty() && config.lo_binary_path != "soffice" {
         return config.lo_binary_path;
     }
     for path in common_lo_paths() {
@@ -112,6 +114,13 @@ fn determine_lo_binary() -> String {
         }
     }
     "soffice".to_string()
+}
+
+/// Resolve the LibreOffice binary that will actually be used (respecting
+/// LO_BINARY / config override, otherwise the first existing common path).
+/// Used by the dependencies panel so users see the real path, not "soffice".
+pub fn resolved_lo_binary() -> String {
+    determine_lo_binary()
 }
 
 /// Suppress LibreOffice Dock icons during a scan session.

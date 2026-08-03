@@ -108,7 +108,7 @@ pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
         },
         DependencyStatus {
             name: "LibreOffice (Office 文档提取)".into(),
-            command: "soffice".into(),
+            command: crate::extractor::office::resolved_lo_binary(),
             available: crate::extractor::office::is_libreoffice_available(),
             install_guide: "macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice".into(),
         },

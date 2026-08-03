@@ -9,7 +9,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -56,6 +56,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     tx.execute_batch(CREATE_TABLES_SQL)
         .context("failed to create tables")?;
 
+    // Migration to schema v2: add `file_ext` (list_files_db ORDER BY + get_file_type_stats GROUP BY previously referenced a non-existent column).
+    ensure_file_ext_column(&tx)?;
+
     seed_default_settings(&tx)?;
 
     tx.execute(
@@ -68,10 +71,37 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `file_ext` column to an existing v1 database and backfill it from
+/// `path`. Idempotent — safe to call on every startup.
+fn ensure_file_ext_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(file_tracking)")
+            .context("failed to inspect file_tracking")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "file_ext")
+    };
+    if has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE file_tracking ADD COLUMN file_ext TEXT")
+        .context("failed to add file_ext column")?;
+    crate::db::tracker::backfill_file_ext(tx)
+        .context("failed to backfill file_ext")?;
+    Ok(())
+}
+
 const CREATE_TABLES_SQL: &str = "
     CREATE TABLE IF NOT EXISTS file_tracking (
         id          TEXT PRIMARY KEY,
         path        TEXT NOT NULL UNIQUE,
+        file_ext    TEXT,
         dir_id      TEXT NOT NULL,
         mtime       INTEGER NOT NULL,
         size        INTEGER NOT NULL DEFAULT 0,

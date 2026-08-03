@@ -19,7 +19,8 @@ impl Default for AppConfig {
         Self {
             data_dir: default_data_dir(),
             language: "zh".to_string(),
-            lo_binary_path: "soffice".to_string(),
+            // Empty = auto-detect; macOS resolves brew/App install paths at runtime.
+            lo_binary_path: String::new(),
         }
     }
 }
