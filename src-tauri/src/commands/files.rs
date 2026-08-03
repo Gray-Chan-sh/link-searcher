@@ -158,6 +158,11 @@ pub async fn list_files_db(
     let items: Vec<FileItem> = rows.collect::<rusqlite::Result<_>>()
         .map_err(|e| format!("collect error: {e}"))?;
 
+    log::info!(
+        "[BROWSE] filter={:?} sort={} page={} ps={} offset={} total={} items={}",
+        filter, sort.as_deref().unwrap_or("default"), p, ps, offset, total, items.len()
+    );
+
     Ok(FileListResponse { items, total, page: p, page_size: ps })
 }
 
