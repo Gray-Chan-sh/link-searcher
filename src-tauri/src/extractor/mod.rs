@@ -22,7 +22,10 @@ static OFFICE_EXTRACTOR: LazyLock<office::OfficeExtractor> =
 static IMAGE_EXTRACTOR: LazyLock<image::ImageExtractor> = LazyLock::new(image::ImageExtractor::new);
 
 /// Dispatch text extraction based on file extension.
-pub fn extract_text(path: &Path) -> Result<String> {
+/// `lang` is the OCR language for PDF/image extraction (from directory config
+/// or global settings). When the extracted text is watermark/garbage, PDFs
+/// fall through to OCR and image files always go through OCR.
+pub fn extract_text(path: &Path, lang: &str) -> Result<String> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -35,7 +38,7 @@ pub fn extract_text(path: &Path) -> Result<String> {
         | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql" | "sh" | "bat"
         | "ps1" | "env" | "conf" | "properties" => TEXT_EXTRACTOR.extract(path),
         // Document formats
-        "pdf" => PDF_EXTRACTOR.extract(path),
+        "pdf" => PDF_EXTRACTOR.extract_with_lang(path, lang),
         "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => OFFICE_EXTRACTOR.extract(path),
         // Image formats (OCR placeholder)
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => {
@@ -117,7 +120,7 @@ mod tests {
         for ext in ["txt", "md", "csv", "json", "rs", "py"] {
             let path = dir.join(format!("test.{}", ext));
             std::fs::write(&path, "hello").unwrap();
-            let result = extract_text(&path);
+            let result = extract_text(&path, "eng");
             assert!(
                 result.is_ok(),
                 "{} should extract ok: {:?}",
@@ -137,7 +140,7 @@ mod tests {
 
         let path = dir.join("readme.me");
         std::fs::write(&path, "hello world").unwrap();
-        let result = extract_text(&path);
+        let result = extract_text(&path, "eng");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "hello world");
 

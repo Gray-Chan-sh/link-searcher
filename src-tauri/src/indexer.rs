@@ -154,7 +154,12 @@ impl IndexerService {
                 }
             }
             let mut ocr_used = false;
-            let extracted = match crate::extractor::extract_text(&job.file_path) {
+            let ocr_lang = crate::db::dir_config::get_dir(&conn, &job.dir_id)
+                .ok()
+                .flatten()
+                .map(|c| c.ocr_lang)
+                .unwrap_or_else(|| "eng".to_string());
+            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang) {
                 Ok(t) if t.len() > 10 => t,
                 Ok(t) => {
                     if file_ext.eq_ignore_ascii_case("pdf") {

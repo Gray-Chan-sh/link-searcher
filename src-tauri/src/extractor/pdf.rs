@@ -14,6 +14,47 @@ impl PdfExtractor {
     pub fn new() -> Self {
         Self
     }
+
+    pub fn extract_with_lang(&self, path: &Path, lang: &str) -> Result<String> {
+        let doc = lopdf::Document::load(path).context("failed to load PDF")?;
+        let pages: Vec<u32> = doc.get_pages().into_keys().collect();
+        if pages.is_empty() {
+            return Ok(String::new());
+        }
+        let mut page_texts: Vec<String> = Vec::new();
+        for page_num in &pages {
+            match doc.extract_text(&[*page_num]) {
+                Ok(text) => page_texts.push(text.trim_end_matches('\n').to_owned()),
+                Err(e) => {
+                    log::warn!("[PDF] page {} extraction failed: {e}", page_num);
+                    page_texts.push(String::new());
+                }
+            }
+        }
+        let merged = page_texts.join("\n");
+        let is_wm = is_watermark_text(&page_texts);
+        let is_garbled = is_garbled_text(&merged);
+        let is_rep = is_repetitive(&merged);
+        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep {
+            return Ok(merged);
+        }
+        if is_pdftoppm_available() {
+            match ocr_pdf_via_pdftoppm(path, lang) {
+                Ok(ocr_text) if !ocr_text.is_empty() => {
+                    log::info!(
+                        "[PDF] OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        merged.len(),
+                        ocr_text.len(),
+                    );
+                    return Ok(ocr_text);
+                }
+                Ok(_) => log::warn!("[PDF] OCR returned empty text for {:?}", path.file_name()),
+                Err(e) => log::warn!("[PDF] OCR failed for {:?}: {e}", path.file_name()),
+            }
+        }
+        Ok(merged)
+    }
 }
 
 /// Detect if extracted PDF text is garbled / corrupted.
@@ -136,53 +177,7 @@ pub fn is_pdftoppm_available() -> bool {
 
 impl Extractor for PdfExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
-        let doc = lopdf::Document::load(path).context("failed to load PDF")?;
-        let pages: Vec<u32> = doc.get_pages().into_keys().collect();
-        if pages.is_empty() {
-            return Ok(String::new());
-        }
-
-        // Extract text per page — continue on per-page error
-        let mut page_texts: Vec<String> = Vec::new();
-        for page_num in &pages {
-            match doc.extract_text(&[*page_num]) {
-                Ok(text) => page_texts.push(text.trim_end_matches('\n').to_owned()),
-                Err(e) => {
-                    log::warn!("[PDF] page {} extraction failed: {e}", page_num);
-                    page_texts.push(String::new());
-                }
-            }
-        }
-
-        let merged = page_texts.join("\n");
-        let is_wm = is_watermark_text(&page_texts);
-        let is_garbled = is_garbled_text(&merged);
-        let is_rep = is_repetitive(&merged);
-
-        // Clean text: >100 chars, not garbled, not watermark, not repetitive.
-        // Raised 50 → 100 so mid-length watermarks fall through to OCR;
-        // is_repetitive catches repeating watermark lines on single pages.
-        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep {
-            return Ok(merged);
-        }
-
-        // OCR fallback
-        if is_pdftoppm_available() {
-            match ocr_pdf_via_pdftoppm(path, "eng") {
-                Ok(ocr_text) if !ocr_text.is_empty() => {
-                    log::info!(
-                        "[PDF] OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
-                        path.file_name().unwrap_or_default(),
-                        merged.len(),
-                        ocr_text.len()
-                    );
-                    return Ok(ocr_text);
-                }
-                _ => {}
-            }
-        }
-
-        Ok(merged)
+        self.extract_with_lang(path, "eng")
     }
 }
 
