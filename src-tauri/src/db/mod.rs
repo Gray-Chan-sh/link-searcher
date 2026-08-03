@@ -186,6 +186,7 @@ pub fn vacuum(conn: &Connection) -> Result<()> {
 
 fn seed_default_settings(conn: &Connection) -> Result<()> {
     let defaults = [
+        ("ocr_engine", "PaddleOCR"),
         ("ocr_lang", "eng"),
         ("ocr_concurrent", "2"),
         ("scheduled_scan_time", "02:00"),
