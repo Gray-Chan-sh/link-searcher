@@ -5,7 +5,19 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+use log;
 use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
+}
+
+/// macOS QoS class values — see `pthread_set_qos_class_self_np(3)`.
+/// We request USER_INTERACTIVE so the scheduler prefers performance cores
+/// for the OCR inference threads.
+#[cfg(target_os = "macos")]
+const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 
 static DET_MODEL: &[u8] = include_bytes!("../../models/ppocrv5/det.onnx");
 static REC_MODEL: &[u8] = include_bytes!("../../models/ppocrv5/rec.onnx");
@@ -28,10 +40,12 @@ struct EnginePool {
 
 impl EnginePool {
     fn new(count: usize) -> Result<Self, String> {
+        log::info!("Building OCR engine pool ({} engine(s))…", count);
         let mut engines = Vec::with_capacity(count);
         for _ in 0..count {
             engines.push(try_build_engine()?);
         }
+        log::info!("OCR engine pool ready with {} engine(s)", count);
         Ok(Self {
             engines,
             next: AtomicUsize::new(0),
@@ -42,6 +56,10 @@ impl EnginePool {
     where
         F: FnOnce(&OcrEngine) -> Result<T, String>,
     {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        }
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.engines.len();
         let guard = self.engines[idx].0.lock().unwrap_or_else(|e| e.into_inner());
         f(&*guard)

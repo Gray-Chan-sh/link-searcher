@@ -153,16 +153,26 @@ fn run_with_config(app_config: config::AppConfig) {
 
             // Apply OCR concurrency setting before the engine pool is built
             // (health_check below lazily constructs the pool).
-            if let Ok(conn) = db_pool.get() {
-                if let Ok(v) = conn.query_row(
-                    "SELECT value FROM app_settings WHERE key = 'ocr_concurrent'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    if let Ok(n) = v.parse::<usize>() {
-                        crate::extractor::paddleocr::set_pool_size(n);
+            match db_pool.get() {
+                Ok(conn) => {
+                    match conn.query_row(
+                        "SELECT value FROM app_settings WHERE key = 'ocr_concurrent'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    ) {
+                        Ok(v) => {
+                            match v.parse::<usize>() {
+                                Ok(n) => {
+                                    crate::extractor::paddleocr::set_pool_size(n);
+                                    log::info!("[STARTUP] OCR concurrency set to {} engine(s)", n);
+                                }
+                                Err(e) => log::warn!("[STARTUP] Failed to parse ocr_concurrent value '{}': {}", v, e),
+                            }
+                        }
+                        Err(e) => log::warn!("[STARTUP] Failed to read ocr_concurrent setting: {}", e),
                     }
                 }
+                Err(e) => log::warn!("[STARTUP] Failed to get DB connection for OCR concurrency: {}", e),
             }
 
             if let Err(e) = crate::extractor::paddleocr::health_check() {
