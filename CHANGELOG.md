@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-03（Apple Vision OCR 引擎：macOS 原生 OCR，ANE 推理）
+
+- **Apple Vision OCR 实现**：新增 `apple_vision.rs` 模块，使用 macOS 10.15+ 原生 `VNRecognizeTextRequest`（Accurate 级别），运行在 ANE（Neural Engine）上独立于 CPU。与 tract 单线程 CPU 推理相比，预期单区域 0.05-0.2s（当前 1.5-5s），无需手动引擎池管理。实现参考 thuki（Tauri 2 + Vision OCR）和 Pointra-Pub（缓存请求 + 启动预热）生产级项目，`performRequests_error:` 同步调用模式，`autoreleasepool` 包裹防 ObjC 临时对象泄漏（`src-tauri/src/extractor/apple_vision.rs`）
+- **依赖**：新增 `objc2` 0.6、`objc2-foundation` 0.3、`objc2-vision` 0.3（`Cargo.toml`）
+- **引擎分发**：`ocr.rs` 的 `AppleVision` 分支从 PaddleOCR 桩替换为 `apple_vision::recognize_from_path`；`mod.rs` 注册模块（`src-tauri/src/extractor/ocr.rs`、`mod.rs`）
+- **启动预热**：`lib.rs` 启动时后台线程用 64×64 空白图跑一次 Vision，预加载 CoreML/ANE 模型，消除首次调用 1-3s 延迟（Pointra-Pub 模式）（`src-tauri/src/lib.rs`）
+- **语言映射**：`eng→en-US`、`chi_sim→zh-Hans`、`jpn→ja-JP`、`kor→ko-KR`（Fast 模式不支持中日韩，固定 Accurate）
+
+---
+
 ## 2026-08-03（引擎池诊断：曝光 set_pool_size 静默失败 + macOS P-core 绑定）
 
 - **`set_pool_size` 从未生效（池始终=4）**：`lib.rs` 启动时读 `ocr_concurrent` 的 if-let 链**三层静默吞错**（`db_pool.get()`/`query_row`/`parse` 任意失败均无日志）。修复：改为 `match` 逐层 `log::warn!`，成功后 `log::info!` 记录池大小（`lib.rs`）

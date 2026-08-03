@@ -51,6 +51,9 @@ log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSDictionary"] }
+objc2-vision = { version = "0.3", features = ["VNRecognizeTextRequest", "VNRequestHandler", "VNTypes", "VNDefines"] }
 
 [dev-dependencies]
 dirs = "5"

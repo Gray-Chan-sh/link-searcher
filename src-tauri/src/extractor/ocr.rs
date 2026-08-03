@@ -88,9 +88,8 @@ pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) ->
         OcrEngineType::PaddleOCR => paddleocr::recognize_from_path(path),
         OcrEngineType::Tesseract => ocr_image_tesseract(path, lang),
         OcrEngineType::AppleVision => {
-            // ponytail: call macOS Vision framework via objc or CLI wrapper.
-            // For now, fall back to paddleocr.
-            paddleocr::recognize_from_path(path)
+            super::apple_vision::recognize_from_path(path, lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         OcrEngineType::WindowsOcr => {
             // ponytail: call Windows OCR via WinRT.

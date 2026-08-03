@@ -182,6 +182,28 @@ fn run_with_config(app_config: config::AppConfig) {
                 log::info!("OCR 引擎自检通过");
             }
 
+            // Warm up Apple Vision OCR (preloads CoreML/ANE models on a background
+            // thread, eliminating the 1–3 s first-call latency).
+            #[cfg(target_os = "macos")]
+            {
+                let warmup_path = data_dir.join(".vision_warmup.png");
+                {
+                    let img = image::RgbaImage::from_pixel(64, 64, image::Rgba([255u8; 4]));
+                    if let Err(e) = img.save(&warmup_path) {
+                        log::warn!("[STARTUP] Vision warmup image failed: {}", e);
+                    }
+                }
+                std::thread::spawn(move || {
+                    match crate::extractor::apple_vision::recognize_from_path(
+                        &warmup_path, "eng",
+                    ) {
+                        Ok(_) => log::info!("Apple Vision OCR warmed up"),
+                        Err(e) => log::warn!("Apple Vision OCR warmup failed: {e}"),
+                    }
+                    let _ = std::fs::remove_file(&warmup_path);
+                });
+            }
+
             // Warn (don't block) if any monitored dir already overlaps the data dir.
             if let Ok(conn) = db_pool.get() {
                 if let Ok(dirs) = crate::db::dir_config::list_dirs(&conn) {

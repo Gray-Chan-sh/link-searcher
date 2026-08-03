@@ -1,3 +1,4 @@
+pub mod apple_vision;
 mod image;
 pub mod ocr;
 pub mod office;
