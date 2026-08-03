@@ -175,6 +175,17 @@ fn run_with_config(app_config: config::AppConfig) {
                 Err(e) => log::warn!("[STARTUP] Failed to get DB connection for OCR concurrency: {}", e),
             }
 
+            if let Ok(conn) = db_pool.get() {
+                let engine_name = conn
+                    .query_row(
+                        "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap_or_else(|_| "PaddleOCR".to_string());
+                log::info!("[STARTUP] OCR engine: {}", engine_name);
+            }
+
             if let Err(e) = crate::extractor::paddleocr::health_check() {
                 log::error!("OCR 引擎自检失败: {e}");
                 eprintln!("[OCR] 引擎自检失败: {e}");
