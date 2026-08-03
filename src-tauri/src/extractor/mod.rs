@@ -43,7 +43,8 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => OFFICE_EXTRACTOR.extract(path),
         // Image formats (OCR placeholder)
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => {
-            IMAGE_EXTRACTOR.extract(path)
+            let e = engine.unwrap_or(ocr::OcrEngineType::PaddleOCR);
+            ocr::ocr_image_with_engine(path, &e, lang)
         }
         // Unknown format: try reading as plain text
         _ => match std::fs::read_to_string(path) {

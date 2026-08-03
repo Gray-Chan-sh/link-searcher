@@ -188,11 +188,10 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
 
 /// Extract text from an image using the best available engine.
 ///
-/// Convenience wrapper that delegates to `ocr_image_with_engine` with
-/// `OcrEngineType::Tesseract`. Callers that need a specific engine should
-/// use `ocr_image_with_engine` directly.
-pub fn ocr_image(image_path: &Path, _lang: &str) -> Result<String> {
-    paddleocr::recognize_from_path(image_path)
+/// Convenience wrapper. Falls back to PaddleOCR when `engine` is `None`.
+pub fn ocr_image(image_path: &Path, lang: &str, engine: Option<OcrEngineType>) -> Result<String> {
+    let e = engine.unwrap_or(OcrEngineType::PaddleOCR);
+    ocr_image_with_engine(image_path, &e, lang)
 }
 
 /// Generate a simple test pattern PNG image for OCR engine validation.

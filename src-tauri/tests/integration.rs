@@ -370,12 +370,12 @@ fn test_text_extraction_formats() -> Result<()> {
     // .txt
     let txt = tmp.path().join("hello.txt");
     std::fs::write(&txt, "Hello from txt")?;
-    assert_eq!(extractor::extract_text(&txt, "eng")?, "Hello from txt");
+    assert_eq!(extractor::extract_text(&txt, "eng", None)?, "Hello from txt");
 
     // .md
     let md = tmp.path().join("readme.md");
     std::fs::write(&md, "# Markdown\n\nContent here")?;
-    let md_text = extractor::extract_text(&md, "eng")?;
+    let md_text = extractor::extract_text(&md, "eng", None)?;
     assert!(md_text.contains("Content"), "md: {md_text:?}");
 
     // .pdf (minimal via lopdf)
@@ -423,7 +423,7 @@ fn test_text_extraction_formats() -> Result<()> {
         doc.trailer.set("Root", Object::Reference(catalog_id));
         doc.save(&pdf_path)?;
     }
-    let pdft = extractor::extract_text(&pdf_path, "eng")?;
+    let pdft = extractor::extract_text(&pdf_path, "eng", None)?;
     assert!(pdft.contains("PDF"), "pdf: {pdft:?}");
 
     // .docx (minimal via zip)
@@ -442,7 +442,7 @@ fn test_text_extraction_formats() -> Result<()> {
         )?;
         z.finish()?;
     }
-    let docxt = extractor::extract_text(&docx_path, "eng")?;
+    let docxt = extractor::extract_text(&docx_path, "eng", None)?;
     assert!(docxt.contains("DOCX"), "docx: {docxt:?}");
 
     Ok(())
@@ -459,7 +459,7 @@ fn test_ocr_fallback() -> Result<()> {
     let img = image::DynamicImage::new_rgba8(1, 1);
     img.save(&img_path)?;
 
-    let result = extractor::extract_text(&img_path, "eng")?;
+    let result = extractor::extract_text(&img_path, "eng", None)?;
     // If tesseract not available: empty string.
     // If tesseract available: may be empty (1px image) or contain something.
     // Either is acceptable — we just verify no panic/error.

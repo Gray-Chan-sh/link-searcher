@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-03（消除残留硬编码：图片 OCR + OCR 回退接入引擎分发）
+
+- **`ocr_image` 便利函数硬编码 PaddleOCR**：图片文件索引和 indexer 短文本 OCR 回退均通过 `ocr_image` 走 PaddleOCR，忽略引擎设置。修复：`ocr_image` 新增 `engine: Option<OcrEngineType>` 参数并通过 `ocr_image_with_engine` 分发；`mod.rs` 图片分支改用 `ocr_image_with_engine`（不再依赖 `ImageExtractor.extract`）；`indexer.rs` 短文本回退传入 `ocr_engine`（`src-tauri/src/extractor/ocr.rs`、`mod.rs`、`indexer.rs`、`tests/integration.rs`）
+
+---
+
 ## 2026-08-03（PDF OCR 接入引擎分发：不再硬编码 PaddleOCR）
 
 - **PDF OCR 始终走 PaddleOCR，忽略用户引擎选择**：`pdf.rs` 的 `ocr_pdf_via_pdftoppm` 硬编码 `paddleocr::recognize_from_path_with_regions`，完全绕过 `ocr.rs` 的引擎分发。即使设置页选了 Apple Vision，PDF OCR 仍跑 PaddleOCR → 用户无法感知 Vision 加速。修复：`ocr_pdf_via_pdftoppm`/`extract_with_lang`/`extract_text` 新增 `engine: Option<OcrEngineType>` 参数；`indexer.rs` 从 `app_settings.ocr_engine` 读取配置传入；`ocr.rs` 新增 `ocr_image_with_regions` 调度函数（PaddleOCR/AppleVision/Tesseract 三路）；`apple_vision.rs` 新增 `recognize_from_path_with_regions` 输出 region 数（`src-tauri/src/extractor/pdf.rs`、`mod.rs`、`ocr.rs`、`apple_vision.rs`、`indexer.rs`、`test_pdf_ocr.rs`）

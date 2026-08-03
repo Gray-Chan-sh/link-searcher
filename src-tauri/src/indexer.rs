@@ -167,7 +167,7 @@ impl IndexerService {
                 )
                 .ok()
                 .map(|v| crate::extractor::ocr::map_engine(&v));
-            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang, ocr_engine) {
+            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang, ocr_engine.clone()) {
                 Ok(t) if t.len() > 10 => t,
                 Ok(t) => {
                     if file_ext.eq_ignore_ascii_case("pdf") {
@@ -179,7 +179,7 @@ impl IndexerService {
                         t
                     } else {
                         log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
-                        match crate::extractor::ocr::ocr_image(&job.file_path, "eng") {
+                        match crate::extractor::ocr::ocr_image(&job.file_path, "eng", ocr_engine.clone()) {
                             Ok(ocr) if !ocr.is_empty() => {
                                 ocr_used = true;
                                 ocr
