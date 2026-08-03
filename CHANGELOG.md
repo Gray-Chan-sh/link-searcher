@@ -17,7 +17,7 @@
 
 ## 2026-08-02（Batch 2+3：浏览页右键菜单 + 列宽拖拽 + 页码输入 + 复制修复）
 
-- **浏览页右键菜单**：文件行新增 `onContextMenu`，弹出菜单含 **打开**（`openFile`）、**在 Finder 中显示**（`revealInFolder`）、**手动索引**（调 `reindex_file` 后刷新列表）。移植自 `ResultList.tsx` 的右键模式，document click 自动关闭（`src/pages/Browse.tsx`）
+- **浏览页右键菜单**：文件行新增 `onContextMenu`，弹出菜单含 **打开**（`openFile`）、**在 Finder 中显示**（`revealInFolder`）、**手动索引**（调 `reindex_file` 后刷新列表）。移植自 `ResultList.tsx` 的右键模式，document click 自动关闭。修复 `open_file`/`reveal_in_folder` 相对路径未解析为绝对路径的 bug——DB 存相对路径，需通过 `dir_config` 拼接（`src/pages/Browse.tsx`、`src-tauri/src/commands/files.rs`）
 - **新增 `reindex_file` 命令**：支持手动逐文件重索引，查 DB 记录 → 解析绝对路径 → 调用 `indexer.index_file`。已注册 invoke_handler，前端封装 `reindexFile`（`src-tauri/src/commands/index.rs`、`lib.rs`、`src/api/index.ts`）。i18n 新增 `reindex` 键
 - **列宽可拖拽**：每列独立 width 状态，表头间加 `cursor-col-resize` 拖拽手柄（onMouseDown → mousemove → mouseup），最低 80px。移植自 `PreviewPanel.tsx` 的 drag resize 模式（`src/pages/Browse.tsx`）
 - **页码输入框**：前后翻页按钮间插入 `go_to` 数字输入框，Enter/失焦跳转，1..totalPages 校验。移植自 `SearchPage.tsx` 模式（`src/pages/Browse.tsx`）
