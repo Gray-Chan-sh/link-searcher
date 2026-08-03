@@ -229,11 +229,8 @@ export default function Browse() {
                     {t('path')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} />
                   </th>
-                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.type }}>
-                    {t('type')}
-                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'type')} />
-                  </th>
-                  <th className="px-2 py-1 font-medium" style={{ width: colWidths.status }}>{t('status')}</th>
+                  <th className="px-2 py-1 font-medium">{t('type')}</th>
+                  <th className="px-2 py-1 font-medium">{t('status')}</th>
                 </tr>
               </thead>
               <tbody>
