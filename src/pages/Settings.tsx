@@ -215,6 +215,9 @@ export default function Settings() {
         </Section>
 
         <Section title={t('ocr_engine')}>
+          <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
+            当前: <span className="font-semibold text-gray-900 dark:text-gray-100">{selectedEngine?.name ?? '未选择'}</span>
+          </p>
           <div className="space-y-2">
             {ocrEngines.map(engine => (
               <label key={engine.engine_type} className="flex items-center gap-3 p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer">
