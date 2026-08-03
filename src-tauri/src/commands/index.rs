@@ -443,6 +443,11 @@ pub async fn reindex_file(
     let dir = db::dir_config::get_dir(&conn, &rec.dir_id)
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| "dir config not found".to_string())?;
+    // Clear the dedup cache for this file's hash so re-extraction actually
+    // runs (important when OCR language changed).
+    if let Some(ref md5) = rec.md5 {
+        let _ = tracker::delete_content(&conn, md5);
+    }
     let full_path = std::path::Path::new(&dir.path).join(&rec.path);
     drop(conn);
     state.indexer.index_file(&file_id, &full_path, &rec.dir_id)

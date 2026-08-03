@@ -313,9 +313,17 @@ pub fn store_content(conn: &Connection, md5: &str, text: &str, ocr_used: bool, o
 }
 
 pub fn get_content(conn: &Connection, md5: &str) -> Result<Option<String>> {
-    let mut s = conn.prepare("SELECT text_content FROM content_index WHERE md5=?1").context("prepare get_content")?;
-    let mut rows = s.query_map(rusqlite::params![md5], |row| row.get::<_, String>(0))?;
+    let mut stmt = conn.prepare("SELECT text_content FROM content_index WHERE md5=?1")?;
+    let mut rows = stmt.query_map(rusqlite::params![md5], |row| row.get::<_, String>(0))?;
     Ok(rows.next().transpose()?)
+}
+
+/// Delete content from the dedup cache so the next extraction for this hash
+/// will re-run OCR/extraction rather than reusing stale text.
+pub fn delete_content(conn: &Connection, md5: &str) -> Result<()> {
+    conn.execute("DELETE FROM content_index WHERE md5=?1", rusqlite::params![md5])
+        .context("delete_content failed")?;
+    Ok(())
 }
 
 pub fn get_content_ocr_used(conn: &Connection, md5: &str) -> Result<bool> {
