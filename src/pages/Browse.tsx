@@ -37,6 +37,7 @@ export default function Browse() {
   const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
   type ColKey = keyof typeof colWidths
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
+  const tableRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     const close = () => setContextMenu(null)
@@ -62,6 +63,29 @@ export default function Browse() {
     document.addEventListener('mousemove', onMouseMove)
     document.addEventListener('mouseup', onMouseUp)
   }, [colWidths])
+
+  const handleAutoFit = useCallback((col: ColKey) => {
+    const colIdx = col === 'filename' ? 0 : 1
+    const cells = tableRef.current?.querySelectorAll<HTMLTableCellElement>(
+      `tbody td:nth-child(${colIdx + 1})`
+    )
+    if (!cells || cells.length === 0) return
+    const ruler = document.createElement('span')
+    Object.assign(ruler.style, {
+      visibility: 'hidden', position: 'absolute', whiteSpace: 'nowrap',
+      fontSize: '0.75rem', lineHeight: '1rem',
+    })
+    document.body.appendChild(ruler)
+    let max = 80
+    cells.forEach(cell => {
+      const el = cell.querySelector<HTMLElement>('[title]')
+      ruler.textContent = el?.getAttribute('title') ?? cell.textContent ?? ''
+      max = Math.max(max, ruler.offsetWidth + 20)
+    })
+    document.body.removeChild(ruler)
+    setColWidths(prev => ({ ...prev, [col]: Math.min(max, 600) }))
+  }, [])
+
 
   // Sync URL params
   useEffect(() => {
@@ -212,7 +236,7 @@ export default function Browse() {
         </div>
 
         {/* Table */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-auto" ref={tableRef}>
           {loading ? (
             <div className="flex items-center justify-center py-16">
               <LoadingSpinner className="size-5" />
@@ -223,11 +247,11 @@ export default function Browse() {
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
                   <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.filename }}>
                     {t('filename')}
-                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'filename')} />
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'filename')} onDoubleClick={() => handleAutoFit('filename')} />
                   </th>
                   <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.path }}>
                     {t('path')}
-                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} />
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} onDoubleClick={() => handleAutoFit('path')} />
                   </th>
                   <th className="px-2 py-1 font-medium">{t('type')}</th>
                   <th className="px-2 py-1 font-medium">{t('status')}</th>
