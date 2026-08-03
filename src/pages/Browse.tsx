@@ -253,11 +253,11 @@ export default function Browse() {
                         <span className={`size-2 rounded-full shrink-0 ${
                           item.indexed === 1 ? 'bg-green-500' : item.indexed === 2 ? 'bg-red-500' : 'bg-yellow-500'
                         }`} />
-                        <span className="truncate max-w-[180px]" title={item.file_name}>{item.file_name}</span>
+                        <span className="truncate" title={item.file_name}>{item.file_name}</span>
                       </div>
                     </td>
                     <td className="px-4 py-2">
-                      <span className="text-gray-500 dark:text-gray-400 truncate block max-w-[200px]" title={item.rel_path}>{item.rel_path}</span>
+                      <span className="text-gray-500 dark:text-gray-400 truncate block" title={item.rel_path}>{item.rel_path}</span>
                     </td>
                     <td className="px-4 py-2">
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>

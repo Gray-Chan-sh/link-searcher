@@ -391,11 +391,30 @@ pub async fn reveal_in_folder(state: State<'_, AppState>, id: String) -> Result<
     drop(conn);
 
     let abs = std::path::Path::new(&dir.path).join(&file.path);
-    let parent = abs
-        .parent()
-        .ok_or_else(|| "no parent directory".to_string())?;
+    reveal_in_file_manager(&abs).map_err(|e| format!("failed to reveal: {e}"))
+}
 
-    opener::open(parent).map_err(|e| format!("failed to open: {e}"))
+#[cfg(target_os = "macos")]
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "windows")]
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("explorer")
+        .arg(format!("/select,{}", path.to_string_lossy()))
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(path);
+    opener::open(parent)
 }
 
 #[derive(Serialize)]
