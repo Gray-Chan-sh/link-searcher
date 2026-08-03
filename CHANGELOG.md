@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-03（PDF OCR 提速：渲染 DPI 300→200）
+
+- **PDF OCR 每页 30-60 秒过慢**：根因是 `ocr_pdf_via_pdftoppm` 硬编码 `-r 300` 渲染 870 万像素大图（A4 2480×3508），而检测模型 `det_limit_side_len=960` 只消费 960px，剩余像素全浪费在 Lanczos3 下采样上。修复：渲染 DPI 降到 200（A4 1654×2339），缩放计算量减少约 2.25 倍，仍高于检测模型所需 960px。实测各阶段耗时验证见 `tests/test_pdf_ocr.rs`（`src-tauri/src/extractor/pdf.rs`）
+
+---
+
 ## 2026-08-03（浏览页扩展名排序修复 + 已索引文件手动重索引确认 + macOS LibreOffice 路径探测）
 
 - **浏览页分页「翻到第 N 页后空白」根因修复**：前端传 `page_size`（snake_case）但 Tauri 2 `#[tauri::command]` 默认将 Rust 参数名 `page_size` 转为前端 `pageSize`（camelCase）→ 参数丢失，后端走默认 `ps=50`，而前端按 `pageSize=20` 计算 `totalPages` → 翻页时 offset 与实际页面对不上（例：第 109 页前端 offset=2160，后端 offset=5400>5358→零行）。修复：前端 `listFilesDb` 参数名 `pageSize` 对齐 Tauri 自动驼峰命名（`src/api/files.ts`、`src/pages/Browse.tsx`）

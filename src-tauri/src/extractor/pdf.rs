@@ -137,7 +137,7 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
 
     let output_prefix = tmp_dir.path().join("page");
     let mut cmd = Command::new("pdftoppm");
-    cmd.args(["-png", "-r", "300"]).arg(path).arg(&output_prefix);
+    cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
     let (tx, rx) = std::sync::mpsc::channel();
