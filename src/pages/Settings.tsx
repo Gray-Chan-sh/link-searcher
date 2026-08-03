@@ -119,7 +119,7 @@ export default function Settings() {
     setLocalError(null)
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
-      updateSettings({ ...settings, [key]: value })
+      updateSettings({ [key]: value })
         .catch(e => setLocalError(e instanceof Error ? e.message : 'Failed to save setting'))
     }, 300)
   }

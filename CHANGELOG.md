@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-03（设置保存失败：前端回传整个 settings 对象触发白名单拒绝）
+
+- **修改任何设置都报 "Failed to save setting"**：根因是 `Settings.tsx` 的 `handleFieldChange` 通过 `updateSettings({ ...settings, [key]: value })` 把**整个 settings 对象**发回后端，而该对象来自 `get_settings` 返回的 DB **所有行**，包含非白名单键（`theme`、`onboarding_done`、`last_scan_*`、`schema_version` 等）。后端 `update_settings` 白名单校验遇到第一个非法键即整体拒绝 → 改任何设置都失败。修复：只发送被修改的单键 `updateSettings({ [key]: value })`（`src/pages/Settings.tsx`）。附带确认 `Settings.tsx` 用到的 9 个键全部在后端 `ALLOWED_KEYS` 白名单内；`onboarding_done` 写入失败被 `.catch` 静默吞掉且已有 localStorage 兜底，无功能影响
+
+---
+
 ## 2026-08-03（PDF OCR 每页诊断日志 + 池大小暴露）
 
 - **PDF OCR 性能疑点定位**：9 页扫描件 OCR 耗时 319s（平均 35s/页），接近串行耗时（9×35s），与 2 引擎并行预期（~175s）不符。原因待定：可能是引擎被 Rayon 调度到 E-core（效率核）拖慢，或池实际大小非预期。此前日志无池大小与每页耗时，无法区分。修复：`paddleocr.rs` 新增 `active_pool_size()`（惰性池未构建时为 0）和 `recognize_from_path_with_regions()`（返回文本 + 区域数）；`pdf.rs` OCR 循环每页记录耗时/区域数/字符数，起始日志打印池大小（`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/extractor/pdf.rs`）
