@@ -16,11 +16,13 @@ impl PdfExtractor {
     }
 
     pub fn extract_with_lang(&self, path: &Path, lang: &str) -> Result<String> {
+        log::info!("[PDF] extracting {:?}", path.file_name());
         let doc = lopdf::Document::load(path).context("failed to load PDF")?;
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
         if pages.is_empty() {
             return Ok(String::new());
         }
+        log::info!("[PDF] {:?}: {} pages, extracting text", path.file_name(), pages.len());
         let mut page_texts: Vec<String> = Vec::new();
         for page_num in &pages {
             match doc.extract_text(&[*page_num]) {
@@ -32,12 +34,16 @@ impl PdfExtractor {
             }
         }
         let merged = page_texts.join("\n");
+        log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
         if merged.len() > 100 && !is_garbled && !is_wm && !is_rep {
+            log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
             return Ok(merged);
         }
+        log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to OCR ({lang})",
+            path.file_name(), is_wm, is_garbled, is_rep);
         if is_pdftoppm_available() {
             match ocr_pdf_via_pdftoppm(path, lang) {
                 Ok(ocr_text) if !ocr_text.is_empty() => {
@@ -127,6 +133,7 @@ fn is_repetitive(text: &str) -> bool {
 /// Returns extracted text from all pages.
 pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
     let tmp_dir = TempDir::new("ls_pdf_ocr")?;
+    log::info!("[PDF] pdftoppm: rendering {:?}", path.file_name());
 
     let output_prefix = tmp_dir.path().join("page");
     let mut cmd = Command::new("pdftoppm");
@@ -144,6 +151,10 @@ pub fn ocr_pdf_via_pdftoppm(path: &Path, lang: &str) -> Result<String> {
             return Err(anyhow::anyhow!("pdftoppm timed out after 120s"));
         }
     }
+
+    let page_files: Vec<_> = (1..).map(|n| tmp_dir.path().join(format!("page-{n}.png")))
+        .take_while(|p| p.exists()).collect();
+    log::info!("[PDF] {:?}: {} page images, starting OCR ({})", path.file_name(), page_files.len(), lang);
 
     let mut full_text = String::new();
     let mut page_num = 1;
