@@ -78,7 +78,7 @@ export async function listFilesDb(params: {
   sort?: SortKey
   order?: SortOrder
   page?: number
-  page_size?: number
+  pageSize?: number
 }): Promise<FileListResponse> {
   return invoke<FileListResponse>('list_files_db', params)
 }

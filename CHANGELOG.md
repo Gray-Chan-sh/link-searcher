@@ -6,6 +6,7 @@
 
 ## 2026-08-03（浏览页扩展名排序修复 + 已索引文件手动重索引确认 + macOS LibreOffice 路径探测）
 
+- **浏览页分页「翻到第 N 页后空白」根因修复**：前端传 `page_size`（snake_case）但 Tauri 2 `#[tauri::command]` 默认将 Rust 参数名 `page_size` 转为前端 `pageSize`（camelCase）→ 参数丢失，后端走默认 `ps=50`，而前端按 `pageSize=20` 计算 `totalPages` → 翻页时 offset 与实际页面对不上（例：第 109 页前端 offset=2160，后端 offset=5400>5358→零行）。修复：前端 `listFilesDb` 参数名 `pageSize` 对齐 Tauri 自动驼峰命名（`src/api/files.ts`、`src/pages/Browse.tsx`）
 - **浏览页「扩展名 A-Z」排序失效 + FileTypes 类型统计为空**：根因是 `file_tracking` 表从未存在 `file_ext` 列，但 `list_files_db` 的 `ORDER BY file_ext` 和 `get_file_type_stats` 的 `GROUP BY file_ext` 都引用了它 → 两个查询直接报错（前端 `.catch` 静默吞掉）。修复：schema 升级到 v2，新增 `file_ext` 列 + `ensure_file_ext_column` 幂等迁移（ALTER TABLE + Rust 侧 `Path::extension()` 回填，避免目录名含点误判）；`upsert_file`/`update_file_path`/`migrate_paths_to_relative` 同步维护该列（`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）
 - **已索引文件手动重索引无确认**：右键菜单「手动索引」对已索引（indexed=1）文件直接执行，可能覆盖现有索引。修复：前端 `handleReindex` 用 `ask()` 弹确认框「该文件已索引，重新索引将重新提取并覆盖现有索引数据」，确认后才执行；新增 `confirm_reindex` i18n 键。失败/待索引文件仍直接执行（`src/pages/Browse.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`）
 - **浏览页页码越界空白**：当结果集缩小时（如重扫后失败文件减少），`page` 可能超过 `totalPages`，停留在空页。修复：新增 effect 将 `page` 钳制到有效范围（`src/pages/Browse.tsx`）

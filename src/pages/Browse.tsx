@@ -77,7 +77,7 @@ export default function Browse() {
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await listFilesDb({ filter, ext: ext || undefined, search: debouncedSearch || undefined, sort, order, page, page_size: pageSize })
+      const res = await listFilesDb({ filter, ext: ext || undefined, search: debouncedSearch || undefined, sort, order, page, pageSize })
       setItems(res.items)
       setTotal(res.total)
     } catch {
