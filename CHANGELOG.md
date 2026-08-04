@@ -27,6 +27,8 @@
 
 - **修复预存测试竞态**：`test_index_file_creates_document` 与 `test_delete_file` 并行时共享 `tmp_file("test.txt")` 导致文件覆盖。改名 `test_create.txt` 避免冲突（`src-tauri/src/indexer.rs`）
 
+- **macOS `open -gj` 彻底消除遗留 Dock 图标**：批量转换中残留的每次 soffice 进程启动仍会产生一次 Dock 闪现。改为通过 `open -gj -b org.libreoffice.script --args ...` 启动——LaunchServices 以 hidden 模式运行（`lsappinfo` 显示 `(hidden)`，等效 LSUIElement），彻底无 Dock 图标。PID 通过 `pgrep` 差集追踪，超时时用 PID 精确 kill。`open -gj` 失败时自动回退直接 exec（`src-tauri/src/extractor/office/mod.rs`）
+
 - **Windows OCR 实现**：新增 `windows_ocr.rs` 模块，使用 Windows 10+ 原生 `Windows.Media.Ocr.OcrEngine`，同步 `.get()` 阻塞模式。与 Apple Vision 镜像设计：同签名、同语言映射、同 `_with_regions` 诊断接口。非 Windows 平台保留错误提示桩（`src-tauri/src/extractor/windows_ocr.rs`）
 - **依赖**：新增 `windows` 0.61，target-conditional（`cfg(target_os = "windows")`），macOS/Linux 编译零影响（`Cargo.toml`）
 - **引擎分发**：`ocr.rs` 两处 `WindowsOcr` 分支从 PaddleOCR 桩替换为 `windows_ocr::recognize_from_path` / `_with_regions`；`mod.rs` 注册模块（`src-tauri/src/extractor/ocr.rs`、`mod.rs`）

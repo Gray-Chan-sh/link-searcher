@@ -1,8 +1,8 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use calamine::Reader as CalamineReader;
@@ -364,6 +364,59 @@ impl LoBatcher {
     }
 }
 
+// ── Helpers for macOS `open -gj` polling-based conversion ──────────
+
+/// Return the set of PIDs of running soffice processes (via `pgrep`).
+#[cfg(target_os = "macos")]
+fn find_lo_pids() -> HashSet<u32> {
+    std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg("soffice")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.lines().filter_map(|l| l.parse::<u32>().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// Poll until every expected output file exists or `timeout` elapses.
+/// Kills `pid` (when present) on timeout.
+#[cfg(target_os = "macos")]
+fn poll_lo_outputs(
+    pid: Option<u32>,
+    round_paths: &[(usize, PathBuf)],
+    out_dir: &Path,
+    timeout: Duration,
+    start: Instant,
+) {
+    loop {
+        let all_done = round_paths.iter().all(|(_, p)| {
+            let stem = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            out_dir.join(format!("{stem}.txt")).exists()
+        });
+        if all_done {
+            return;
+        }
+        if start.elapsed() >= timeout {
+            if let Some(p) = pid {
+                log::warn!(
+                    "[OFFICE] timeout {}s, killing pid {}",
+                    timeout.as_secs(),
+                    p
+                );
+                let _ = std::process::Command::new("kill")
+                    .arg(p.to_string())
+                    .status();
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
 // ── Multi‑file & single‑file conversion ──────────────────────────────
 
 /// Convert many files in one `soffice` process.  Handles filename‑stem
@@ -442,45 +495,101 @@ pub fn extract_many_via_libreoffice(paths: &[PathBuf]) -> Vec<Result<String, Str
             }
         };
 
-        let mut cmd = std::process::Command::new(&binary);
-        cmd.env("SAL_USE_VCLPLUGIN", "svp")
-            .arg(format!("-env:UserInstallation={profile_uri}"))
-            .args([
-                "--headless",
-                "--nologo",
-                "--nodefault",
-                "--norestore",
-                "--nolockcheck",
-                "--nofirststartwizard",
-            ])
-            .arg("--convert-to")
-            .arg("txt:Text")
-            .arg("--outdir")
-            .arg(&out_dir)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::from(stderr_file));
-
-        for (_, p) in &round_paths {
-            cmd.arg(p);
-        }
-
-        let child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                for (idx, _) in &round_paths {
-                    results[*idx] = Some(Err(format!("{binary} 启动失败: {e}")));
-                }
-                continue;
+        // ── Launch + wait ──────────────────────────────────────────────
+        let soffice_args = {
+            let mut v = vec![
+                format!("-env:UserInstallation={profile_uri}"),
+                "--headless".into(),
+                "--nologo".into(),
+                "--nodefault".into(),
+                "--norestore".into(),
+                "--nolockcheck".into(),
+                "--nofirststartwizard".into(),
+                "--convert-to".into(),
+                "txt:Text".into(),
+                "--outdir".into(),
+                out_dir.display().to_string(),
+            ];
+            for (_, p) in &round_paths {
+                v.push(p.display().to_string());
             }
+            v
         };
 
-        let child_handle = std::sync::Arc::new(std::sync::Mutex::new(child));
-        let child_handle2 = std::sync::Arc::clone(&child_handle);
-        let (tx, rx) = mpsc::channel();
+        #[cfg(target_os = "macos")]
+        {
+            use std::process::Stdio;
+            let start = Instant::now();
+            let before = find_lo_pids();
+            let ok = std::process::Command::new("open")
+                .arg("-gj")
+                .arg("-b")
+                .arg("org.libreoffice.script")
+                .arg("--args")
+                .args(&soffice_args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
 
-        std::thread::spawn(move || {
-            loop {
-                let mut child = child_handle2.lock().unwrap_or_else(|e| e.into_inner());
+            let pid = if ok {
+                std::thread::sleep(Duration::from_millis(1500));
+                let after = find_lo_pids();
+                after.difference(&before).next().copied()
+            } else {
+                log::warn!("[OFFICE] open -gj failed, falling back to direct exec");
+                let mut cmd = std::process::Command::new(&binary);
+                cmd.env("SAL_USE_VCLPLUGIN", "svp")
+                    .args(&soffice_args)
+                    .stdout(Stdio::null())
+                    .stderr(std::process::Stdio::from(stderr_file));
+                match cmd.spawn() {
+                    Ok(child) => Some(child.id()),
+                    Err(e) => {
+                        for (idx, _) in &round_paths {
+                            results[*idx] =
+                                Some(Err(format!("{binary} 启动失败: {e}")));
+                        }
+                        continue;
+                    }
+                }
+            };
+
+            if let Some(pid) = pid {
+                poll_lo_outputs(Some(pid), &round_paths, &out_dir, timeout, start);
+            } else {
+                poll_lo_outputs(None, &round_paths, &out_dir, timeout, start);
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            let mut cmd = std::process::Command::new(&binary);
+            cmd.env("SAL_USE_VCLPLUGIN", "svp")
+                .args(&soffice_args)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::from(stderr_file));
+
+            let child = match cmd.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    for (idx, _) in &round_paths {
+                        results[*idx] =
+                            Some(Err(format!("{binary} 启动失败: {e}")));
+                    }
+                    continue;
+                }
+            };
+
+            let child_handle =
+                std::sync::Arc::new(std::sync::Mutex::new(child));
+            let child_handle2 = std::sync::Arc::clone(&child_handle);
+            let (tx, rx) = mpsc::channel();
+
+            std::thread::spawn(move || loop {
+                let mut child =
+                    child_handle2.lock().unwrap_or_else(|e| e.into_inner());
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         let _ = tx.send(Ok(status));
@@ -495,21 +604,26 @@ pub fn extract_many_via_libreoffice(paths: &[PathBuf]) -> Vec<Result<String, Str
                         break;
                     }
                 }
-            }
-        });
+            });
 
-        let _status = match rx.recv_timeout(timeout) {
-            Ok(Ok(status)) => Some(status),
-            Ok(Err(_e)) => None,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let mut child = child_handle.lock().unwrap_or_else(|e| e.into_inner());
-                log::warn!("[OFFICE] killed soffice after {}s timeout", timeout.as_secs());
-                let _ = child.kill();
-                let _ = child.wait();
-                None
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => None,
-        };
+            let _status = match rx.recv_timeout(timeout) {
+                Ok(Ok(s)) => Some(s),
+                Ok(Err(_)) => None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let mut child = child_handle
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    log::warn!(
+                        "[OFFICE] killed soffice after {}s timeout",
+                        timeout.as_secs()
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    None
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => None,
+            };
+        }
 
         // Collect per‑file results for this round.
         for (idx, path) in round_paths {
