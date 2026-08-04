@@ -23,6 +23,8 @@ const zh: Record<string, string> = {
     files: '个文件',
     ocr_engine: 'OCR 引擎',
     libreoffice_path: 'LibreOffice 路径',
+  lo_batch_size: '批量转换批大小',
+  lo_batch_desc: 'LibreOffice 每次转换的文件数(越小越省资源)',
     theme: '主题',
     light: '浅色',
     dark: '深色',

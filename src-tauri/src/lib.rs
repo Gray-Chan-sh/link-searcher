@@ -169,8 +169,28 @@ fn run_with_config(app_config: config::AppConfig) {
                                 Err(e) => log::warn!("[STARTUP] Failed to parse ocr_concurrent value '{}': {}", v, e),
                             }
                         }
-                        Err(e) => log::warn!("[STARTUP] Failed to read ocr_concurrent setting: {}", e),
+                Err(e) => log::warn!("[STARTUP] Failed to read ocr_concurrent setting: {}", e),
+            }
+
+            // Apply LO batch size to the global batcher.
+            match conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'lo_batch_size'",
+                [],
+                |row| row.get::<_, String>(0),
+            ) {
+                Ok(v) => match v.parse::<usize>() {
+                    Ok(n) => {
+                        crate::extractor::office::LO_BATCH_SIZE
+                            .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+                        log::info!("[STARTUP] LO batch size set to {}", n.max(1));
                     }
+                    Err(e) => log::warn!(
+                        "[STARTUP] Failed to parse lo_batch_size value '{}': {}",
+                        v, e
+                    ),
+                },
+                Err(e) => log::warn!("[STARTUP] Failed to read lo_batch_size setting: {}", e),
+            }
                 }
                 Err(e) => log::warn!("[STARTUP] Failed to get DB connection for OCR concurrency: {}", e),
             }

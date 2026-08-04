@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Mutex, OnceLock};
+use std::sync::{atomic::AtomicUsize, mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -284,7 +284,10 @@ pub fn ensure_lo_background_mode() {
 //     invocation, reducing Dock‑icon flashes and serialising LO to
 //     eliminate DeploymentException concurrency crashes. ───────────────
 
-const LO_BATCH_SIZE: usize = 32;
+/// Maximum files per soffice invocation.  Set at startup from the
+/// `lo_batch_size` user setting; the number-field is capped at 100.
+pub static LO_BATCH_SIZE: AtomicUsize = AtomicUsize::new(32);
+
 const LO_BATCH_GRACE_MS: u64 = 300;
 
 struct LoJob {
@@ -349,7 +352,7 @@ impl LoBatcher {
                     st.collecting = false;
                     return;
                 }
-                let take = st.queue.len().min(LO_BATCH_SIZE);
+                let take = st.queue.len().min(LO_BATCH_SIZE.load(std::sync::atomic::Ordering::Relaxed).max(1));
                 st.queue.drain(..take).collect()
             };
             let paths: Vec<PathBuf> = batch.iter().map(|j| j.path.clone()).collect();

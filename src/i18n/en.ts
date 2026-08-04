@@ -23,6 +23,8 @@ const en: Record<string, string> = {
     files: 'files',
     ocr_engine: 'OCR Engine',
     libreoffice_path: 'LibreOffice Path',
+  lo_batch_size: 'LO Batch Size',
+  lo_batch_desc: 'Files per LibreOffice invocation (lower uses less RAM)',
     theme: 'Theme',
     light: 'Light',
     dark: 'Dark',

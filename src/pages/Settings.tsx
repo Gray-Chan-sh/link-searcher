@@ -214,6 +214,17 @@ export default function Settings() {
           )}
         </Section>
 
+        <Section title={t('lo_batch_size')}>
+          <NumberField
+            label={t('lo_batch_desc')}
+            value={parseInt(settings['lo_batch_size'] ?? '32', 10)}
+            onChange={v => handleFieldChange('lo_batch_size', String(v))}
+            min={1}
+            max={100}
+            placeholder="Default: 32"
+          />
+        </Section>
+
         <Section title={t('ocr_engine')}>
           <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
             当前: <span className="font-semibold text-gray-900 dark:text-gray-100">{selectedEngine?.name ?? '未选择'}</span>

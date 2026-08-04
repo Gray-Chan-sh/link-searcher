@@ -193,6 +193,7 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("max_results", "1000"),
         ("auto_backup_enabled", "1"),
         ("auto_backup_interval_days", "7"),
+        ("lo_batch_size", "32"),
         ("theme", "system"),
     ];
     for (key, value) in defaults {

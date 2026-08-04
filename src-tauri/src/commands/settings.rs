@@ -9,6 +9,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "ocr_engine",
     "ocr_lang",
     "ocr_concurrent",
+    "lo_batch_size",
     "max_results",
     "exclude_patterns",
     "scan_time",
@@ -51,6 +52,13 @@ pub async fn update_settings(
             rusqlite::params![key, value],
         )
         .map_err(|e| format!("failed to update setting '{key}': {e}"))?;
+    }
+    // Apply batch size change immediately (no restart needed).
+    if let Some(val) = settings.get("lo_batch_size") {
+        if let Ok(n) = val.parse::<usize>() {
+            crate::extractor::office::LO_BATCH_SIZE
+                .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+        }
     }
     Ok(())
 }
