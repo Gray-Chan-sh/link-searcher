@@ -1,6 +1,7 @@
+use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
-use std::path::Path;
-use std::sync::mpsc;
+use std::path::{Path, PathBuf};
+use std::sync::{mpsc, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -114,6 +115,25 @@ fn determine_lo_binary() -> String {
         }
     }
     "soffice".to_string()
+}
+
+// ── Cached, verified LO binary — avoids per‑file `soffice --version`
+//     spawns (each of which briefly registers a Dock icon). ────────────
+static LO_BINARY: OnceLock<Option<String>> = OnceLock::new();
+
+/// Cached, process‑lifetime resolution + liveness check.  Returns `None`
+/// when LibreOffice is unavailable, else the absolute path to use.
+pub fn lo_binary() -> Option<String> {
+    LO_BINARY
+        .get_or_init(|| {
+            let bin = determine_lo_binary();
+            if !bin.is_empty() && check_binary(&bin) {
+                Some(bin)
+            } else {
+                None
+            }
+        })
+        .clone()
 }
 
 /// Resolve the LibreOffice binary that will actually be used (respecting
@@ -259,19 +279,122 @@ pub fn ensure_lo_background_mode() {
     // No-op on non-macOS
 }
 
-pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
-    let binary = determine_lo_binary();
-    if binary.is_empty() {
-        return Err(anyhow::anyhow!("LibreOffice 未配置且不可用"));
+// ── Request‑coalescing batcher — multiple incoming .doc / .ppt requests
+//     from parallel Rayon threads are collected into a single soffice
+//     invocation, reducing Dock‑icon flashes and serialising LO to
+//     eliminate DeploymentException concurrency crashes. ───────────────
+
+const LO_BATCH_SIZE: usize = 32;
+const LO_BATCH_GRACE_MS: u64 = 300;
+
+struct LoJob {
+    path: PathBuf,
+    tx: mpsc::Sender<Result<String, String>>,
+}
+
+struct LoBatchState {
+    queue: VecDeque<LoJob>,
+    collecting: bool,
+}
+
+pub struct LoBatcher {
+    state: Mutex<LoBatchState>,
+}
+
+static LO_BATCHER: OnceLock<LoBatcher> = OnceLock::new();
+
+fn lo_batcher() -> &'static LoBatcher {
+    LO_BATCHER.get_or_init(|| LoBatcher {
+        state: Mutex::new(LoBatchState {
+            queue: VecDeque::new(),
+            collecting: false,
+        }),
+    })
+}
+
+impl LoBatcher {
+    /// Submit a path for LibreOffice conversion.  Calls arrive from
+    /// parallel threads, but the batcher serialises and coalesces them
+    /// so that a single `soffice` process handles many files.
+    pub fn extract(&self, path: &Path) -> Result<String, String> {
+        let (tx, rx) = mpsc::channel();
+        let leader = {
+            let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.queue.push_back(LoJob {
+                path: path.to_path_buf(),
+                tx,
+            });
+            if st.collecting {
+                false
+            } else {
+                st.collecting = true;
+                true
+            }
+        };
+        if leader {
+            // Brief grace so other threads have time to enqueue their
+            // files before we drain the first batch.
+            std::thread::sleep(Duration::from_millis(LO_BATCH_GRACE_MS));
+            self.run_batches();
+        }
+        rx.recv()
+            .unwrap_or_else(|_| Err("LibreOffice 批量调度异常".to_string()))
     }
 
-    let tmp_dir = TempDir::new("ls_lo").context("failed to create LO temp dir")?;
-    let out_dir = tmp_dir.path().to_path_buf();
+    fn run_batches(&self) {
+        loop {
+            let batch: Vec<LoJob> = {
+                let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                if st.queue.is_empty() {
+                    st.collecting = false;
+                    return;
+                }
+                let take = st.queue.len().min(LO_BATCH_SIZE);
+                st.queue.drain(..take).collect()
+            };
+            let paths: Vec<PathBuf> = batch.iter().map(|j| j.path.clone()).collect();
+            let results = extract_many_via_libreoffice(&paths);
+            // extract_many always returns results.len() == paths.len().
+            for (job, res) in batch.into_iter().zip(results.into_iter()) {
+                let _ = job.tx.send(res);
+            }
+            // Loop — new jobs may have arrived while we were running
+            // the batch (those callers are blocked on rx.recv()).
+        }
+    }
+}
 
-    // Isolated profile per invocation: concurrent soffice processes (Rayon
-    // par_iter) would otherwise contend on the shared default profile .lock.
+// ── Multi‑file & single‑file conversion ──────────────────────────────
+
+/// Convert many files in one `soffice` process.  Handles filename‑stem
+/// collisions internally by running extra sub‑rounds when necessary.
+///
+/// Returns one `Result` per input path, in the same order.
+pub fn extract_many_via_libreoffice(paths: &[PathBuf]) -> Vec<Result<String, String>> {
+    let n = paths.len();
+    if n == 0 {
+        return vec![];
+    }
+    let binary = match lo_binary() {
+        Some(b) => b,
+        None => {
+            return paths
+                .iter()
+                .map(|_| Err("LibreOffice 未配置且不可用".to_string()))
+                .collect();
+        }
+    };
+
+    let tmp = match TempDir::new("ls_lo") {
+        Ok(t) => t,
+        Err(e) => return repeat_err(n, &format!("临时目录创建失败: {e}")),
+    };
+    let out_dir = tmp.path().to_path_buf();
+
     let profile_dir = out_dir.join("lo_profile");
-    std::fs::create_dir_all(&profile_dir).context("failed to create LO profile dir")?;
+    if let Err(e) = std::fs::create_dir_all(&profile_dir) {
+        return repeat_err(n, &format!("profile 目录创建失败: {e}"));
+    }
     let profile_display = profile_dir.display().to_string();
     let profile_uri = if profile_display.starts_with('/') {
         format!("file://{profile_display}")
@@ -279,87 +402,169 @@ pub fn extract_via_libreoffice(path: &Path) -> Result<String> {
         format!("file:///{profile_display}")
     };
 
-    let stderr_log = out_dir.join("lo_stderr.log");
-    let stderr_file = std::fs::File::create(&stderr_log).context("failed to create LO stderr log")?;
+    // Group by lowercase stem so we never produce two output files with
+    // the same name in one round (which would overwrite each other).
+    let mut stem_map: HashMap<String, Vec<(usize, PathBuf)>> = HashMap::with_capacity(n);
+    for (i, p) in paths.iter().enumerate() {
+        let stem = p
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_lowercase();
+        stem_map.entry(stem).or_default().push((i, p.clone()));
+    }
+    let max_rounds = stem_map.values().map(|v| v.len()).max().unwrap_or(1);
+    let mut results: Vec<Option<Result<String, String>>> = vec![None; n];
 
-    let child = std::process::Command::new(&binary)
-        .env("SAL_USE_VCLPLUGIN", "svp")
-        .arg(format!("-env:UserInstallation={profile_uri}"))
-        .args([
-            "--headless",
-            "--nologo",
-            "--nodefault",
-            "--norestore",
-            "--nolockcheck",
-            "--nofirststartwizard",
-        ])
-        .arg("--convert-to")
-        .arg("txt:Text")
-        .arg("--outdir")
-        .arg(&out_dir)
-        .arg(path)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(stderr_file))
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("{binary} not available: {e}"))?;
+    for round in 0..max_rounds {
+        let round_paths: Vec<(usize, PathBuf)> = stem_map
+            .values()
+            .filter_map(|entries| entries.get(round).cloned())
+            .collect();
+        if round_paths.is_empty() {
+            break;
+        }
+        let round_n = round_paths.len();
+        round_paths.iter().for_each(|(idx, _)| {
+            results[*idx] = None;
+        });
+        let timeout = Duration::from_secs((30 + (15 * round_n) as u64).min(600));
 
-    let child_handle = std::sync::Arc::new(std::sync::Mutex::new(child));
-    let child_for_thread = std::sync::Arc::clone(&child_handle);
-    let (tx, rx) = mpsc::channel();
-
-    std::thread::spawn(move || {
-        // Poll without holding the lock while sleeping so the timeout
-        // branch below can acquire it to kill an orphaned process.
-        let result = loop {
-            let mut child = child_for_thread.lock().unwrap_or_else(|e| e.into_inner());
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(status),
-                Ok(None) => {
-                    drop(child);
-                    std::thread::sleep(Duration::from_millis(200));
+        let stderr_log = out_dir.join("lo_stderr.log");
+        let stderr_file = match std::fs::File::create(&stderr_log) {
+            Ok(f) => f,
+            Err(e) => {
+                for (idx, _) in &round_paths {
+                    results[*idx] =
+                        Some(Err(format!("stderr 日志创建失败: {e}", )));
                 }
-                Err(e) => break Err(e),
+                continue;
             }
         };
-        let _ = tx.send(result);
-    });
 
-    let status = match rx.recv_timeout(Duration::from_secs(60)) {
-        Ok(Ok(status)) => status,
-        Ok(Err(e)) => return Err(anyhow::anyhow!("LibreOffice wait failed: {e}")),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let mut child = child_handle.lock().unwrap_or_else(|e| e.into_inner());
-            log::warn!("[OFFICE] killed soffice after 60s timeout");
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow::anyhow!(
-                "LibreOffice timed out (60s) and was killed (pid {})",
-                child.id()
-            ));
+        let mut cmd = std::process::Command::new(&binary);
+        cmd.env("SAL_USE_VCLPLUGIN", "svp")
+            .arg(format!("-env:UserInstallation={profile_uri}"))
+            .args([
+                "--headless",
+                "--nologo",
+                "--nodefault",
+                "--norestore",
+                "--nolockcheck",
+                "--nofirststartwizard",
+            ])
+            .arg("--convert-to")
+            .arg("txt:Text")
+            .arg("--outdir")
+            .arg(&out_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(stderr_file));
+
+        for (_, p) in &round_paths {
+            cmd.arg(p);
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            return Err(anyhow::anyhow!("LibreOffice thread panicked"));
+
+        let child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                for (idx, _) in &round_paths {
+                    results[*idx] = Some(Err(format!("{binary} 启动失败: {e}")));
+                }
+                continue;
+            }
+        };
+
+        let child_handle = std::sync::Arc::new(std::sync::Mutex::new(child));
+        let child_handle2 = std::sync::Arc::clone(&child_handle);
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            loop {
+                let mut child = child_handle2.lock().unwrap_or_else(|e| e.into_inner());
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        let _ = tx.send(Ok(status));
+                        break;
+                    }
+                    Ok(None) => {
+                        drop(child);
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Err(e));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let _status = match rx.recv_timeout(timeout) {
+            Ok(Ok(status)) => Some(status),
+            Ok(Err(_e)) => None,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let mut child = child_handle.lock().unwrap_or_else(|e| e.into_inner());
+                log::warn!("[OFFICE] killed soffice after {}s timeout", timeout.as_secs());
+                let _ = child.kill();
+                let _ = child.wait();
+                None
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => None,
+        };
+
+        // Collect per‑file results for this round.
+        for (idx, path) in round_paths {
+            let stem = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("output");
+            let out_path = out_dir.join(format!("{stem}.txt"));
+            let res = if out_path.exists() {
+                match std::fs::read_to_string(&out_path) {
+                    Ok(t) => Ok(t),
+                    Err(e) => Err(format!("读取转换结果失败: {e}")),
+                }
+            } else {
+                let stderr_snippet =
+                    std::fs::read_to_string(&stderr_log).unwrap_or_default();
+                Err(format!(
+                    "转换失败: {}",
+                    if stderr_snippet.trim().is_empty() {
+                        "未生成输出文件"
+                    } else {
+                        stderr_snippet.trim()
+                    }
+                ))
+            };
+            results[idx] = Some(res);
+            let _ = std::fs::remove_file(&out_path);
         }
-    };
-
-    let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
-
-    if !status.success() {
-        anyhow::bail!("{binary} --convert-to txt failed (code {:?}): {}", status.code(), stderr.trim());
     }
 
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
-    let out_path = out_dir.join(format!("{stem}.txt"));
+    // Drain the temp dir (in‑scope drop handles it, but explicit helps).
+    drop(tmp);
 
-    if !out_path.exists() {
-        anyhow::bail!("LibreOffice 转换失败: {}", if stderr.trim().is_empty() { "未生成输出文件" } else { stderr.trim() });
-    }
-
-    let text = std::fs::read_to_string(&out_path)
-        .map_err(|e| anyhow::anyhow!("failed to read LO output: {e}"))?;
-
-    Ok(text)
+    results
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|| Err("内部错误".to_string())))
+        .collect()
 }
+
+fn repeat_err(n: usize, msg: &str) -> Vec<Result<String, String>> {
+    std::iter::repeat_with(|| Err(msg.to_string()))
+        .take(n)
+        .collect()
+}
+
+/// Convert a single file with LibreOffice (thin wrapper).
+pub fn extract_via_libreoffice(path: &Path) -> anyhow::Result<String> {
+    let mut results = extract_many_via_libreoffice(&[path.to_path_buf()]);
+    results
+        .pop()
+        .unwrap_or_else(|| Err("内部错误".to_string()))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+// ── Office extractor (native‑first, LO‑batched for legacy formats) ───
 
 pub struct OfficeExtractor;
 
@@ -367,46 +572,72 @@ impl OfficeExtractor {
     pub fn new() -> Self {
         Self
     }
+
+    fn lo_extract(path: &Path) -> anyhow::Result<String> {
+        lo_batcher()
+            .extract(path)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn native_then_lo(
+        path: &Path,
+        native: fn(&Path) -> anyhow::Result<String>,
+    ) -> anyhow::Result<String> {
+        match native(path) {
+            Ok(t) if !t.trim().is_empty() => Ok(t),
+            Ok(_) => {
+                if lo_binary().is_some() {
+                    Self::lo_extract(path)
+                } else {
+                    Ok(String::new())
+                }
+            }
+            Err(native_err) => {
+                if lo_binary().is_some() {
+                    Self::lo_extract(path).map_err(|lo_err| {
+                        anyhow::anyhow!("原生解析失败({native_err}); LibreOffice 也失败: {lo_err}")
+                    })
+                } else {
+                    Err(native_err)
+                }
+            }
+        }
+    }
+
+    fn lo_only(path: &Path) -> anyhow::Result<String> {
+        if lo_binary().is_some() {
+            Self::lo_extract(path)
+        } else {
+            Err(anyhow::anyhow!(
+                "需要安装 LibreOffice 或使用自定义路径提取此格式。\
+                 macOS: brew install --cask libreoffice\n\
+                 Linux: sudo apt install libreoffice\n\
+                 Windows: winget install LibreOffice。\
+                 如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
+            ))
+        }
+    }
 }
 
 impl Extractor for OfficeExtractor {
-    fn extract(&self, path: &Path) -> Result<String> {
+    fn extract(&self, path: &Path) -> anyhow::Result<String> {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
             .unwrap_or_default();
 
-        let lo_available = is_libreoffice_available();
-        let is_office = matches!(ext.as_str(), "doc"|"docx"|"xls"|"xlsx"|"ppt"|"pptx");
-
-        let lo_error = if is_office && lo_available {
-            match extract_via_libreoffice(path) {
-                Ok(text) if !text.trim().is_empty() => return Ok(text),
-                Ok(_) => Some("LibreOffice 提取结果为空".to_string()),
-                Err(e) => Some(format!("LibreOffice 提取失败: {e}")),
-            }
-        } else {
-            None
-        };
-
         match ext.as_str() {
-            "docx" => extract_docx(path),
-            "xlsx" => extract_xlsx(path),
-            "pptx" => extract_pptx(path),
-            "doc" | "xls" | "ppt" => {
-                if let Some(msg) = lo_error {
-                    Err(anyhow::anyhow!("{}。文件可能已损坏或使用了不兼容的格式", msg))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "需要安装 LibreOffice 或使用自定义路径提取此格式。macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice。如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
-                    ))
-                }
-            }
-            _ => Err(anyhow::anyhow!("unsupported office format: {}", ext)),
+            "docx" => Self::native_then_lo(path, extract_docx),
+            "xlsx" | "xls" => Self::native_then_lo(path, extract_xlsx),
+            "pptx" => Self::native_then_lo(path, extract_pptx),
+            "doc" | "ppt" => Self::lo_only(path),
+            _ => Err(anyhow::anyhow!("unsupported office format: {ext}")),
         }
     }
 }
+
+// ── Native parsers ───────────────────────────────────────────────────
 
 fn extract_docx(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path).context("failed to open DOCX")?;

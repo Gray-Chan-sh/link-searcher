@@ -1,10 +1,31 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 8月2日，共 40+ commit，修复 70+ Bug，完成 30+ 功能改进
+> 2026年7月30日 — 8月5日，共 45+ commit，修复 80+ Bug，完成 35+ 功能改进
 
 ---
 
-## 2026-08-03（Windows OCR 引擎：Windows.Media.Ocr WinRT 集成）
+## 2026-08-05（Dock 图标根治：原生优先 + 批量转换取代 LSUIElement hack）
+
+**根因诊断**（受控实验证伪三种压制方案）：
+- `SAL_USE_VCLPLUGIN=svp`：不阻止 soffice 注册前台 app（`lsappinfo list` 仍出现 ASN）
+- `LSUIElement=true` + `lsregister -f` 强刷缓存：仍注册前台 app（直接 exec 二进制不读 LSUIElement）
+- `DYLD_INSERT_LIBRARIES` 注入 dylib：adhoc 签名不够，dyld 直接剥掉（marker 文件未创建）
+→ **结论：直接执行 LibreOffice 二进制时，其启动代码必定把自己注册为前台应用，外部手段全部无效。唯一方案是减少进程启动次数。**
+
+**修复方案**：
+
+- **现代格式原生优先**：`.docx`→`extract_docx`、`.xlsx/.xls`→`extract_xlsx`（calamine 原生支持 `.xls`）、`.pptx`→`extract_pptx`，全部原生解析优先；仅原生解析失败或返回空时才回退 LibreOffice。此前连现代 OOXML 格式都先调 LO→ 导致大量不必要的 soffice 进程启动→Dock 图标泛滥。`.xls` 此前被路由到 LO-only 分支，calamine 的 xls 支持路径处于休眠状态——现已激活（`src-tauri/src/extractor/office/mod.rs`）
+
+- **旧格式批量转换**：新增 `LoBatcher`——请求合并调度器。Rayon `par_iter` 并行提交的 `.doc/.ppt` 提取请求进入全局队列，leader 线程收集聚合成批（最多 32 个/批，300ms 收集窗口），单次 `soffice --convert-to` 进程转换整批。`extract_many_via_libreoffice` 内部处理 stem 碰撞（同名输出文件覆盖→分 sub-round 转换）。Leader-election 模式保证并行 Rayon 线程不饿死且无死锁。**索引器零改动**（`src-tauri/src/extractor/office/mod.rs`）
+  - 附带疗效：serialize 了 LibreOffice 调用，根治旧日志里的 `DeploymentException` 并发崩溃
+  - 超时按批大小缩放：30s + 15s×N，上限 600s
+
+- **LO 路径缓存**：`lo_binary()` 用 `OnceLock` 缓存进程内第一次 `check_binary` 结果，后续每文件不再 spawn `soffice --version`（每个 `--version` 本身也是一次 Dock 图标）
+  - 保留原 `is_libreoffice_available()` 用于设置/面板 UI（不缓存，支持用户换路径后即时检测）
+
+- **移除 LoBackgroundGuard::enter 三处调用**：对 `lib.rs` 启动扫描、`index.rs` 的 `trigger_scan` 和 `rebuild_index` 三处 `LoBackgroundGuard::enter()` 已证实无效且会修改用户已签名 LibreOffice 的 Info.plist（破坏签名 + LaunchServices 缓存不认 → 白改）。保留 `ensure_lo_background_mode`（= recover）在启动时清理残余 LSUIElement（`src-tauri/src/lib.rs`、`src-tauri/src/commands/index.rs`）
+
+- **修复预存测试竞态**：`test_index_file_creates_document` 与 `test_delete_file` 并行时共享 `tmp_file("test.txt")` 导致文件覆盖。改名 `test_create.txt` 避免冲突（`src-tauri/src/indexer.rs`）
 
 - **Windows OCR 实现**：新增 `windows_ocr.rs` 模块，使用 Windows 10+ 原生 `Windows.Media.Ocr.OcrEngine`，同步 `.get()` 阻塞模式。与 Apple Vision 镜像设计：同签名、同语言映射、同 `_with_regions` 诊断接口。非 Windows 平台保留错误提示桩（`src-tauri/src/extractor/windows_ocr.rs`）
 - **依赖**：新增 `windows` 0.61，target-conditional（`cfg(target_os = "windows")`），macOS/Linux 编译零影响（`Cargo.toml`）

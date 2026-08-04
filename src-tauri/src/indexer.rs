@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn test_index_file_creates_document() {
         let (svc, fid) = setup();
-        let path = tmp_file("test.txt", "hello world test content");
+        let path = tmp_file("test_create.txt", "hello world test content");
 
         svc.index_file(&fid, &path, "d1").unwrap();
         svc.commit().unwrap();
