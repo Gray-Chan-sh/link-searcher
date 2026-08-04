@@ -23,28 +23,10 @@
    d. semgrep scan --severity ERROR 零发现
    e. cargo check / npx tsc 零错误
   ↓
-6. 提交 & 推送：git commit + git push
+6. 提交 & 推送：git commit + git push（CHANGELOG 必须同在此 commit）
 ```
 
 > **例外**：纯修 typo、单行 config 改值、仅文档修改等**微不足道**的变更，可跳过步骤 2–3，直接实施。
-
----
-
-## 提交流程（每次 commit 前必做）
-
-**⚠️ 任何源代码变更（含 bug 修复、功能、重构）必须在同一个 commit 中更新 CHANGELOG.md。**
-**漏写 CHANGELOG 的 commit 视为 incomplete，不可推送。**
-
-每次 commit 前，**必须按以下顺序完成**：
-
-```
-1. 更新 CHANGELOG.md   → 记录本次变更（根因、怎么修、涉及哪些文件）  ← 强制，不可跳过
-2. 更新 README.md       → 如涉及功能/架构变化，同步文档
-3. 更新 USER_MANUAL.md  → 如涉及用户可见行为变化，同步手册
-3.5. Semgrep 检查 → semgrep scan --severity ERROR 零发现
-4. 编译验证             → cargo check / npx tsc 零错误
-5. 提交并推送           → git commit + git push（CHANGELOG 必须同在此 commit）
-```
 
 ## 静态分析（Semgrep）
 
