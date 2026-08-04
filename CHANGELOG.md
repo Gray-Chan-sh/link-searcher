@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-03（Windows OCR 引擎：Windows.Media.Ocr WinRT 集成）
+
+- **Windows OCR 实现**：新增 `windows_ocr.rs` 模块，使用 Windows 10+ 原生 `Windows.Media.Ocr.OcrEngine`，同步 `.get()` 阻塞模式。与 Apple Vision 镜像设计：同签名、同语言映射、同 `_with_regions` 诊断接口。非 Windows 平台保留错误提示桩（`src-tauri/src/extractor/windows_ocr.rs`）
+- **依赖**：新增 `windows` 0.61，target-conditional（`cfg(target_os = "windows")`），macOS/Linux 编译零影响（`Cargo.toml`）
+- **引擎分发**：`ocr.rs` 两处 `WindowsOcr` 分支从 PaddleOCR 桩替换为 `windows_ocr::recognize_from_path` / `_with_regions`；`mod.rs` 注册模块（`src-tauri/src/extractor/ocr.rs`、`mod.rs`）
+
+---
+
 ## 2026-08-03（消除残留硬编码：图片 OCR + OCR 回退接入引擎分发）
 
 - **`ocr_image` 便利函数硬编码 PaddleOCR**：图片文件索引和 indexer 短文本 OCR 回退均通过 `ocr_image` 走 PaddleOCR，忽略引擎设置。修复：`ocr_image` 新增 `engine: Option<OcrEngineType>` 参数并通过 `ocr_image_with_engine` 分发；`mod.rs` 图片分支改用 `ocr_image_with_engine`（不再依赖 `ImageExtractor.extract`）；`indexer.rs` 短文本回退传入 `ocr_engine`（`src-tauri/src/extractor/ocr.rs`、`mod.rs`、`indexer.rs`、`tests/integration.rs`）

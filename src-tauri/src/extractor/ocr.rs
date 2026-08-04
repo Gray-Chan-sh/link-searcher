@@ -104,9 +104,8 @@ pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) ->
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
         OcrEngineType::WindowsOcr => {
-            // ponytail: call Windows OCR via WinRT.
-            // For now, fall back to paddleocr.
-            paddleocr::recognize_from_path(path)
+            super::windows_ocr::recognize_from_path(path, lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         }
         OcrEngineType::None => Ok(String::new()),
     }
@@ -134,7 +133,7 @@ pub fn ocr_image_with_regions(
             Ok((text, regions))
         }
         OcrEngineType::WindowsOcr => {
-            paddleocr::recognize_from_path_with_regions(path)
+            super::windows_ocr::recognize_from_path_with_regions(path, lang)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
         OcrEngineType::None => Ok((String::new(), 0)),

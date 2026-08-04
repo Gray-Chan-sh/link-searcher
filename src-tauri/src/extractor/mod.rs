@@ -3,6 +3,7 @@ mod image;
 pub mod ocr;
 pub mod office;
 pub mod paddleocr;
+pub mod windows_ocr;
 pub mod pdf;
 mod text;
 
