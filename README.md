@@ -29,9 +29,9 @@
 | 格式 | 扩展名 | 提取方式 |
 |------|--------|---------|
 | PDF | `.pdf` | 文本提取 + 扫描件自动 OCR（pdftoppm 渲染 → PaddleOCR 识别） |
-| Word | `.docx` `.doc` | XML 解析提取；旧版 `.doc` 通过 LibreOffice 提取 |
-| Excel | `.xlsx` `.xls` | calamine 读取所有单元格 |
-| PPT | `.pptx` `.ppt` | XML 解析幻灯片文本 |
+| Word | `.docx` `.doc` | `.docx` XML 解析提取；`.doc` 通过 LibreOffice 批量转换 |
+| Excel | `.xlsx` `.xls` | calamine 原生读取所有单元格 |
+| PPT | `.pptx` `.ppt` | `.pptx` XML 解析提取；`.ppt` 通过 LibreOffice 批量转换 |
 | 图片 | `.png` `.jpg` `.jpeg` `.gif` `.bmp` `.webp` `.tiff` | PaddleOCR 文字识别 |
 | Markdown | `.md` | 直接读取 |
 | 纯文本 | `.txt` `.csv` `.json` `.xml` `.yaml` `.toml` `.ini` `.log` | 直接读取 |
@@ -45,8 +45,8 @@
 | 引擎 | 状态 | 说明 |
 |------|:---:|------|
 | **PaddleOCR**（默认） | ✅ | 内置引擎，模型编译进二进制（约 21MB），支持中英文，开箱即用 |
-| Apple Vision | ⏳ | macOS 10.15+ 系统原生，计划后续实现 |
-| Windows OCR | ⏳ | Windows 10+ 系统原生，计划后续实现 |
+| Apple Vision | ✅ | macOS 10.15+ 系统原生，ANE 硬件加速 |
+| Windows OCR | ✅ | Windows 10+ 系统原生 |
 | Tesseract | ✅ | 备选引擎，需用户自行安装 `tesseract` CLI |
 
 引擎优先级：PaddleOCR → Apple Vision → Windows OCR → Tesseract（自动降级）。
@@ -123,7 +123,7 @@
 - **Node.js** 20+
 - **Rust** 1.85+
 
-> PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎或 LibreOffice（旧版 `.doc` `.xls` `.ppt`），请参考用户手册。
+> PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎或 LibreOffice（旧版 `.doc` `.ppt`），请参考用户手册。
 
 ### 开发运行
 

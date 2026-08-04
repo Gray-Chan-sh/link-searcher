@@ -41,7 +41,7 @@ npm run tauri dev
 | 工具 | 用途 | macOS | Windows | Linux |
 |------|------|--------|---------|-------|
 | Tesseract | 备选 OCR | `brew install tesseract tesseract-lang` | `winget install Tesseract-OCR` | `sudo apt install tesseract-ocr` |
-| LibreOffice | 旧版 Office (.doc .xls .ppt) | `brew install --cask libreoffice` | `winget install LibreOffice` | `sudo apt install libreoffice` |
+| LibreOffice | 旧版 Office (.doc .ppt) | `brew install --cask libreoffice` | `winget install LibreOffice` | `sudo apt install libreoffice` |
 | poppler | PDF 扫描件渲染 | `brew install poppler` | `winget install poppler` | `sudo apt install poppler-utils` |
 
 ### 1.2 三步开始
@@ -227,6 +227,7 @@ npm run tauri dev
 | 排除 | 全局排除模式 | 额外 glob 规则 |
 | 备份 | 自动备份 | 启用 + 间隔天数 |
 | 高级 | LO 路径 | LibreOffice 可执行文件路径（留空自动探测：macOS 依次查 brew `/opt/homebrew/bin/soffice`、`/usr/local/bin/soffice`、`/Applications/LibreOffice.app/...`） |
+| 高级 | LO 批大小 | 每次 soffice 转换文件数（1–100，默认 32）。越小越省内存，越大越快 |
 
 **所有设置项即时自动保存。**
 
