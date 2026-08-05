@@ -1,12 +1,41 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use super::Extractor;
 use crate::scanner::helpers::TempDir;
+
+/// Locate a poppler binary (`pdftoppm` or `pdfimages`).
+/// Searches PATH first, then common Homebrew installation prefixes
+/// so the Tauri app (which may not inherit the terminal PATH) can
+/// find them.
+fn find_poppler_binary(name: &str) -> Option<PathBuf> {
+    if Command::new(name).arg("--version").output().is_ok() {
+        return Some(PathBuf::from(name));
+    }
+    for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        let candidate = PathBuf::from(prefix).join(name);
+        if candidate.exists() && Command::new(&candidate).arg("--version").output().is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+static PDFTOPPM_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+static PDFIMAGES_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn pdftoppm_path() -> Option<&'static Path> {
+    PDFTOPPM_PATH.get_or_init(|| find_poppler_binary("pdftoppm")).as_deref()
+}
+
+fn pdfimages_path() -> Option<&'static Path> {
+    PDFIMAGES_PATH.get_or_init(|| find_poppler_binary("pdfimages")).as_deref()
+}
 
 pub struct PdfExtractor;
 
@@ -165,7 +194,9 @@ pub fn ocr_pdf_via_pdftoppm(
     log::info!("[PDF] pdftoppm: rendering {:?}", path.file_name());
 
     let output_prefix = tmp_dir.path().join("page");
-    let mut cmd = Command::new("pdftoppm");
+    let bin = pdftoppm_path()
+        .ok_or_else(|| anyhow::anyhow!("pdftoppm not available. Install poppler-utils."))?;
+    let mut cmd = Command::new(bin);
     cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
@@ -236,18 +267,12 @@ pub fn ocr_pdf_via_pdftoppm(
 
 /// Check if pdftoppm is available on the system.
 pub fn is_pdftoppm_available() -> bool {
-    Command::new("pdftoppm")
-        .arg("--version")
-        .output()
-        .is_ok()
+    pdftoppm_path().is_some()
 }
 
 /// Check if pdfimages is available on the system.
 pub fn is_pdfimages_available() -> bool {
-    Command::new("pdfimages")
-        .arg("--version")
-        .output()
-        .is_ok()
+    pdfimages_path().is_some()
 }
 
 /// Render scanned PDF pages via pdfimages (extracts only the image layer,
@@ -321,7 +346,9 @@ fn extract_and_ocr_page_via_pdfimages(
     let tmp = TempDir::new("ls_pdfimg")?;
     let prefix = tmp.path().join("img");
 
-    let mut cmd = Command::new("pdfimages");
+    let bin = pdfimages_path()
+        .ok_or_else(|| anyhow::anyhow!("pdfimages not available. Install poppler-utils."))?;
+    let mut cmd = Command::new(bin);
     cmd.args([
         "-png",
         "-f",
@@ -334,7 +361,7 @@ fn extract_and_ocr_page_via_pdfimages(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!("pdfimages not available: {e}. Install poppler-utils."))?;
+        .context("failed to spawn pdfimages")?;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let _ = tx.send(child.wait());

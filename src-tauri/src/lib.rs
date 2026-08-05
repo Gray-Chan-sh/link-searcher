@@ -280,7 +280,7 @@ fn run_with_config(app_config: config::AppConfig) {
             let scanner_for_watcher = scanner.clone();
             std::thread::spawn(move || {
                 while let Ok(event) = event_rx.recv() {
-                    log::info!("[WATCHER] file {:?}: {:?}", event.kind, event.path);
+                    log::debug!("[WATCHER] file {:?}: {:?}", event.kind, event.path);
                     let _ = scanner_for_watcher.handle_event(event);
                 }
             });

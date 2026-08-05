@@ -37,6 +37,8 @@
 
 - **PDF 视觉水印 OCR 污染**：扫描件 PDF 中，水印文字被 `pdftoppm` 渲染到页面图像上，导致 OCR 回退后水印仍被读出。修复：检测到文字层含水印后，优先使用 `pdfimages` 提取原始图像层（不解码文字层/注解层叠加），再对每页最大图像做 OCR，从根本上避免水印污染。`pdfimages` 不可用时回退原有 `pdftoppm` 路径（`src-tauri/src/extractor/pdf.rs`）
 
+- **Tauri GUI PATH 不含 Homebrew → `pdfimages`/`pdftoppm` 找不到**：Tauri macOS 应用 PATH 不包含 `/opt/homebrew/bin`，导致 `Command::new` 找不到 poppler 二进制，OCR 回退完全跳过。修复：新增 `find_poppler_binary` 按 `/opt/homebrew/bin` → `/usr/local/bin` → `/usr/bin` 回退查找，结果用 `OnceLock` 缓存；`is_*_available` 和所有 OCR 函数均改为使用缓存的绝对路径。附带：`[WATCHER] file Modify` 日志对排除文件（`.DS_Store` 等）降级为 `debug!` 级别（`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/lib.rs`）
+
 ---
 
 ## 2026-08-03（消除残留硬编码：图片 OCR + OCR 回退接入引擎分发）
