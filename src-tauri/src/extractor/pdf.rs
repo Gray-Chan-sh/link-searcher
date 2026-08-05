@@ -138,6 +138,48 @@ fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType)
     None
 }
 
+/// Check whether most pages contain large embedded images (area ≥100K px²).
+/// Returns true for scanned PDFs with an image per page, false for text-based
+/// PDFs where the text layer is the actual content.
+fn has_scan_images(path: &Path) -> Result<bool> {
+    let bin = pdfimages_path()
+        .ok_or_else(|| anyhow::anyhow!("pdfimages not available"))?;
+    let total_pages = get_pdf_page_count(path)? as usize;
+    if total_pages == 0 {
+        return Ok(false);
+    }
+    let output = Command::new(bin)
+        .args(["-list"])
+        .arg(path)
+        .output()
+        .context("pdfimages -list failed")?;
+    if !output.status.success() {
+        return Ok(false);
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut pages_with: HashSet<usize> = HashSet::new();
+    for line in stdout.lines().skip(2) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        if fields.len() < 5 {
+            continue;
+        }
+        if let (Ok(page), Ok(w), Ok(h)) = (
+            fields[0].parse::<usize>(),
+            fields[3].parse::<u64>(),
+            fields[4].parse::<u64>(),
+        ) {
+            if w * h >= 100_000 {
+                pages_with.insert(page);
+            }
+        }
+    }
+    Ok(pages_with.len() * 2 > total_pages)
+}
+
 impl PdfExtractor {
     pub fn new() -> Self {
         Self
@@ -197,6 +239,26 @@ impl PdfExtractor {
         }
         let merged = page_texts.join("\n");
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
+        let engine = engine.unwrap_or_else(default_engine);
+
+        // When most pages have large embedded images, this PDF is a scan
+        // and the text layer is an overlay/watermark — skip it.
+        if merged.len() > 100 {
+            match has_scan_images(path) {
+                Ok(true) => {
+                    log::info!(
+                        "[PDF] {:?}: scanned PDF (images on most pages), bypassing text layer",
+                        path.file_name()
+                    );
+                    if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
+                        return Ok(ocr_text);
+                    }
+                }
+                Ok(false) => {} // Not a scan — fall through to text analysis
+                Err(e) => log::warn!("[PDF] {:?}: has_scan_images error: {e}", path.file_name()),
+            }
+        }
+
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
@@ -206,7 +268,6 @@ impl PdfExtractor {
         }
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
-        let engine = engine.unwrap_or_else(default_engine);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
             return Ok(ocr_text);
         }
