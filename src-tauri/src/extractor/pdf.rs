@@ -37,6 +37,12 @@ fn pdfimages_path() -> Option<&'static Path> {
     PDFIMAGES_PATH.get_or_init(|| find_poppler_binary("pdfimages")).as_deref()
 }
 
+static PDFTOTEXT_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn pdftotext_path() -> Option<&'static Path> {
+    PDFTOTEXT_PATH.get_or_init(|| find_poppler_binary("pdftotext")).as_deref()
+}
+
 static PDFINFO_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 fn pdfinfo_path() -> Option<&'static Path> {
@@ -64,6 +70,33 @@ fn get_pdf_page_count(path: &Path) -> Result<u32> {
     // Fall back to lopdf
     let doc = lopdf::Document::load(path).context("failed to load PDF")?;
     Ok(doc.get_pages().len() as u32)
+}
+
+/// Extract text via pdftotext (poppler) and check for watermarks/repetition.
+/// Used as a fallback when lopdf cannot parse the PDF but the text layer is
+/// still valid (common for digitally generated PDFs with stream errors).
+fn try_pdftotext_extract(path: &Path) -> Option<String> {
+    let bin = pdftotext_path()?;
+    let output = Command::new(bin).arg(path).arg("-").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    if text.len() < 100 {
+        return None;
+    }
+    // Split by form-feed for per-page watermark detection
+    let pages: Vec<String> = text.split('\x0c')
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if pages.len() >= 2 && is_watermark_text(&pages) {
+        return None;
+    }
+    if is_repetitive(&text) {
+        return None;
+    }
+    Some(text)
 }
 
 pub struct PdfExtractor;
@@ -121,7 +154,20 @@ impl PdfExtractor {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(
-                    "[PDF] {:?}: lopdf failed to parse ({e}), falling to OCR directly",
+                    "[PDF] {:?}: lopdf failed to parse ({e}), trying pdftotext fallback",
+                    path.file_name()
+                );
+                // Digital PDFs often have clean text accessible via pdftotext
+                if let Some(text) = try_pdftotext_extract(path) {
+                    log::info!(
+                        "[PDF] {:?}: pdftotext fallback ({}) chars",
+                        path.file_name(),
+                        text.len()
+                    );
+                    return Ok(text);
+                }
+                log::info!(
+                    "[PDF] {:?}: pdftotext unavailable/watermarked, falling to image OCR",
                     path.file_name()
                 );
                 let engine = engine.unwrap_or_else(default_engine);
@@ -455,6 +501,13 @@ fn extract_and_ocr_page_via_pdfimages(
 
     let best_path = best_path
         .ok_or_else(|| anyhow::anyhow!("pdfimages page {page_num}: no valid images found"))?;
+
+    const MIN_PAGE_IMAGE_AREA: u64 = 100_000;
+    if best_area < MIN_PAGE_IMAGE_AREA {
+        return Err(anyhow::anyhow!(
+            "pdfimages page {page_num}: largest image too small ({best_area} px²) — not a scanned page"
+        ));
+    }
 
     let (text, _regions) =
         crate::extractor::ocr::ocr_image_with_regions(&best_path, engine, lang)?;
