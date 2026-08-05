@@ -43,4 +43,7 @@
 - [ ] **命令行增强**：`link-searcher index --dir /path`、`link-searcher status` 等 CLI 子命令，支持无 GUI 场景（NAS、服务器）。
 - [ ] **索引增量同步 / 备份兼容性**：不同版本间的索引格式兼容校验 + 自动重建。
 - [ ] **大模型内容分析与学习**：对已索引文档做 RAG（检索增强生成）、自动摘要、主题聚类、跨文件关联发现。可本地部署（llama.cpp / Ollama）或接云端 API。典型场景："这批判决书的核心争议点是什么""对比这三份合同的差异"。
-- [ ] **音频 STT（语音转文字）**：支持 `.mp3` `.wav` `.m4a` `.aac` 等音频格式的语音识别，结果进入全文索引。引擎可选 Whisper.cpp（本地）或 Apple Speech（macOS 原生）。上海话支持需评估模型可用性（Whisper large-v3 有部分吴语识别能力，但上海话专项模型需单独调研）。
+- [ ] **音频 STT（语音转文字）**：支持 `.mp3` `.wav` `.m4a` `.aac` 等音频格式的语音识别，结果进入全文索引。
+  - **首选引擎：Fun-ASR-Nano**（阿里通义实验室，8 亿参数，Apache 2.0 开源）——原生支持**吴语（上海话）**、粤语、闽语等 7 大汉语方言 + 26 种地域口音，50 万小时方言数据训练。远场降噪 93% 准确率。ModelScope / HuggingFace 可直接下载。
+  - **备选引擎**：SenseVoice-Small（5 语言，速度快 15×）或 Whisper.cpp（本地离线）。SenseVoice-Small 不支持上海话；SenseVoice-Large 支持 50+ 语言但未声明吴语。
+  - 上海话专项评估需建测试集：用 Fun-ASR-Nano 对真实上海话录音测 CER，低于 15% 即为可用。
