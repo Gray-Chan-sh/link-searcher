@@ -282,14 +282,20 @@ pub fn is_garbled_text(text: &str) -> bool {
         return false;
     }
     let total = text.chars().count() as f64;
+    // >30% suspicious chars (replacement char, stray control chars)
     let suspicious = text
         .chars()
         .filter(|c| {
-            *c == '\u{FFFD}' // replacement character
+            *c == '\u{FFFD}'
                 || (c.is_control() && *c != '\n' && *c != '\r' && *c != '\t')
         })
         .count() as f64;
-    suspicious / total > 0.3
+    if suspicious / total > 0.3 {
+        return true;
+    }
+    // <5% non-whitespace → lopdf parsed only spaces (e.g. Quartz PDFs)
+    let non_blank = text.chars().filter(|c| !c.is_whitespace()).count() as f64;
+    non_blank / total < 0.05
 }
 
 /// Normalize page text for watermark comparison: strip variable parts
