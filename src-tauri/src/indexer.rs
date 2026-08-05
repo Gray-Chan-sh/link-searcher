@@ -491,7 +491,7 @@ impl IndexerService {
         if let Err(ref e) = result {
             let error_type = classify_error(e, &file_ext);
             let _ = crate::db::tracker::log_index_error(&conn, file_id, &file_path.to_string_lossy(), error_type, &e.to_string());
-            log::error!("[INDEX] 失败: {file_name}: {e}");
+            log::warn!("[INDEX] 失败: {file_name}: {e}");
         }
 
         result
@@ -574,6 +574,8 @@ fn classify_error_str(msg: &str, _ext: &str) -> &'static str {
         "ocr_failed"
     } else if msg.contains("timeout") {
         "timeout"
+    } else if msg.contains("损坏") || msg.contains("加密") || msg.contains("无法读取") {
+        "corrupted_or_protected"
     } else if msg.contains("parse") || msg.contains("invalid") || msg.contains("failed to") {
         "parse_error"
     } else {

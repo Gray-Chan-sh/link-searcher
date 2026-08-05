@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{atomic::AtomicUsize, mpsc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -714,7 +715,8 @@ impl Extractor for OfficeExtractor {
 
         match ext.as_str() {
             "docx" => Self::native_then_lo(path, extract_docx),
-            "xlsx" | "xls" => Self::native_then_lo(path, extract_xlsx),
+            "xls" => xls_with_lo_xlsx_fallback(path),
+            "xlsx" => Self::native_then_lo(path, extract_xlsx),
             "pptx" => Self::native_then_lo(path, extract_pptx),
             "doc" | "ppt" => Self::lo_only(path),
             _ => Err(anyhow::anyhow!("unsupported office format: {ext}")),
@@ -778,6 +780,51 @@ fn extract_docx(path: &Path) -> Result<String> {
         text.pop();
     }
     Ok(text)
+}
+
+/// Try calamine natively, then LO --convert-to xlsx, then LO --convert-to txt.
+/// The xlsx intermediate step often succeeds when direct text export fails,
+/// because xlsx is just a container swap (not text extraction).
+fn xls_with_lo_xlsx_fallback(path: &Path) -> Result<String> {
+    match extract_xlsx(path) {
+        Ok(t) if !t.trim().is_empty() => return Ok(t),
+        Ok(_) => log::info!("[OFFICE] calamine XLS: empty result, trying xlsx conversion"),
+        Err(e) => log::warn!("[OFFICE] calamine XLS 解析失败 ({e}), 尝试 LibreOffice xlsx 转换"),
+    }
+
+    if let Some(lo_bin) = lo_binary() {
+        if let Some(text) = lo_xls_via_xlsx(path, &lo_bin) {
+            return Ok(text);
+        }
+        log::info!("[OFFICE] xlsx 转换未获取到内容，回退到文本导出");
+        return OfficeExtractor::lo_extract(path);
+    }
+
+    Err(anyhow::anyhow!(
+        "此旧版 Excel 文件无法读取（可能已损坏或加密），请用 WPS/Excel 另存为 .xlsx 后重新索引"
+    ))
+}
+
+/// Convert .xls to .xlsx via LibreOffice, then extract text with calamine.
+fn lo_xls_via_xlsx(path: &Path, lo_bin: &str) -> Option<String> {
+    let tmp = TempDir::new("ls_xls2xlsx").ok()?;
+    let xlsx_path = tmp.path().join("converted.xlsx");
+
+    let outdir = tmp.path().to_string_lossy().to_string();
+    let output = Command::new(lo_bin)
+        .args(["--headless", "--convert-to", "xlsx", "--outdir", &outdir])
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() || !xlsx_path.exists() {
+        return None;
+    }
+
+    match extract_xlsx(&xlsx_path) {
+        Ok(t) if !t.trim().is_empty() => Some(t),
+        _ => None,
+    }
 }
 
 fn extract_xlsx(path: &Path) -> Result<String> {
