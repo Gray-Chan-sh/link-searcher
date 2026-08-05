@@ -37,10 +37,72 @@ fn pdfimages_path() -> Option<&'static Path> {
     PDFIMAGES_PATH.get_or_init(|| find_poppler_binary("pdfimages")).as_deref()
 }
 
+static PDFINFO_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn pdfinfo_path() -> Option<&'static Path> {
+    PDFINFO_PATH.get_or_init(|| find_poppler_binary("pdfinfo")).as_deref()
+}
+
+/// Get the number of pages in a PDF. Uses pdfinfo first (tolerant of
+/// malformed PDFs that lopdf rejects), falling back to lopdf.
+fn get_pdf_page_count(path: &Path) -> Result<u32> {
+    // Try pdfinfo first — handles broken streams that lopdf rejects
+    if let Some(bin) = pdfinfo_path() {
+        let output = Command::new(bin)
+            .arg(path)
+            .output()
+            .context("pdfinfo failed")?;
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                if let Some(val) = line.strip_prefix("Pages:") {
+                    return val.trim().parse::<u32>().context("invalid pdfinfo Pages output");
+                }
+            }
+        }
+    }
+    // Fall back to lopdf
+    let doc = lopdf::Document::load(path).context("failed to load PDF")?;
+    Ok(doc.get_pages().len() as u32)
+}
+
 pub struct PdfExtractor;
 
 fn default_engine() -> super::ocr::OcrEngineType {
     super::ocr::OcrEngineType::PaddleOCR
+}
+
+/// Try OCR via pdfimages → pdftoppm, returning the first non-empty result.
+fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType) -> Option<String> {
+    if pdfimages_path().is_some() {
+        match ocr_pdf_via_pdfimages(path, lang, engine) {
+            Ok(ocr_text) if !ocr_text.is_empty() => {
+                log::info!(
+                    "[PDF] pdfimages OCR for {:?} (OCR'd {} chars)",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    ocr_text.len(),
+                );
+                return Some(ocr_text);
+            }
+            Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {:?}", path.file_name()),
+            Err(e) => log::warn!("[PDF] pdfimages OCR failed for {:?}: {e}", path.file_name()),
+        }
+    }
+    if pdftoppm_path().is_some() {
+        match ocr_pdf_via_pdftoppm(path, lang, engine) {
+            Ok(ocr_text) if !ocr_text.is_empty() => {
+                log::info!(
+                    "[PDF] pdftoppm OCR for {:?} (OCR'd {} chars)",
+                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                    ocr_text.len(),
+                );
+                return Some(ocr_text);
+            }
+            Ok(_) => log::warn!("[PDF] pdftoppm OCR returned empty text for {:?}", path.file_name()),
+            Err(e) => log::warn!("[PDF] pdftoppm OCR failed for {:?}: {e}", path.file_name()),
+        }
+    }
+    None
 }
 
 impl PdfExtractor {
@@ -55,7 +117,23 @@ impl PdfExtractor {
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<String> {
         log::info!("[PDF] extracting {:?}", path.file_name());
-        let doc = lopdf::Document::load(path).context("failed to load PDF")?;
+        let doc = match lopdf::Document::load(path) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "[PDF] {:?}: lopdf failed to parse ({e}), falling to OCR directly",
+                    path.file_name()
+                );
+                let engine = engine.unwrap_or_else(default_engine);
+                return if let Some(text) = try_ocr_fallback(path, lang, &engine) {
+                    Ok(text)
+                } else {
+                    Err(anyhow::anyhow!(
+                        "failed to load PDF and no OCR fallback available: {e}"
+                    ))
+                };
+            }
+        };
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
         if pages.is_empty() {
             return Ok(String::new());
@@ -83,35 +161,8 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
         let engine = engine.unwrap_or_else(default_engine);
-        if is_pdfimages_available() {
-            match ocr_pdf_via_pdfimages(path, lang, &engine) {
-                Ok(ocr_text) if !ocr_text.is_empty() => {
-                    log::info!(
-                        "[PDF] pdfimages OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
-                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                        merged.len(),
-                        ocr_text.len(),
-                    );
-                    return Ok(ocr_text);
-                }
-                Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {:?}", path.file_name()),
-                Err(e) => log::warn!("[PDF] pdfimages OCR failed for {:?}: {e}", path.file_name()),
-            }
-        }
-        if is_pdftoppm_available() {
-            match ocr_pdf_via_pdftoppm(path, lang, &engine) {
-                Ok(ocr_text) if !ocr_text.is_empty() => {
-                    log::info!(
-                        "[PDF] pdftoppm OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
-                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                        merged.len(),
-                        ocr_text.len(),
-                    );
-                    return Ok(ocr_text);
-                }
-                Ok(_) => log::warn!("[PDF] pdftoppm OCR returned empty text for {:?}", path.file_name()),
-                Err(e) => log::warn!("[PDF] pdftoppm OCR failed for {:?}: {e}", path.file_name()),
-            }
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
+            return Ok(ocr_text);
         }
         Ok(merged)
     }
@@ -285,16 +336,16 @@ pub fn ocr_pdf_via_pdfimages(
 ) -> Result<String> {
     log::info!("[PDF] pdfimages: extracting {:?}", path.file_name());
 
-    let doc = lopdf::Document::load(path).context("failed to load PDF for pdfimages")?;
-    let pages: Vec<u32> = doc.get_pages().into_keys().collect();
-    if pages.is_empty() {
+    let page_count = get_pdf_page_count(path)?;
+    if page_count == 0 {
         return Ok(String::new());
     }
+    let pages: Vec<u32> = (1..=page_count).collect();
 
     log::info!(
         "[PDF] {:?}: {} pages, extracting images via pdfimages",
         path.file_name(),
-        pages.len(),
+        page_count,
     );
 
     use rayon::prelude::*;

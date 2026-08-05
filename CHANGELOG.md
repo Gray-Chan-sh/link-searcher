@@ -39,6 +39,8 @@
 
 - **Tauri GUI PATH 不含 Homebrew → `pdfimages`/`pdftoppm` 找不到**：Tauri macOS 应用 PATH 不包含 `/opt/homebrew/bin`，导致 `Command::new` 找不到 poppler 二进制，OCR 回退完全跳过。修复：新增 `find_poppler_binary` 按 `/opt/homebrew/bin` → `/usr/local/bin` → `/usr/bin` 回退查找，结果用 `OnceLock` 缓存；`is_*_available` 和所有 OCR 函数均改为使用缓存的绝对路径。附带：`[WATCHER] file Modify` 日志对排除文件（`.DS_Store` 等）降级为 `debug!` 级别（`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/lib.rs`）
 
+- **`lopdf` 严格解析导致部分 PDF 无法提取**：`lopdf` 对语法错误 PDF（stream `Bad Length`、缺 `endstream`）直接 `failed to load PDF`，而 `pdfinfo`/`pdftoppm` 等 poppler 工具可正常读取。修复：`extract_with_lang` 中 `lopdf::Document::load` 失败后不再抛错，直接走 image-layer OCR 回退；`ocr_pdf_via_pdfimages` 页数获取改用 `pdfinfo` 优先、`lopdf` 兜底（`get_pdf_page_count`）；提取 `try_ocr_fallback` 统一 pdfimages→pdftoppm 回退链，消除重复代码（`src-tauri/src/extractor/pdf.rs`）
+
 ---
 
 ## 2026-08-03（消除残留硬编码：图片 OCR + OCR 回退接入引擎分发）
