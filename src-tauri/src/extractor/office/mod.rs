@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicUsize, mpsc, Mutex, OnceLock};
@@ -367,20 +367,7 @@ impl LoBatcher {
     }
 }
 
-// ── Helpers for macOS `open -gj` polling-based conversion ──────────
-
-/// Return the set of PIDs of running soffice processes (via `pgrep`).
-#[cfg(target_os = "macos")]
-fn find_lo_pids() -> HashSet<u32> {
-    std::process::Command::new("pgrep")
-        .arg("-f")
-        .arg("soffice")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.lines().filter_map(|l| l.parse::<u32>().ok()).collect())
-        .unwrap_or_default()
-}
+// ── Helpers for macOS polling-based conversion ────────────────────────
 
 /// Poll until every expected output file exists or `timeout` elapses.
 /// Kills `pid` (when present) on timeout.
@@ -523,39 +510,20 @@ pub fn extract_many_via_libreoffice(paths: &[PathBuf]) -> Vec<Result<String, Str
         {
             use std::process::Stdio;
             let start = Instant::now();
-            let before = find_lo_pids();
-            let ok = std::process::Command::new("open")
-                .arg("-gj")
-                .arg("-b")
-                .arg("org.libreoffice.script")
-                .arg("--args")
+            let mut cmd = std::process::Command::new(&binary);
+            cmd.env("SAL_USE_VCLPLUGIN", "svp")
                 .args(&soffice_args)
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .stderr(std::process::Stdio::from(stderr_file));
 
-            let pid = if ok {
-                std::thread::sleep(Duration::from_millis(1500));
-                let after = find_lo_pids();
-                after.difference(&before).next().copied()
-            } else {
-                log::warn!("[OFFICE] open -gj failed, falling back to direct exec");
-                let mut cmd = std::process::Command::new(&binary);
-                cmd.env("SAL_USE_VCLPLUGIN", "svp")
-                    .args(&soffice_args)
-                    .stdout(Stdio::null())
-                    .stderr(std::process::Stdio::from(stderr_file));
-                match cmd.spawn() {
-                    Ok(child) => Some(child.id()),
-                    Err(e) => {
-                        for (idx, _) in &round_paths {
-                            results[*idx] =
-                                Some(Err(format!("{binary} 启动失败: {e}")));
-                        }
-                        continue;
+            let pid = match cmd.spawn() {
+                Ok(child) => Some(child.id()),
+                Err(e) => {
+                    for (idx, _) in &round_paths {
+                        results[*idx] =
+                            Some(Err(format!("{binary} 启动失败: {e}")));
                     }
+                    continue;
                 }
             };
 

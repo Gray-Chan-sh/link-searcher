@@ -157,7 +157,21 @@ impl IndexerService {
             let ocr_lang = crate::db::dir_config::get_dir(&conn, &job.dir_id)
                 .ok()
                 .flatten()
-                .map(|c| c.ocr_lang)
+                .and_then(|c| {
+                    if c.ocr_lang.is_empty() || c.ocr_lang == "eng" {
+                        None // fall through to global default
+                    } else {
+                        Some(c.ocr_lang)
+                    }
+                })
+                .or_else(|| {
+                    conn.query_row(
+                        "SELECT value FROM app_settings WHERE key = 'ocr_lang'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                })
                 .unwrap_or_else(|| "eng".to_string());
             let ocr_engine =
                 conn.query_row(
