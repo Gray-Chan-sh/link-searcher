@@ -285,6 +285,13 @@ fn normalize_for_watermark(text: &str) -> String {
         out.push(c);
         i += 1;
     }
+    // Strip trailing page numbers like "1.", "12."
+    while out.ends_with('.') {
+        out.pop();
+        while out.chars().next_back().map_or(false, |c| c.is_ascii_digit()) {
+            out.pop();
+        }
+    }
     out
 }
 
