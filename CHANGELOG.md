@@ -35,6 +35,8 @@
 - **依赖**：新增 `windows` 0.61，target-conditional（`cfg(target_os = "windows")`），macOS/Linux 编译零影响（`Cargo.toml`）
 - **引擎分发**：`ocr.rs` 两处 `WindowsOcr` 分支从 PaddleOCR 桩替换为 `windows_ocr::recognize_from_path` / `_with_regions`；`mod.rs` 注册模块（`src-tauri/src/extractor/ocr.rs`、`mod.rs`）
 
+- **PDF 视觉水印 OCR 污染**：扫描件 PDF 中，水印文字被 `pdftoppm` 渲染到页面图像上，导致 OCR 回退后水印仍被读出。修复：检测到文字层含水印后，优先使用 `pdfimages` 提取原始图像层（不解码文字层/注解层叠加），再对每页最大图像做 OCR，从根本上避免水印污染。`pdfimages` 不可用时回退原有 `pdftoppm` 路径（`src-tauri/src/extractor/pdf.rs`）
+
 ---
 
 ## 2026-08-03（消除残留硬编码：图片 OCR + OCR 回退接入引擎分发）

@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -51,22 +51,37 @@ impl PdfExtractor {
             log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
             return Ok(merged);
         }
-        log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to OCR ({lang})",
+        log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
-        if is_pdftoppm_available() {
-            let engine = engine.unwrap_or_else(default_engine);
-            match ocr_pdf_via_pdftoppm(path, lang, &engine) {
+        let engine = engine.unwrap_or_else(default_engine);
+        if is_pdfimages_available() {
+            match ocr_pdf_via_pdfimages(path, lang, &engine) {
                 Ok(ocr_text) if !ocr_text.is_empty() => {
                     log::info!(
-                        "[PDF] OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
+                        "[PDF] pdfimages OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
                         path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
                         merged.len(),
                         ocr_text.len(),
                     );
                     return Ok(ocr_text);
                 }
-                Ok(_) => log::warn!("[PDF] OCR returned empty text for {:?}", path.file_name()),
-                Err(e) => log::warn!("[PDF] OCR failed for {:?}: {e}", path.file_name()),
+                Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {:?}", path.file_name()),
+                Err(e) => log::warn!("[PDF] pdfimages OCR failed for {:?}: {e}", path.file_name()),
+            }
+        }
+        if is_pdftoppm_available() {
+            match ocr_pdf_via_pdftoppm(path, lang, &engine) {
+                Ok(ocr_text) if !ocr_text.is_empty() => {
+                    log::info!(
+                        "[PDF] pdftoppm OCR fallback for {:?} (extracted {} chars, OCR'd {} chars)",
+                        path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                        merged.len(),
+                        ocr_text.len(),
+                    );
+                    return Ok(ocr_text);
+                }
+                Ok(_) => log::warn!("[PDF] pdftoppm OCR returned empty text for {:?}", path.file_name()),
+                Err(e) => log::warn!("[PDF] pdftoppm OCR failed for {:?}: {e}", path.file_name()),
             }
         }
         Ok(merged)
@@ -225,6 +240,147 @@ pub fn is_pdftoppm_available() -> bool {
         .arg("--version")
         .output()
         .is_ok()
+}
+
+/// Check if pdfimages is available on the system.
+pub fn is_pdfimages_available() -> bool {
+    Command::new("pdfimages")
+        .arg("--version")
+        .output()
+        .is_ok()
+}
+
+/// Render scanned PDF pages via pdfimages (extracts only the image layer,
+/// not overlays/annotations/watermarks). Returns the OCR'd text with far
+/// less watermark contamination than pdftoppm-based rendering.
+pub fn ocr_pdf_via_pdfimages(
+    path: &Path,
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Result<String> {
+    log::info!("[PDF] pdfimages: extracting {:?}", path.file_name());
+
+    let doc = lopdf::Document::load(path).context("failed to load PDF for pdfimages")?;
+    let pages: Vec<u32> = doc.get_pages().into_keys().collect();
+    if pages.is_empty() {
+        return Ok(String::new());
+    }
+
+    log::info!(
+        "[PDF] {:?}: {} pages, extracting images via pdfimages",
+        path.file_name(),
+        pages.len(),
+    );
+
+    use rayon::prelude::*;
+    let page_texts: Vec<Option<String>> = pages
+        .par_iter()
+        .map(|page_num| {
+            let page_no = page_num.to_string();
+            let started = std::time::Instant::now();
+            match extract_and_ocr_page_via_pdfimages(path, *page_num, lang, engine) {
+                Ok(text) if !text.trim().is_empty() => {
+                    log::info!(
+                        "[PDF] pdfimages page {page_no}: {} chars in {:.1}s",
+                        text.len(),
+                        started.elapsed().as_secs_f64(),
+                    );
+                    Some(text)
+                }
+                Ok(_) => {
+                    log::warn!("[PDF] pdfimages page {page_no}: empty OCR result");
+                    None
+                }
+                Err(e) => {
+                    log::warn!("[PDF] pdfimages page {page_no}: {e}");
+                    None
+                }
+            }
+        })
+        .collect();
+
+    let mut full_text = String::new();
+    for text in page_texts.into_iter().flatten() {
+        if !full_text.is_empty() {
+            full_text.push('\n');
+        }
+        full_text.push_str(text.trim());
+    }
+
+    Ok(full_text)
+}
+
+/// Extract images from a single PDF page using pdfimages, pick the largest
+/// (the scanned page image), and OCR it.
+fn extract_and_ocr_page_via_pdfimages(
+    pdf_path: &Path,
+    page_num: u32,
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Result<String> {
+    let tmp = TempDir::new("ls_pdfimg")?;
+    let prefix = tmp.path().join("img");
+
+    let mut cmd = Command::new("pdfimages");
+    cmd.args([
+        "-png",
+        "-f",
+        &page_num.to_string(),
+        "-l",
+        &page_num.to_string(),
+    ])
+    .arg(pdf_path)
+    .arg(&prefix);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("pdfimages not available: {e}. Install poppler-utils."))?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+    match rx.recv_timeout(Duration::from_secs(30)) {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(_)) => return Err(anyhow::anyhow!("pdfimages page {page_num} failed")),
+        Ok(Err(e)) => return Err(anyhow::anyhow!("pdfimages page {page_num}: {e}")),
+        Err(_) => {
+            let _ = Command::new("pkill").arg("-f").arg("pdfimages").status();
+            return Err(anyhow::anyhow!("pdfimages page {page_num} timed out after 30s"));
+        }
+    }
+
+    let mut best_path: Option<PathBuf> = None;
+    let mut best_area: u64 = 0;
+    for entry in std::fs::read_dir(tmp.path())
+        .with_context(|| format!("failed to read pdfimages output dir for page {page_num}"))?
+    {
+        let entry = entry?;
+        let img_path = entry.path();
+        if img_path.extension().map_or(false, |e| e == "png") {
+            match image::open(&img_path) {
+                Ok(img) => {
+                    let area = (img.width() as u64) * (img.height() as u64);
+                    if area > best_area {
+                        best_area = area;
+                        best_path = Some(img_path);
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[PDF] page {page_num}: failed to open image {:?}: {e}",
+                        img_path.file_name()
+                    );
+                }
+            }
+        }
+    }
+
+    let best_path = best_path
+        .ok_or_else(|| anyhow::anyhow!("pdfimages page {page_num}: no valid images found"))?;
+
+    let (text, _regions) =
+        crate::extractor::ocr::ocr_image_with_regions(&best_path, engine, lang)?;
+    Ok(text)
 }
 
 impl Extractor for PdfExtractor {
