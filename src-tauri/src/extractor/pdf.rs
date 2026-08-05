@@ -231,38 +231,87 @@ pub fn is_garbled_text(text: &str) -> bool {
     suspicious / total > 0.3
 }
 
+/// Normalize page text for watermark comparison: strip variable parts
+/// (hex codes ≥30 chars, dates, URLs, whitespace) leaving only stable text.
+fn normalize_for_watermark(text: &str) -> String {
+    let mut out = String::with_capacity(300);
+    let chars: Vec<char> = text.chars().take(300).collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        // Skip URLs
+        if c == 'h' && i + 4 <= len && chars[i..i + 4] == ['h', 't', 't', 'p'] {
+            while i < len && !chars[i].is_whitespace() {
+                i += 1;
+            }
+            continue;
+        }
+        // Skip hex blobs (≥30 consecutive hex chars → verification codes, UUIDs)
+        if c.is_ascii_hexdigit() {
+            let start = i;
+            while i < len && chars[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            if i - start >= 30 {
+                continue;
+            }
+            i = start;
+        }
+        // Skip date/time patterns: YYYY-MM-DD HH:MM:SS or YYYY.MM.DD
+        if c.is_ascii_digit() {
+            let start = i;
+            while i < len
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == '-'
+                    || chars[i] == '.'
+                    || chars[i] == ':')
+            {
+                i += 1;
+            }
+            let slice: String = chars[start..i].iter().collect();
+            if slice.contains('-') || slice.contains(':')
+                || (slice.contains('.') && slice.len() >= 8)
+            {
+                continue;
+            }
+            i = start;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Detect if text across pages looks like a repeated watermark.
-/// Compares consecutive non-empty pages using Jaccard similarity on character sets.
-/// Returns true if >80% of consecutive page pairs have similarity >0.8.
+/// Normalizes each page's prefix (strips hex codes, dates, URLs, whitespace)
+/// then checks whether adjacent normalized prefixes are identical. Returns
+/// true if >80% of consecutive page pairs match.
 pub fn is_watermark_text(pages: &[String]) -> bool {
     if pages.len() < 2 {
         return false;
     }
-    let non_empty: Vec<&str> = pages
+    let normalized: Vec<String> = pages
         .iter()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
+        .map(|p| normalize_for_watermark(p))
+        .filter(|n| n.len() > 20)
         .collect();
-    if non_empty.len() < 2 {
+    if normalized.len() < 2 {
         return false;
     }
-    let mut similar = 0;
-    let total = non_empty.len() - 1;
-    for i in 1..non_empty.len() {
-        let prev: HashSet<char> = non_empty[i - 1].chars().collect();
-        let curr: HashSet<char> = non_empty[i].chars().collect();
-        let intersection = prev.intersection(&curr).count();
-        let union = prev.union(&curr).count();
-        let sim = if union > 0 {
-            intersection as f64 / union as f64
-        } else {
-            1.0
-        };
-        if sim > 0.8 {
-            similar += 1;
+    let mut same = 0usize;
+    for i in 1..normalized.len() {
+        if normalized[i - 1] == normalized[i] {
+            same += 1;
         }
     }
-    total > 0 && (similar as f64 / total as f64) > 0.8
+    let total = normalized.len() - 1;
+    total > 0 && (same as f64 / total as f64) > 0.8
 }
 
 /// Returns true if text is highly repetitive — e.g. a watermark repeated
@@ -420,6 +469,14 @@ pub fn ocr_pdf_via_pdfimages(
             }
         })
         .collect();
+
+    let pages_with_text = page_texts.iter().filter(|t| t.is_some()).count();
+    if pages.len() > 2 && pages_with_text * 2 < pages.len() {
+        return Err(anyhow::anyhow!(
+            "pdfimages: only {pages_with_text}/{len} pages had images — not a scanned PDF",
+            len = pages.len(),
+        ));
+    }
 
     let mut full_text = String::new();
     for text in page_texts.into_iter().flatten() {

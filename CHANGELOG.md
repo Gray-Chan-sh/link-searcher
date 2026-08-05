@@ -6,6 +6,8 @@
 
 ## 2026-08-05（Dock 图标根治：原生优先 + 批量转换取代 LSUIElement hack）
 
+- **`is_watermark_text` 对中文文本误判**：原算法用字符集 Jaccard 相似度判断，但中文常用字仅两三千，任意两页的字符集重叠度天然高，导致 182 页财报被误判为水印，触发 OCR 回退。修复：改为归一化前缀精确比较 — 取每页前 300 字符，剔除 hex 长串（验证码/UUID）、日期、URL、空白后逐页对比，>80% 连续页归一化前缀相同时才判定水印。附带：`ocr_pdf_via_pdfimages` 结束时检查有效 OCR 页数，少于总页数一半时返回 Err，回退到 pdftoppm，防止 182 页文字 PDF 因仅 1 页有嵌入图而被截断（`src-tauri/src/extractor/pdf.rs`）
+
 **根因诊断**（受控实验证伪三种压制方案）：
 - `SAL_USE_VCLPLUGIN=svp`：不阻止 soffice 注册前台 app（`lsappinfo list` 仍出现 ASN）
 - `LSUIElement=true` + `lsregister -f` 强刷缓存：仍注册前台 app（直接 exec 二进制不读 LSUIElement）
