@@ -109,7 +109,7 @@ fn default_engine() -> super::ocr::OcrEngineType {
 fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType) -> Option<String> {
     if pdfimages_path().is_some() {
         match ocr_pdf_via_pdfimages(path, lang, engine) {
-            Ok(ocr_text) if !ocr_text.is_empty() => {
+            Ok(ocr_text) if ocr_text.len() > 100 => {
                 log::info!(
                     "[PDF] pdfimages OCR for {:?} (OCR'd {} chars)",
                     path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),

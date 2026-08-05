@@ -39,6 +39,8 @@
 
 - **Tauri GUI PATH 不含 Homebrew → `pdfimages`/`pdftoppm` 找不到**：Tauri macOS 应用 PATH 不包含 `/opt/homebrew/bin`，导致 `Command::new` 找不到 poppler 二进制，OCR 回退完全跳过。修复：新增 `find_poppler_binary` 按 `/opt/homebrew/bin` → `/usr/local/bin` → `/usr/bin` 回退查找，结果用 `OnceLock` 缓存；`is_*_available` 和所有 OCR 函数均改为使用缓存的绝对路径。附带：`[WATCHER] file Modify` 日志对排除文件（`.DS_Store` 等）降级为 `debug!` 级别（`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/lib.rs`）
 
+- **`try_ocr_fallback` pdfimages 短文本未回退**：部分 PDF 由多图层合成（JPEG 底图 + stencil 文字层叠加），`pdfimages` 提取到 JPEG 底图后 OCR 仅返回几个字符（如"签署页：上海線"），`!is_empty()` 判定成功导致不触发 pdftoppm 回退。修复：pdfimages OCR 成功阈值改为 100 字符以上（`src-tauri/src/extractor/pdf.rs`）
+
 - **`lopdf` 严格解析导致部分 PDF 无法提取**：`lopdf` 对语法错误 PDF（stream `Bad Length`、缺 `endstream`）直接 `failed to load PDF`，而 poppler 工具可正常读取。修复：`extract_with_lang` 中 `lopdf` 失败后依次尝试 `pdftotext` 提取文字层（含水印检测） → `pdfimages` 图像层 OCR → `pdftoppm` 全页 OCR，确保数字生成 PDF 和扫描件均能提取。附加：`ocr_pdf_via_pdfimages` 页数获取改用 `pdfinfo` 优先、`lopdf` 兜底；图片面积 <100k 像素时跳过该页（过滤 logo/二维码等嵌入素材而非页面截图）；提取 `try_ocr_fallback` 统一 OCR 回退链（`src-tauri/src/extractor/pdf.rs`）
 
 ---
