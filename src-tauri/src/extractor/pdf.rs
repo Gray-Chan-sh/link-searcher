@@ -192,6 +192,17 @@ impl PdfExtractor {
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<String> {
         log::info!("[PDF] extracting {:?}", path.file_name());
+        // Try anydoc/pdf-inspector first — handles Quartz/CFF PDFs and
+        // text-based PDFs that lopdf struggles with.
+        match anydoc::to_markdown(path) {
+            Ok(md) if md.len() > 100 => {
+                log::info!("[PDF] {:?}: anydoc {} chars", path.file_name(), md.len());
+                return Ok(md);
+            }
+            Ok(_) => log::info!("[PDF] {:?}: anydoc returned empty/short, falling to lopdf", path.file_name()),
+            Err(e) => log::info!("[PDF] {:?}: anydoc {e}, falling to lopdf", path.file_name()),
+        }
+
         let doc = match lopdf::Document::load(path) {
             Ok(d) => d,
             Err(e) => {

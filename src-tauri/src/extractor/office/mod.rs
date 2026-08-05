@@ -665,6 +665,7 @@ impl OfficeExtractor {
             .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
+    #[allow(dead_code)]
     fn native_then_lo(
         path: &Path,
         native: fn(&Path) -> anyhow::Result<String>,
@@ -690,6 +691,7 @@ impl OfficeExtractor {
         }
     }
 
+    #[allow(dead_code)]
     fn lo_only(path: &Path) -> anyhow::Result<String> {
         if lo_binary().is_some() {
             Self::lo_extract(path)
@@ -699,7 +701,37 @@ impl OfficeExtractor {
                  macOS: brew install --cask libreoffice\n\
                  Linux: sudo apt install libreoffice\n\
                  Windows: winget install LibreOffice。\
-                 如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
+                  如需指定自定义路径，请在设置中配置 LibreOffice 可执行文件位置"
+            ))
+        }
+    }
+
+    fn anydoc_then_lo(path: &Path) -> anyhow::Result<String> {
+        match anydoc::to_markdown(path) {
+            Ok(md) if !md.trim().is_empty() => {
+                log::info!("[OFFICE] anydoc: {} chars from {:?}", md.len(), path.file_name());
+                Ok(md)
+            }
+            Ok(_) => {
+                log::warn!("[OFFICE] anydoc empty for {:?}, falling to LO", path.file_name());
+                Self::lo_fallback(path)
+            }
+            Err(anydoc::ConvertError::Encrypted) => {
+                Err(anyhow::anyhow!("此文件已加密，无法读取内容"))
+            }
+            Err(e) => {
+                log::warn!("[OFFICE] anydoc {:?} for {:?}, falling to LO", e, path.file_name());
+                Self::lo_fallback(path)
+            }
+        }
+    }
+
+    fn lo_fallback(path: &Path) -> anyhow::Result<String> {
+        if lo_binary().is_some() {
+            Self::lo_extract(path)
+        } else {
+            Err(anyhow::anyhow!(
+                "文档无法读取（anydoc 解析失败且未安装 LibreOffice）"
             ))
         }
     }
@@ -714,18 +746,19 @@ impl Extractor for OfficeExtractor {
             .unwrap_or_default();
 
         match ext.as_str() {
-            "docx" => Self::native_then_lo(path, extract_docx),
-            "xls" => xls_with_lo_xlsx_fallback(path),
-            "xlsx" => Self::native_then_lo(path, extract_xlsx),
-            "pptx" => Self::native_then_lo(path, extract_pptx),
-            "doc" | "ppt" => Self::lo_only(path),
+            "docx" | "doc" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb"
+            | "ppt" | "pptx" | "pptm" | "ppsm" | "ppsx" | "pps" | "pot"
+            | "odt" | "ods" | "odp" | "rtf" | "epub" | "csv" => {
+                OfficeExtractor::anydoc_then_lo(path)
+            }
             _ => Err(anyhow::anyhow!("unsupported office format: {ext}")),
         }
     }
 }
 
-// ── Native parsers ───────────────────────────────────────────────────
+// ── Native parsers (replaced by anydoc, kept for reference) ──────────────────
 
+#[allow(dead_code)]
 fn extract_docx(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path).context("failed to open DOCX")?;
     let mut archive = zip::ZipArchive::new(file).context("failed to read DOCX as ZIP")?;
@@ -785,6 +818,7 @@ fn extract_docx(path: &Path) -> Result<String> {
 /// Try calamine natively, then LO --convert-to xlsx, then LO --convert-to txt.
 /// The xlsx intermediate step often succeeds when direct text export fails,
 /// because xlsx is just a container swap (not text extraction).
+#[allow(dead_code)]
 fn xls_with_lo_xlsx_fallback(path: &Path) -> Result<String> {
     match extract_xlsx(path) {
         Ok(t) if !t.trim().is_empty() => return Ok(t),
@@ -806,6 +840,7 @@ fn xls_with_lo_xlsx_fallback(path: &Path) -> Result<String> {
 }
 
 /// Convert .xls to .xlsx via LibreOffice, then extract text with calamine.
+#[allow(dead_code)]
 fn lo_xls_via_xlsx(path: &Path, lo_bin: &str) -> Option<String> {
     let tmp = TempDir::new("ls_xls2xlsx").ok()?;
     let xlsx_path = tmp.path().join("converted.xlsx");
@@ -827,6 +862,8 @@ fn lo_xls_via_xlsx(path: &Path, lo_bin: &str) -> Option<String> {
     }
 }
 
+#[allow(dead_code)]
+#[allow(dead_code)]
 fn extract_xlsx(path: &Path) -> Result<String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let mut text = String::new();
@@ -883,7 +920,9 @@ fn extract_xlsx(path: &Path) -> Result<String> {
 
     Ok(text)
 }
+#[allow(dead_code)]
 
+#[allow(dead_code)]
 fn extract_pptx(path: &Path) -> Result<String> {
     let file = std::fs::File::open(path).context("failed to open PPTX")?;
     let mut archive = zip::ZipArchive::new(file).context("failed to read PPTX as ZIP")?;

@@ -191,6 +191,13 @@ export default function Settings() {
           )}
         </Section>
 
+        <Section title={t('doc_engine')}>
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            <span className="font-semibold text-gray-900 dark:text-gray-100">AnyDoc</span>
+            {' '}— {t('doc_engine_desc')}
+          </p>
+        </Section>
+
         <Section title={t('libreoffice_path')}>
           <div className="flex gap-2">
             <input
