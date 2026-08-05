@@ -280,6 +280,11 @@ fn normalize_for_watermark(text: &str) -> String {
             {
                 continue;
             }
+            // Short pure-digit sequences (<5 chars) are PDF coordinate
+            // garbage, not meaningful content. Skip them.
+            if slice.chars().all(|c| c.is_ascii_digit()) && slice.len() <= 4 {
+                continue;
+            }
             i = start;
         }
         out.push(c);
