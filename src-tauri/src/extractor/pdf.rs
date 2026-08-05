@@ -266,6 +266,14 @@ impl PdfExtractor {
             log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
             return Ok(merged);
         }
+        // lopdf can produce whitespace-only text on Quartz/CFF PDFs —
+        // pdftotext handles these correctly
+        if is_garbled {
+            if let Some(text) = try_pdftotext_extract(path) {
+                log::info!("[PDF] {:?}: pdftotext recovered {} chars from garbled text", path.file_name(), text.len());
+                return Ok(text);
+            }
+        }
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
