@@ -3187,6 +3187,7 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "windows",
  "zip",
 ]
 
