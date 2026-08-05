@@ -558,6 +558,17 @@ impl Scanner {
                     .with_context(|| format!("failed to stat {path_str}"))?;
                 let mtime = mtime_micros(&meta).unwrap_or(0);
                 let size = meta.len();
+
+                // Skip files already marked as failed — soffice side-effects
+                // (mtime bump, lock-file create/delete) would otherwise
+                // trigger an infinite re-index loop on broken docs.
+                if let Some(rec) = tracker::get_file_by_path(&conn, &rel_path)? {
+                    if rec.indexed == 2 {
+                        // Failed — skip to avoid infinite re-index loop
+                        return Ok(());
+                    }
+                }
+
                 let file_id = tracker::upsert_file(&conn, &rel_path, &event.dir_id, mtime, size, None)?;
                 drop(conn);
                 match self.indexer.index_file(&file_id, file_path, &event.dir_id) {
