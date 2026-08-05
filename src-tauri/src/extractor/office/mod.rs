@@ -713,8 +713,8 @@ impl OfficeExtractor {
                 Ok(md)
             }
             Ok(_) => {
-                log::warn!("[OFFICE] anydoc empty for {:?}, falling to LO", path.file_name());
-                Self::lo_fallback(path)
+                log::info!("[OFFICE] anydoc empty for {:?} (empty/corrupted file)", path.file_name());
+                Ok(String::new())
             }
             Err(anydoc::ConvertError::Encrypted) => {
                 Err(anyhow::anyhow!("此文件已加密，无法读取内容"))
