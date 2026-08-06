@@ -55,6 +55,10 @@ objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSDictionary"] }
 objc2-vision = { version = "0.3", features = ["VNRecognizeTextRequest", "VNRequestHandler", "VNTypes", "VNDefines"] }
 anydoc = "0.1.6"
+tar = "0.4.46"
+flate2 = "1.1.9"
+bzip2 = "0.6.1"
+xz2 = "0.1.7"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [

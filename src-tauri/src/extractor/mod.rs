@@ -1,4 +1,5 @@
 pub mod apple_vision;
+pub mod archive;
 mod image;
 pub mod ocr;
 pub mod office;
@@ -22,6 +23,7 @@ static PDF_EXTRACTOR: LazyLock<pdf::PdfExtractor> = LazyLock::new(pdf::PdfExtrac
 static OFFICE_EXTRACTOR: LazyLock<office::OfficeExtractor> =
     LazyLock::new(office::OfficeExtractor::new);
 static IMAGE_EXTRACTOR: LazyLock<image::ImageExtractor> = LazyLock::new(image::ImageExtractor::new);
+static ARCHIVE_EXTRACTOR: LazyLock<archive::ArchiveExtractor> = LazyLock::new(archive::ArchiveExtractor::new);
 
 /// Dispatch text extraction based on file extension.
 /// `lang` is the OCR language for PDF/image extraction (from directory config
@@ -47,6 +49,10 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
             let e = engine.unwrap_or(ocr::OcrEngineType::PaddleOCR);
             ocr::ocr_image_with_engine(path, &e, lang)
         }
+        // Archives
+        "zip" | "tar" | "tgz" | "tbz2" | "txz" | "gz" | "bz2" | "xz" => {
+            ARCHIVE_EXTRACTOR.extract_archive(path, lang)
+        }
         // Unknown format: try reading as plain text
         _ => match std::fs::read_to_string(path) {
             Ok(text) if !text.trim().is_empty() => Ok(text),
@@ -64,7 +70,8 @@ pub fn classify_ext(ext: &str) -> &'static str {
         "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" => "office",
         "txt" | "md" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini"
         | "cfg" | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql"
-        | "sh" | "bat" | "ps1" | "env" | "conf" | "properties" => "text",
+        |         "sh" | "bat" | "ps1" | "env" | "conf" | "properties" => "text",
+        "zip" | "tar" | "tgz" | "tbz2" | "txz" | "gz" | "bz2" | "xz" => "archive",
         _ => "unknown",
     }
 }
@@ -75,6 +82,7 @@ pub fn get_supported_extensions() -> Vec<&'static str> {
         "txt", "md", "csv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "log", "py",
         "rs", "ts", "js", "html", "css", "sql", "sh", "bat", "ps1", "env", "conf", "properties",
         "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif",
+        "zip", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz",
     ]
 }
 
