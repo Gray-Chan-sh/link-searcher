@@ -55,8 +55,19 @@ impl Extractor for TextExtractor {
                 if body[..body.len().min(BINARY_CHECK_SIZE)].contains(&0x00) {
                     return Ok(String::new());
                 }
-                // Lossy fallback for text files with encoding issues
-                Ok(String::from_utf8_lossy(body).into_owned())
+                // Try GBK/GB18030 for Chinese text files without BOM
+                let (gbk, _, had_errors) = encoding_rs::GBK.decode(body);
+                if !had_errors {
+                    return Ok(gbk.into_owned());
+                }
+                let lossy = String::from_utf8_lossy(body).into_owned();
+                // Prefer GBK if it produces fewer replacement chars than lossy UTF-8
+                let gbk_repl = gbk.chars().filter(|c| *c == '\u{FFFD}').count();
+                let utf8_repl = lossy.chars().filter(|c| *c == '\u{FFFD}').count();
+                if gbk_repl < utf8_repl {
+                    return Ok(gbk.into_owned());
+                }
+                Ok(lossy)
             }
         }
     }
