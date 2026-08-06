@@ -12,6 +12,8 @@
 
 - **日志清空改为截断**：`clear_logs` 不再覆盖 `app.log`（破坏 logger 句柄），改为写 `log_marker` 时间戳；`get_logs` 只返回标记之后的行（`src-tauri/src/commands/logs.rs`）
 
+- **性能日志**：`batch_index` 新增 Phase 1/2 分阶段计时和吞吐量统计，每 100 文件或 30 秒汇报进度（文件/s、MB/s、成功/失败数）。`archive.rs` 新增压缩包提取耗时和条目数统计（`src-tauri/src/indexer.rs`、`src-tauri/src/extractor/archive.rs`）
+
 - **`is_watermark_text` 对中文文本误判**：原算法用字符集 Jaccard 相似度判断，但中文常用字仅两三千，任意两页的字符集重叠度天然高，导致 182 页财报被误判为水印，触发 OCR 回退。修复：改为归一化前缀精确比较 — 取每页前 300 字符，剔除 hex 长串（验证码/UUID）、日期、URL、空白后逐页对比，>80% 连续页归一化前缀相同时才判定水印。附带：`ocr_pdf_via_pdfimages` 结束时检查有效 OCR 页数，少于总页数一半时返回 Err，回退到 pdftoppm，防止 182 页文字 PDF 因仅 1 页有嵌入图而被截断（`src-tauri/src/extractor/pdf.rs`）
 
 **根因诊断**（受控实验证伪三种压制方案）：
