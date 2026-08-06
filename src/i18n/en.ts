@@ -72,7 +72,6 @@ const en: Record<string, string> = {
     // Shared UI
     all: 'All',
     all_types: 'All Types',
-    refresh: 'Refresh',
     failed: 'Failed',
     error: 'Error',
     index: 'Index',
