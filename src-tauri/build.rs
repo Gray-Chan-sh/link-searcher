@@ -33,5 +33,20 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");
 
+    // Copy poppler binaries into resources for app-bundle packaging
+    let bin_dir = std::path::PathBuf::from("poppler-bin");
+    let _ = std::fs::create_dir_all(&bin_dir);
+    for bin in ["pdftoppm", "pdfimages", "pdfinfo", "pdftotext"] {
+        for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let src = std::path::PathBuf::from(prefix).join(bin);
+            if src.exists() {
+                let dst = bin_dir.join(bin);
+                let _ = std::fs::copy(&src, &dst);
+                break;
+            }
+        }
+    }
+    println!("cargo:rustc-env=POPPLER_BIN_DIR=poppler-bin");
+
     tauri_build::build()
 }

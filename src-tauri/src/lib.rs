@@ -360,12 +360,6 @@ fn run_with_config(app_config: config::AppConfig) {
 
                 log::info!("[STARTUP] 检查系统依赖...");
 
-                // Clear any LSUIElement leftover from a previous crashed scan.
-                // (LoBackgroundGuard::enter has been removed — we proved
-                //  it cannot suppress the Dock icon; batching now reduces
-                //  the icon count by 95%+.)
-                crate::extractor::office::ensure_lo_background_mode();
-
                 let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
                 let lo_ok = office::is_libreoffice_available();
 

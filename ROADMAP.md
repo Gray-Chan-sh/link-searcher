@@ -46,6 +46,7 @@
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
 - [ ] **poppler-utils 零安装**：将 pdftoppm/pdfimages 打包进 app bundle
 - [ ] **损坏文件优雅降级**：indexer 层区分"加密""损坏""格式不支持"，日志 warn 不 error
+- [ ] **索引会话日志**：每次全量/增量扫描单独记一份日志文件（`index-<timestamp>.log`），记录[扫描阶段/文件数/耗时/跳过原因/错误详情]，前端可查看最近一次完整索引日志，方便分析索引情况
 - [ ] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：anydoc 已支持这些格式，前端 filter 下拉还没加
 
 ---

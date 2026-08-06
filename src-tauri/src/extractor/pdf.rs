@@ -17,6 +17,11 @@ fn find_poppler_binary(name: &str) -> Option<PathBuf> {
     if Command::new(name).arg("--version").output().is_ok() {
         return Some(PathBuf::from(name));
     }
+    // Build-time bundled copy (dev mode via build.rs, release via app resources)
+    let bundled = PathBuf::from(env!("POPPLER_BIN_DIR")).join(name);
+    if bundled.exists() && Command::new(&bundled).arg("--version").output().is_ok() {
+        return Some(bundled);
+    }
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         let candidate = PathBuf::from(prefix).join(name);
         if candidate.exists() && Command::new(&candidate).arg("--version").output().is_ok() {
@@ -668,6 +673,7 @@ fn extract_and_ocr_page_via_pdfimages(
 }
 
 impl Extractor for PdfExtractor {
+    /// Prefer [`extract_with_lang`] for language-aware extraction.
     fn extract(&self, path: &Path) -> Result<String> {
         self.extract_with_lang(path, "eng", None)
     }

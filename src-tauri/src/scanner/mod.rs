@@ -176,7 +176,10 @@ impl Scanner {
             on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
 
             if processed % 100 == 0 {
-                log::info!("[SCAN] 进度 [{processed}/{total}]");
+                let elapsed = start.elapsed().as_secs_f64();
+                let rate = processed as f64 / elapsed.max(0.001);
+                let eta = (total - processed) as f64 / rate.max(0.001);
+                log::info!("[SCAN] 进度 [{processed}/{total}] {:.1}s, {:.0} f/s, ETA {:.0}s", elapsed, rate, eta);
             }
             progress(ScanProgress { total, processed, errors, current_file: String::new(), phase: "scan" });
         }
