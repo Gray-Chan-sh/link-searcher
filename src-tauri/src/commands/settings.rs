@@ -62,3 +62,8 @@ pub async fn update_settings(
     }
     Ok(())
 }
+
+#[tauri::command]
+pub fn get_version() -> String {
+    env!("GIT_VERSION").to_string()
+}

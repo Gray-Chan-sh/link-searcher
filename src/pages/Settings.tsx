@@ -6,7 +6,7 @@ import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
-import { checkDependencies, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
+import { checkDependencies, getVersion, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -34,7 +34,12 @@ export default function Settings() {
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
+  const [version, setVersion] = useState<string>('')
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => {})
+  }, [])
 
   useEffect(() => {
     listOcrEngines().then(setOcrEngines).catch(() => {})
@@ -410,6 +415,12 @@ export default function Settings() {
             ))}
           </div>
         </Section>
+
+        {version && (
+          <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-2">
+            git: {version}
+          </div>
+        )}
       </div>
     </div>
   )
