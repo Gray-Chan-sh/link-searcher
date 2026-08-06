@@ -1,49 +1,73 @@
 # Link-Searcher 路线图
 
-> 最后更新：2026-08-05
+> 最后更新：2026-08-06
+
+---
+
+## ✅ 本轮已完成
+
+- [x] **AnyDoc 集成**：Office 格式和文字 PDF 统一用 anydoc，LO 降为备用
+- [x] **压缩包提取**：zip/tar/tar.gz/tgz/tar.bz2/tbz2/tar.xz/txz/gz/bz2/xz
+- [x] **PDF 扫描水印检测**：`has_scan_images()` 结构检测替代字符集 Jaccard
+- [x] **PDF 图像层 OCR**：pdfimages 提取原始扫描件，绕过 pdftoppm 文字层渲染
+- [x] **GBK 文本编码检测**：非 UTF-8 中文文件自动识别
+- [x] **Git 版本号**：启动日志和设置页显示 commit hash + 时间
+- [x] **日志清空改截断**：写时间戳标记，不破坏 logger 句柄
+- [x] **批量索引进度可见**：Phase 1 提取完成即标 indexed=3，UI 实时刷新
+- [x] **浏览页刷新按钮**
+- [x] **预览面板高度填充**
 
 ---
 
 ## P0 — 已知缺陷（应尽快修）
 
-- [ ] **PdfExtractor trait impl 硬编码 `"eng"`**：`pdf.rs:232` 的 `extract()` 里 `extract_with_lang(path, "eng", None)` 不读全局 `ocr_lang` 设置。虽然当前调用链都走 `extract_with_lang`，但作为公共接口是隐藏 bug。
-- [ ] **LoBackgroundGuard 死代码清理**：`enter()` 和 `Drop` 已证实无效且修改已签名 app 的 Info.plist 破坏签名。三处调用已移除，但 struct/impl 定义仍在 `office/mod.rs`，应整块删除。
-- [ ] **Semgrep WARNING：`unwrap`/`expect` 使用**：完整扫描下存在若干 WARNING 级发现（锁中毒、未处理错误路径），应逐步消除。
+- [ ] **PdfExtractor trait impl 硬编码 `"eng"`**：`pdf.rs` 的 `extract()` 不读全局 `ocr_lang` 设置
+- [ ] **LoBackgroundGuard 死代码清理**：`enter()`/`Drop` 已证实无效，struct 定义仍在 `office/mod.rs`
+- [ ] **Semgrep WARNING**：`unwrap`/`expect` 若干处应逐步消除
 
 ---
 
-## P1 — 性能优化（已识别瓶颈，有明确方案）
+## P1 — 性能优化
 
-- [ ] **LO 批次轮询粒度优化**：当前 `poll_lo_outputs` 用 500ms 间隔 + 直接 exec。可改为 200ms 间隔，每文件少等 ~300ms。批次大小从 32 调大也能减少启动次数。
-- [ ] **大文件 MD5 优化**：当前 `indexer.rs` 对流式 MD5 已做了首尾 1MB 优化（>100MB 文件），但批量扫描时 `par_iter` 下多文件同时读可能产生 IO 竞争。可考虑 IO 线程池限流。
-- [ ] **启动扫描缩短冷启动**：`startup_scan` 目前同步阻塞（lib.rs 线程内串行），此时前端 UI 虽然能显示但无数据。可改为异步分批提交、逐步显示结果。
-- [ ] **Tantivy reader 缓存刷新策略**：当前 `IndexManager` 在 commit 后需要手动 rebuild reader。频繁 commit（每 100 文件）可能产生 reader 重建开销。可评估 `IndexReader::reopen()` 替代完全重建。
+- [ ] **OCR 引擎并发数可配置**：当前 Rayon 线程池 + 2 引擎池，大文件集可调高并行度
+- [ ] **IO 竞争缓解**：批量扫描时 `par_iter` 多文件同时读可能产生 IO 竞争，可考虑限流
+- [ ] **启动扫描异步化**：当前同步阻塞，可分批提交、逐步显示结果
+- [ ] **Tantivy reader 刷新**：频繁 commit 后 rebuild reader 有开销，可用 `reopen()`
 
 ---
 
 ## P2 — 功能增强
 
-- [ ] **搜索结果预览内高亮命中关键词**：当前预览面板只展示全文，无命中位置标注。
-- [ ] **PDF 原文高亮渲染**：搜索结果中展示 PDF 页面截图 + OCR 文字对应区域高亮。
-- [ ] **增量扫描预计剩余时间**：前端进度条目前只显示 "已处理/总文件"，可基于平均速度估算剩余时间。
-- [ ] **搜索历史与收藏**：`search_history` 表已建但前端无入口。可加历史下拉 + 常用搜索置顶。
-- [ ] **文件类型统计页增强**：`FileTypes.tsx` 当前只显示扩展名分布。可加各类型索引状态（已索引/待处理/失败数）和体积占比饼图。
-- [ ] **纯 Rust .doc 解析**：探索 `doc-rs` 或类似 crate 替代 LibreOffice 处理老式 .doc 二进制格式。成功则可彻底移除 LO 依赖。
-- [ ] **批量导出优化**：当前 CSV 导出一次性把全部结果加载到内存。超大数据集（10 万+）可能 OOM。改为流式写入 + 分片。
+- [ ] **搜索结果关键词高亮**：预览面板标注命中位置
+- [ ] **增量扫描剩余时间估算**：基于平均速度预测
+- [ ] **搜索历史前端入口**：`search_history` 表已建，加下拉 + 常用置顶
+- [ ] **文件类型统计增强**：加索引状态分解（已索引/待处理/失败数）+ 体积占比
+- [ ] **批量导出流式化**：10 万+ 结果集不 OOM，改为分片写入
+- [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
+- [ ] **poppler-utils 零安装**：将 pdftoppm/pdfimages 打包进 app bundle
+- [ ] **损坏文件优雅降级**：indexer 层区分"加密""损坏""格式不支持"，日志 warn 不 error
+- [ ] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：anydoc 已支持这些格式，前端 filter 下拉还没加
 
 ---
 
 ## P3 — 远期规划
 
-- [ ] **向量搜索 / AI 增强**：集成本地 embedding 模型（如 ONNX 格式的 all-MiniLM），支持语义搜索（"找关于合同纠纷的文件"而非关键词匹配）。
-- [ ] **监控目录热重载**：目录增删时不需重启扫描。`dir_config` 变更后自动增量同步。
-- [ ] **插件化的提取器**：用户可自定义文件格式提取器（Lua/WASM），不依赖 Rust 重新编译。
-- [ ] **iOS / Android 只读客户端**：本地网络共享索引数据，手机端只做搜索和预览。
-- [ ] **多语言界面**：当前仅中/英文。可扩展日/韩文（jpn/kor OCR 已支持，UI 还缺）。
-- [ ] **命令行增强**：`link-searcher index --dir /path`、`link-searcher status` 等 CLI 子命令，支持无 GUI 场景（NAS、服务器）。
-- [ ] **索引增量同步 / 备份兼容性**：不同版本间的索引格式兼容校验 + 自动重建。
-- [ ] **大模型内容分析与学习**：对已索引文档做 RAG（检索增强生成）、自动摘要、主题聚类、跨文件关联发现。可本地部署（llama.cpp / Ollama）或接云端 API。典型场景："这批判决书的核心争议点是什么""对比这三份合同的差异"。
-- [ ] **音频 STT（语音转文字）**：支持 `.mp3` `.wav` `.m4a` `.aac` 等音频格式的语音识别，结果进入全文索引。
-  - **首选引擎：Fun-ASR-Nano**（阿里通义实验室，8 亿参数，Apache 2.0 开源）——原生支持**吴语（上海话）**、粤语、闽语等 7 大汉语方言 + 26 种地域口音，50 万小时方言数据训练。远场降噪 93% 准确率。ModelScope / HuggingFace 可直接下载。
-  - **备选引擎**：SenseVoice-Small（5 语言，速度快 15×）或 Whisper.cpp（本地离线）。SenseVoice-Small 不支持上海话；SenseVoice-Large 支持 50+ 语言但未声明吴语。
-  - 上海话专项评估需建测试集：用 Fun-ASR-Nano 对真实上海话录音测 CER，低于 15% 即为可用。
+- [ ] **向量搜索 / AI 增强**：本地 embedding（ONNX all-MiniLM），语义搜索
+- [ ] **监控目录热重载**：`dir_config` 变更后自动增量同步
+- [ ] **插件化提取器**：用户自定义格式（Lua/WASM），不依赖 Rust 重新编译
+- [ ] **多语言界面**：日/韩文（jpn/kor OCR 已支持，UI 缺）
+- [ ] **CLI 增强**：`link-searcher index --dir` 等子命令，支持无 GUI 场景
+- [ ] **RAG 内容分析**：本地大模型做摘要、主题聚类、跨文件关联
+- [ ] **音频 STT**：`.mp3` `.wav` 语音识别（Fun-ASR-Nano 支持吴语/上海话）
+
+---
+
+## 📊 本次工作统计（Aug 5-6）
+
+| 类别 | 数量 |
+|------|:--:|
+| Commits | 30+ |
+| 新增模块 | `archive.rs` |
+| 重构模块 | `pdf.rs`, `office/mod.rs`, `text.rs`, `indexer.rs`, `logs.rs` |
+| 新增依赖 | `anydoc`, `tar`, `flate2`, `bzip2`, `xz2` |
+| UI 改动 | Browse 刷新按钮、设置页 AnyDoc 段、版本号显示、预览高度 |
