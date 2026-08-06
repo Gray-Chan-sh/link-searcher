@@ -192,22 +192,11 @@ impl PdfExtractor {
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<String> {
         log::info!("[PDF] extracting {:?}", path.file_name());
-        // Try anydoc/pdf-inspector first — handles Quartz/CFF PDFs and
-        // text-based PDFs that lopdf struggles with.
-        match anydoc::to_markdown(path) {
-            Ok(md) if md.len() > 100 => {
-                log::info!("[PDF] {:?}: anydoc {} chars", path.file_name(), md.len());
-                return Ok(md);
-            }
-            Ok(_) => log::info!("[PDF] {:?}: anydoc returned empty/short, falling to lopdf", path.file_name()),
-            Err(e) => log::info!("[PDF] {:?}: anydoc {e}, falling to lopdf", path.file_name()),
-        }
-
         let doc = match lopdf::Document::load(path) {
             Ok(d) => d,
             Err(e) => {
                 log::warn!(
-                    "[PDF] {:?}: lopdf failed to parse ({e}), trying pdftotext fallback",
+                    "[PDF] {:?}: lopdf failed to parse ({e}), trying pdftotext/anydoc fallback",
                     path.file_name()
                 );
                 // Digital PDFs often have clean text accessible via pdftotext
@@ -218,6 +207,15 @@ impl PdfExtractor {
                         text.len()
                     );
                     return Ok(text);
+                }
+                // anydoc handles Quartz/CFF PDFs that lopdf and pdftotext both fail on
+                match anydoc::to_markdown(path) {
+                    Ok(md) if md.len() > 100 => {
+                        log::info!("[PDF] {:?}: anydoc fallback {} chars", path.file_name(), md.len());
+                        return Ok(md);
+                    }
+                    Ok(_) => log::info!("[PDF] {:?}: anydoc returned empty, falling to image OCR", path.file_name()),
+                    Err(anydoc_err) => log::info!("[PDF] {:?}: anydoc {anydoc_err}, falling to image OCR", path.file_name()),
                 }
                 log::info!(
                     "[PDF] {:?}: pdftotext unavailable/watermarked, falling to image OCR",
