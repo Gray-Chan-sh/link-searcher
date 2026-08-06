@@ -34,7 +34,7 @@ export default function Settings() {
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
-  const [version, setVersion] = useState<string>('')
+  const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -417,8 +417,8 @@ export default function Settings() {
         </Section>
 
         {version && (
-          <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-2">
-            git: {version}
+          <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">
+            git: {version.hash} ({version.time})
           </div>
         )}
       </div>

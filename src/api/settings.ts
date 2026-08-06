@@ -46,6 +46,6 @@ export async function checkDependencies(): Promise<DependencyStatus[]> {
     return invoke<DependencyStatus[]>('check_dependencies')
 }
 
-export async function getVersion(): Promise<string> {
-    return invoke<string>('get_version')
+export async function getVersion(): Promise<{ hash: string; time: string }> {
+    return invoke<{ hash: string; time: string }>('get_version')
 }

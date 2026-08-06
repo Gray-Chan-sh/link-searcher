@@ -133,7 +133,8 @@ fn run_with_config(app_config: config::AppConfig) {
             .format_timestamp_secs()
             .init();
             let version = env!("GIT_VERSION");
-            log::info!("application started (git: {version})");
+            let commit_time = env!("GIT_COMMIT_TIME");
+            log::info!("application started (git: {version}, {commit_time})");
 
             // One-time migration: rename legacy `index` dir to `.ls-index`
             let legacy_index = data_dir.join("index");

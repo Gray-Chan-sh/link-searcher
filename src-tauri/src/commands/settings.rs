@@ -64,6 +64,9 @@ pub async fn update_settings(
 }
 
 #[tauri::command]
-pub fn get_version() -> String {
-    env!("GIT_VERSION").to_string()
+pub fn get_version() -> serde_json::Value {
+    serde_json::json!({
+        "hash": env!("GIT_VERSION"),
+        "time": env!("GIT_COMMIT_TIME"),
+    })
 }
