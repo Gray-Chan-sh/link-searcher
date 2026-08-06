@@ -364,7 +364,7 @@ export default function Browse() {
           </div>
         )}
         {preview && !previewLoading && (
-          <div className="p-4">
+           <div className="p-4 min-h-full">
             {preview.file_type === 'image' && preview.image_path && (
               <div className="mb-3 flex justify-center">
                 <img
