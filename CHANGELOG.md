@@ -8,6 +8,10 @@
 
 - **集成 AnyDoc 作为主导擎**：替换 calamine/lopdf/quick-xml + LibreOffice 多工具链，统一为 AnyDoc（`firecrawl/anydoc` v0.1.6，纯 Rust，MIT 协议）。20 种 Office 格式（doc/docx/xls/xlsx/ppt/pptx/odt/rtf/epub/csv）均优先用 anydoc，失败回退 LibreOffice；文字 PDF 用 anydoc/pdf-inspector 优先，解决 Quartz/CFF PDF 的 `lopdf` 空格问题。提取速度 ~5ms/文件，输出统一为 Markdown。设置页新增"文档提取引擎"段，LibreOffice 降级标注为备用引擎。旧原生提取器保留代码并标 `#[allow(dead_code)]` 待后续清理（`src-tauri/Cargo.toml`、`src-tauri/src/extractor/office/mod.rs`、`tests.rs`、`pdf.rs`、`src/pages/Settings.tsx`、`src/i18n/{zh,en}.ts`）
 
+- **压缩包提取**：新增 `extractor/archive.rs`，支持 zip/tar/tar.gz/tgz/tar.bz2/tbz2/tar.xz/txz/gz/bz2/xz 全纯 Rust 提取。枚举条目后文本文件直接读取，Office/PDF/图片解压到临时目录走现有提取管线（含 OCR），不支持格式和加密文件跳过并标注原因。100MB/1000 文件/50MB 单文件上限防炸弹。输出用 `─── path/in/zip.pdf ───` 分隔（`src-tauri/src/extractor/archive.rs`、`mod.rs`、`Cargo.toml`、`Cargo.lock`）
+
+- **日志清空改为截断**：`clear_logs` 不再覆盖 `app.log`（破坏 logger 句柄），改为写 `log_marker` 时间戳；`get_logs` 只返回标记之后的行（`src-tauri/src/commands/logs.rs`）
+
 - **`is_watermark_text` 对中文文本误判**：原算法用字符集 Jaccard 相似度判断，但中文常用字仅两三千，任意两页的字符集重叠度天然高，导致 182 页财报被误判为水印，触发 OCR 回退。修复：改为归一化前缀精确比较 — 取每页前 300 字符，剔除 hex 长串（验证码/UUID）、日期、URL、空白后逐页对比，>80% 连续页归一化前缀相同时才判定水印。附带：`ocr_pdf_via_pdfimages` 结束时检查有效 OCR 页数，少于总页数一半时返回 Err，回退到 pdftoppm，防止 182 页文字 PDF 因仅 1 页有嵌入图而被截断（`src-tauri/src/extractor/pdf.rs`）
 
 **根因诊断**（受控实验证伪三种压制方案）：
