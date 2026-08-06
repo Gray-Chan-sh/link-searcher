@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 
@@ -59,6 +60,7 @@ impl ArchiveExtractor {
     }
 
     fn extract_zip(&self, path: &Path, lang: &str) -> Result<String> {
+        let started = Instant::now();
         let file = fs::File::open(path).context("open zip")?;
         let mut archive = zip::ZipArchive::new(BufReader::new(file)).context("read zip")?;
 
@@ -94,6 +96,11 @@ impl ArchiveExtractor {
 
             append_entry(&mut output, &entry_name, &buf, lang)?;
         }
+        log::info!(
+            "[ARCHIVE] zip: {} entries extracted in {:.1}s",
+            file_count,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(output)
     }
 
@@ -114,6 +121,7 @@ impl ArchiveExtractor {
         _path: &Path,
         lang: &str,
     ) -> Result<String> {
+        let started = Instant::now();
         let mut output = String::new();
         let mut total_size: u64 = 0;
         let mut file_count: usize = 0;
@@ -151,6 +159,12 @@ impl ArchiveExtractor {
 
             append_entry(&mut output, &entry_name, &buf, lang)?;
         }
+        log::info!(
+            "[ARCHIVE] tar: {} entries ({:.1}MB) extracted in {:.1}s",
+            file_count,
+            total_size as f64 / 1_048_576.0,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(output)
     }
 

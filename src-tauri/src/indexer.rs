@@ -9,6 +9,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use md5::Digest;
@@ -294,8 +295,11 @@ impl IndexerService {
     ) -> Result<Vec<BatchResult>> {
         let db = self.db.clone();
         let total = jobs.len() as u64;
+        let started = Instant::now();
 
         // ── Phase 1: parallel extraction ──────────────────────────────
+        let phase1_start = Instant::now();
+        log::info!("[INDEX] Phase 1: 并行提取 {} 文件", total);
         let extracted: Vec<Result<ExtractedData, (String, String)>> = jobs
             .par_iter()
             .map(|job| {
@@ -310,7 +314,17 @@ impl IndexerService {
             })
             .collect();
 
+        let phase1_elapsed = phase1_start.elapsed();
+        let phase1_ok = extracted.iter().filter(|r| r.is_ok()).count();
+        let phase1_err = extracted.iter().filter(|r| r.is_err()).count();
+        log::info!(
+            "[PERF] Phase 1 完成: {phase1_ok} 成功 {phase1_err} 失败, 耗时 {:.1}s ({:.1} 文件/s)",
+            phase1_elapsed.as_secs_f64(),
+            total as f64 / phase1_elapsed.as_secs_f64().max(0.001),
+        );
+
         // ── Phase 2: serial Tantivy write + DB tracking ──────────────
+        let phase2_start = Instant::now();
         let mut guard = self.lock_writer()?;
         let writer = guard
             .as_mut()
@@ -319,7 +333,11 @@ impl IndexerService {
 
         let mut results = Vec::with_capacity(total as usize);
         let mut success_count = 0u64;
+        let mut error_count = 0u64;
         let mut done = 0u64;
+        let mut total_bytes: u64 = 0;
+        let mut last_report = done;
+        let mut last_report_time: u64 = 0;
 
         for extraction in extracted {
             if self.cancel_scan.load(Ordering::Acquire) {
@@ -375,6 +393,7 @@ impl IndexerService {
 
                     log::info!("[INDEX] 完成: {}", data.file_name);
                     success_count += 1;
+                    total_bytes += data.file_size;
                     results.push(BatchResult {
                         file_id,
                         success: true,
@@ -382,6 +401,7 @@ impl IndexerService {
                     });
                 }
                 Err((file_id, err)) => {
+                    error_count += 1;
                     log::error!("[INDEX] 提取失败: {}", err);
                     let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
                     results.push(BatchResult {
@@ -391,7 +411,36 @@ impl IndexerService {
                     });
                 }
             }
+            // Progress report every 100 files or 30 seconds
+            if done - last_report >= 100
+                || (done > 0 && phase2_start.elapsed().as_secs() > last_report_time + 30)
+            {
+                let elapsed = phase2_start.elapsed().as_secs_f64();
+                log::info!(
+                    "[PERF] Phase 2: {done}/{total} ({:.1}%), {success_count} ok {error_count} err, {:.1}MB, {:.1} 文件/s, {:.1}s",
+                    done as f64 / total as f64 * 100.0,
+                    total_bytes as f64 / 1_048_576.0,
+                    done as f64 / elapsed.max(0.001),
+                    elapsed,
+                );
+                last_report = done;
+                last_report_time = phase2_start.elapsed().as_secs();
+            }
         }
+
+        let phase2_elapsed = phase2_start.elapsed();
+        log::info!(
+            "[PERF] Phase 2 完成: {total} 文件, {success_count} 成功 {error_count} 失败, {:.1}MB, 耗时 {:.1}s ({:.1} 文件/s)",
+            total_bytes as f64 / 1_048_576.0,
+            phase2_elapsed.as_secs_f64(),
+            total as f64 / phase2_elapsed.as_secs_f64().max(0.001),
+        );
+        let total_elapsed = started.elapsed();
+        log::info!(
+            "[PERF] 批索引总计: {total} 文件, 耗时 {:.1}s ({:.1} 文件/s)",
+            total_elapsed.as_secs_f64(),
+            total as f64 / total_elapsed.as_secs_f64().max(0.001),
+        );
 
         // Periodic auto-commit every N successful files.
         if success_count > 0 {
