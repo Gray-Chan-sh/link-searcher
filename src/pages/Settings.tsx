@@ -402,20 +402,6 @@ export default function Settings() {
           />
         </Section>
 
-        <Section title="外部依赖">
-          <div className="space-y-2">
-            <DepRow name="PaddleOCR（内置）" status="✅" cmd="" />
-            {deps.filter(d => d.command !== 'tesseract').map(dep => (
-              <DepRow
-                key={dep.command}
-                name={dep.name}
-                status={dep.available ? '✅' : '❌'}
-                cmd={filterGuide(dep.install_guide)}
-              />
-            ))}
-          </div>
-        </Section>
-
         {version && (
           <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">
             git: {version.hash} ({version.time})
