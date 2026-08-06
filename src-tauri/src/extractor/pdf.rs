@@ -17,10 +17,19 @@ fn find_poppler_binary(name: &str) -> Option<PathBuf> {
     if Command::new(name).arg("--version").output().is_ok() {
         return Some(PathBuf::from(name));
     }
-    // Build-time bundled copy (dev mode via build.rs, release via app resources)
-    let bundled = PathBuf::from(env!("POPPLER_BIN_DIR")).join(name);
-    if bundled.exists() && Command::new(&bundled).arg("--version").output().is_ok() {
-        return Some(bundled);
+    // Dev mode: look relative to project root
+    let dev_path = PathBuf::from("poppler-bin").join(name);
+    if dev_path.exists() && Command::new(&dev_path).arg("--version").output().is_ok() {
+        return Some(dev_path);
+    }
+    // Release mode: look next to the executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundle_path = dir.join(name);
+            if bundle_path.exists() && Command::new(&bundle_path).arg("--version").output().is_ok() {
+                return Some(bundle_path);
+            }
+        }
     }
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         let candidate = PathBuf::from(prefix).join(name);

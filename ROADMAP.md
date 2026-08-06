@@ -32,6 +32,7 @@
 - [ ] **OCR 引擎并发数可配置**：当前 Rayon 线程池 + 2 引擎池，大文件集可调高并行度
 - [ ] **IO 竞争缓解**：批量扫描时 `par_iter` 多文件同时读可能产生 IO 竞争，可考虑限流
 - [ ] **启动扫描异步化**：当前同步阻塞，可分批提交、逐步显示结果
+- [ ] **浏览页动态分页**：根据窗口高度自动计算 `pageSize`（`ResizeObserver`），撑满可视区域，减少翻页次数
 - [ ] **Tantivy reader 刷新**：频繁 commit 后 rebuild reader 有开销，可用 `reopen()`
 
 ---
@@ -47,6 +48,7 @@
 - [ ] **poppler-utils 零安装**：将 pdftoppm/pdfimages 打包进 app bundle
 - [ ] **损坏文件优雅降级**：indexer 层区分"加密""损坏""格式不支持"，日志 warn 不 error
 - [ ] **索引会话日志**：每次全量/增量扫描单独记一份日志文件（`index-<timestamp>.log`），记录[扫描阶段/文件数/耗时/跳过原因/错误详情]，前端可查看最近一次完整索引日志，方便分析索引情况
+- [ ] **浏览页多选**：Cmd/Ctrl+单击(toggle)、Shift+单击(范围)、Cmd/Ctrl+A(全选)，多选后隐藏「打开」「在 Finder 中打开」，支持批量手动索引
 - [ ] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：anydoc 已支持这些格式，前端 filter 下拉还没加
 
 ---

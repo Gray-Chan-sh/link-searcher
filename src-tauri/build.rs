@@ -1,3 +1,4 @@
+use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn git_output(args: &[&str]) -> String {
@@ -37,11 +38,13 @@ fn main() {
     let bin_dir = std::path::PathBuf::from("poppler-bin");
     let _ = std::fs::create_dir_all(&bin_dir);
     for bin in ["pdftoppm", "pdfimages", "pdfinfo", "pdftotext"] {
+        let dst = bin_dir.join(bin);
+        if dst.exists() { continue; }
         for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
             let src = std::path::PathBuf::from(prefix).join(bin);
             if src.exists() {
-                let dst = bin_dir.join(bin);
-                let _ = std::fs::copy(&src, &dst);
+                std::fs::copy(&src, &dst).ok();
+                std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).ok();
                 break;
             }
         }
