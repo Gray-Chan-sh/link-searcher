@@ -405,6 +405,12 @@ impl IndexerService {
                 Err((file_id, err)) => {
                     error_count += 1;
                     log::error!("[INDEX] 提取失败: {}", err);
+                    let etype = classify_error_str(&err, "");
+                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &file_id) {
+                        let _ = crate::db::tracker::log_index_error(
+                            &conn, &file_id, &rec.path, etype, &err,
+                        );
+                    }
                     let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
                     results.push(BatchResult {
                         file_id,
@@ -625,7 +631,13 @@ fn classify_error_str(msg: &str, _ext: &str) -> &'static str {
         "ocr_failed"
     } else if msg.contains("timeout") {
         "timeout"
-    } else if msg.contains("损坏") || msg.contains("加密") || msg.contains("无法读取") {
+    } else if msg.contains("损坏")
+        || msg.contains("加密")
+        || msg.contains("无法读取")
+        || msg.contains("encrypted")
+        || msg.contains("corrupted")
+        || msg.contains("password")
+    {
         "corrupted_or_protected"
     } else if msg.contains("parse") || msg.contains("invalid") || msg.contains("failed to") {
         "parse_error"

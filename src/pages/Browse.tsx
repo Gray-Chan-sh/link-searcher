@@ -194,6 +194,10 @@ export default function Browse() {
             <option value="jpg">JPG</option>
             <option value="jpeg">JPEG</option>
             <option value="pptx">PPTX</option>
+            <option value="ods">ODS</option>
+            <option value="odp">ODP</option>
+            <option value="rtf">RTF</option>
+            <option value="epub">EPUB</option>
             <option value="csv">CSV</option>
           </select>
 

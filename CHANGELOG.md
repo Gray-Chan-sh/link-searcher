@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-08-07（错误分类英文关键词 + 消除 parse_filename 生产 unwrap）
+
+- **加密/损坏英文关键词识别**：`classify_error_str` 增加 `encrypted`/`corrupted`/`password` 英文检测（与中文 `损坏`/`加密` 并列）；批量索引 Phase 1 提取失败分支也调用 `classify_error_str` 并以错误类型写入 `index_errors`，不再只 `mark_failed`（`src-tauri/src/indexer.rs`）
+- **消除生产环境 unwrap**：`parse_filename_prefix` 用 `OnceLock<Regex>` 静态编译正则替代 `Regex::new().unwrap()`，并去掉 `cap.get(0).unwrap()` 改用安全匹配（`src-tauri/src/search/searcher.rs`）
+
+---
+
 ## 2026-08-05（Dock 图标根治：原生优先 + 批量转换取代 LSUIElement hack）
 
 - **集成 AnyDoc 作为主导擎**：替换 calamine/lopdf/quick-xml + LibreOffice 多工具链，统一为 AnyDoc（`firecrawl/anydoc` v0.1.6，纯 Rust，MIT 协议）。20 种 Office 格式（doc/docx/xls/xlsx/ppt/pptx/odt/rtf/epub/csv）均优先用 anydoc，失败回退 LibreOffice；文字 PDF 用 anydoc/pdf-inspector 优先，解决 Quartz/CFF PDF 的 `lopdf` 空格问题。提取速度 ~5ms/文件，输出统一为 Markdown。设置页新增"文档提取引擎"段，LibreOffice 降级标注为备用引擎。旧原生提取器保留代码并标 `#[allow(dead_code)]` 待后续清理（`src-tauri/Cargo.toml`、`src-tauri/src/extractor/office/mod.rs`、`tests.rs`、`pdf.rs`、`src/pages/Settings.tsx`、`src/i18n/{zh,en}.ts`）

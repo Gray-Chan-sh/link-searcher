@@ -1,4 +1,7 @@
+use std::sync::OnceLock;
 use std::time::Instant;
+
+use regex::Regex;
 
 use serde::{Deserialize, Serialize};
 use tantivy::collector::TopDocs;
@@ -491,12 +494,19 @@ impl SearcherWrap {
 /// If multiple `filename:` values are present, the last one wins.
 /// Returns `(Some(value), remaining_query)` if found, or `(None, original_query)` otherwise.
 fn parse_filename_prefix(query: &str) -> (Option<String>, String) {
-    let re = regex::Regex::new(r#"(?i)(?:^|\s)filename:("([^"]+)"|(\S+))"#).unwrap();
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r#"(?i)(?:^|\s)filename:("([^"]+)"|(\S+))"#)
+            .expect("static filename regex is valid")
+    });
     let mut last_value: Option<String> = None;
     let mut segments: Vec<(usize, usize)> = Vec::new(); // (start, end) byte offsets of each match
 
     for cap in re.captures_iter(query) {
-        let m = cap.get(0).unwrap();
+        let m = match cap.get(0) {
+            Some(m) => m,
+            None => continue,
+        };
         let value = cap.get(2).or_else(|| cap.get(3)).map(|m| m.as_str()).unwrap_or("");
         last_value = Some(value.to_string());
         segments.push((m.start(), m.end()));
