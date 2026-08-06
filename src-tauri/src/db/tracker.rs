@@ -254,11 +254,22 @@ pub fn mark_failed(conn: &Connection, file_id: &str, error: &str) -> Result<()> 
     Ok(())
 }
 
+pub fn mark_extracted(conn: &Connection, file_id: &str) -> Result<()> {
+    let n = conn
+        .execute(
+            "UPDATE file_tracking SET indexed=3, updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), file_id],
+        )
+        .context("mark_extracted failed")?;
+    if n == 0 { anyhow::bail!("file not found: {file_id}"); }
+    Ok(())
+}
+
 fn run_stats_query(conn: &Connection, clause: &str, param: Option<&str>) -> Result<IndexStats> {
     let sql = format!(
         "SELECT COUNT(*) t, \
-                COALESCE(SUM(CASE WHEN indexed=1 THEN 1 ELSE 0 END),0) i, \
-                COALESCE(SUM(CASE WHEN indexed IN (0,2) THEN 1 ELSE 0 END),0) p, \
+                COALESCE(SUM(CASE WHEN indexed IN (1,3) THEN 1 ELSE 0 END),0) i, \
+                COALESCE(SUM(CASE WHEN indexed=0 THEN 1 ELSE 0 END),0) p, \
                 COALESCE(SUM(CASE WHEN indexed=2 THEN 1 ELSE 0 END),0) e \
          FROM file_tracking {clause}"
     );
