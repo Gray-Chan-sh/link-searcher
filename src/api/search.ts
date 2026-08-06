@@ -33,6 +33,9 @@ export interface FileTypeStat {
   extension: string
   name: string
   count: number
+  indexed: number
+  pending: number
+  failed: number
 }
 
 export async function search(

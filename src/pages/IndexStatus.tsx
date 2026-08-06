@@ -282,14 +282,20 @@ export default function IndexStatus() {
                   {typeStats.map((t) => (
                     <div key={t.extension} className="flex items-center gap-2">
                       <span className="text-xs w-12 truncate font-medium text-gray-700 dark:text-gray-300">{t.name}</span>
-                      <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                      <div className="flex-1 h-4 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden flex">
                         {status?.total_files && status.total_files > 0 && (
-                          <div className="h-full bg-blue-500 rounded-full transition-all" 
-                                style={{ width: `${(t.count / status.total_files) * 100}%` }} 
-                          />
+                          <>
+                            <div className="h-full bg-green-500 transition-all" style={{ width: `${(t.indexed / status.total_files) * 100}%` }} />
+                            <div className="h-full bg-yellow-400 transition-all" style={{ width: `${(t.pending / status.total_files) * 100}%` }} />
+                            <div className="h-full bg-red-400 transition-all" style={{ width: `${(t.failed / status.total_files) * 100}%` }} />
+                          </>
                         )}
                       </div>
-                      <span className="text-xs text-gray-500 w-10 text-right">{t.count}</span>
+                      <span className="text-xs text-gray-500 w-16 text-right tabular-nums">
+                        <span className="text-green-600">{t.indexed ?? 0}</span>
+                        {t.pending > 0 && <span className="text-yellow-600"> {t.pending}</span>}
+                        {t.failed > 0 && <span className="text-red-500"> {t.failed}</span>}
+                      </span>
                     </div>
                   ))}
                 </div>

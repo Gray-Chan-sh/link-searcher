@@ -23,6 +23,9 @@ pub struct FileTypeStat {
     pub extension: String,
     pub name: String,
     pub count: u64,
+    pub indexed: u64,
+    pub pending: u64,
+    pub failed: u64,
 }
 
 fn file_type_name(ext: &str) -> String {
@@ -300,53 +303,55 @@ pub async fn export_search_results(
         .search(&params)
         .map_err(|e| format!("search failed: {e}"))?;
 
-    let output = match format.as_str() {
+    let tmp_dir = TempDir::new("ls_export").map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let tmp_path = tmp_dir.path().join(format!("export.{}", format));
+    let mut file = std::fs::File::create(&tmp_path).map_err(|e| format!("failed to create export file: {e}"))?;
+    use std::io::Write;
+
+    match format.as_str() {
         "csv" => {
-            let mut csv = String::from("file_name,file_ext,path,score,mtime,file_size\n");
+            writeln!(file, "file_name,file_ext,path,score,mtime,file_size").map_err(|e| format!("write error: {e}"))?;
             for hit in &response.hits {
-                csv.push_str(&format!(
-                    "\"{}\",\"{}\",\"{}\",{},{},{}\n",
+                writeln!(file, "\"{}\",\"{}\",\"{}\",{},{},{}",
                     hit.file_name.replace('"', "\"\""),
                     hit.file_ext.replace('"', "\"\""),
                     hit.path.replace('"', "\"\""),
                     hit.score,
                     hit.mtime,
                     hit.file_size,
-                ));
+                ).map_err(|e| format!("write error: {e}"))?;
             }
-            csv
         }
         _ => {
-            let mut txt = String::new();
             for hit in &response.hits {
-                txt.push_str(&format!("{} ({}): {}\n", hit.file_name, hit.file_ext, hit.snippet));
+                writeln!(file, "{} ({}): {}", hit.file_name, hit.file_ext, hit.snippet).map_err(|e| format!("write error: {e}"))?;
             }
-            txt
         }
     };
-
     drop(searcher);
     drop(mgr);
-
-    let tmp_dir = TempDir::new("ls_export").map_err(|e| format!("failed to create temp dir: {e}"))?;
-    let tmp_path = tmp_dir.path().join(format!("export.{}", format));
-    std::fs::write(&tmp_path, &output).map_err(|e| format!("failed to write export: {e}"))?;
     Ok(tmp_path.to_string_lossy().to_string())
 }
 #[tauri::command]
 pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileTypeStat>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let sql = "SELECT file_ext, COUNT(*) as cnt FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
+    let sql = "SELECT file_ext, COUNT(*) as cnt, COALESCE(SUM(CASE WHEN indexed IN (1,3) THEN 1 ELSE 0 END),0) as idx, COALESCE(SUM(CASE WHEN indexed=0 THEN 1 ELSE 0 END),0) as pnd, COALESCE(SUM(CASE WHEN indexed=2 THEN 1 ELSE 0 END),0) as fld FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
     let mut stmt = conn.prepare(sql).map_err(|e| format!("db prepare error: {e}"))?;
     let mut results = Vec::new();
     let rows = stmt.query_map([], |row| {
         let ext: String = row.get("file_ext")?;
         let cnt: i64 = row.get("cnt")?;
+        let idx: i64 = row.get("idx")?;
+        let pnd: i64 = row.get("pnd")?;
+        let fld: i64 = row.get("fld")?;
         let name = file_type_name(&ext);
         Ok(FileTypeStat {
             extension: ext,
             name,
             count: cnt as u64,
+            indexed: idx as u64,
+            pending: pnd as u64,
+            failed: fld as u64,
         })
     }).map_err(|e| format!("db query error: {e}"))?;
     for row in rows {
