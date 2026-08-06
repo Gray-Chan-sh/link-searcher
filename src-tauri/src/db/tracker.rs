@@ -254,11 +254,11 @@ pub fn mark_failed(conn: &Connection, file_id: &str, error: &str) -> Result<()> 
     Ok(())
 }
 
-pub fn mark_extracted(conn: &Connection, file_id: &str) -> Result<()> {
+pub fn mark_extracted(conn: &Connection, file_id: &str, md5: Option<&str>) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET indexed=3, updated_at=?1 WHERE id=?2",
-            rusqlite::params![chrono::Utc::now().timestamp(), file_id],
+            "UPDATE file_tracking SET indexed=3, md5=?1, updated_at=?2 WHERE id=?3",
+            rusqlite::params![md5, chrono::Utc::now().timestamp(), file_id],
         )
         .context("mark_extracted failed")?;
     if n == 0 { anyhow::bail!("file not found: {file_id}"); }

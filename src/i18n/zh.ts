@@ -72,6 +72,7 @@ const zh: Record<string, string> = {
     // Shared UI
     all: '全部',
     all_types: '全部类型',
+    refresh: '刷新',
     failed: '失败',
     error: '错误',
     index: '索引',

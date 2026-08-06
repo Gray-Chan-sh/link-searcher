@@ -232,6 +232,15 @@ export default function Browse() {
             <option value="ext-asc">{t('ext_az')}</option>
           </select>
 
+          <button
+            onClick={() => loadFiles()}
+            disabled={loading}
+            className="text-xs px-2 py-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-50"
+            title={t('refresh')}
+          >
+            ↻
+          </button>
+
           <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{total.toLocaleString()} {t('files')}</span>
         </div>
 

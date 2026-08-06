@@ -244,7 +244,7 @@ impl IndexerService {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
 
-        let _ = crate::db::tracker::mark_extracted(conn, &job.file_id);
+        let _ = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash));
 
         Ok(ExtractedData {
             file_id: job.file_id.clone(),
