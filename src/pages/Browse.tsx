@@ -10,7 +10,7 @@ import { reindexFile } from '../api/index'
 import { LoadingSpinner } from '../icons'
 
 function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
-  if (indexed === 1) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
+  if (indexed === 1 || indexed === 3) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
   if (indexed === 2) return <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400" title={error_msg ?? undefined}>✗ {t('failed')}</span>
   return <span className="inline-flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">○ {t('pending')}</span>
 }

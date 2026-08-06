@@ -85,7 +85,7 @@ pub async fn list_files_db(
     let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
 
     match filter.as_deref() {
-        Some("indexed") => { wheres.push("indexed = 1"); }
+        Some("indexed") => { wheres.push("indexed IN (1, 3)"); }
         Some("pending") => { wheres.push("indexed = 0"); }
         Some("failed") => { wheres.push("indexed = 2"); }
         _ => {}
