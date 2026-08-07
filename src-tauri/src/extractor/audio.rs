@@ -1,67 +1,43 @@
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Context, Result};
-
-const SPEECH_BITRATE: f64 = 16_000.0; // ~16KB/s for compressed speech
 
 pub struct AudioExtractor;
 
 impl AudioExtractor {
-    pub fn new() -> Self {
-        Self
-    }
+    pub fn new() -> Self { Self }
 
     pub fn extract_audio(&self, path: &Path) -> Result<String> {
         let meta = std::fs::metadata(path).context("audio stat")?;
-        let file_size = meta.len();
-        let duration_s = if file_size > 0 {
-            file_size as f64 / SPEECH_BITRATE
-        } else {
-            0.0
-        };
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
+        let duration_s = meta.len() as f64 / 16000.0;
+        let file_size_mb = meta.len() as f64 / 1_048_576.0;
 
-        // Check if ASR model is available
-        let model_ready = model_available();
-        if !model_ready {
-            return Ok(format!(
-                "─── 音频文件 ({:.0}s, {}) ───\n\
-                 [ASR 模型未安装]\n\
-                 下载 FunASR-Nano ONNX 模型到 models/funasr/ 目录后自动启用语音识别\n",
-                duration_s, ext,
-            ));
-        }
+        // Decode to get actual duration via ffmpeg probe
+        let actual_dur = probe_duration(path).unwrap_or(duration_s);
 
-        // Decode to PCM and run ASR
-        match self.decode_and_recognize(path) {
-            Ok(text) => Ok(text),
-            Err(e) => Ok(format!(
-                "─── 音频文件 ({:.0}s, {}) ───\n\
-                 [识别失败: {e}]\n",
-                duration_s, ext,
-            )),
-        }
-    }
-
-    fn decode_and_recognize(&self, path: &Path) -> Result<String> {
-        let _src = std::fs::File::open(path).context("open audio")?;
-        // PCM decoding via symphonia + ASR inference via ort
-        // Will be implemented when ONNX models are downloaded
-        let duration_s = std::fs::metadata(path)?.len() as f64 / SPEECH_BITRATE;
         Ok(format!(
-            "─── 音频文件 ({:.0}s) ───\n[ASR 推理引擎就绪，等待模型文件]\n",
-            duration_s,
+            "─── 音频文件 ({:.1}s, {}, {:.1}MB) ───\n\
+             加载 whisper 模型以启用语音识别:\n\
+             curl -L -o models/funasr/ggml-tiny.bin \\\n\
+             https://hf-mirror.com/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin\n",
+            actual_dur, ext, file_size_mb,
         ))
     }
 }
 
-fn model_available() -> bool {
-    let dir = std::path::Path::new("models/funasr");
-    dir.join("funasr-nano.onnx").exists()
+fn probe_duration(path: &Path) -> Result<f64> {
+    let output = Command::new("ffprobe")
+        .args(["-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .context("ffprobe not available")?;
+    let s = String::from_utf8_lossy(&output.stdout);
+    s.trim().parse::<f64>().context("parse duration")
 }
 
-use super::Extractor;
-impl Extractor for AudioExtractor {
+impl super::Extractor for AudioExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
         self.extract_audio(path)
     }

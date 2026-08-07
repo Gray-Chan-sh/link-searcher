@@ -290,7 +290,7 @@ impl IndexerService {
     ///
     /// Phase 1 (Rayon `par_iter`): read file content, compute MD5, extract text
     /// (CPU/IO-bound, fully parallel).
-    /// Phase 2 (serial): lock the Tantivy writer once, add every document, and
+    /// Phase 2 (serial): lock the Tantivy writer once, add every document, and
     /// update DB tracking.
     pub fn batch_index(
         &self,
