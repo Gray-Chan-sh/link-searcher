@@ -46,6 +46,7 @@
 - [ ] **批量导出流式化**：10 万+ 结果集不 OOM，改为分片写入
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
 - [ ] **poppler-utils 零安装**：将 pdftoppm/pdfimages 打包进 app bundle
+- [ ] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定，用 content stream 文本操作符检测实现四分类（TextBased/Scanned/ImageBased/Mixed）+ 置信度 + 按页 OCR 路由，同时替代 `pdftotext` 回退提取
 - [ ] **损坏文件优雅降级**：indexer 层区分"加密""损坏""格式不支持"，日志 warn 不 error
 - [ ] **索引会话日志**：每次全量/增量扫描单独记一份日志文件（`index-<timestamp>.log`），记录[扫描阶段/文件数/耗时/跳过原因/错误详情]，前端可查看最近一次完整索引日志，方便分析索引情况
 - [ ] **浏览页多选**：Cmd/Ctrl+单击(toggle)、Shift+单击(范围)、Cmd/Ctrl+A(全选)，多选后隐藏「打开」「在 Finder 中打开」，支持批量手动索引
