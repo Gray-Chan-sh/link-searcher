@@ -36,6 +36,8 @@ export default function Browse() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
   const [indexLog, setIndexLog] = useState<string | null>(null)
   const [indexLogLoading, setIndexLogLoading] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [lastClickedIdx, setLastClickedIdx] = useState<number | null>(null)
   const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
   type ColKey = keyof typeof colWidths
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
@@ -147,6 +149,18 @@ export default function Browse() {
     const t = setTimeout(() => setDebouncedSearch(search), 300)
     return () => clearTimeout(t)
   }, [search])
+
+  // Cmd/Ctrl+A: select all
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a' && items.length > 0) {
+        e.preventDefault()
+        setSelectedIds(new Set(items.map(i => i.file_id)))
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [items])
 
   useEffect(() => {
     loadFiles()
@@ -287,13 +301,34 @@ export default function Browse() {
                 </tr>
               </thead>
               <tbody>
-                {items.map(item => (
+                {items.map((item, idx) => (
                   <tr
                     key={item.file_id}
-                    onClick={() => selectFile(item.rel_path)}
+                    onClick={(e) => {
+                      if (e.metaKey || e.ctrlKey) {
+                        setSelectedIds(prev => {
+                          const next = new Set(prev)
+                          if (next.has(item.file_id)) next.delete(item.file_id)
+                          else next.add(item.file_id)
+                          return next
+                        })
+                        setLastClickedIdx(idx)
+                      } else if (e.shiftKey && lastClickedIdx !== null) {
+                        const lo = Math.min(lastClickedIdx, idx)
+                        const hi = Math.max(lastClickedIdx, idx)
+                        const range = new Set(items.slice(lo, hi+1).map(i => i.file_id))
+                        setSelectedIds(range)
+                      } else {
+                        selectFile(item.rel_path)
+                        setSelectedIds(new Set())
+                        setLastClickedIdx(idx)
+                      }
+                    }}
                     onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, item }) }}
                     className={`border-b border-gray-100 dark:border-gray-800/50 cursor-pointer transition-colors ${
-                      selectedFile === item.rel_path
+                      selectedIds.has(item.file_id)
+                        ? 'bg-blue-50 dark:bg-blue-900/20'
+                        : selectedFile === item.rel_path
                         ? 'bg-blue-50 dark:bg-blue-900/20'
                         : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
                     }`}
@@ -424,6 +459,7 @@ export default function Browse() {
           className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
+          {selectedIds.size <= 1 && (<>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => { openFile(contextMenu.item.file_id); setContextMenu(null) }}
@@ -436,11 +472,16 @@ export default function Browse() {
           >
             {t('show_in_folder')}
           </button>
-           <button
+          </>)}
+          <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { handleReindex(contextMenu.item); setContextMenu(null) }}
+            onClick={() => {
+              const ids = selectedIds.size > 1 ? [...selectedIds] : [contextMenu.item.file_id]
+              ids.forEach(id => reindexFile(id).catch(() => {}))
+              setContextMenu(null); setSelectedIds(new Set()); loadFiles()
+            }}
           >
-            {t('reindex')}
+            {selectedIds.size > 1 ? `批量重新索引 (${selectedIds.size})` : t('reindex')}
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
