@@ -131,7 +131,18 @@ fn run_with_config(app_config: config::AppConfig) {
                 env_logger::Env::default().default_filter_or("info"),
             )
             .target(env_logger::Target::Pipe(log_file))
-            .format_timestamp_secs()
+            .format(|buf, record| {
+                use std::io::Write;
+                let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
+                writeln!(
+                    buf,
+                    "[{} {:<5} {}] {}",
+                    ts,
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+            })
             .init();
             let version = env!("GIT_VERSION");
             let commit_time = env!("GIT_COMMIT_TIME");

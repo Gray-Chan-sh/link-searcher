@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-08（日志时间戳改本地时区）
+
+- **日志时间戳显示 UTC 而非本地时间**：`env_logger` 默认 `format_timestamp_secs()` 输出 UTC（如 `2026-08-07T22:37:06Z`），用户看到的时间与本地相差 8 小时。改为自定义 `format` 闭包用 `chrono::Local` 输出本地时区（`2026-08-08T06:37:06+08:00`），保持原 `[ts LEVEL module] msg` 布局（`src-tauri/src/lib.rs`；`chrono` 已在依赖中，零新增）
+
+---
+
 ## 2026-08-08（Phase 1 索引进度静默丢失 + 浏览筛选补音频格式）
 
 - **Phase 1 索引进度不可见（再次出现）**：`mark_extracted` 用 `let _` 吞错误，SQLite 并行写冲突（Rayon par_iter）时静默失败，文件停在 `indexed=0`，UI 显示已索引=0 且浏览页无法筛选已索引文件。改为失败时打 WARN 日志 + 重试一次（`src-tauri/src/indexer.rs`）。此问题已加入 AGENTS.md「反复出现的问题清单」，禁止再次出现
