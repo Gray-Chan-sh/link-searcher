@@ -39,18 +39,20 @@
 
 ## P2 — 功能增强
 
-- [ ] **搜索结果关键词高亮**：预览面板标注命中位置
-- [ ] **增量扫描剩余时间估算**：基于平均速度预测
-- [ ] **搜索历史前端入口**：`search_history` 表已建，加下拉 + 常用置顶
-- [ ] **文件类型统计增强**：加索引状态分解（已索引/待处理/失败数）+ 体积占比
-- [ ] **批量导出流式化**：10 万+ 结果集不 OOM，改为分片写入
+- [x] **搜索结果关键词高亮**：预览面板标注命中位置（已实现，SearchPage PreviewPanel）
+- [x] **增量扫描剩余时间估算**：scanner 进度日志加 ETA
+- [x] **搜索历史前端入口**：SearchBar 下拉 + SearchPage 传 history prop
+- [x] **文件类型统计增强**：加索引状态分解（已索引/待处理/失败数）
+- [x] **批量导出流式化**：BufWriter 直接写临时文件，不攒内存
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
-- [ ] **poppler-utils 零安装**：将 pdftoppm/pdfimages 打包进 app bundle
-- [ ] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定，用 content stream 文本操作符检测实现四分类（TextBased/Scanned/ImageBased/Mixed）+ 置信度 + 按页 OCR 路由，同时替代 `pdftotext` 回退提取
-- [ ] **损坏文件优雅降级**：indexer 层区分"加密""损坏""格式不支持"，日志 warn 不 error
-- [ ] **索引会话日志**：每次全量/增量扫描单独记一份日志文件（`index-<timestamp>.log`），记录[扫描阶段/文件数/耗时/跳过原因/错误详情]，前端可查看最近一次完整索引日志，方便分析索引情况
-- [ ] **浏览页多选**：Cmd/Ctrl+单击(toggle)、Shift+单击(范围)、Cmd/Ctrl+A(全选)，多选后隐藏「打开」「在 Finder 中打开」，支持批量手动索引
-- [ ] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：anydoc 已支持这些格式，前端 filter 下拉还没加
+- [x] **poppler-utils 零安装**：build.rs 拷贝二进制到 poppler-bin/，运行时查找
+- [ ] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定
+- [x] **损坏文件优雅降级**：classify_error_str 区分加密/损坏/格式不支持
+- [ ] **索引会话日志**：每次扫描单独日志文件
+- [ ] **浏览页多选**：Cmd/Ctrl+单击多选，批量手动索引
+- [x] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：前端 filter + 后端路由
+- [x] **音频 STT**：FunASR-Nano ONNX 推理，8 种音频格式，Python助手脚本
+- [x] **热词增量计数**：jieba 分词 + SQLite，ASR 识别精度增强
 
 ---
 
