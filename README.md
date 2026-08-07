@@ -38,6 +38,7 @@
 | 代码 | `.py` `.rs` `.ts` `.js` `.html` `.css` `.sql` `.sh` | 作为文本处理 |
 | 未知 | 任意 | 纯文本回退尝试 |
 | 压缩包 | `.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.gz` `.bz2` `.xz` | 枚举条目，文本直接读，Office/PDF/图片走提取管线 |
+| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + CAM++ 说话人分离，支持吴语/粤语/闽语 |
 
 ### OCR（文字识别）
 
