@@ -2,7 +2,6 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { ask } from '@tauri-apps/plugin-dialog'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
@@ -133,14 +132,6 @@ export default function Browse() {
   useEffect(() => {
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
-
-  const handleReindex = useCallback(async (item: FileItem) => {
-    if (item.indexed === 1) {
-      const confirmed = await ask(t('confirm_reindex'), { title: t('reindex'), kind: 'warning' })
-      if (!confirmed) return
-    }
-    reindexFile(item.file_id).catch(() => {}).finally(() => loadFiles())
-  }, [t, loadFiles])
 
   const viewIndexLog = useCallback(async (fileId: string) => {
     setIndexLogLoading(true)

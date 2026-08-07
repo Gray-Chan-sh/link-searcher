@@ -31,6 +31,13 @@ export default function SearchBar({
   }, [])
 
   useEffect(() => {
+    if (query) {
+      getSearchHistory().then(setHistory).catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query])
+
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
         e.preventDefault()
