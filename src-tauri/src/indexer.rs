@@ -246,7 +246,12 @@ impl IndexerService {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
 
-        let _ = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash));
+        // CRITICAL: mark_extracted must succeed for Phase 1 progress visibility.
+        // If SQLite is busy (parallel writes), retry once.
+        if let Err(e) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
+            log::warn!("[INDEX] mark_extracted retry for {}: {e}", job.file_id);
+            let _ = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash));
+        }
 
         Ok(ExtractedData {
             file_id: job.file_id.clone(),

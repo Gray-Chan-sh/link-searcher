@@ -228,7 +228,13 @@ export default function Browse() {
             <option value="odp">ODP</option>
             <option value="rtf">RTF</option>
             <option value="epub">EPUB</option>
-            <option value="csv">CSV</option>
+             <option value="csv">CSV</option>
+            <option value="mp3">MP3</option>
+            <option value="wav">WAV</option>
+            <option value="m4a">M4A</option>
+            <option value="aac">AAC</option>
+            <option value="flac">FLAC</option>
+            <option value="ogg">OGG</option>
           </select>
 
           <div className="relative flex-1 min-w-[160px] max-w-xs">
