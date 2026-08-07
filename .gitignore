@@ -34,3 +34,6 @@ src-tauri/index/
 .omo/
 scripts/
 opencode.json
+
+# Python venv for FunASR
+src-tauri/models/funasr/.venv/

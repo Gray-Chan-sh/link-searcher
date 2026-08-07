@@ -124,6 +124,7 @@
 
 - **Node.js** 20+
 - **Rust** 1.85+
+- **音频识别（可选）**：Python 3 + ffmpeg，按 `src-tauri/models/funasr/README.md` 创建 venv 并安装 funasr 后启用 mp3/wav 等语音转写
 
 > PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎或 LibreOffice（旧版 `.doc` `.ppt`），请参考用户手册。
 

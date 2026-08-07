@@ -268,7 +268,7 @@ link-searcher health             # 健康检查
 
 **Q: 文件未索引？** 可能被排除规则匹配、权限不足、格式不支持。
 
-**Q: 音频文件支持？** 支持 mp3/wav/m4a/aac/flac/ogg 等格式，需 Python + funasr + torch。首次使用自动下载模型（~2GB），后续离线可用。支持说话人分离和吴语等方言识别。
+**Q: 音频文件支持？** 支持 mp3/wav/m4a/aac/flac/ogg 等格式，需在 `src-tauri/models/funasr/` 下创建 venv 并安装 funasr + torch（`python3 -m venv .venv && .venv/bin/pip install funasr torch torchaudio`，详见该目录 README.md）。首次使用自动下载模型（~2GB），后续离线可用。支持说话人分离和吴语等方言识别。
 
 **Q: 索引大小？** 约为原始文档 2–25%。
 

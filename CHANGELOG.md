@@ -11,6 +11,15 @@
 
 ---
 
+## 2026-08-08（ASR 环境根治：项目 venv + Python 发现逻辑加固）
+
+- **ASR 推理 `ModuleNotFoundError: funasr` 修复**：根因是 funasr Python 包从未装入任何环境，而 `audio.rs` 硬编码调用系统 `python3`。修复：在 `src-tauri/models/funasr/` 创建项目专属 `.venv` 并安装 funasr + torch；`audio.rs` 优先使用 `.venv/bin/python`（兜底系统 python3），`model_ready` 改校验 venv 存在，报错信息指向安装文档而非裸 traceback（`src-tauri/src/extractor/audio.rs`、`models/funasr/README.md`）
+- **清除死代码环境变量**：`FUNASR_TOKENIZER_DIR` 写入的 ONNX 时代路径，infer.py 从未读取，已删除
+- **文档**：README.md 前提条件补音频识别依赖说明；USER_MANUAL FAQ 补 venv 安装命令
+- **验证**：真实法庭录音 mp3（60s）转写成功，含说话人分离（`[Speaker 0] 上海市闵行区人民法院…`）
+
+---
+
 ## 2026-08-08（Browse 文件类型筛选动态加载 + test_stats 回归修复）
 
 - **浏览文件类型筛选动态加载**：新增 `get_browse_file_types` 命令，查询 `file_tracking` 实际存在的扩展名，用 `get_supported_extensions()` 过滤（仅显示可索引类型，`.exe`/`.dll` 等不可索引类型不出现），按字典序返回。Browse 页删除 20 个硬编码 `<option>`，改为 `useEffect` 挂载时动态加载渲染，URL 中失效的 `ext` 参数自动重置（`src-tauri/src/commands/search.rs`、`lib.rs`、`src/api/files.ts`、`src/pages/Browse.tsx`）
