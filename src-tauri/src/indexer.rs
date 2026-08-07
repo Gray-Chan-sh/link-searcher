@@ -137,7 +137,7 @@ impl IndexerService {
             hash = format!("{:x}", hasher.finalize());
         }
 
-        log::info!("[INDEX] 开始: {file_name} ({file_ext}, {file_size} B)");
+        log::info!("[INDEX] [{}] 开始: {file_name} ({file_ext}, {file_size} B)", job.file_id);
 
         // Dedup – reuse previously extracted content for the same hash.
         let text = 'dedup: {
@@ -228,7 +228,7 @@ impl IndexerService {
                 }
             };
             let char_count = extracted.chars().count();
-            log::info!("[INDEX] 提取文字: {file_name} ({char_count} 字符)");
+            log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
             if let Err(e) =
                 crate::db::tracker::store_content(conn, &hash, &extracted, ocr_used, None)
             {
@@ -395,7 +395,7 @@ impl IndexerService {
                         continue;
                     }
 
-                    log::info!("[INDEX] 完成: {}", data.file_name);
+                    log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
                     success_count += 1;
                     total_bytes += data.file_size;
                     results.push(BatchResult {
@@ -533,7 +533,7 @@ impl IndexerService {
             crate::db::tracker::update_indexed(&conn, &data.file_id, Some(&data.hash))
                 .context("failed to update indexed status")?;
 
-            log::info!("[INDEX] 完成: {}", data.file_name);
+            log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
 
             // Periodic auto-commit every N successful files (reuse held writer).
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
