@@ -8,6 +8,11 @@
 
 - **加密/损坏英文关键词识别**：`classify_error_str` 增加 `encrypted`/`corrupted`/`password` 英文检测（与中文 `损坏`/`加密` 并列）；批量索引 Phase 1 提取失败分支也调用 `classify_error_str` 并以错误类型写入 `index_errors`，不再只 `mark_failed`（`src-tauri/src/indexer.rs`）
 - **消除生产环境 unwrap**：`parse_filename_prefix` 用 `OnceLock<Regex>` 静态编译正则替代 `Regex::new().unwrap()`，并去掉 `cap.get(0).unwrap()` 改用安全匹配（`src-tauri/src/search/searcher.rs`）
+- **音频 STT 提取**：新增 `extractor/audio.rs`，支持 mp3/wav/m4a/aac/flac/ogg/opus/wma 8 种音频格式索引。ffmpeg 解码到 16kHz 单声道，通过 Python 助手脚本调用 FunASR-Nano ONNX 模型推理（encoder + LLM 自回归 + Qwen3 tokenizer），识别结果进入全文索引。Kaldi fbank + CMVN + LFR 前端特征提取。模型本地化，运行时自动检测（`src-tauri/src/extractor/audio.rs`、`models/funasr/infer.py`）
+- **热词增量计数**：每次索引文件时自动用 jieba 分词提取 ≥2 字非数字词，存入 `hotword_counts` 表。用于提升 ASR 识别精度，下次全量扫描自动重建（`src-tauri/src/db/tracker.rs`、`mod.rs`、`indexer.rs`）
+- **浏览筛选扩展**：Browse 页新增 ods/odp/rtf/epub 格式选项；后端 `extract_text` 路由同步支持（`src/pages/Browse.tsx`、`extractor/mod.rs`）
+- **文件类型统计增强**：`IndexStatus` 页各扩展名展示已索引/待处理/失败分项堆叠条（`commands/search.rs`、`api/search.ts`、`IndexStatus.tsx`）
+- **日志清空改截断**：`clear_logs` 写时间戳标记，不再覆盖 `app.log`；`get_logs` 只返回标记之后的日志行（`commands/logs.rs`）
 
 ---
 
