@@ -7,6 +7,13 @@ import { type FilePreview, openFile, revealInFolder } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFile } from '../api/index'
 import { LoadingSpinner } from '../icons'
+import { usePersistentState } from '../hooks/usePersistentState'
+
+const LS_KEY_FILTER = 'ls_browse_filter'
+const LS_KEY_EXT = 'ls_browse_ext'
+const LS_KEY_SEARCH = 'ls_browse_search'
+const LS_KEY_SORT = 'ls_browse_sort'
+const LS_KEY_ORDER = 'ls_browse_order'
 
 function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
   if (indexed === 1 || indexed === 3) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
@@ -21,13 +28,13 @@ export default function Browse() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [pageSize] = useState(20)
-  const [filter, setFilter] = useState<FilterType>(params.get('filter') as FilterType || 'all')
-  const [ext, setExt] = useState(params.get('ext') || '')
+  const [filter, setFilter] = usePersistentState<FilterType>(LS_KEY_FILTER, params.get('filter') as FilterType || 'all')
+  const [ext, setExt] = usePersistentState<string>(LS_KEY_EXT, params.get('ext') || '')
   const [availableExts, setAvailableExts] = useState<string[]>([])
-  const [search, setSearch] = useState(params.get('search') || '')
+  const [search, setSearch] = usePersistentState<string>(LS_KEY_SEARCH, params.get('search') || '')
   const [debouncedSearch, setDebouncedSearch] = useState(search)
-  const [sort, setSort] = useState<SortKey>(params.get('sort') as SortKey || 'name')
-  const [order, setOrder] = useState<SortOrder>(params.get('order') as SortOrder || 'asc')
+  const [sort, setSort] = usePersistentState<SortKey>(LS_KEY_SORT, params.get('sort') as SortKey || 'name')
+  const [order, setOrder] = usePersistentState<SortOrder>(LS_KEY_ORDER, params.get('order') as SortOrder || 'asc')
   const [loading, setLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [preview, setPreview] = useState<FilePreview | null>(null)
@@ -137,9 +144,8 @@ export default function Browse() {
     setIndexLogLoading(true)
     setIndexLog(null)
     try {
-      const lines: string[] = await invoke('get_logs', { lines: 500 })
-      const filtered = lines.filter(l => l.includes(`[${fileId}]`))
-      setIndexLog(filtered.join('\n') || '未找到此文件的索引日志')
+      const lines: string[] = await invoke('get_logs', { lines: 500, fileId })
+      setIndexLog(lines.join('\n') || '未找到此文件的索引日志')
     } catch {
       setIndexLog('获取日志失败')
     } finally {
@@ -310,11 +316,18 @@ export default function Browse() {
                         setSelectedIds(range)
                       } else {
                         selectFile(item.rel_path)
-                        setSelectedIds(new Set())
+                        setSelectedIds(new Set([item.file_id]))
                         setLastClickedIdx(idx)
                       }
                     }}
-                    onContextMenu={(e) => { e.preventDefault(); setContextMenu({ x: e.clientX, y: e.clientY, item }) }}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      // Right-clicking a row that isn't selected selects it alone.
+                      if (!selectedIds.has(item.file_id)) {
+                        setSelectedIds(new Set([item.file_id]))
+                      }
+                      setContextMenu({ x: e.clientX, y: e.clientY, item })
+                    }}
                     className={`border-b border-gray-100 dark:border-gray-800/50 cursor-pointer transition-colors ${
                       selectedIds.has(item.file_id)
                         ? 'bg-blue-50 dark:bg-blue-900/20'
@@ -449,20 +462,22 @@ export default function Browse() {
           className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          {selectedIds.size <= 1 && (<>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { openFile(contextMenu.item.file_id); setContextMenu(null) }}
-          >
-            {t('open')}
-          </button>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { revealInFolder(contextMenu.item.file_id); setContextMenu(null) }}
-          >
-            {t('show_in_folder')}
-          </button>
-          </>)}
+          {selectedIds.size <= 1 ? (
+            <>
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { openFile(contextMenu.item.file_id); setContextMenu(null) }}
+              >
+                {t('open')}
+              </button>
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { revealInFolder(contextMenu.item.file_id); setContextMenu(null) }}
+              >
+                {t('show_in_folder')}
+              </button>
+            </>
+          ) : null}
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => {
@@ -473,12 +488,14 @@ export default function Browse() {
           >
             {selectedIds.size > 1 ? `批量重新索引 (${selectedIds.size})` : t('reindex')}
           </button>
-          <button
-            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { viewIndexLog(contextMenu.item.file_id); setContextMenu(null) }}
-          >
-            查看索引日志
-          </button>
+          {selectedIds.size <= 1 ? (
+            <button
+              className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { viewIndexLog(contextMenu.item.file_id); setContextMenu(null) }}
+            >
+              查看索引日志
+            </button>
+          ) : null}
         </div>
       )}
 

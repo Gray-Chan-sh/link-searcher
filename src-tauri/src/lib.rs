@@ -114,14 +114,24 @@ fn run_with_config(app_config: config::AppConfig) {
                 return Err(Box::new(e));
             }
 
-            // Initialize file logger
+            // Initialize file logger (append across restarts, rotate at 100 MB)
             let log_path = data_dir.join("app.log");
+            if let Ok(meta) = std::fs::metadata(&log_path) {
+                if meta.len() > 100 * 1024 * 1024 {
+                    let rotated = data_dir.join("app.log.1");
+                    let _ = std::fs::rename(&log_path, &rotated);
+                }
+            }
             let log_file: Box<dyn std::io::Write + Send> =
-                match std::fs::File::create(&log_path) {
+                match std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
                     Ok(f) => Box::new(f),
                     Err(e) => {
                         eprintln!(
-                            "[WARN] failed to create log file {:?}: {}, falling back to stderr",
+                            "[WARN] failed to open log file {:?}: {}, falling back to stderr",
                             log_path, e
                         );
                         Box::new(std::io::stderr())
