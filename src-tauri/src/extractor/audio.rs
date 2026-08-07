@@ -1,24 +1,50 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
 
-const MODEL_DIR: &str = "models/funasr";
+const MODEL_SUBDIR: &str = "models/funasr";
 
-fn model_ready() -> bool {
-    let venv_py = Path::new(MODEL_DIR).join(".venv").join("bin").join("python");
-    venv_py.exists()
+/// Resolve the FunASR model directory across dev and bundled runs.
+///
+/// The venv lives at `src-tauri/models/funasr/.venv` during development,
+/// where the process cwd is `src-tauri/`. A bundled build starts from an
+/// arbitrary cwd, so relative paths fail — probe fixed candidates instead.
+fn funasr_dir() -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = {
+        let mut v = Vec::new();
+        if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+            v.push(PathBuf::from(d));
+        }
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                v.push(parent.join(MODEL_SUBDIR));
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            v.push(cwd.join(MODEL_SUBDIR));
+        }
+        v
+    };
+    candidates
+        .into_iter()
+        .find(|d| d.join(".venv").join("bin").join("python").exists())
 }
 
-fn python_cmd() -> Command {
-    let venv_py = Path::new(MODEL_DIR).join(".venv").join("bin").join("python");
-    let mut c = if venv_py.exists() {
-        Command::new(venv_py)
-    } else {
-        Command::new("python3")
-    };
-    c.arg("models/funasr/infer.py");
-    c
+fn venv_python() -> Option<PathBuf> {
+    funasr_dir().map(|d| d.join(".venv").join("bin").join("python"))
+}
+
+fn model_ready() -> bool {
+    venv_python().is_some()
+}
+
+fn python_cmd() -> Option<Command> {
+    let dir = funasr_dir()?;
+    let py = dir.join(".venv").join("bin").join("python");
+    let mut c = Command::new(py);
+    c.arg(dir.join("infer.py"));
+    Some(c)
 }
 
 pub struct AudioExtractor;
@@ -32,7 +58,7 @@ impl AudioExtractor {
 
         if !model_ready() {
             return Ok(format!(
-                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 环境未安装]\n安装参考: src-tauri/models/funasr/README.md\n",
+                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 环境未安装]\n安装参考: models/funasr/README.md（可设 LINK_SEARCHER_FUNASR_DIR 指向模型目录）\n",
                 ext, meta.len() as f64 / 1_048_576.0,
             ));
         }
@@ -56,11 +82,8 @@ impl AudioExtractor {
             Err(_) => 0.0,
         };
 
-// Run FunASR inference via the project venv python.
-        match python_cmd()
-            .arg(&wav_path)
-            .output()
-        {
+        let mut cmd = python_cmd().ok_or_else(|| anyhow::anyhow!("FunASR venv not found"))?;
+        match cmd.arg(&wav_path).output() {
             Ok(output) if output.status.success() => {
                 let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if text.is_empty() {

@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-08（7 项日志/浏览/ASR 缺陷修复）
+
+- **[BROWSE] 无关日志**：`files.rs` 每次浏览查询打印 `[BROWSE] filter/sort/page` 参数，与索引内容无关，已删除（`src-tauri/src/commands/files.rs`）
+- **build 后 mp3 无法转录**：`audio.rs` 的 `MODEL_DIR="models/funasr"` 与 `infer.py` 均为相对路径，dev 时 cwd=src-tauri 可见 `.venv`，build 后 cwd 不定导致 `model_ready()` 失败。改为 `funasr_dir()` 多候选探测（`LINK_SEARCHER_FUNASR_DIR` 环境变量 → 可执行文件旁 → 当前目录）+ 绝对路径调用（`src-tauri/src/extractor/audio.rs`）
+- **日志每次启动被清空**：`File::create` 每次启动 truncate `app.log`。改为 `OpenOptions::append` 跨启动保留 + 超 100MB 轮转 `app.log.1`（`src-tauri/src/lib.rs`）
+- **清空日志失效**：`clear_logs` 只写 UTC `Z` 格式 marker，而日志时间戳已是本地 `+08:00`，字符串比较下所有日志行都大于 marker，过滤失效。改为直接截断 `app.log`，`get_logs` 去掉 marker 逻辑（`src-tauri/src/commands/logs.rs`）
+- **查看索引日志显示全部历史**：Browse 的索引日志按 `[fileId]` 过滤全部历史行。`get_logs` 新增可选 `file_id` 参数，只返回最后一次 `[INDEX] [id] 开始:` 之后的完整索引过程（`logs.rs`、`src/pages/Browse.tsx`）
+- **浏览筛选切 tab 后丢失**：新增 `usePersistentState` hook（localStorage 持久化），Browse 的 filter/ext/search/sort/order 跨 tab 保留（`src/hooks/usePersistentState.ts`、`src/pages/Browse.tsx`）
+- **多选右键菜单错乱**：普通单击清空 selectedIds 导致多选实际为单选；右键菜单在 size≤1 时显示打开/Finder 只对第一个文件生效。修复：单击改为单选当前项、右键未选中行先单选；**多选时右键菜单只显示「手动索引」，打开/Finder/索引日志仅单选显示**（`src/pages/Browse.tsx`）
+
+---
+
 ## 2026-08-08（日志时间戳改本地时区）
 
 - **日志时间戳显示 UTC 而非本地时间**：`env_logger` 默认 `format_timestamp_secs()` 输出 UTC（如 `2026-08-07T22:37:06Z`），用户看到的时间与本地相差 8 小时。改为自定义 `format` 闭包用 `chrono::Local` 输出本地时区（`2026-08-08T06:37:06+08:00`），保持原 `[ts LEVEL module] msg` 布局（`src-tauri/src/lib.rs`；`chrono` 已在依赖中，零新增）
