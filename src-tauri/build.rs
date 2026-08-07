@@ -51,5 +51,14 @@ fn main() {
     }
     println!("cargo:rustc-env=POPPLER_BIN_DIR=poppler-bin");
 
+    // Create model directories
+    let _ = std::fs::create_dir_all("models/funasr");
+
+    // Check for optional FunASR models
+    let funasr = std::path::Path::new("models/funasr/funasr-nano.onnx");
+    let campp = std::path::Path::new("models/funasr/campp.onnx");
+    let has_asr = funasr.exists() && campp.exists();
+    println!("cargo:rustc-env=HAS_ASR_MODELS={}", if has_asr { "1" } else { "0" });
+
     tauri_build::build()
 }
