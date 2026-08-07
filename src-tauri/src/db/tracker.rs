@@ -500,7 +500,10 @@ mod tests {
         update_indexed(&conn, &a, Some("m_a")).unwrap();
         mark_failed(&conn, &b, "err").unwrap();
         let all = get_stats(&conn, None).unwrap();
-        assert_eq!(all.total, 2); assert_eq!(all.indexed, 1); assert_eq!(all.pending, 1); assert_eq!(all.errors, 1);
+        assert_eq!(all.total, 2);
+        assert_eq!(all.indexed, 1);
+        assert_eq!(all.pending, 0);
+        assert_eq!(all.errors, 1);
         assert_eq!(get_stats(&conn, Some("d1")).unwrap().indexed, 1);
     }
 

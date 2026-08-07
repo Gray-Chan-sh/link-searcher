@@ -5,7 +5,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder } from '../api/files'
-import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb } from '../api/files'
+import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFile } from '../api/index'
 import { LoadingSpinner } from '../icons'
 
@@ -24,6 +24,7 @@ export default function Browse() {
   const [pageSize] = useState(20)
   const [filter, setFilter] = useState<FilterType>(params.get('filter') as FilterType || 'all')
   const [ext, setExt] = useState(params.get('ext') || '')
+  const [availableExts, setAvailableExts] = useState<string[]>([])
   const [search, setSearch] = useState(params.get('search') || '')
   const [debouncedSearch, setDebouncedSearch] = useState(search)
   const [sort, setSort] = useState<SortKey>(params.get('sort') as SortKey || 'name')
@@ -101,6 +102,16 @@ export default function Browse() {
     if (order !== 'asc') p.set('order', order)
     setParams(p, { replace: true })
   }, [filter, ext, search, sort, order, setParams])
+
+  // Load available file types dynamically; reset stale ext param
+  useEffect(() => {
+    getBrowseFileTypes()
+      .then(types => {
+        setAvailableExts(types)
+        if (ext && !types.includes(ext)) setExt('')
+      })
+      .catch(() => setAvailableExts([]))
+  }, [])
 
   const loadFiles = useCallback(async () => {
     setLoading(true)
@@ -214,27 +225,9 @@ export default function Browse() {
             className="text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
           >
             <option value="">{t('all_types')}</option>
-            <option value="pdf">PDF</option>
-            <option value="docx">DOCX</option>
-            <option value="doc">DOC</option>
-            <option value="xlsx">XLSX</option>
-            <option value="txt">TXT</option>
-            <option value="md">MD</option>
-            <option value="png">PNG</option>
-            <option value="jpg">JPG</option>
-            <option value="jpeg">JPEG</option>
-            <option value="pptx">PPTX</option>
-            <option value="ods">ODS</option>
-            <option value="odp">ODP</option>
-            <option value="rtf">RTF</option>
-            <option value="epub">EPUB</option>
-             <option value="csv">CSV</option>
-            <option value="mp3">MP3</option>
-            <option value="wav">WAV</option>
-            <option value="m4a">M4A</option>
-            <option value="aac">AAC</option>
-            <option value="flac">FLAC</option>
-            <option value="ogg">OGG</option>
+            {availableExts.map(e => (
+              <option key={e} value={e}>{e.toUpperCase()}</option>
+            ))}
           </select>
 
           <div className="relative flex-1 min-w-[160px] max-w-xs">

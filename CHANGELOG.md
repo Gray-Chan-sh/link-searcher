@@ -11,6 +11,13 @@
 
 ---
 
+## 2026-08-08（Browse 文件类型筛选动态加载 + test_stats 回归修复）
+
+- **浏览文件类型筛选动态加载**：新增 `get_browse_file_types` 命令，查询 `file_tracking` 实际存在的扩展名，用 `get_supported_extensions()` 过滤（仅显示可索引类型，`.exe`/`.dll` 等不可索引类型不出现），按字典序返回。Browse 页删除 20 个硬编码 `<option>`，改为 `useEffect` 挂载时动态加载渲染，URL 中失效的 `ext` 参数自动重置（`src-tauri/src/commands/search.rs`、`lib.rs`、`src/api/files.ts`、`src/pages/Browse.tsx`）
+- **test_stats 回归修复**：commit `274343f` 将 `get_stats` 的 pending 定义从 `indexed IN (0,2)` 改为 `indexed=0`（failed 不再计入 pending），导致 `test_stats` 断言 `pending=1` 失效。更新断言为 `pending=0` 匹配新语义（`src-tauri/src/db/tracker.rs`）
+
+---
+
 ## 2026-08-07（错误分类英文关键词 + 消除 parse_filename 生产 unwrap）
 
 - **加密/损坏英文关键词识别**：`classify_error_str` 增加 `encrypted`/`corrupted`/`password` 英文检测（与中文 `损坏`/`加密` 并列）；批量索引 Phase 1 提取失败分支也调用 `classify_error_str` 并以错误类型写入 `index_errors`，不再只 `mark_failed`（`src-tauri/src/indexer.rs`）
