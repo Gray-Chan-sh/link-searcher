@@ -21,9 +21,12 @@ python3 -m venv .venv
 
 ## 工作原理
 
-1. `extractor/audio.rs` 先用 ffmpeg 将音频解码为 16kHz 单声道 WAV（截取前 60s）
+1. `extractor/audio.rs` 先用 ffmpeg 将音频解码为 16kHz 单声道 WAV（**完整时长，不截断**）
 2. 调用 `.venv/bin/python models/funasr/infer.py <wav>`
 3. FunASR-Nano 识别 + VAD 分段 + CAM++ 说话人分离，结果进入全文索引
+
+> `language="中文"` 已隐含自动方言识别（吴语/粤语/闽语等 7 大方言 + 26 地区口音），无需额外参数。
+> 长音频（30 分钟+）转写耗时约 0.3 倍实时（CPU），属正常。
 
 ## 模型文件清单
 
