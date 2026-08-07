@@ -11,6 +11,13 @@
 
 ---
 
+## 2026-08-08（音频完整时长识别：移除 -t 60 截断）
+
+- **音频只识别前 60 秒（回归修复）**：`audio.rs` 的 ffmpeg 解码参数带 `-t 60`，34 分钟的庭审录音只转写开头 60 秒（470 字符）。移除该参数，处理完整音频。验证：3.5 分钟文件 441→1518 字符并正确识别吴语（"扣脱来塞勿啦"等），34.5 分钟庭审完整转写 13713 字符（含"今日庭审到此结束"结尾）（`src-tauri/src/extractor/audio.rs`）
+- **说明**：`language="中文"` 已隐含自动方言识别（Fun-ASR-Nano-2512 支持 7 大吴粤闽客赣湘晋方言 + 26 地区口音），无需额外参数；之前"吴语没识别"实为 60s 截断导致吴语片段未进入模型
+
+---
+
 ## 2026-08-08（ASR 环境根治：项目 venv + Python 发现逻辑加固）
 
 - **ASR 推理 `ModuleNotFoundError: funasr` 修复**：根因是 funasr Python 包从未装入任何环境，而 `audio.rs` 硬编码调用系统 `python3`。修复：在 `src-tauri/models/funasr/` 创建项目专属 `.venv` 并安装 funasr + torch；`audio.rs` 优先使用 `.venv/bin/python`（兜底系统 python3），`model_ready` 改校验 venv 存在，报错信息指向安装文档而非裸 traceback（`src-tauri/src/extractor/audio.rs`、`models/funasr/README.md`）

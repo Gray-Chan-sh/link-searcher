@@ -37,12 +37,12 @@ impl AudioExtractor {
             ));
         }
 
-        // Decode to 16kHz mono WAV
+        // Decode to 16kHz mono WAV (full length)
         let tmp = crate::scanner::helpers::TempDir::new("ls_audio")?;
         let wav_path = tmp.path().join("audio.wav");
         let status = Command::new("ffmpeg")
             .args(["-y", "-i"]).arg(path)
-            .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16", "-t", "60"])
+            .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
             .arg(&wav_path)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
             .status().context("ffmpeg not available")?;
