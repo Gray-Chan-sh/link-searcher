@@ -411,6 +411,30 @@ pub fn get_index_errors(conn: &Connection, limit: usize) -> Result<Vec<IndexErro
     Ok(result)
 }
 
+pub fn update_hotwords(conn: &Connection, text: &str) {
+    let jieba = &crate::search::schema::JIEBA;
+    for token in jieba.tokenize(text, jieba_rs::TokenizeMode::Search, true) {
+        let word = token.word;
+        if word.len() >= 2 && !word.chars().all(|c| c.is_ascii_digit()) {
+            let _ = conn.execute(
+                "INSERT INTO hotword_counts (word, count) VALUES (?1, 1)
+                 ON CONFLICT(word) DO UPDATE SET count = count + 1",
+                rusqlite::params![word],
+            );
+        }
+    }
+}
+
+pub fn get_hotwords(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+    let mut s = conn.prepare("SELECT word FROM hotword_counts ORDER BY count DESC LIMIT ?1")?;
+    let rows = s.query_map(rusqlite::params![limit as i64], |row| row.get::<_, String>(0))?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

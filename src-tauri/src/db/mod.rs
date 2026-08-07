@@ -161,6 +161,11 @@ const CREATE_TABLES_SQL: &str = "
         error_msg   TEXT NOT NULL,
         created_at  INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS hotword_counts (
+        word        TEXT PRIMARY KEY,
+        count       INTEGER NOT NULL DEFAULT 1
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any

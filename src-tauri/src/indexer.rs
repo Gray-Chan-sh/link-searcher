@@ -234,6 +234,8 @@ impl IndexerService {
             {
                 log::warn!("[INDEX] 存储提取内容失败: {e}");
             }
+            // Incrementally count hotwords for ASR/Wu dialect recognition
+            crate::db::tracker::update_hotwords(conn, &extracted);
             extracted
         };
 

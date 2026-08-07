@@ -57,7 +57,6 @@
 
 - [ ] **向量搜索 / AI 增强**：本地 embedding（ONNX all-MiniLM），语义搜索
 - [ ] **监控目录热重载**：`dir_config` 变更后自动增量同步
-- [ ] **插件化提取器**：用户自定义格式（Lua/WASM），不依赖 Rust 重新编译
 - [ ] **多语言界面**：日/韩文（jpn/kor OCR 已支持，UI 缺）
 - [ ] **CLI 增强**：`link-searcher index --dir` 等子命令，支持无 GUI 场景
 - [ ] **RAG 内容分析**：本地大模型做摘要、主题聚类、跨文件关联
