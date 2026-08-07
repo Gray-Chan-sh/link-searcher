@@ -100,3 +100,14 @@ semgrep scan \
 | `src/pages/IndexStatus.tsx` | 索引状态页 |
 | `src/pages/Settings.tsx` | 设置页 |
 | `CHANGELOG.md` | 变更日志（每次 commit 必更新） |
+
+## ⚠️ 反复出现的问题清单（修复后禁止再次出现）
+
+### 1. Phase 1 索引进度不可见（indexed=3 被丢弃）
+- **现象**：批量索引时，Phase 1 提取完成但 UI 显示已索引=0
+- **根因**：`mark_extracted` 用 `let _` 吞错误，SQLite 并行写冲突静默失败
+- **修复**：`indexer.rs` 中 `mark_extracted` 失败时打 WARN 日志 + 重试一次
+- **检查方法**：批量索引时看 DB 中 `SELECT indexed, COUNT(*) FROM file_tracking GROUP BY indexed` 是否有 indexed=3
+- **触发条件**：Rayon par_iter + SQLite 并行写
+- **修复人/时间**：2026-08-08
+- **Tags**: `indexer.rs`, `mark_extracted`, `Phase 1`, `let _`
