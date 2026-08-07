@@ -82,3 +82,7 @@ export async function listFilesDb(params: {
 }): Promise<FileListResponse> {
   return invoke<FileListResponse>('list_files_db', params)
 }
+
+export async function getBrowseFileTypes(): Promise<string[]> {
+  return invoke<string[]>('get_browse_file_types')
+}

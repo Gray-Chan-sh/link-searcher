@@ -361,3 +361,30 @@ pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileT
     Ok(results)
 }
 
+/// Distinct file extensions present in tracked dirs, filtered to indexable
+/// types only (used by the Browse page type dropdown).
+#[tauri::command]
+pub async fn get_browse_file_types(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    let supported = crate::extractor::get_supported_extensions();
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let sql = "SELECT file_ext, COUNT(*) as cnt FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
+    let mut stmt = conn.prepare(sql).map_err(|e| format!("db prepare error: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            let ext: String = row.get("file_ext")?;
+            let cnt: i64 = row.get("cnt")?;
+            Ok((ext, cnt))
+        })
+        .map_err(|e| format!("db query error: {e}"))?;
+    let mut types: Vec<String> = Vec::new();
+    for row in rows {
+        let (ext, _cnt) = row.map_err(|e| format!("db query error: {e}"))?;
+        let lower = ext.to_lowercase();
+        if !lower.is_empty() && supported.contains(&lower.as_str()) {
+            types.push(lower);
+        }
+    }
+    types.sort();
+    Ok(types)
+}
+
