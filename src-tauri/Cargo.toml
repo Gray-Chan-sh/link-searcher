@@ -61,6 +61,7 @@ bzip2 = "0.6.1"
 xz2 = "0.1.7"
 symphonia = { version = "0.6.0", features = ["all"] }
 hound = "3.5.1"
+ort = "2.0.0-rc.13"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
