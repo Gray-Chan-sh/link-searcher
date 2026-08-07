@@ -34,6 +34,8 @@ export default function Browse() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
+  const [indexLog, setIndexLog] = useState<string | null>(null)
+  const [indexLogLoading, setIndexLogLoading] = useState(false)
   const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
   type ColKey = keyof typeof colWidths
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
@@ -126,6 +128,20 @@ export default function Browse() {
     }
     reindexFile(item.file_id).catch(() => {}).finally(() => loadFiles())
   }, [t, loadFiles])
+
+  const viewIndexLog = useCallback(async (fileId: string) => {
+    setIndexLogLoading(true)
+    setIndexLog(null)
+    try {
+      const lines: string[] = await invoke('get_logs', { lines: 500 })
+      const filtered = lines.filter(l => l.includes(`[${fileId}]`))
+      setIndexLog(filtered.join('\n') || '未找到此文件的索引日志')
+    } catch {
+      setIndexLog('获取日志失败')
+    } finally {
+      setIndexLogLoading(false)
+    }
+  }, [])
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300)
@@ -420,12 +436,32 @@ export default function Browse() {
           >
             {t('show_in_folder')}
           </button>
-          <button
+           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => { handleReindex(contextMenu.item); setContextMenu(null) }}
           >
             {t('reindex')}
           </button>
+          <button
+            className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+            onClick={() => { viewIndexLog(contextMenu.item.file_id); setContextMenu(null) }}
+          >
+            查看索引日志
+          </button>
+        </div>
+      )}
+
+      {indexLog !== null && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center" onClick={() => setIndexLog(null)}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[70vh] overflow-auto" onClick={e => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+              <span className="text-sm font-medium">索引日志</span>
+              <button onClick={() => setIndexLog(null)} className="text-gray-400 hover:text-gray-600">×</button>
+            </div>
+            <pre className="p-4 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
+              {indexLogLoading ? '加载中...' : indexLog}
+            </pre>
+          </div>
         </div>
       )}
     </div>
