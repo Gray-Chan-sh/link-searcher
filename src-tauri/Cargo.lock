@@ -3409,6 +3409,7 @@ dependencies = [
  "objc2-vision",
  "opener",
  "ort",
+ "pdf-inspector",
  "pure-onnx-ocr",
  "quick-xml 0.36.2",
  "r2d2",
