@@ -6,7 +6,19 @@ use anyhow::{Context, Result};
 const MODEL_DIR: &str = "models/funasr";
 
 fn model_ready() -> bool {
-    std::path::Path::new(MODEL_DIR).join("encoder_adaptor.int8.onnx").exists()
+    let venv_py = Path::new(MODEL_DIR).join(".venv").join("bin").join("python");
+    venv_py.exists()
+}
+
+fn python_cmd() -> Command {
+    let venv_py = Path::new(MODEL_DIR).join(".venv").join("bin").join("python");
+    let mut c = if venv_py.exists() {
+        Command::new(venv_py)
+    } else {
+        Command::new("python3")
+    };
+    c.arg("models/funasr/infer.py");
+    c
 }
 
 pub struct AudioExtractor;
@@ -20,7 +32,7 @@ impl AudioExtractor {
 
         if !model_ready() {
             return Ok(format!(
-                "─── 音频文件 ({}, {:.1}MB) ──\n[FunASR 模型未安装]\nmodelscope download zengshuishui/FunASR-nano-onnx\n",
+                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 环境未安装]\n安装参考: src-tauri/models/funasr/README.md\n",
                 ext, meta.len() as f64 / 1_048_576.0,
             ));
         }
@@ -44,11 +56,9 @@ impl AudioExtractor {
             Err(_) => 0.0,
         };
 
-        // Run FunASR inference via Python helper
-        match Command::new("python3")
-            .arg("models/funasr/infer.py")
+// Run FunASR inference via the project venv python.
+        match python_cmd()
             .arg(&wav_path)
-            .env("FUNASR_TOKENIZER_DIR", "/Volumes/Data/modelscope_cacheexport/models/zengshuishui--FunASR-nano-onnx/snapshots/master/Qwen3-0.6B")
             .output()
         {
             Ok(output) if output.status.success() => {
