@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-08-08（Phase 1 索引进度静默丢失 + 浏览筛选补音频格式）
+
+- **Phase 1 索引进度不可见（再次出现）**：`mark_extracted` 用 `let _` 吞错误，SQLite 并行写冲突（Rayon par_iter）时静默失败，文件停在 `indexed=0`，UI 显示已索引=0 且浏览页无法筛选已索引文件。改为失败时打 WARN 日志 + 重试一次（`src-tauri/src/indexer.rs`）。此问题已加入 AGENTS.md「反复出现的问题清单」，禁止再次出现
+- **浏览筛选缺音频格式**：Browse 页文件类型下拉框补充 mp3/wav/m4a/aac/flac/ogg（与 `extractor/audio.rs` 支持的音频格式对齐）（`src/pages/Browse.tsx`）
+
+---
+
 ## 2026-08-07（错误分类英文关键词 + 消除 parse_filename 生产 unwrap）
 
 - **加密/损坏英文关键词识别**：`classify_error_str` 增加 `encrypted`/`corrupted`/`password` 英文检测（与中文 `损坏`/`加密` 并列）；批量索引 Phase 1 提取失败分支也调用 `classify_error_str` 并以错误类型写入 `index_errors`，不再只 `mark_failed`（`src-tauri/src/indexer.rs`）
