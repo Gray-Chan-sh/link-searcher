@@ -10,6 +10,12 @@
 
 ---
 
+## 2026-08-08（修复 tauri build 失败：清两处 TS 死代码）
+
+- **tauri build 失败（tsc 拦截）**：`tsc -b` 报 2 个 TS 错误导致 `npm run tauri build` 终止，而 `tauri dev` 用 esbuild 转译不做类型检查故不受影响。① `Browse.tsx` `handleReindex` 从未被挂载（右键菜单只挂 `viewIndexLog`，批量重索引用裸 `reindexFile`）——TS6133 未使用；② `SearchPage.tsx` 给 `<SearchBar>` 传 `history` prop，但 `SearchBar` 已自管 history，props 无此项——TS2322。修复：删 `Browse.tsx` 的 `handleReindex` 及孤儿 `ask` import；删 `SearchPage.tsx` 的 history state/effect/import/传参，将"query 变化后刷新历史"并入 `SearchBar` 自身 effect（`src/pages/Browse.tsx`、`src/pages/SearchPage.tsx`、`src/components/SearchBar.tsx`）
+
+---
+
 ## 2026-08-08（Phase 1 索引进度静默丢失 + 浏览筛选补音频格式）
 
 - **Phase 1 索引进度不可见（再次出现）**：`mark_extracted` 用 `let _` 吞错误，SQLite 并行写冲突（Rayon par_iter）时静默失败，文件停在 `indexed=0`，UI 显示已索引=0 且浏览页无法筛选已索引文件。改为失败时打 WARN 日志 + 重试一次（`src-tauri/src/indexer.rs`）。此问题已加入 AGENTS.md「反复出现的问题清单」，禁止再次出现

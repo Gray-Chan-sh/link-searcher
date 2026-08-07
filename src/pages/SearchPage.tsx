@@ -3,8 +3,6 @@ import { Link } from 'react-router-dom'
 import { useSearch } from '../hooks/useSearch'
 import { useDirs } from '../hooks/useDirs'
 import { useI18n } from '../i18n'
-import { getSearchHistory /*, clearSearchHistory */ } from '../api/search'
-import type { SearchHistoryEntry } from '../api/search'
 import SearchBar from '../components/SearchBar'
 import FilterPanel from '../components/FilterPanel'
 import ResultList from '../components/ResultList'
@@ -26,16 +24,6 @@ export default function SearchPage() {
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
-  const [history, setHistory] = useState<SearchHistoryEntry[]>([])
-
-  useEffect(() => {
-    getSearchHistory().then(setHistory).catch(() => {})
-  }, [])
-
-  // Refresh history after each search
-  useEffect(() => {
-    if (search.query) { getSearchHistory().then(setHistory).catch(() => {}) }
-  }, [search.query, search.total])
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
   useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
@@ -138,7 +126,6 @@ useEffect(() => {
                 query={search.query}
                 loading={search.status === 'loading'}
                 suggestions={search.suggestions}
-                history={history}
                 onQueryChange={search.setQuery}
                 onFetchSuggestions={search.fetchSuggestions}
                 onClearSuggestions={search.clearSuggestions}
