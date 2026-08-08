@@ -227,15 +227,19 @@ impl AudioExtractor {
         );
 
         let t0 = std::time::Instant::now();
-        let stream = rec.create_stream();
-        stream.accept_waveform(16000, &samples);
-        rec.decode(&stream);
-        let text = match stream.get_result() {
-            Some(r) => r.text.trim().to_string(),
-            None => String::new(),
+        // FunASR-Nano is an LLM trained on ~30s windows; long audio must be
+        // split by VAD first. Segments are recognized independently and the
+        // utterances concatenated (matching the legacy Python fsmn-vad flow).
+        let text = match recognize_segments(&samples) {
+            Some(segments) => segments
+                .iter()
+                .filter_map(|seg| transcribe(rec, seg))
+                .collect::<Vec<_>>()
+                .join(" "),
+            None => transcribe(rec, &samples).unwrap_or_default(),
         };
 
-        if text.is_empty() {
+        if text.trim().is_empty() {
             return Ok(format!(
                 "─── 音频文件 ({:.0}s, {}) ──\n[FunASR 推理完成，无识别结果]\n",
                 dur, ext
@@ -244,6 +248,67 @@ impl AudioExtractor {
         log::info!("[ASR] {:?}: {} chars in {:.1}s", path.file_name(), text.len(), t0.elapsed().as_secs_f64());
         Ok(format!("─── 音频文件 ({:.0}s) ──\n{}\n", dur, text))
     }
+}
+
+/// Silero VAD: split long audio into speech segments (max 30s each, aligned
+/// with the legacy fsmn-vad `max_single_segment_time`). Returns `None` when
+/// the VAD model is unavailable so the caller falls back to single-shot.
+fn vad_available() -> bool {
+    funasr_dir()
+        .map(|d| d.join("silero_vad.onnx").is_file())
+        .unwrap_or(false)
+}
+
+fn recognize_segments(samples: &[f32]) -> Option<Vec<Vec<f32>>> {
+    if !vad_available() {
+        return None;
+    }
+    let dir = funasr_dir()?;
+    let vad_model = dir.join("silero_vad.onnx").to_string_lossy().to_string();
+
+    let mut vad_config = sherpa_onnx::VadModelConfig::default();
+    vad_config.sample_rate = 16000;
+    vad_config.num_threads = 1;
+    vad_config.silero_vad = sherpa_onnx::SileroVadModelConfig {
+        model: Some(vad_model),
+        threshold: 0.5,
+        min_silence_duration: 0.35,
+        min_speech_duration: 0.25,
+        window_size: 512,
+        max_speech_duration: 30.0,
+    };
+    let vad = sherpa_onnx::VoiceActivityDetector::create(&vad_config, 60.0)?;
+
+    let window = 512usize;
+    let mut segments = Vec::new();
+    let mut i = 0;
+    while i + window <= samples.len() {
+        vad.accept_waveform(&samples[i..i + window]);
+        drain_vad(&vad, &mut segments);
+        i += window;
+    }
+    if i < samples.len() {
+        vad.accept_waveform(&samples[i..]);
+    }
+    vad.flush();
+    drain_vad(&vad, &mut segments);
+    Some(segments)
+}
+
+fn drain_vad(vad: &sherpa_onnx::VoiceActivityDetector, segments: &mut Vec<Vec<f32>>) {
+    while !vad.is_empty() {
+        if let Some(seg) = vad.front() {
+            segments.push(seg.samples().to_vec());
+            vad.pop();
+        }
+    }
+}
+
+fn transcribe(rec: &sherpa_onnx::OfflineRecognizer, samples: &[f32]) -> Option<String> {
+    let stream = rec.create_stream();
+    stream.accept_waveform(16000, samples);
+    rec.decode(&stream);
+    stream.get_result().map(|r| r.text.trim().to_string())
 }
 
 use super::Extractor;

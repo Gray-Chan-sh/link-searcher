@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-08（长音频转写修复 · Silero VAD 分段）
+
+- **长音频（>30s）返回「无识别结果」**：用户 209 秒 mp3 转写为空。根因——FunASR-Nano 是 LLM 架构（Qwen-0.6B），训练输入约 30s 窗口，整段 209s 一次性喂入超出长度上限，模型静默返回空。旧 Python 方案有 `fsmn-vad` + `max_single_segment_time=30000` 分段，sherpa-onnx 迁移时漏掉了
+- **修复**：`extract_audio` 增加 **Silero VAD 分段**（`VoiceActivityDetector`，`max_speech_duration=30s` 对齐官方）——512-sample 窗口滑动喂入 → `flush` 取段 → 每段独立识别 → 文本拼接；VAD 模型缺失时自动回退单次识别（短音频不受影响）（`src-tauri/src/extractor/audio.rs`）
+- **VAD 模型随安装下载**：`install_funasr` 在校验主模型后追加下载 `silero_vad.onnx`（628KB，独立小文件非归档内），同样走 GitHub→ModelScope 镜像回退 + 100KB 有效性校验；下载失败不阻塞（只影响长音频分段）（`src-tauri/src/commands/funasr.rs`）
+- **验证**：209s 真实通话录音转写成功（分段识别合并，37s 处理）；新增 `audio_extractor_long_audio` 冒烟测试（`tests/funasr_smoke.rs`）
+
+---
+
 ## 2026-08-08（文档：模型存储目录澄清）
 
 - **打包版检测不到已下载模型**：用户模型在项目 `src-tauri/models/funasr/`（dev 位置），但双击运行的 .app 只认数据目录 `~/Library/Application Support/link-searcher/models/funasr/`（与 db/索引同源）。文档补清两处：USER_MANUAL 8.1 存储位置列出 `models/funasr/` 并加 dev vs 打包版差异说明；`models/funasr/README.md` 修正手动下载的错误路径 `com.linksearcher.app`（应为 `link-searcher`），并注明归档顶层目录需平铺
