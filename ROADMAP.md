@@ -21,15 +21,15 @@
 
 ## P0 — 已知缺陷（应尽快修）
 
-- [ ] **PdfExtractor trait impl 硬编码 `"eng"`**：`pdf.rs` 的 `extract()` 不读全局 `ocr_lang` 设置
-- [ ] **LoBackgroundGuard 死代码清理**：`enter()`/`Drop` 已证实无效，struct 定义仍在 `office/mod.rs`
+- [x] **PdfExtractor trait impl 硬编码 `"eng"`**：`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 池）
+- [x] **LoBackgroundGuard 死代码清理**：struct 已删除
 - [ ] **Semgrep WARNING**：`unwrap`/`expect` 若干处应逐步消除
 
 ---
 
 ## P1 — 性能优化
 
-- [ ] **OCR 引擎并发数可配置**：当前 Rayon 线程池 + 2 引擎池，大文件集可调高并行度
+- [x] **OCR 引擎并发数可配置**：`ocr_concurrent` 设置（默认 2）+ 设置页下拉 → `set_pool_size` 生效
 - [ ] **IO 竞争缓解**：批量扫描时 `par_iter` 多文件同时读可能产生 IO 竞争，可考虑限流
 - [ ] **启动扫描异步化**：当前同步阻塞，可分批提交、逐步显示结果
 - [ ] **浏览页动态分页**：根据窗口高度自动计算 `pageSize`（`ResizeObserver`），撑满可视区域，减少翻页次数
@@ -47,7 +47,7 @@
 - [x] **批量导出流式化**：BufWriter 直接写临时文件，不攒内存
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
 - [x] **poppler-utils 零安装**：build.rs 拷贝二进制到 poppler-bin/，运行时查找
-- [ ] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定
+- [x] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定（四分类+置信度+按页 OCR 路由）
 - [x] **损坏文件优雅降级**：classify_error_str 区分加密/损坏/格式不支持
 - [ ] **索引会话日志**：每次扫描单独日志文件
 - [ ] **浏览页多选**：Cmd/Ctrl+单击多选，批量手动索引

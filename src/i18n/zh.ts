@@ -139,6 +139,7 @@ const zh: Record<string, string> = {
     incl_errors: '含错误',
     index_progress: '索引进度',
     indexing: '索引中',
+    extracted_but_not_indexed: '已提取，等待写入索引（搜索稍后可用）',
     scan_info: '扫描信息',
     total_indexed: '已索引总数',
     recent_changes: '最近变更',
