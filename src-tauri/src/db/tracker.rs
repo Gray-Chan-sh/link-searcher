@@ -11,6 +11,8 @@ pub enum IndexedState {
     Pending = 0,
     Indexed = 1,
     Failed = 2,
+    /// Phase-1 extraction complete; Tantivy write pending (mark_extracted).
+    Extracted = 3,
 }
 
 impl std::fmt::Display for IndexedState {
@@ -19,6 +21,7 @@ impl std::fmt::Display for IndexedState {
             Self::Pending => write!(f, "pending"),
             Self::Indexed => write!(f, "indexed"),
             Self::Failed => write!(f, "failed"),
+            Self::Extracted => write!(f, "extracted"),
         }
     }
 }
@@ -271,7 +274,7 @@ pub fn absorb_subdir(
 
 pub fn get_files_needing_index(conn: &Connection, limit: usize) -> Result<Vec<FileRecord>> {
     let mut s = conn
-        .prepare(&format!("{SEL} WHERE indexed IN (0,2) ORDER BY updated_at ASC LIMIT ?1"))
+        .prepare(&format!("{SEL} WHERE indexed IN (0,2,3) ORDER BY updated_at ASC LIMIT ?1"))
         .context("prepare get_files_needing_index")?;
     let rows = s.query_map(rusqlite::params![limit as i64], row_to_record)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect needing_index")

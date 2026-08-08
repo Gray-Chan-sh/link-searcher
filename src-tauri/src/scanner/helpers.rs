@@ -138,7 +138,14 @@ pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
 
 pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
     match existing {
-        Some(r) => r.mtime != mtime || r.indexed == IndexedState::Pending as i64,
+        // Extracted (Phase-1 done, Tantivy write pending) is treated as
+        // incomplete: a crash after extraction but before the Tantivy write
+        // would otherwise orphan the record forever (searchable-never).
+        Some(r) => {
+            r.mtime != mtime
+                || r.indexed == IndexedState::Pending as i64
+                || r.indexed == IndexedState::Extracted as i64
+        }
         None => true,
     }
 }
@@ -192,6 +199,22 @@ mod tests {
         let a = TempDir::new("test_tmp").unwrap().path().to_path_buf();
         let b = TempDir::new("test_tmp").unwrap().path().to_path_buf();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn needs_reindex_treats_extracted_as_incomplete() {
+        let rec = |indexed: i64| Some(crate::db::tracker::FileRecord {
+            id: "id".into(), path: "p".into(), dir_id: "d".into(),
+            mtime: 100, size: 1, md5: None, status: "active".into(),
+            indexed, error_msg: None, created_at: 0, updated_at: 0,
+        });
+        // Same mtime: indexed=1 is up-to-date, extracted(3) is not.
+        assert!(!needs_reindex(&rec(1), 100));
+        assert!(needs_reindex(&rec(3), 100));
+        // mtime change forces re-index regardless of state.
+        assert!(needs_reindex(&rec(1), 1001));
+        // No record → re-index.
+        assert!(needs_reindex(&None, 0));
     }
 
     #[test]
