@@ -9,9 +9,21 @@ pub const INDEX_DIR_NAME: &str = ".ls-index";
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
+    #[serde(default)]
     pub data_dir: PathBuf,
+    #[serde(default)]
     pub language: String,
+    #[serde(default)]
     pub lo_binary_path: String,
+    /// OpenAI-compatible AI gateway (embedding + chat). Empty base = feature off.
+    #[serde(default)]
+    pub ai_api_base: String,
+    #[serde(default)]
+    pub ai_api_key: String,
+    #[serde(default)]
+    pub embedding_model: String,
+    #[serde(default)]
+    pub llm_model: String,
 }
 
 impl Default for AppConfig {
@@ -21,6 +33,10 @@ impl Default for AppConfig {
             language: "zh".to_string(),
             // Empty = auto-detect; macOS resolves brew/App install paths at runtime.
             lo_binary_path: String::new(),
+            ai_api_base: String::new(),
+            ai_api_key: String::new(),
+            embedding_model: "text-embedding-v3-small".to_string(),
+            llm_model: "qwen2.5-7b-instruct".to_string(),
         }
     }
 }

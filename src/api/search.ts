@@ -47,6 +47,7 @@ export async function search(
   extFilter?: string[],
   sort?: string,
   sortOrder?: string,
+  semantic?: boolean,
 ): Promise<SearchResponse> {
   return invoke<SearchResponse>('search', {
     query,
@@ -57,6 +58,7 @@ export async function search(
     extFilter: extFilter ?? [],
     sort,
     sortOrder,
+    semantic: semantic ?? false,
   })
 }
 

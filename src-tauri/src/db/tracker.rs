@@ -529,6 +529,63 @@ pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExt
     Ok(result)
 }
 
+/// Store (or replace) a document's embedding vector as a little-endian f32 blob.
+pub fn upsert_embedding(
+    conn: &Connection,
+    file_id: &str,
+    vector: &[f32],
+) -> Result<()> {
+    let mut bytes: Vec<u8> = Vec::with_capacity(vector.len() * 4);
+    for x in vector {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    conn.execute(
+        "INSERT INTO doc_embeddings (file_id, dim, vector, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(file_id) DO UPDATE SET dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
+        rusqlite::params![file_id, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
+    )?;
+    Ok(())
+}
+
+/// Load every stored embedding as `(file_id, Vec<f32>)`. Used by the
+/// semantic-search path to brute-force cosine over the whole corpus.
+pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
+    let mut s = conn.prepare(
+        "SELECT file_id, dim, vector FROM doc_embeddings",
+    )?;
+    let rows = s.query_map([], |row| {
+        let file_id: String = row.get(0)?;
+        let dim: usize = row.get(1)?;
+        let blob: Vec<u8> = row.get(2)?;
+        let mut v = Vec::with_capacity(dim);
+        for chunk in blob.chunks_exact(4) {
+            v.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok((file_id, v))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Remove a document's embedding (e.g. when the file is deleted or re-indexed).
+pub fn delete_embedding(conn: &Connection, file_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM doc_embeddings WHERE file_id = ?1",
+        rusqlite::params![file_id],
+    )?;
+    Ok(())
+}
+
+/// Number of stored embeddings (for the AI status panel).
+pub fn count_embeddings(conn: &Connection) -> Result<u64> {
+    conn.query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get::<_, i64>(0))
+        .map(|n| n as u64)
+        .context("count embeddings")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +724,24 @@ mod tests {
         store_content(&conn, "m1", "hello", false, None).unwrap();
         assert_eq!(get_content(&conn, "m1").unwrap().unwrap(), "hello");
         assert!(get_content(&conn, "mX").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_embedding_roundtrip() {
+        let conn = db();
+        upsert_embedding(&conn, "f1", &[0.5, -1.0, 2.0]).unwrap();
+        upsert_embedding(&conn, "f2", &[1.0, 2.0]).unwrap();
+        let all = get_all_embeddings(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        let v = all.iter().find(|(id, _)| id == "f1").unwrap();
+        assert_eq!(v.1, vec![0.5, -1.0, 2.0]);
+
+        upsert_embedding(&conn, "f1", &[9.0]).unwrap();
+        let all = get_all_embeddings(&conn).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.iter().find(|(id, _)| id == "f1").unwrap().1, vec![9.0]);
+
+        delete_embedding(&conn, "f1").unwrap();
+        assert_eq!(count_embeddings(&conn).unwrap(), 1);
     }
 }

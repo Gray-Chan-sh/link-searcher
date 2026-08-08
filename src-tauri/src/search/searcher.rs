@@ -64,6 +64,10 @@ pub struct SearchParams {
     /// Results per page.
     #[serde(default = "default_page_size")]
     pub page_size: usize,
+    /// When true and the AI gateway is configured, rerank hits by semantic
+    /// similarity (RRF fusion of BM25 + embedding cosine).
+    #[serde(default)]
+    pub semantic: bool,
 }
 
 fn default_sort_order() -> String {
@@ -625,6 +629,7 @@ mod tests {
             page: 1,
             page_size: 20,
             fuzzy: false,
+            semantic: false,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -652,6 +657,7 @@ mod tests {
             page: 1,
             page_size: 20,
             fuzzy: false,
+            semantic: false,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -676,6 +682,7 @@ mod tests {
             page: 1,
             page_size: 20,
             fuzzy: false,
+            semantic: false,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -701,6 +708,7 @@ mod tests {
             page: 1,
             page_size: 2,
             fuzzy: false,
+            semantic: false,
         };
         let resp = searcher.search(&params).expect("search");
         assert_eq!(resp.total, 4);
@@ -751,6 +759,7 @@ mod tests {
             page: 1,
             page_size: 20,
             fuzzy: false,
+            semantic: false,
         };
 
         let resp = searcher.search(&params).expect("search");

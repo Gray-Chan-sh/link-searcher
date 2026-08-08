@@ -4,6 +4,10 @@ export interface ConfigInfo {
     data_dir: string
     language: string
     lo_binary_path: string
+    ai_api_base: string
+    ai_api_key: string
+    embedding_model: string
+    llm_model: string
 }
 
 export interface MigrationProgress {
