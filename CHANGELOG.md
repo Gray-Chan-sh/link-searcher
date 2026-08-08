@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-08（FunASR 模型下载镜像自动回退）
+
+- **GitHub 下载慢/失败时模型装不上**：`install_funasr` 之前只认 `LINK_SEARCHER_FUNASR_MIRROR=modelscope` 环境变量，普通用户不知道、下载 842MB 从 GitHub 直连可能超时。改为**双源自动回退**：默认 GitHub 先行，失败/超时（每源 180s 上限）自动切 ModelScope 镜像重试；环境变量仍可强制镜像专用（`src-tauri/src/commands/funasr.rs`）
+- **下载超时保护**：`download()` 每源 180s 上限，连接建立后无进展即中止并切源，安装器不再无限期挂起
+- 新增 `download_sources_modes` 单元测试覆盖默认回退/强制镜像两种模式
+
+---
+
 ## 2026-08-08（ffmpeg 自动检测）
 
 - **音频提取报 `ffmpeg not available`**：`Command::new("ffmpeg")` 只查 PATH，Tauri 运行时（不继承终端 PATH）找不到 Homebrew 的 ffmpeg → mp3 等音频提取全部失败、静默降级为纯文本回退（结果为空）。新增 `find_ffmpeg_binary()` 多候选探测：PATH → `ffmpeg-bin/`（dev 相对）→ 可执行文件旁 → `/opt/homebrew/bin` 等常用前缀，`OnceLock` 缓存；未找到时返回明确安装指引（`src-tauri/src/extractor/audio.rs`）
