@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-08（长音频内存爆炸修复 · OOM）
+
+- **长音频索引导致 OOM 崩溃（18.7GB）**：用户索引 34 分钟录音（2071s）时 RSS 飙升至 18.7GB，进程被系统杀掉。根因——VAD 模型缺失时 `recognize_segments()` 返回 `None`，代码回退 `transcribe(rec, &samples)` **把整段长音频一次性喂给 FunASR-Nano（LLM 架构）**，解码内存失控
+- **修复**：`recognize_segments()` 改为**永远返回有界分段**——Silero VAD 可用时用 VAD（≤30s），不可用时**固定 28s 硬切回退**；彻底移除"整段喂入"路径。实测 2071s 音频 RSS 峰值从 18.7GB → 1.5GB，转写成功（483s）（`src-tauri/src/extractor/audio.rs`）
+- **VAD 模型补齐**：向各数据目录 `models/funasr/` 复制 `silero_vad.onnx`（628KB）——此前多个数据目录缺失导致走硬切路径；`install_funasr` 已有 VAD 下载逻辑，此为先验修复
+
+---
+
 ## 2026-08-08（长音频转写修复 · Silero VAD 分段）
 
 - **长音频（>30s）返回「无识别结果」**：用户 209 秒 mp3 转写为空。根因——FunASR-Nano 是 LLM 架构（Qwen-0.6B），训练输入约 30s 窗口，整段 209s 一次性喂入超出长度上限，模型静默返回空。旧 Python 方案有 `fsmn-vad` + `max_single_segment_time=30000` 分段，sherpa-onnx 迁移时漏掉了
