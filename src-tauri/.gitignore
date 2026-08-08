@@ -1,2 +1,3 @@
 poppler-bin/
+ffmpeg-bin/
 models/funasr/*.bin

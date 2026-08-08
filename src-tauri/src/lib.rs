@@ -391,14 +391,20 @@ fn run_with_config(app_config: config::AppConfig) {
                 let pdf_ok = pdf::is_pdftoppm_available();
 
                 let funasr_ok = crate::extractor::audio::funasr_model_ready();
+                let ffmpeg_ok = crate::extractor::audio::ffmpeg_available();
 
                 log::info!(
-                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={} FunASR={}",
+                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={} FunASR={} ffmpeg={}",
                     if ocr_ok { "OK" } else { "FAIL" },
                     if lo_ok { "OK" } else { "N/A" },
                     if pdf_ok { "OK" } else { "N/A" },
                     if funasr_ok { "OK" } else { "MISSING" },
+                    if ffmpeg_ok { "OK" } else { "MISSING" },
                 );
+
+                if !ffmpeg_ok {
+                    log::info!("[STARTUP] ffmpeg 未找到，音频解码暂不可用（brew install ffmpeg）");
+                }
 
                 if !funasr_ok {
                     log::info!("[STARTUP] FunASR 模型未下载，音频转写暂不可用（设置页可下载）");

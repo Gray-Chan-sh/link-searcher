@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-08（ffmpeg 自动检测）
+
+- **音频提取报 `ffmpeg not available`**：`Command::new("ffmpeg")` 只查 PATH，Tauri 运行时（不继承终端 PATH）找不到 Homebrew 的 ffmpeg → mp3 等音频提取全部失败、静默降级为纯文本回退（结果为空）。新增 `find_ffmpeg_binary()` 多候选探测：PATH → `ffmpeg-bin/`（dev 相对）→ 可执行文件旁 → `/opt/homebrew/bin` 等常用前缀，`OnceLock` 缓存；未找到时返回明确安装指引（`src-tauri/src/extractor/audio.rs`）
+- **build.rs 打包 ffmpeg**：像 poppler 一样将 `ffmpeg` 拷贝进 `ffmpeg-bin/`，app bundle 自带解码器（`src-tauri/build.rs`）
+- **依赖检测 + 启动日志**：`check_dependencies()` 新增「FFmpeg (音频解码)」条目（含 brew 安装指引）；`[STARTUP]` 日志增加 `ffmpeg=OK/MISSING`（`src-tauri/src/commands/tesseract.rs`、`src-tauri/src/lib.rs`）
+
+---
+
 ## 2026-08-08（文件类型页 · 扫描过但不支持）
 
 - **扫描静默丢弃的问题文件可见化**：此前不支持的扩展名被 `extension_allowed` 过滤后无声消失，用户看不到「为什么这些文件搜索不到」。现扫描器在全量/增量/启动扫描 3 处过滤点记录被跳过文件的扩展名计数（`unsupported_ext_stats` 表，`bump_unsupported_ext`），文件类型页新增「扫描过但不支持」区块（`src-tauri/src/scanner/mod.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）

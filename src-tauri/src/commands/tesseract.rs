@@ -113,6 +113,12 @@ pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
             install_guide: "macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice".into(),
         },
         DependencyStatus {
+            name: "FFmpeg (音频解码)".into(),
+            command: "ffmpeg".into(),
+            available: crate::extractor::audio::ffmpeg_available(),
+            install_guide: "macOS: brew install ffmpeg\nWindows: winget install ffmpeg\nLinux: sudo apt install ffmpeg".into(),
+        },
+        DependencyStatus {
             name: "FunASR (音频转写)".into(),
             command: "data_dir/models/funasr (sherpa-onnx int8 models)".into(),
             available: crate::extractor::audio::funasr_model_ready(),

@@ -51,6 +51,22 @@ fn main() {
     }
     println!("cargo:rustc-env=POPPLER_BIN_DIR=poppler-bin");
 
+    // Copy ffmpeg into resources for app-bundle packaging (audio decode).
+    let ff_dir = std::path::PathBuf::from("ffmpeg-bin");
+    let _ = std::fs::create_dir_all(&ff_dir);
+    let ff_dst = ff_dir.join("ffmpeg");
+    if !ff_dst.exists() {
+        for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+            let src = std::path::PathBuf::from(prefix).join("ffmpeg");
+            if src.exists() {
+                std::fs::copy(&src, &ff_dst).ok();
+                std::fs::set_permissions(&ff_dst, std::fs::Permissions::from_mode(0o755)).ok();
+                break;
+            }
+        }
+    }
+    println!("cargo:rustc-env=FFMPEG_BIN_DIR=ffmpeg-bin");
+
     // Create model directories
     let _ = std::fs::create_dir_all("models/funasr");
 
