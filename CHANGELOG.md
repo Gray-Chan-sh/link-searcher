@@ -8,6 +8,7 @@
 
 - **添加已含子目录的父目录被拒绝**：`add_dir(/A)` 因已索引 `/A/B` 报"此目录包含已索引目录"。现改为**吸收**——添加父目录时，把被包含子目录的 `file_tracking` 记录重根到父目录（`path` 加子目录相对前缀如 `B/`、`dir_id` 指向父、`indexed` 重置），删除子目录配置并停 watcher；Tantivy 旧文档按 `dir_id` 删除，父目录重扫时通过 MD5/content 去重**复用已提取内容**、只重建索引文档，不重复提取（`src-tauri/src/commands/dirs.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/search/indexer.rs`、`src-tauri/src/indexer.rs`）
 - **新增**：`tracker::absorb_subdir`（事务内批量迁移，保留 md5）、`Indexer::delete_by_dir` + `IndexerService::delete_dir`（按 dir_id 删 Tantivy 文档）
+- **吸收后自动全量扫描**：`add_dir` 吸收子目录后后台触发父目录 `full_scan`（`is_scanning` 防重入），Tantivy 文档立即以新路径重建，无需手动扫描；内容经 MD5 去重复用（`src-tauri/src/commands/dirs.rs`）
 - **测试**：`test_absorb_subdir_reroots_paths_and_dir_id` 覆盖路径重根/目录切换/md5 保留/indexed 重置；93 单元 + 3 smoke + 9 集成通过
 
 ---

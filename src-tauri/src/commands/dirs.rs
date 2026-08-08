@@ -115,6 +115,34 @@ pub async fn add_dir(
         path: std::path::PathBuf::from(&dir.path),
     });
 
+    // Absorbed sub-directories need their Tantivy documents rebuilt with the
+    // new paths. Trigger a background full scan of the parent so the change
+    // takes effect without a manual scan (content is reused via MD5 dedup).
+    if !contains.is_empty() {
+        let scanner = state.scanner.clone();
+        let dir_id = dir.id.clone();
+        let is_scanning = state.is_scanning.clone();
+        let cancel_scan = state.cancel_scan.clone();
+        tokio::task::spawn_blocking(move || {
+            if is_scanning
+                .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+                .is_err()
+            {
+                log::warn!("[DIRS] 扫描已在运行，跳过吸收后自动全量扫描");
+                return;
+            }
+            cancel_scan.store(false, std::sync::atomic::Ordering::Release);
+            match scanner.full_scan(&dir_id, |_| {}) {
+                Ok(r) => log::info!(
+                    "[DIRS] 吸收后扫描完成: {} files, {} indexed, {} errors",
+                    r.total_files, r.indexed, r.errors
+                ),
+                Err(e) => log::warn!("[DIRS] 吸收后扫描失败: {e}"),
+            }
+            is_scanning.store(false, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+
     Ok(DirConfigResponse {
         id: dir.id,
         path: dir.path,
