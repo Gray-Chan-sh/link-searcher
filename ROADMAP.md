@@ -43,6 +43,7 @@
 - [x] **增量扫描剩余时间估算**：scanner 进度日志加 ETA
 - [x] **搜索历史前端入口**：SearchBar 下拉 + SearchPage 传 history prop
 - [x] **文件类型统计增强**：加索引状态分解（已索引/待处理/失败数）
+- [x] **扫描过但不支持的扩展名可见**：扫描时记录白名单外扩展名计数，文件类型页展示（区分缺依赖/不支持）
 - [x] **批量导出流式化**：BufWriter 直接写临时文件，不攒内存
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
 - [x] **poppler-utils 零安装**：build.rs 拷贝二进制到 poppler-bin/，运行时查找
@@ -53,6 +54,7 @@
 - [x] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：前端 filter + 后端路由
 - [x] **音频 STT**：FunASR-Nano ONNX 推理，8 种音频格式，Python助手脚本
 - [x] **热词增量计数**：jieba 分词 + SQLite，ASR 识别精度增强
+- [x] **FunASR 零 Python 化（方案 B）**：sherpa-onnx crate（1.13.4）替代 Python venv 推理，下载预转 FunASR-Nano ONNX int8 模型（~842MB）；首次使用（模型未就绪）时自动下载，后台进度 + 完成后可立即索引（复用 install_funasr 事件模式）；部署不打包模型、不装 torch，删除 venv/install_funasr 逻辑
 
 ---
 

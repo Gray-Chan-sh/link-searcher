@@ -88,6 +88,7 @@ impl Scanner {
         // Record last scan time BEFORE walking — prevents missing files
         // that are modified during the scan.
         record_last_scan(&conn, dir_id)?;
+        tracker::reset_unsupported_ext(&conn, dir_id);
 
         // Phase 1: Count files for the progress bar.
         //
@@ -152,7 +153,12 @@ impl Scanner {
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
-            if !extension_allowed(&path, &include_exts) { continue; }
+            if !extension_allowed(&path, &include_exts) {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    tracker::bump_unsupported_ext(&conn, &ext.to_lowercase(), dir_id);
+                }
+                continue;
+            }
 
             processed += 1;
             let name = entry.file_name().to_string_lossy().to_string();
@@ -257,6 +263,7 @@ impl Scanner {
 
         // Record last scan time BEFORE walking the main loop.
         record_last_scan(&conn, dir_id)?;
+        tracker::reset_unsupported_ext(&conn, dir_id);
 
         // Load all tracked records once. The old mtime gate skipped every
         // unchanged file's DB lookup; we now need the record for every file
@@ -279,7 +286,12 @@ impl Scanner {
         for entry in walker {
             let entry = entry.context("walkdir error")?;
             if !entry.file_type().is_file() { continue; }
-            if !extension_allowed(entry.path(), &include_exts) { continue; }
+            if !extension_allowed(entry.path(), &include_exts) {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    tracker::bump_unsupported_ext(&conn, &ext.to_lowercase(), dir_id);
+                }
+                continue;
+            }
             if self.cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] 扫描已取消, 停止遍历");
                 break;
@@ -379,6 +391,7 @@ impl Scanner {
 
         // Record last scan time BEFORE walking the main loop.
         record_last_scan(&conn, dir_id)?;
+        tracker::reset_unsupported_ext(&conn, dir_id);
 
         let mut on_disk: Vec<DiskEntry> = Vec::new();
         let mut indexed = 0u64;
@@ -393,7 +406,12 @@ impl Scanner {
         for entry in walker {
             let entry = entry.context("walkdir error")?;
             if !entry.file_type().is_file() { continue; }
-            if !extension_allowed(entry.path(), &include_exts) { continue; }
+            if !extension_allowed(entry.path(), &include_exts) {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    tracker::bump_unsupported_ext(&conn, &ext.to_lowercase(), dir_id);
+                }
+                continue;
+            }
             if self.cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] 启动扫描已取消, 停止遍历");
                 break;

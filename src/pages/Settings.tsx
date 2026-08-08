@@ -6,7 +6,7 @@ import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
-import { checkDependencies, getVersion, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
+import { checkDependencies, getVersion, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -35,6 +35,7 @@ export default function Settings() {
   const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
+  const [funasrInstalling, setFunasrInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
@@ -62,6 +63,11 @@ export default function Settings() {
     listen<MigrationWarning>('migration-warning', e => {
       void message(e.payload.message, { title: '迁移警告', kind: 'warning' })
     }).then(u => unlisteners.push(u))
+    listen<FunasrInstallResult>('funasr-install-done', async e => {
+      setFunasrInstalling(false)
+      await message(e.payload.message, { title: 'FunASR', kind: e.payload.success ? 'info' : 'warning' })
+      checkDependencies().then(setDeps).catch(() => {})
+    }).then(u => unlisteners.push(u))
     return () => {
       unlisteners.forEach(u => u())
     }
@@ -72,6 +78,24 @@ export default function Settings() {
       setLoPath(appConfig.lo_binary_path)
     }
   }, [appConfig])
+
+  const handleFunasrInstall = async () => {
+    if (funasrInstalling) return
+    const confirmed = await ask(t('confirm_install_funasr'), {
+      title: t('funasr_install_prompt'),
+      kind: 'warning',
+      okLabel: t('install_now'),
+      cancelLabel: t('not_now'),
+    })
+    if (!confirmed) return
+    setFunasrInstalling(true)
+    try {
+      await installFunasr()
+    } catch (e) {
+      setFunasrInstalling(false)
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const handleTestOcr = async () => {
     const engineType = settings['ocr_engine'] ?? 'PaddleOCR'
@@ -385,6 +409,15 @@ export default function Settings() {
                   <pre className="mt-1 text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 p-2 rounded">{filterGuide(dep.install_guide)}</pre>
                 )}
               </div>
+              {!dep.available && dep.name.includes('FunASR') && (
+                <button
+                  onClick={handleFunasrInstall}
+                  disabled={funasrInstalling}
+                  className="shrink-0 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+                >
+                  {funasrInstalling ? t('installing') : t('install_now')}
+                </button>
+              )}
             </div>
           ))}
         </Section>

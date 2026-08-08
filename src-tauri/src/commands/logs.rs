@@ -13,9 +13,8 @@ pub fn get_logs(
     let content = std::fs::read_to_string(&log_path).map_err(|e| format!("{e}"))?;
     let all: Vec<&str> = content.lines().collect();
 
-    // When a file_id is given, return the most recent complete indexing
-    // session for that file: from the last "开始:" line mentioning the id
-    // (both the start and end of the indexing are tagged [INDEX] [id]).
+    // Return the most recent indexing session for this file: parallel batches
+    // interleave in the log, so trim to the last 开始: and keep only [id] lines.
     if let Some(fid) = file_id {
         let id_tag = format!("[{fid}]");
         // Find the position of the LAST "开始:" line for this file.
@@ -26,7 +25,11 @@ pub fn get_logs(
             }
         }
         return match start_idx {
-            Some(s) => Ok(all[s..].iter().map(|s| s.to_string()).collect()),
+            Some(s) => Ok(all[s..]
+                .iter()
+                .filter(|line| line.contains(&id_tag))
+                .map(|s| s.to_string())
+                .collect()),
             None => Ok(Vec::new()),
         };
     }

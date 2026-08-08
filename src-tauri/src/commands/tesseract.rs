@@ -112,6 +112,12 @@ pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
             available: crate::extractor::office::is_libreoffice_available(),
             install_guide: "macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice".into(),
         },
+        DependencyStatus {
+            name: "FunASR (音频转写)".into(),
+            command: "data_dir/models/funasr (sherpa-onnx int8 models)".into(),
+            available: crate::extractor::audio::funasr_model_ready(),
+            install_guide: "在设置页点击「下载 FunASR 模型」\n（自动下载 sherpa-onnx-funasr-nano-int8，约 850MB）\n或手动: 将下列归档解压到 <data_dir>/models/funasr/\n  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2".into(),
+        },
     ])
 }
 
@@ -172,6 +178,58 @@ pub fn get_file_type_support(state: State<'_, AppState>) -> Result<Vec<FileTypeI
         result.push(FileTypeInfo { extension: ext.to_string(), name: name.to_string(), dependency_met: dep_met, install_guide: guide.to_string(), count_in_dirs: count });
     }
     Ok(result)
+}
+
+#[derive(Serialize)]
+pub struct UnsupportedExtInfo {
+    pub extension: String,
+    pub count: u64,
+    pub dir_id: String,
+    /// True when the format could be indexed if a known dependency were
+    /// installed (e.g. LibreOffice for `.wps`/`.et`/`.dps`); false for
+    /// formats with no extractor path at all.
+    pub rescusable: bool,
+    /// Human-readable hint shown in the UI (install guide or "no support").
+    pub hint: String,
+}
+
+/// Common-but-unsupported office extensions that become indexable once
+/// LibreOffice is present (the text/office pipeline handles many of these).
+const RESCUABLE_OFFICE_EXTS: [&str; 10] = [
+    "wps", "et", "dps", "rtf", "odg", "odf", "sxw", "sxc", "sxi", "wpt",
+];
+
+/// Return file extensions seen on disk during scans that are NOT in the
+/// extractor whitelist, with occurrence counts. Lets users see *why* some
+/// files never appear in search results instead of silently dropping them.
+#[tauri::command]
+pub fn get_unsupported_ext_stats(state: State<'_, AppState>) -> Result<Vec<UnsupportedExtInfo>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let lo_ok = crate::extractor::office::is_libreoffice_available();
+    let stats = crate::db::tracker::get_unsupported_ext_stats(&conn)
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(stats
+        .into_iter()
+        .map(|s| {
+            let (rescusable, hint) = if RESCUABLE_OFFICE_EXTS.contains(&s.ext.as_str()) {
+                if lo_ok {
+                    (true, "LibreOffice 已安装，可手动索引".into())
+                } else {
+                    (true, "安装 LibreOffice 后可索引（brew install --cask libreoffice）".into())
+                }
+            } else {
+                (false, "暂无提取器支持".into())
+            };
+            UnsupportedExtInfo {
+                extension: s.ext,
+                count: s.count,
+                dir_id: s.dir_id,
+                rescusable,
+                hint,
+            }
+        })
+        .collect())
 }
 
 /// Test an OCR engine by running it against a generated test image.

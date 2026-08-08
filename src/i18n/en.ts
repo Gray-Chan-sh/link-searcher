@@ -43,6 +43,12 @@ const en: Record<string, string> = {
     retry: 'Retry',
     clear: 'Clear',
     clear_search: 'Clear search',
+    confirm_clear_logs: 'Clear all logs? This cannot be undone.',
+    confirm_install_funasr: 'Audio transcription (FunASR) is not ready. It downloads an ~850MB model (sherpa-onnx-funasr-nano-int8); after that, transcription works offline with no Python required. Download now?',
+    funasr_install_prompt: 'Download Audio Recognition Model',
+    install_now: 'Install Now',
+    not_now: 'Not Now',
+    installing: 'Installing…',
     refresh: 'Refresh',
     open: 'Open',
     copy_path: 'Copy Path',
@@ -172,6 +178,9 @@ const en: Record<string, string> = {
     file_types_desc: 'Check dependency status and file counts per type',
     missing_dependencies: 'Missing Dependencies',
     has_files: 'Has Files',
+    unsupported_file_types: 'Scanned but Unsupported',
+    unsupported_file_types_desc: 'Extensions found on disk that cannot be extracted; these files will never be indexed',
+    unsupported: 'Unsupported',
 
     // Search bar / results
     recent_searches: 'Recent searches',

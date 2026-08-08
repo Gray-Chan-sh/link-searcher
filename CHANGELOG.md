@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-08-08（文件类型页 · 扫描过但不支持）
+
+- **扫描静默丢弃的问题文件可见化**：此前不支持的扩展名被 `extension_allowed` 过滤后无声消失，用户看不到「为什么这些文件搜索不到」。现扫描器在全量/增量/启动扫描 3 处过滤点记录被跳过文件的扩展名计数（`unsupported_ext_stats` 表，`bump_unsupported_ext`），文件类型页新增「扫描过但不支持」区块（`src-tauri/src/scanner/mod.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）
+- **新命令 `get_unsupported_ext_stats`**：返回扩展名 + 出现次数 + 是否可救（wps/et/dps 等 LibreOffice 可救格式标记缺依赖并给安装指引，其余标「暂无提取器支持」）（`src-tauri/src/commands/tesseract.rs`、`src-tauri/src/lib.rs`）
+- **前端**：FileTypes 页在支持列表下方展示不支持扩展名，区分「缺少依赖」（琥珀色）与「不支持」（红色），含文件计数与提示文案；i18n 新增 4 键（`src/pages/FileTypes.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`）
+- **scan-run 重置**：`unsupported_ext_stats` 由累计制改为快照制——每个扫描函数遍历前按 `dir_id` 清空（`reset_unsupported_ext`），扫描完成后即该目录的当前磁盘状态；多目录独立、取消扫描后下次自愈（`src-tauri/src/scanner/mod.rs`、`src-tauri/src/db/tracker.rs`）
+
+---
+
+## 2026-08-08（FunASR 零 Python 化 · sherpa-onnx）
+
+- **彻底移除 Python venv 依赖**：音频 STT 从「venv + torch + funasr + infer.py」迁移为 sherpa-onnx Rust crate（1.13.4，Apache-2.0）进程内推理 `Fun-ASR-Nano-2512` ONNX int8 模型。`infer.py`、`install_funasr` 的 venv/pip 逻辑全部删除，`data_dir/models/funasr/.venv`（约 1.3GB）已清理（`src-tauri/Cargo.toml`、`src-tauri/src/extractor/audio.rs`、`src-tauri/src/commands/funasr.rs`）
+- **模型改为下载制（方案 B）**：`install_funasr` 命令改为「下载 + 解压 sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2（~850MB，GitHub；`LINK_SEARCHER_FUNASR_MIRROR=modelscope` 走国内镜像）→ 校验 4 个必需文件」，后台线程 + 每 5% 进度日志 + 完成后 emit `funasr-install-done` 事件，前端交互零改动（`src-tauri/src/commands/funasr.rs`）
+- **识别器全局复用**：`OfflineRecognizer` 存 `OnceLock` 单例，避免每文件重复加载 ~950M int8 权重；解码参数对齐官方配置（`greedy_search`、`temperature=1e-6`、`top_p=0.8`、`user_prompt="语音转写："`、`max_new_tokens=512`）（`src-tauri/src/extractor/audio.rs`）
+- **就绪检查更新**：`funasr_venv_ready()` → `funasr_model_ready()`，依赖检测/启动日志/设置页指引全部指向模型下载而非 venv；build.rs 的 `HAS_ASR_MODELS` 改查新 int8 布局（`src-tauri/src/commands/tesseract.rs`、`src-tauri/src/lib.rs`、`src-tauri/build.rs`）
+- **文档与文案**：`models/funasr/README.md` 重写为下载制；README/USER_MANUAL i18n 文案从「2GB venv」改为「850MB 模型下载」；**注意：不再输出 `[Speaker X]` 说话人分离**（sherpa-onnx 接口仅返回整段文本）
+- **构建说明**：sherpa-onnx-sys 首次构建需联网下载静态链接库（18M，缓存于 `target/sherpa-onnx-prebuilt/`）；本机有代理时如遇 `UnknownIssuer` TLS 错误，手动下载归档并设 `SHERPA_ONNX_ARCHIVE_DIR`
+
+---
+
+## 2026-08-08（FunASR 启动依赖检测 + 自动安装）
+
+- **build 后 FunASR venv 定位失败**：venv（约 2.3GB）不进包，dev 仓库内的 venv 在 build 后 cwd 不定的情况下找不到。`funasr_candidates()` 新增「从可执行文件向上逐级找 `src-tauri/models/funasr`」，开发机上 build 产物零拷贝直接复用仓库 venv（`src-tauri/src/extractor/audio.rs`）
+- **FunASR 纳入依赖检测**：`check_dependencies()` 新增「FunASR (音频转写)」条目，设置页自动显示 ✓/✗ + 安装指引；启动日志 `[STARTUP] PaddleOCR=.. LibreOffice=.. pdftoppm=.. FunASR=OK/MISSING`（`src-tauri/src/commands/tesseract.rs`、`src-tauri/src/lib.rs`）
+- **一键自动安装**：新增 `install_funasr` 命令——`python3 -m venv` + `pip install funasr torch torchaudio` 到 `data_dir/models/funasr`，后台线程执行不阻塞 UI，pip 输出逐行写日志，完成 emit `funasr-install-done`，`AtomicBool` 防重入；无 python3 时报错提示（`src-tauri/src/commands/funasr.rs`，新文件）
+- **启动交互**：App 挂载时查依赖，FunASR 缺失 → `ask()` 确认弹窗（约 2GB）→ 确认即安装，拒绝本次会话不再打扰（`sessionStorage`）；设置页依赖卡内置「立即安装」按钮（`src/App.tsx`、`src/pages/Settings.tsx`）
+- **i18n**：新增 `confirm_install_funasr` / `funasr_install_prompt` / `install_now` / `not_now` / `installing`（zh/en）
+
+---
+
+## 2026-08-08（索引日志过滤 + ASR 候选链 + 清空确认）
+
+- **单文件索引日志混入无关行**：`get_logs(file_id)` 上次修复返回最后一次 `开始:` 之后**全部**行，并行批次交错后混入其他文件/启动/tantivy/`[BROWSE]` 日志。改为从最后一次 `开始:` 起只保留含 `[fid]` 标记的行（开始/提取/完成均带 `[INDEX] [id]`）（`src-tauri/src/commands/logs.rs`）。日志中残留的 `[BROWSE]` 行来自修复前旧版本启动的历史记录，append 保留属预期
+- **build 后 FunASR 仍找不到 venv**：探测链少了 data_dir 候选。抽出 `funasr_candidates()`，新增 `data_dir/models/funasr`（`crate::config::load_config()`）为第 4 候选；`[ASR 环境未安装]` 错误信息列出全部已探测路径，便于定位（`src-tauri/src/extractor/audio.rs`）
+- **清空日志误触**：LogViewer 清空按钮直接截断日志无确认。新增 `confirm_clear_logs` i18n key（zh/en），点击后 `ask()` 二次确认（kind=warning）（`src/pages/LogViewer.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`）
+
+---
+
 ## 2026-08-08（7 项日志/浏览/ASR 缺陷修复）
 
 - **[BROWSE] 无关日志**：`files.rs` 每次浏览查询打印 `[BROWSE] filter/sort/page` 参数，与索引内容无关，已删除（`src-tauri/src/commands/files.rs`）

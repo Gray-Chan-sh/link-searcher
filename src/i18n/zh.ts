@@ -43,6 +43,12 @@ const zh: Record<string, string> = {
     retry: '重试',
     clear: '清空',
     clear_search: '清除搜索',
+    confirm_clear_logs: '确定清空全部日志？此操作不可恢复。',
+    confirm_install_funasr: '音频转写 (FunASR) 尚未就绪：需要下载约 850MB 模型（sherpa-onnx-funasr-nano-int8），下载后即可离线使用，无需 Python。是否立即下载？',
+    funasr_install_prompt: '下载音频识别模型',
+    install_now: '立即安装',
+    not_now: '暂不',
+    installing: '安装中…',
     refresh: '刷新',
     open: '打开',
     copy_path: '复制路径',
@@ -172,6 +178,9 @@ const zh: Record<string, string> = {
     file_types_desc: '查看各类型的依赖状态与文件数量',
     missing_dependencies: '缺少依赖',
     has_files: '有文件',
+    unsupported_file_types: '扫描过但不支持',
+    unsupported_file_types_desc: '目录中存在但无法提取内容的扩展名，出现即不会被索引',
+    unsupported: '不支持',
 
     // Search bar / results
     recent_searches: '最近搜索',
