@@ -241,7 +241,11 @@ npm run tauri dev
 - **Windows**：`%APPDATA%\link-searcher\`
 - **Linux**：`~/.local/share/link-searcher/`
 
-内容：`data.db` + `index/` + `app.log` + `backups/`
+内容：`data.db` + `index/` + `app.log` + `backups/` + `models/funasr/`
+
+> **FunASR 模型下载位置**：设置页"下载 FunASR 模型"存入 `数据目录/models/funasr/`（如上），与数据库/索引同源。**只需下载一次，升级重装 app 后仍在**。
+>
+> **开发版（`npm run tauri dev`）**：优先从项目 `src-tauri/models/funasr/` 读取——两台位置任选其一即可；**打包版（.app/安装包）只认数据目录**。若打包版检测不到模型，请确认模型在数据目录而非项目目录。
 
 ### 8.2 迁移数据
 

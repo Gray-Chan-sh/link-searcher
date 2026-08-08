@@ -13,12 +13,17 @@ ONNX 导出模型，**不再需要 Python / venv / torch / 外部进程**。
 
 程序从设置页/启动提示处点击「下载 FunASR 模型」自动完成：
 
-1. 下载 `sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2`（GitHub release，可选
-   `LINK_SEARCHER_FUNASR_MIRROR=modelscope` 走国内镜像）
-2. 解压到 `<data_dir>/models/funasr/`
+1. 下载 `sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2`（默认 GitHub，失败自动切
+   ModelScope 镜像；`LINK_SEARCHER_FUNASR_MIRROR=modelscope` 强制镜像）
+2. 解压到 **应用数据目录** `models/funasr/`（macOS：
+   `~/Library/Application Support/link-searcher/models/funasr/`）
 3. 校验 4 个必需文件后完成，无需重启即可索引
 
-手动下载：
+> **位置说明**：打包版（.app/安装包）只认数据目录，与数据库/索引同源；
+> 开发版（`npm run tauri dev`）额外探测项目 `src-tauri/models/funasr/`。
+> 模型只需下载一次，升级重装 app 后仍在。
+
+手动下载（macOS）：
 
 ```bash
 # GitHub
@@ -28,8 +33,9 @@ curl -L -o /tmp/model.tar.bz2 \
 curl -L -o /tmp/model.tar.bz2 \
   https://modelscope.cn/models/csukuangfj/asr-models/resolve/master/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2
 
-mkdir -p ~/Library/Application\ Support/com.linksearcher.app/models/funasr
-tar xjf /tmp/model.tar.bz2 -C <data_dir>/models/funasr/
+mkdir -p ~/Library/Application\ Support/link-searcher/models/funasr
+tar xjf /tmp/model.tar.bz2 -C ~/Library/Application\ Support/link-searcher/models/funasr/
+# 归档内含顶层目录 sherpa-onnx-funasr-nano-int8-2025-12-30/，需将其内容平铺到 models/funasr/ 下
 ```
 
 ## 文件清单（模型就绪后）
