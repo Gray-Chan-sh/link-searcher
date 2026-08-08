@@ -233,5 +233,5 @@ fn test_ipc_get_settings() {
         result.as_object().unwrap().contains_key("ocr_lang"),
         "settings should contain 'ocr_lang' key"
     );
-    assert_eq!(result["ocr_lang"], json!("eng"), "expected ocr_lang=eng");
+    assert_eq!(result["ocr_lang"], json!("chi_sim"), "expected ocr_lang=chi_sim");
 }

@@ -10,6 +10,7 @@
 - **删 `ocr_concurrent` 设置项**：该键只作用于 PaddleOCR 内部池却误导用户，且不再读取。清除 seed（`db/mod.rs`）、白名单（`commands/settings.rs`）、设置页 UI（`Settings.tsx`）；PaddleOCR 池固定 2 引擎，Apple Vision 由全局闸门按核数限流
 - **数据佐证**：真实库 5734 个 PDF 实测分类——59.7% 纯文字层（直接读）、35.8% 纯扫描件（整本 OCR）、3.2% 混合型；需 OCR 页约 23K。据此**否决**了页级混合提取方案（混合型占比过小，收益 <2% 且引入 wm/garbled 回归风险），保留现有 pdf-inspector + 水印/乱码/重复检测门禁不动
 - **测试**：`test_ocr_gate_limits_concurrency`（12 线程抢 3 槽峰值 ≤3）；103 单元 + 3 smoke + 9 集成通过，semgrep 0
+- **修复过时断言**：`test_ipc_get_settings` 断言 `ocr_lang=eng` 但 seed 早已是 `chi_sim`（f4f1803 改默认语言时漏同步测试），断言改为 `chi_sim`；同步修正 `file_tracking` 无关的 `app_settings` DDL 兜底 `DEFAULT 'eng' → 'chi_sim'`（`src-tauri/tests/ipc_test.rs`、`src-tauri/src/db/mod.rs`）
 
 ---
 

@@ -130,7 +130,7 @@ const CREATE_TABLES_SQL: &str = "
         id              TEXT PRIMARY KEY,
         path            TEXT NOT NULL UNIQUE,
         alias           TEXT,
-        ocr_lang        TEXT NOT NULL DEFAULT 'eng',
+        ocr_lang        TEXT NOT NULL DEFAULT 'chi_sim',
         exclude_patterns TEXT,
         include_exts    TEXT,
         recursive       INTEGER NOT NULL DEFAULT 1,
