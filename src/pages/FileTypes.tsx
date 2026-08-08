@@ -10,15 +10,27 @@ interface FileTypeInfo {
   count_in_dirs: number
 }
 
+interface UnsupportedExtInfo {
+  extension: string
+  count: number
+  dir_id: string
+  rescusable: boolean
+  hint: string
+}
+
 export default function FileTypes() {
   const { t } = useI18n()
   const [types, setTypes] = useState<FileTypeInfo[]>([])
+  const [unsupported, setUnsupported] = useState<UnsupportedExtInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState<'all' | 'missing' | 'has_files'>('all')
 
   useEffect(() => {
     invoke<FileTypeInfo[]>('get_file_type_support')
       .then(setTypes)
+      .catch(() => {})
+    invoke<UnsupportedExtInfo[]>('get_unsupported_ext_stats')
+      .then(setUnsupported)
       .catch(() => {})
       .finally(() => setLoading(false))
   }, [])
@@ -65,6 +77,25 @@ export default function FileTypes() {
           </div>
         ))}
       </div>
+
+      {unsupported.length > 0 && (
+        <div className="mt-8">
+          <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">{t('unsupported_file_types')}</h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{t('unsupported_file_types_desc')}</p>
+          <div className="space-y-1">
+            {unsupported.map(ue => (
+              <div key={ue.extension} className="flex items-center gap-3 px-3 py-2 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg text-sm">
+                <span className="font-mono font-medium w-24 text-gray-900 dark:text-gray-100">.{ue.extension}</span>
+                <span className={`text-xs font-medium w-20 ${ue.rescusable ? 'text-amber-500' : 'text-red-500'}`}>
+                  {ue.rescusable ? t('missing_dependencies') : t('unsupported')}
+                </span>
+                <span className="text-xs text-gray-500 w-16 text-right">{ue.count} {t('files')}</span>
+                <span className="flex-1 text-xs text-gray-400 dark:text-gray-500">{ue.hint}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

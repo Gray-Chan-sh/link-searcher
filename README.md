@@ -103,6 +103,7 @@
 | **No Results 引导** | 提供清空筛选、打开索引页等快捷操作 |
 | **设置页** | 所有选项修改后自动保存，无需手动点击保存按钮 |
 | **索引状态页** | 文件数/已索引/待处理/失败统计，Recent Changes（新增/修改/删除），文件类型分布 |
+| **文件类型页** | 各类型依赖状态与文件数；「扫描过但不支持」区块展示白名单外扩展名（缺依赖格式可一键定位安装指引） |
 | **日志查看** | 按类型筛选，自动刷新 |
 
 ### 系统集成
@@ -124,7 +125,7 @@
 
 - **Node.js** 20+
 - **Rust** 1.85+
-- **音频识别（可选）**：Python 3 + ffmpeg，按 `src-tauri/models/funasr/README.md` 创建 venv 并安装 funasr 后启用 mp3/wav 等语音转写
+- **音频识别（可选）**：ffmpeg，首次使用时在设置页下载 FunASR-Nano 模型（~850MB）后启用 mp3/wav 等语音转写（sherpa-onnx 纯 Rust 推理，无需 Python）
 
 > PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎或 LibreOffice（旧版 `.doc` `.ppt`），请参考用户手册。
 

@@ -166,6 +166,13 @@ const CREATE_TABLES_SQL: &str = "
         word        TEXT PRIMARY KEY,
         count       INTEGER NOT NULL DEFAULT 1
     );
+
+    CREATE TABLE IF NOT EXISTS unsupported_ext_stats (
+        ext         TEXT PRIMARY KEY,
+        count       INTEGER NOT NULL DEFAULT 0,
+        dir_id      TEXT NOT NULL DEFAULT '*',
+        updated_at  INTEGER NOT NULL
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any

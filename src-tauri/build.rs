@@ -54,10 +54,15 @@ fn main() {
     // Create model directories
     let _ = std::fs::create_dir_all("models/funasr");
 
-    // Check for optional FunASR models
-    let funasr = std::path::Path::new("models/funasr/funasr-nano.onnx");
-    let campp = std::path::Path::new("models/funasr/campp.onnx");
-    let has_asr = funasr.exists() && campp.exists();
+    // Check for optional FunASR models (sherpa-onnx int8 layout)
+    let has_asr = [
+        "models/funasr/encoder_adaptor.int8.onnx",
+        "models/funasr/llm.int8.onnx",
+        "models/funasr/embedding.int8.onnx",
+        "models/funasr/Qwen3-0.6B/tokenizer.json",
+    ]
+    .iter()
+    .all(|p| std::path::Path::new(p).is_file());
     println!("cargo:rustc-env=HAS_ASR_MODELS={}", if has_asr { "1" } else { "0" });
 
     tauri_build::build()

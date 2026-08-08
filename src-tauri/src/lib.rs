@@ -19,7 +19,8 @@ use crate::commands::index::{cancel_scan, check_index_health, get_index_errors, 
 use crate::commands::search::{export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs};
-use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, list_ocr_engines, test_ocr_engine};
+use crate::commands::funasr::install_funasr;
+use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
 use crate::indexer::IndexerService;
 use crate::scanner::Scanner;
 use crate::scanner::watcher::FileWatcher;
@@ -98,10 +99,12 @@ fn run_with_config(app_config: config::AppConfig) {
             test_ocr_engine,
             check_dependencies,
             get_file_type_support,
+            get_unsupported_ext_stats,
             check_index_health,
             get_logs,
             clear_logs,
             get_version,
+            install_funasr,
             get_config,
             update_config,
             migrate_data,
@@ -387,12 +390,19 @@ fn run_with_config(app_config: config::AppConfig) {
 
                 let pdf_ok = pdf::is_pdftoppm_available();
 
+                let funasr_ok = crate::extractor::audio::funasr_model_ready();
+
                 log::info!(
-                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={}",
+                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={} FunASR={}",
                     if ocr_ok { "OK" } else { "FAIL" },
                     if lo_ok { "OK" } else { "N/A" },
                     if pdf_ok { "OK" } else { "N/A" },
+                    if funasr_ok { "OK" } else { "MISSING" },
                 );
+
+                if !funasr_ok {
+                    log::info!("[STARTUP] FunASR 模型未下载，音频转写暂不可用（设置页可下载）");
+                }
 
                 if !ocr_ok {
                     log::error!("[STARTUP] PaddleOCR 引擎不可用，图片 OCR 将无法工作");

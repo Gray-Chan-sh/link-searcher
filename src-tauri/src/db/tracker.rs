@@ -435,6 +435,55 @@ pub fn get_hotwords(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     Ok(result)
 }
 
+/// Increment the seen-count of a file extension that exists on disk but is
+/// not in the extractor whitelist. `dir_id` is the scan root that saw it.
+pub fn bump_unsupported_ext(conn: &Connection, ext: &str, dir_id: &str) {
+    if ext.is_empty() {
+        return;
+    }
+    let _ = conn.execute(
+        "INSERT INTO unsupported_ext_stats (ext, count, dir_id, updated_at)
+         VALUES (?1, 1, ?2, ?3)
+         ON CONFLICT(ext) DO UPDATE SET count = count + 1, updated_at = ?3",
+        rusqlite::params![ext, dir_id, chrono::Utc::now().timestamp()],
+    );
+}
+
+/// Clear stats for one directory before a scan walk begins, so the table
+/// reflects the current disk state after the run rather than cumulative totals.
+pub fn reset_unsupported_ext(conn: &Connection, dir_id: &str) {
+    let _ = conn.execute(
+        "DELETE FROM unsupported_ext_stats WHERE dir_id = ?1",
+        rusqlite::params![dir_id],
+    );
+}
+
+pub struct UnsupportedExtStat {
+    pub ext: String,
+    pub count: u64,
+    pub dir_id: String,
+    pub updated_at: i64,
+}
+
+pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExtStat>> {
+    let mut s = conn.prepare(
+        "SELECT ext, count, dir_id, updated_at FROM unsupported_ext_stats ORDER BY count DESC",
+    )?;
+    let rows = s.query_map([], |row| {
+        Ok(UnsupportedExtStat {
+            ext: row.get(0)?,
+            count: row.get(1)?,
+            dir_id: row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -515,6 +564,34 @@ mod tests {
         upsert_file(&conn, "/c.txt", "d1", 1000, 3, Some("uniq")).unwrap();
         let dups = get_duplicates(&conn).unwrap();
         assert_eq!(dups.len(), 1); assert_eq!(dups[0].count, 2);
+    }
+
+    #[test]
+    fn test_unsupported_ext_stats_accumulate() {
+        let conn = db();
+        bump_unsupported_ext(&conn, "wps", "d1");
+        bump_unsupported_ext(&conn, "wps", "d1");
+        bump_unsupported_ext(&conn, "xyz", "d2");
+        bump_unsupported_ext(&conn, "", "d1");
+        let stats = get_unsupported_ext_stats(&conn).unwrap();
+        assert_eq!(stats.len(), 2);
+        let wps = stats.iter().find(|s| s.ext == "wps").unwrap();
+        assert_eq!(wps.count, 2);
+        assert_eq!(wps.dir_id, "d1");
+        let xyz = stats.iter().find(|s| s.ext == "xyz").unwrap();
+        assert_eq!(xyz.count, 1);
+    }
+
+    #[test]
+    fn test_unsupported_ext_reset_per_dir() {
+        let conn = db();
+        bump_unsupported_ext(&conn, "wps", "d1");
+        bump_unsupported_ext(&conn, "xyz", "d2");
+        reset_unsupported_ext(&conn, "d1");
+        let stats = get_unsupported_ext_stats(&conn).unwrap();
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].ext, "xyz");
+        assert_eq!(stats[0].dir_id, "d2");
     }
 
     #[test]

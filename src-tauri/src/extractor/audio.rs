@@ -1,50 +1,116 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
+/// FunASR-Nano ONNX model files that must be present in the model dir.
+/// Layout matches `sherpa-onnx-funasr-nano-int8-2025-12-30` archive.
 const MODEL_SUBDIR: &str = "models/funasr";
+const MODEL_ARCHIVE_URL: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2";
+const REQUIRED_FILES: [&str; 4] = [
+    "encoder_adaptor.int8.onnx",
+    "llm.int8.onnx",
+    "embedding.int8.onnx",
+    "Qwen3-0.6B/tokenizer.json",
+];
 
 /// Resolve the FunASR model directory across dev and bundled runs.
 ///
-/// The venv lives at `src-tauri/models/funasr/.venv` during development,
-/// where the process cwd is `src-tauri/`. A bundled build starts from an
-/// arbitrary cwd, so relative paths fail — probe fixed candidates instead.
-fn funasr_dir() -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = {
-        let mut v = Vec::new();
-        if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
-            v.push(PathBuf::from(d));
-        }
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                v.push(parent.join(MODEL_SUBDIR));
+/// Dev: `src-tauri/models/funasr`. Bundled: next to executable / data dir.
+/// The model dir contains the sherpa-onnx-int8 archive contents (no venv).
+fn funasr_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+        v.push(PathBuf::from(d));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            // Dev-machine builds: walk up from the .app to the checkout.
+            let mut dir = Some(parent);
+            while let Some(d) = dir {
+                let repo = d.join("src-tauri").join(MODEL_SUBDIR);
+                if model_present(&repo) {
+                    v.push(repo);
+                    break;
+                }
+                dir = d.parent();
             }
+            v.push(parent.join(MODEL_SUBDIR));
         }
-        if let Ok(cwd) = std::env::current_dir() {
-            v.push(cwd.join(MODEL_SUBDIR));
-        }
-        v
-    };
-    candidates
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        v.push(cwd.join(MODEL_SUBDIR));
+    }
+    v.push(crate::config::load_config().data_dir.join(MODEL_SUBDIR));
+    v
+}
+
+fn model_present(dir: &Path) -> bool {
+    REQUIRED_FILES
+        .iter()
+        .all(|f| dir.join(f).is_file())
+}
+
+fn funasr_dir() -> Option<PathBuf> {
+    funasr_candidates()
         .into_iter()
-        .find(|d| d.join(".venv").join("bin").join("python").exists())
+        .find(|d| model_present(d))
 }
 
-fn venv_python() -> Option<PathBuf> {
-    funasr_dir().map(|d| d.join(".venv").join("bin").join("python"))
+/// Public check used by startup dependency detection and `check_dependencies`.
+/// True when all four sherpa-onnx model files are present on disk.
+pub fn funasr_model_ready() -> bool {
+    funasr_dir().is_some()
 }
 
-fn model_ready() -> bool {
-    venv_python().is_some()
+/// URL used by the installer (`download_funasr_model`).
+pub fn model_download_url() -> &'static str {
+    MODEL_ARCHIVE_URL
 }
 
-fn python_cmd() -> Option<Command> {
-    let dir = funasr_dir()?;
-    let py = dir.join(".venv").join("bin").join("python");
-    let mut c = Command::new(py);
-    c.arg(dir.join("infer.py"));
-    Some(c)
+/// Static shared recognizer. `OfflineRecognizer` creation loads ~950M of
+/// int8 weights; reusing one instance across files avoids reloading per file.
+static RECOGNIZER: OnceLock<Option<sherpa_onnx::OfflineRecognizer>> = OnceLock::new();
+
+fn recognizer() -> Option<&'static sherpa_onnx::OfflineRecognizer> {
+    RECOGNIZER
+        .get_or_init(|| build_recognizer().ok())
+        .as_ref()
+}
+
+fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
+    let dir = funasr_dir().ok_or_else(|| anyhow::anyhow!("FunASR model not found"))?;
+    let f = |name: &str| dir.join(name).to_string_lossy().to_string();
+
+    let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
+    config.model_config.num_threads = 4;
+    config.model_config.funasr_nano = sherpa_onnx::OfflineFunASRNanoModelConfig {
+        encoder_adaptor: Some(f("encoder_adaptor.int8.onnx")),
+        llm: Some(f("llm.int8.onnx")),
+        embedding: Some(f("embedding.int8.onnx")),
+        tokenizer: Some(f("Qwen3-0.6B")),
+        system_prompt: Some("You are a helpful assistant.".into()),
+        user_prompt: Some("语音转写：".into()),
+        max_new_tokens: 512,
+        temperature: 1e-06,
+        top_p: 0.8,
+        seed: 42,
+        language: None,
+        itn: 1,
+        hotwords: None,
+        ..Default::default()
+    };
+    config.decoding_method = Some("greedy_search".into());
+    config.model_config.model_type = Some("funasr_nano".into());
+
+    log::info!("[ASR] loading FunASR-Nano model (warm, ~1-2s)");
+    let t0 = std::time::Instant::now();
+    let rec = sherpa_onnx::OfflineRecognizer::create(&config)
+        .ok_or_else(|| anyhow::anyhow!("sherpa-onnx failed to init FunASR-Nano recognizer"))?;
+    log::info!("[ASR] recognizer ready in {:.1}s", t0.elapsed().as_secs_f64());
+    Ok(rec)
 }
 
 pub struct AudioExtractor;
@@ -56,10 +122,17 @@ impl AudioExtractor {
         let meta = std::fs::metadata(path).context("audio stat")?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
 
-        if !model_ready() {
+        if !funasr_model_ready() {
+            let probed = funasr_candidates()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n  ");
             return Ok(format!(
-                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 环境未安装]\n安装参考: models/funasr/README.md（可设 LINK_SEARCHER_FUNASR_DIR 指向模型目录）\n",
-                ext, meta.len() as f64 / 1_048_576.0,
+                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未下载]\n已探测:\n  {}\n请在设置页点击「下载 FunASR 模型」（约 850MB，GitHub 下载）\n",
+                ext,
+                meta.len() as f64 / 1_048_576.0,
+                probed,
             ));
         }
 
@@ -82,21 +155,53 @@ impl AudioExtractor {
             Err(_) => 0.0,
         };
 
-        let mut cmd = python_cmd().ok_or_else(|| anyhow::anyhow!("FunASR venv not found"))?;
-        match cmd.arg(&wav_path).output() {
-            Ok(output) if output.status.success() => {
-                let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if text.is_empty() {
-                    return Ok(format!("─── 音频文件 ({:.0}s) ──\n[FunASR 推理完成，无识别结果]\n", dur));
-                }
-                Ok(format!("─── 音频文件 ({:.0}s) ──\n{}\n", dur, text))
+        // Read PCM samples (i16) and convert to f32 in [-1, 1].
+        let reader = hound::WavReader::open(&wav_path).context("open decoded wav")?;
+        let samples: Vec<f32> = reader
+            .into_samples::<i16>()
+            .map_while(Result::ok)
+            .map(|s| s as f32 / 32768.0)
+            .collect();
+
+        let rec = match recognizer() {
+            Some(r) => r,
+            None => {
+                return Ok(format!(
+                    "─── 音频文件 ({:.0}s, {}) ──\n[ASR 初始化失败：模型文件缺失或损坏，请重新下载模型]\n",
+                    dur, ext
+                ));
             }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                Ok(format!("─── 音频文件 ({:.0}s, {}) ──\n[ASR 推理失败: {}]\n", dur, ext, err.trim()))
-            }
-            Err(e) => Ok(format!("─── 音频文件 ({:.0}s, {}) ──\n[Python 环境不可用: {e}]\n", dur, ext)),
+        };
+
+        // Hotwords: keep disabled for now (the legacy Python pipeline never
+        // actually populated FUNASR_HOTWORDS either). Enabling it requires
+        // threading the DB pool into the extractor; tracked as a follow-up.
+        let _hotwords: Option<Vec<String>> = None;
+
+        log::info!(
+            "[ASR] transcribing {:?} ({:.0}s audio, {:.1}MB)",
+            path.file_name(),
+            dur,
+            meta.len() as f64 / 1_048_576.0,
+        );
+
+        let t0 = std::time::Instant::now();
+        let stream = rec.create_stream();
+        stream.accept_waveform(16000, &samples);
+        rec.decode(&stream);
+        let text = match stream.get_result() {
+            Some(r) => r.text.trim().to_string(),
+            None => String::new(),
+        };
+
+        if text.is_empty() {
+            return Ok(format!(
+                "─── 音频文件 ({:.0}s, {}) ──\n[FunASR 推理完成，无识别结果]\n",
+                dur, ext
+            ));
         }
+        log::info!("[ASR] {:?}: {} chars in {:.1}s", path.file_name(), text.len(), t0.elapsed().as_secs_f64());
+        Ok(format!("─── 音频文件 ({:.0}s) ──\n{}\n", dur, text))
     }
 }
 

@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
+import { checkDependencies, installFunasr } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
   SunIcon, MoonIcon, MonitorIcon,
@@ -22,6 +24,7 @@ export default function App() {
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
   const [showOnboarding, setShowOnboarding] = useState(false)
+  const funasrCheckedRef = useRef(false)
 
   const navItems = [
     { to: '/', label: t('search'), icon: SearchIcon },
@@ -44,6 +47,27 @@ export default function App() {
         setShowOnboarding(true)
       }
     })
+  }, [])
+
+  useEffect(() => {
+    const checked = sessionStorage.getItem('funasr_prompt_skipped') === '1'
+    if (checked || funasrCheckedRef.current) return
+    funasrCheckedRef.current = true
+    checkDependencies().then(async deps => {
+      const funasr = deps.find(d => d.name.includes('FunASR'))
+      if (!funasr || funasr.available) return
+      const confirmed = await ask(t('confirm_install_funasr'), {
+        title: t('funasr_install_prompt'),
+        kind: 'warning',
+        okLabel: t('install_now'),
+        cancelLabel: t('not_now'),
+      })
+      if (confirmed) {
+        await installFunasr().catch(e => console.error('FunASR install failed:', e))
+      } else {
+        sessionStorage.setItem('funasr_prompt_skipped', '1')
+      }
+    }).catch(() => {})
   }, [])
 
   const handleOnboardingClose = () => {

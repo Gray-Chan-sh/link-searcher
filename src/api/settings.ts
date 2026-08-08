@@ -49,3 +49,12 @@ export async function checkDependencies(): Promise<DependencyStatus[]> {
 export async function getVersion(): Promise<{ hash: string; time: string }> {
     return invoke<{ hash: string; time: string }>('get_version')
 }
+
+export interface FunasrInstallResult {
+    success: boolean
+    message: string
+}
+
+export async function installFunasr(): Promise<void> {
+    return invoke('install_funasr')
+}
