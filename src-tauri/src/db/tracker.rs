@@ -313,8 +313,8 @@ pub fn mark_extracted(conn: &Connection, file_id: &str, md5: Option<&str>) -> Re
 fn run_stats_query(conn: &Connection, clause: &str, param: Option<&str>) -> Result<IndexStats> {
     let sql = format!(
         "SELECT COUNT(*) t, \
-                COALESCE(SUM(CASE WHEN indexed IN (1,3) THEN 1 ELSE 0 END),0) i, \
-                COALESCE(SUM(CASE WHEN indexed=0 THEN 1 ELSE 0 END),0) p, \
+                COALESCE(SUM(CASE WHEN indexed=1 THEN 1 ELSE 0 END),0) i, \
+                COALESCE(SUM(CASE WHEN indexed IN (0,3) THEN 1 ELSE 0 END),0) p, \
                 COALESCE(SUM(CASE WHEN indexed=2 THEN 1 ELSE 0 END),0) e \
          FROM file_tracking {clause}"
     );

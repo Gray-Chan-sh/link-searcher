@@ -139,6 +139,7 @@ const en: Record<string, string> = {
     incl_errors: 'incl. errors',
     index_progress: 'Index Progress',
     indexing: 'Indexing',
+    extracted_but_not_indexed: 'Extracted, waiting to be written to the index (search will work soon)',
     scan_info: 'Scan Info',
     total_indexed: 'Total indexed',
     recent_changes: 'Recent Changes',

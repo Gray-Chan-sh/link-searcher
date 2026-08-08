@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-08（搜索 vs 浏览不一致 · indexed=3 状态语义修正）
+
+- **已提取文件能预览但搜不到**：批量索引 Phase 1 提取完成即标 `indexed=3`，UI（Browse 状态徽章、`filter=indexed` 筛选、索引统计）把它当"已索引"显示——但 Tantivy 全文索引要到 Phase 2 才写入。结果是浏览/预览有内容、搜索无结果
+- **修复**：`indexed=3` 全链路改为中间态——统计 `indexed` 只计 `=1`（可搜索）、`pending` 含 `0,3`；`filter=indexed` 只查 `=1`、`pending` 查 `0,3`；Browse 徽章 `=3` 显示黄色"索引中"（tooltip 提示等待写入索引）；i18n 新增 `extracted_but_not_indexed`（`src-tauri/src/db/tracker.rs`、`src-tauri/src/commands/files.rs`、`src/pages/Browse.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`）
+- 附：**P0 PdfExtractor `"eng"` 硬编码修复**——`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 连接池），不再写死英语（`src-tauri/src/extractor/pdf.rs`）
+
+---
+
 ## 2026-08-08（目录嵌套吸收 · 添加父目录复用子目录索引）
 
 - **添加已含子目录的父目录被拒绝**：`add_dir(/A)` 因已索引 `/A/B` 报"此目录包含已索引目录"。现改为**吸收**——添加父目录时，把被包含子目录的 `file_tracking` 记录重根到父目录（`path` 加子目录相对前缀如 `B/`、`dir_id` 指向父、`indexed` 重置），删除子目录配置并停 watcher；Tantivy 旧文档按 `dir_id` 删除，父目录重扫时通过 MD5/content 去重**复用已提取内容**、只重建索引文档，不重复提取（`src-tauri/src/commands/dirs.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/search/indexer.rs`、`src-tauri/src/indexer.rs`）

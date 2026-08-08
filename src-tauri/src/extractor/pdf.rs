@@ -649,7 +649,36 @@ fn extract_and_ocr_page_via_pdfimages(
 impl Extractor for PdfExtractor {
     /// Prefer [`extract_with_lang`] for language-aware extraction.
     fn extract(&self, path: &Path) -> Result<String> {
-        self.extract_with_lang(path, "eng", None)
+        // Read the global ocr_lang setting instead of hard-coding "eng",
+        // so direct extract() calls honor the user's language preference.
+        let lang = global_ocr_lang();
+        self.extract_with_lang(path, &lang, None)
+    }
+}
+
+/// Best-effort read of the app-level OCR language setting. Falls back to
+/// "eng" when the setting or DB is unavailable (e.g. in unit tests).
+/// The connection pool is created once and cached.
+fn global_ocr_lang() -> String {
+    static POOL: OnceLock<Option<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
+        OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let data_dir = crate::config::load_config().data_dir;
+        let db_path = data_dir.join("data.db");
+        crate::db::get_pool(&db_path.to_string_lossy()).ok()
+    });
+    match pool {
+        Some(pool) => match pool.get() {
+            Ok(conn) => conn
+                .query_row(
+                    "SELECT value FROM app_settings WHERE key = 'ocr_lang'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_else(|_| "eng".to_string()),
+            Err(_) => "eng".to_string(),
+        },
+        None => "eng".to_string(),
     }
 }
 
