@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-08（RAG 二期 · AI 摘要与跨文件问答）
+
+- **`ai` 模块补 `chat()`**：OpenAI 兼容 `/chat/completions`，system/user 双提示，temperature=0.3，未配置/失败优雅返回 None（`src-tauri/src/ai/mod.rs`）
+- **`doc_summaries` 表**：`upsert_summary`/`get_summary` 存取缓存（`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）
+- **新命令**：`summarize_file`（单文件 AI 摘要，缓存命中即返回）+ `ask_documents`（多文件 RAG 问答，文本截断防超长，均优雅降级）（`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`）
+- **前端**：PreviewPanel「✦ AI 摘要」按钮（缓存结果展示于文档头部）；Browse 页分页栏上方「AI 问答条」——多选 N 文件后输入问题，回答显示在条内；i18n 新增 `ai_summarize`/`ask_ai`/`ask_selected`/`ask_select_files`（`src/components/PreviewPanel.tsx`、`src/pages/Browse.tsx`、`src/api/files.ts`、`src/i18n/*`）
+- **测试**：`chat_degrades_when_unconfigured` 降级断言；101 单元 + 3 smoke + 9 集成通过，semgrep 0
+
+---
+
 ## 2026-08-08（向量搜索 · AI 网关 · 语义搜索一期）
 
 - **AI 网关配置**：`AppConfig` 扩展 `ai_api_base/ai_api_key/embedding_model/llm_model`（`#[serde(default)]` 兼容旧配置），设置页新增「AI 服务」段（OpenAI 兼容协议：Ollama/OneAPI/vLLM 通用，留空关闭）（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src/api/config.ts`、`src/pages/Settings.tsx`）

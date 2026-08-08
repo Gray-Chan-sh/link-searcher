@@ -586,6 +586,30 @@ pub fn count_embeddings(conn: &Connection) -> Result<u64> {
         .context("count embeddings")
 }
 
+/// Store (or replace) a document's LLM-generated summary.
+pub fn upsert_summary(conn: &Connection, file_id: &str, summary: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO doc_summaries (file_id, summary, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(file_id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
+        rusqlite::params![file_id, summary, chrono::Utc::now().timestamp()],
+    )?;
+    Ok(())
+}
+
+/// Load a stored summary by file id, if one exists.
+pub fn get_summary(conn: &Connection, file_id: &str) -> Result<Option<String>> {
+    let mut s = conn
+        .prepare("SELECT summary FROM doc_summaries WHERE file_id = ?1")
+        .context("prepare get_summary")?;
+    let mut rows = s
+        .query_map(rusqlite::params![file_id], |row| row.get::<_, String>(0))
+        .context("query get_summary")?;
+    match rows.next().transpose()? {
+        Some(v) => Ok(Some(v)),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -180,6 +180,12 @@ const CREATE_TABLES_SQL: &str = "
         vector      BLOB NOT NULL,
         updated_at  INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS doc_summaries (
+        file_id     TEXT PRIMARY KEY,
+        summary     TEXT NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any

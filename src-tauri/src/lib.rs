@@ -13,6 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
+use crate::commands::ai::{ask_documents, summarize_file};
 use crate::commands::config::{get_config, migrate_data, restart_app, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
@@ -64,6 +65,8 @@ fn run_with_config(app_config: config::AppConfig) {
         .invoke_handler(tauri::generate_handler![
             search,
             suggest,
+            summarize_file,
+            ask_documents,
             get_search_history,
             export_search_results,
             get_file_type_stats,
