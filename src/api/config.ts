@@ -6,7 +6,11 @@ export interface ConfigInfo {
     lo_binary_path: string
     ai_api_base: string
     ai_api_key: string
+    embedding_api_base: string
+    embedding_api_key: string
     embedding_model: string
+    llm_api_base: string
+    llm_api_key: string
     llm_model: string
 }
 

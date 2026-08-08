@@ -15,13 +15,23 @@ pub struct AppConfig {
     pub language: String,
     #[serde(default)]
     pub lo_binary_path: String,
-    /// OpenAI-compatible AI gateway (embedding + chat). Empty base = feature off.
+    /// Legacy single-gateway fields (merged into embedding/llm below).
     #[serde(default)]
     pub ai_api_base: String,
     #[serde(default)]
     pub ai_api_key: String,
+    /// Embedding gateway (semantic search). Empty base = feature off.
+    #[serde(default)]
+    pub embedding_api_base: String,
+    #[serde(default)]
+    pub embedding_api_key: String,
     #[serde(default)]
     pub embedding_model: String,
+    /// LLM gateway (AI summary / RAG Q&A). Empty base = feature off.
+    #[serde(default)]
+    pub llm_api_base: String,
+    #[serde(default)]
+    pub llm_api_key: String,
     #[serde(default)]
     pub llm_model: String,
 }
@@ -35,7 +45,11 @@ impl Default for AppConfig {
             lo_binary_path: String::new(),
             ai_api_base: String::new(),
             ai_api_key: String::new(),
+            embedding_api_base: String::new(),
+            embedding_api_key: String::new(),
             embedding_model: "text-embedding-v3-small".to_string(),
+            llm_api_base: String::new(),
+            llm_api_key: String::new(),
             llm_model: "qwen2.5-7b-instruct".to_string(),
         }
     }
@@ -63,6 +77,19 @@ pub fn load_config() -> AppConfig {
         if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
             if config.data_dir.as_os_str().is_empty() {
                 config.data_dir = default_data_dir();
+            }
+            // Migrate the legacy single-gateway config: if the user only ever
+            // set ai_api_base/key, apply it to BOTH new gateways so the old
+            // behaviour (one gateway for everything) keeps working.
+            if config.embedding_api_base.is_empty()
+                && config.llm_api_base.is_empty()
+                && !config.ai_api_base.is_empty()
+            {
+                config.embedding_api_base = config.ai_api_base.clone();
+                config.embedding_api_key = config.ai_api_key.clone();
+                config.llm_api_base = config.ai_api_base.clone();
+                config.llm_api_key = config.ai_api_key.clone();
+                let _ = save_config(&config);
             }
             return config;
         }

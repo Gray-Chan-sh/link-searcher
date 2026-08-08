@@ -3,7 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { useI18n } from '../i18n'
-import { type FilePreview, openFile, revealInFolder, askDocuments } from '../api/files'
+import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFile } from '../api/index'
 import { LoadingSpinner } from '../icons'
@@ -47,7 +47,9 @@ export default function Browse() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [lastClickedIdx, setLastClickedIdx] = useState<number | null>(null)
   const [askQuestion, setAskQuestion] = useState('')
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const [askAnswer, setAskAnswer] = useState<string | null>(null)
+  useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
   const [askLoading, setAskLoading] = useState(false)
   const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
   type ColKey = keyof typeof colWidths
@@ -391,13 +393,16 @@ export default function Browse() {
               type="text"
               value={askQuestion}
               onChange={e => setAskQuestion(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleAsk() }}
-              placeholder={selectedIds.size > 0 ? t('ask_selected', { n: selectedIds.size }) : t('ask_select_files')}
-              className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500"
+              onKeyDown={e => { if (e.key === 'Enter' && aiCap.llm) handleAsk() }}
+              disabled={!aiCap.llm}
+              placeholder={aiCap.llm
+                ? (selectedIds.size > 0 ? t('ask_selected', { n: selectedIds.size }) : t('ask_select_files'))
+                : t('ai_llm_unavailable')}
+              className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
             />
             <button
               onClick={handleAsk}
-              disabled={askLoading || selectedIds.size === 0 || !askQuestion.trim()}
+              disabled={askLoading || !aiCap.llm || selectedIds.size === 0 || !askQuestion.trim()}
               className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
             >
               {askLoading ? <LoadingSpinner className="size-3.5" /> : t('ask_ai')}

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ask, open, message } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { useSettings } from '../hooks/useSettings'
@@ -33,7 +33,7 @@ export default function Settings() {
   const [migrationStage, setMigrationStage] = useState<string | null>(null)
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
-  const [aiCfg, setAiCfg] = useState({ base: '', key: '', embedding: '', llm: '' })
+  const [aiCfg, setAiCfg] = useState<Partial<ConfigInfo>>({})
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
@@ -78,10 +78,12 @@ export default function Settings() {
     if (appConfig) {
       setLoPath(appConfig.lo_binary_path)
       setAiCfg({
-        base: appConfig.ai_api_base ?? '',
-        key: appConfig.ai_api_key ?? '',
-        embedding: appConfig.embedding_model ?? '',
-        llm: appConfig.llm_model ?? '',
+        embedding_api_base: appConfig.embedding_api_base ?? '',
+        embedding_api_key: appConfig.embedding_api_key ?? '',
+        embedding_model: appConfig.embedding_model ?? '',
+        llm_api_base: appConfig.llm_api_base ?? '',
+        llm_api_key: appConfig.llm_api_key ?? '',
+        llm_model: appConfig.llm_model ?? '',
       })
     }
   }, [appConfig])
@@ -96,6 +98,21 @@ export default function Settings() {
       setLocalError(err instanceof Error ? err.message : 'Failed to save AI config')
     }
   }
+
+  const [aiTest, setAiTest] = useState<{ kind: string; ok: boolean; detail: string }[] | null>(null)
+  const [aiTestLoading, setAiTestLoading] = useState(false)
+  const testAi = useCallback(async () => {
+    setAiTestLoading(true)
+    setAiTest(null)
+    try {
+      const results = await invoke<{ kind: string; ok: boolean; detail: string }[]>('test_ai_gateway')
+      setAiTest(results)
+    } catch (e) {
+      setAiTest([{ kind: 'error', ok: false, detail: e instanceof Error ? e.message : '测试失败' }])
+    } finally {
+      setAiTestLoading(false)
+    }
+  }, [])
 
   const handleFunasrInstall = async () => {
     if (funasrInstalling) return
@@ -358,35 +375,81 @@ export default function Settings() {
 
         <Section title={t('ai_service')}>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{t('ai_service_desc')}</p>
-          <div className="space-y-3">
-            <TextField
-              label="API Base URL"
-              value={aiCfg.base}
-              onChange={v => setAiCfg({ ...aiCfg, base: v })}
-              onBlur={() => saveAiField('ai_api_base', aiCfg.base)}
-              placeholder="https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
-            />
-            <TextField
-              label="API Key (可选)"
-              value={aiCfg.key}
-              onChange={v => setAiCfg({ ...aiCfg, key: v })}
-              onBlur={() => saveAiField('ai_api_key', aiCfg.key)}
-              placeholder="sk-...  (本地 Ollama 可留空)"
-            />
-            <TextField
-              label={t('embedding_model')}
-              value={aiCfg.embedding}
-              onChange={v => setAiCfg({ ...aiCfg, embedding: v })}
-              onBlur={() => saveAiField('embedding_model', aiCfg.embedding)}
-              placeholder="text-embedding-v3-small"
-            />
-            <TextField
-              label={t('llm_model')}
-              value={aiCfg.llm}
-              onChange={v => setAiCfg({ ...aiCfg, llm: v })}
-              onBlur={() => saveAiField('llm_model', aiCfg.llm)}
-              placeholder="qwen2.5-7b-instruct"
-            />
+          <div className="space-y-4">
+            <div className="space-y-3 p-3 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
+              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                <span className="size-1.5 rounded-full bg-purple-500" />
+                {t('embedding_gateway')}
+              </div>
+              <TextField
+                label="Base URL"
+                value={aiCfg.embedding_api_base ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, embedding_api_base: v })}
+                onBlur={() => saveAiField('embedding_api_base', aiCfg.embedding_api_base ?? '')}
+                placeholder="http://127.0.0.1:11434/v1 或 https://api.openai.com/v1"
+              />
+              <TextField
+                label="API Key (可选)"
+                value={aiCfg.embedding_api_key ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, embedding_api_key: v })}
+                onBlur={() => saveAiField('embedding_api_key', aiCfg.embedding_api_key ?? '')}
+                placeholder="sk-...（本地可留空）"
+              />
+              <TextField
+                label={t('embedding_model')}
+                value={aiCfg.embedding_model ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, embedding_model: v })}
+                onBlur={() => saveAiField('embedding_model', aiCfg.embedding_model ?? '')}
+                placeholder="text-embedding-v3-small"
+              />
+            </div>
+            <div className="space-y-3 p-2 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
+              <div className="text-xs font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+                <span className="size-1.5 rounded-full bg-blue-500" />
+                {t('llm_gateway')}
+              </div>
+              <TextField
+                label="Base URL"
+                value={aiCfg.llm_api_base ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, llm_api_base: v })}
+                onBlur={() => saveAiField('llm_api_base', aiCfg.llm_api_base ?? '')}
+                placeholder="http://127.0.0.1:11434/v1 或 https://api.openai.com/v1"
+              />
+              <TextField
+                label="API Key (可选)"
+                value={aiCfg.llm_api_key ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, llm_api_key: v })}
+                onBlur={() => saveAiField('llm_api_key', aiCfg.llm_api_key ?? '')}
+                placeholder="sk-...（本地可留空）"
+              />
+              <TextField
+                label={t('llm_model')}
+                value={aiCfg.llm_model ?? ''}
+                onChange={v => setAiCfg({ ...aiCfg, llm_model: v })}
+                onBlur={() => saveAiField('llm_model', aiCfg.llm_model ?? '')}
+                placeholder="qwen2.5-7b-instruct"
+              />
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                onClick={testAi}
+                disabled={aiTestLoading}
+                className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50 transition-colors"
+              >
+                {aiTestLoading ? '…' : t('test_ai_gateways')}
+              </button>
+            </div>
+            {aiTest && (
+              <div className="space-y-1">
+                {aiTest.map((r, i) => (
+                  <div key={i} className={`flex items-center gap-2 text-xs ${r.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                    <span>{r.ok ? '✓' : '✗'}</span>
+                    <span className="font-medium w-20">{r.kind === 'embedding' ? t('embedding_gateway') : t('llm_gateway')}</span>
+                    <span className="text-gray-500 dark:text-gray-400 truncate">{r.detail}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </Section>
 

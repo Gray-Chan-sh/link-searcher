@@ -152,7 +152,7 @@ pub async fn search(
     // configured, fuse BM25 hits with embedding-cosine top-N via RRF so
     // meaning-matches surface alongside keyword matches.
     let mut response = response;
-    if params.semantic && crate::ai::ai_enabled() && !params.query.is_empty() {
+    if params.semantic && crate::ai::embedding_enabled() && !params.query.is_empty() {
         match semantic_rerank(&state, &params, &response) {
             Ok(merged) => response = merged,
             Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),

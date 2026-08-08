@@ -14,6 +14,16 @@
 
 ---
 
+## 2026-08-08（AI 网关拆分 · 可用性测试与降级）
+
+- **Embedding / LLM 网关独立配置**：`AppConfig` 从单 `ai_api_base/key` 拆为 `embedding_api_base/key` + `llm_api_base/key` 两组（各自模型名）；旧单网关配置自动迁移到两组；`update_config` 回写 legacy 字段向后兼容（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`）
+- **可用性测试**：新命令 `test_ai_gateway`（ping `/embeddings` + `/chat/completions`，返回各自 `ok/detail`）+ `ai_capabilities`（30s 缓存测试结果）；设置页「AI 服务」拆成 Embedding/LLM 两块配置 + 「测试连接」按钮实时显示 ✓/✗（`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/ai.rs`、`src/pages/Settings.tsx`）
+- **分级降级**：搜索页「✦ 语义」仅在 embedding 网关可用时启用；PreviewPanel 摘要按钮、Browse 问答条仅在 LLM 网关可用时启用；不可用时禁用并 tooltip 引导去设置页配置（`src/pages/SearchPage.tsx`、`src/components/PreviewPanel.tsx`、`src/pages/Browse.tsx`）
+- **测试**：`gateways_unconfigured_report_not_ok`（未配置降级）；104 单元 + 3 smoke + 11 集成通过，semgrep 0
+- 注：`tests/test_pdf_ocr.rs` 的 `test_ocr_20111201` 为**预存**中文字节截断 bug（`&text[..500]` 切在多字节字符中间,8-04 引入,本次未触）
+
+---
+
 ## 2026-08-08（索引完整性 · 分块流水线 + 对账命令）
 
 - **Phase 1 阶段无法搜索**：`batch_index` 原为串行两阶段（全部提取完才一次性写 Tantivy），Phase 1 期间索引无可搜文档。改为**分块流水线**（每 250 个文件：并行提取 → 立即写 Tantivy → commit），已提交的块**立即可搜索**，进度持续可见（`src-tauri/src/indexer.rs`）
