@@ -224,6 +224,51 @@ pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
     Ok(count)
 }
 
+/// Absorb a sub-directory's file records into its parent directory:
+/// re-roots `path` under the parent and reassigns `dir_id`. Runs in one
+/// transaction; `sub_rel` is the sub-directory's path relative to the parent
+/// (e.g. `B` for parent `A`, yielding new paths like `B/foo.txt`).
+///
+/// Also resets the `indexed` flag so a re-scan of the parent rebuilds the
+/// Tantivy documents with the new paths (extraction is skipped via the
+/// MD5/content dedup, so this is cheap).
+pub fn absorb_subdir(
+    conn: &Connection,
+    sub_dir_id: &str,
+    parent_dir_id: &str,
+    sub_rel: &str,
+) -> Result<u64> {
+    let prefix = format!("{sub_rel}/");
+    let tx = conn.unchecked_transaction().context("begin absorb txn")?;
+
+    let rows = tx
+        .prepare("SELECT id, path, md5 FROM file_tracking WHERE dir_id=?1")
+        .context("prepare absorb select")?
+        .query_map(rusqlite::params![sub_dir_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect absorb rows")?;
+
+    let count = rows.len();
+    for (id, path, md5) in rows {
+        let new_path = format!("{prefix}{path}");
+        let file_ext = extension_of(&new_path);
+        tx.execute(
+            "UPDATE file_tracking SET path=?1, file_ext=?2, dir_id=?3, indexed=0, md5=?4, error_msg=NULL WHERE id=?5",
+            rusqlite::params![new_path, file_ext, parent_dir_id, md5, id],
+        )
+        .context("absorb update row")?;
+    }
+
+    tx.commit().context("commit absorb txn")?;
+    Ok(count as u64)
+}
+
 pub fn get_files_needing_index(conn: &Connection, limit: usize) -> Result<Vec<FileRecord>> {
     let mut s = conn
         .prepare(&format!("{SEL} WHERE indexed IN (0,2) ORDER BY updated_at ASC LIMIT ?1"))
@@ -488,6 +533,28 @@ pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExt
 mod tests {
     use super::*;
     fn db() -> Connection { let c = Connection::open_in_memory().unwrap(); crate::db::run_migrations(&c).unwrap(); c }
+
+    #[test]
+    fn test_absorb_subdir_reroots_paths_and_dir_id() {
+        let conn = db();
+        // file_tracking.path is stored relative to the dir root (see
+        // scanner to_relative), so sub-dir rows look like "foo.txt".
+        let foo_id = upsert_file(&conn, "foo.txt", "sub", 1000, 10, Some("md5foo")).unwrap();
+        upsert_file(&conn, "bar.pdf", "sub", 1000, 20, Some("md5bar")).unwrap();
+
+        let n = absorb_subdir(&conn, "sub", "parent", "B").unwrap();
+        assert_eq!(n, 2);
+
+        let foo = get_file_by_id(&conn, &foo_id).unwrap().unwrap();
+        assert_eq!(foo.path, "B/foo.txt");
+        assert_eq!(foo.dir_id, "parent");
+        assert_eq!(foo.md5.as_deref(), Some("md5foo"));
+        assert_eq!(foo.indexed, 0);
+
+        // old dir no longer holds the rows
+        assert_eq!(get_files_by_dir(&conn, "sub").unwrap().len(), 0);
+        assert_eq!(get_files_by_dir(&conn, "parent").unwrap().len(), 2);
+    }
 
     #[test]
     fn test_upsert_and_retrieve() {

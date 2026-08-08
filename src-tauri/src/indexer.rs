@@ -561,7 +561,7 @@ impl IndexerService {
         result
     }
 
-    /// Remove a file from the Tantivy index and mark it as deleted in the DB.
+/// Remove a file from the Tantivy index and mark it as deleted in the DB.
     pub fn delete_file(&self, file_id: &str) -> Result<()> {
         let conn = self.db.get().context("failed to get DB connection")?;
 
@@ -576,6 +576,17 @@ impl IndexerService {
             log::warn!("[INDEX] mark_deleted failed {}: {e}", file_id);
         }
 
+        Ok(())
+    }
+
+    /// Remove all Tantivy documents belonging to `dir_id` (used when a
+    /// sub-directory is absorbed into its parent). Does NOT touch
+    /// file_tracking — those rows were already migrated to the parent.
+    pub fn delete_dir(&self, dir_id: &str) -> Result<()> {
+        let mut guard = self.lock_writer()?;
+        let w = guard.as_mut().ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
+        Indexer::delete_by_dir(w, dir_id)
+            .map_err(|e| anyhow::anyhow!("failed to delete dir documents: {e}"))?;
         Ok(())
     }
 
