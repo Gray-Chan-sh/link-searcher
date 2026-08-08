@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -20,6 +21,61 @@ use imageproc::distance_transform::Norm;
 /// Supported language codes for OCR.
 #[allow(dead_code)]
 const SUPPORTED_LANGUAGES: &[&str] = &["eng", "chi_sim", "jpn", "kor"];
+
+/// Global OCR concurrency gate: caps simultaneously-active OCR inferences at
+/// min(cores, 8) to prevent the nested par_iter fan-out (batch_index × PDF
+/// page) from thrashing the CPU and slowing each page to 2.5s+. Hardware-
+/// adaptive; no user setting — the old `ocr_concurrent` knob only governed
+/// PaddleOCR's pool and was removed to avoid confusion.
+struct OcrGate {
+    limit: usize,
+    current: Mutex<usize>,
+    cv: Condvar,
+}
+
+impl OcrGate {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit: limit.max(1),
+            current: Mutex::new(0),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> OcrGuard<'_> {
+        let mut cur = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        while *cur >= self.limit {
+            cur = self.cv.wait(cur).unwrap_or_else(|e| e.into_inner());
+        }
+        *cur += 1;
+        OcrGuard { gate: self }
+    }
+}
+
+struct OcrGuard<'a> {
+    gate: &'a OcrGate,
+}
+
+impl Drop for OcrGuard<'_> {
+    fn drop(&mut self) {
+        let mut cur = self.gate.current.lock().unwrap_or_else(|e| e.into_inner());
+        *cur = cur.saturating_sub(1);
+        self.gate.cv.notify_one();
+    }
+}
+
+static OCR_GATE: OnceLock<OcrGate> = OnceLock::new();
+
+fn ocr_gate() -> &'static OcrGate {
+    OCR_GATE.get_or_init(|| {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .clamp(1, 8);
+        log::info!("[OCR] 并发闸门就绪: {cores} slots (硬件自适应)");
+        OcrGate::new(cores)
+    })
+}
 
 /// Preprocess an image for better OCR accuracy.
 ///
@@ -96,6 +152,7 @@ pub fn map_engine(value: &str) -> OcrEngineType {
 ///
 /// Delegates to the underlying engine implementation.
 pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) -> Result<String> {
+    let _gate = ocr_gate().acquire();
     match engine {
         OcrEngineType::PaddleOCR => paddleocr::recognize_from_path(path),
         OcrEngineType::Tesseract => ocr_image_tesseract(path, lang),
@@ -118,6 +175,7 @@ pub fn ocr_image_with_regions(
     engine: &OcrEngineType,
     lang: &str,
 ) -> Result<(String, usize)> {
+    let _gate = ocr_gate().acquire();
     match engine {
         OcrEngineType::PaddleOCR => {
             paddleocr::recognize_from_path_with_regions(path)
@@ -306,6 +364,33 @@ pub fn get_available_languages() -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ocr_gate_limits_concurrency() {
+        let gate: &'static OcrGate = Box::leak(Box::new(OcrGate::new(3)));
+        let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..12)
+            .map(|_| {
+                let active = std::sync::Arc::clone(&active);
+                let peak = std::sync::Arc::clone(&peak);
+                std::thread::spawn(move || {
+                    let _guard = gate.acquire();
+                    let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(20));
+                    active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert!(peak.load(std::sync::atomic::Ordering::SeqCst) <= 3, "peak {} exceeded gate", peak.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn test_is_tesseract_available_returns_bool() {
