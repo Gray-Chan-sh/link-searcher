@@ -5,19 +5,31 @@
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
 pub fn ai_enabled() -> bool {
-    !crate::config::load_config().ai_api_base.trim().is_empty()
+    embedding_enabled() || llm_enabled()
+}
+
+/// True when the embedding gateway is configured (semantic search usable).
+pub fn embedding_enabled() -> bool {
+    !crate::config::load_config().embedding_api_base.trim().is_empty()
+}
+
+/// True when the LLM gateway is configured (summary / RAG usable).
+pub fn llm_enabled() -> bool {
+    !crate::config::load_config().llm_api_base.trim().is_empty()
 }
 
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
-    if texts.is_empty() || !ai_enabled() {
+    if texts.is_empty() || !embedding_enabled() {
         return vec![None; texts.len()];
     }
     let cfg = crate::config::load_config();
-    let url = format!("{}/embeddings", cfg.ai_api_base.trim_end_matches('/'));
+    let url = format!("{}/embeddings", cfg.embedding_api_base.trim_end_matches('/'));
 
     #[derive(Serialize)]
     struct Req {
@@ -43,7 +55,7 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
-        .set_auth()
+        .set_auth(&cfg.embedding_api_key)
         .send_string(&req_body);
 
     let parsed: Result<Resp, String> = send_result
@@ -78,11 +90,11 @@ pub fn embed(text: &str) -> Option<Vec<f32>> {
 /// text. `system` is the instruction, `user` the task/content. Returns `None`
 /// when unconfigured or the request fails (downgrade, never block).
 pub fn chat(system: &str, user: &str) -> Option<String> {
-    if !ai_enabled() {
+    if !llm_enabled() {
         return None;
     }
     let cfg = crate::config::load_config();
-    let url = format!("{}/chat/completions", cfg.ai_api_base.trim_end_matches('/'));
+    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
 
     #[derive(Serialize, Deserialize)]
     struct Msg {
@@ -124,7 +136,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
-        .set_auth()
+        .set_auth(&cfg.llm_api_key)
         .send_string(&req_body);
 
     let parsed: Result<Resp, String> = send_result
@@ -179,13 +191,115 @@ fn build_agent() -> ureq::Agent {
     builder.build()
 }
 
+/// Per-gateway connectivity test result.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GatewayTest {
+    pub kind: &'static str,
+    /// True when the gateway is configured, reachable and returned OK.
+    pub ok: bool,
+    /// Short reason when not ok (unconfigured / URL / HTTP status / parse).
+    pub detail: String,
+}
+
+/// Frontend-facing capability flags (from a cached test).
+#[derive(Debug, Clone, Copy, serde::Serialize, Default)]
+pub struct AiCapabilities {
+    pub embedding: bool,
+    pub llm: bool,
+}
+
+impl AiCapabilities {
+    pub fn from_gateways((emb, llm): (bool, bool)) -> Self {
+        Self { embedding: emb, llm }
+    }
+}
+
+/// Ping both gateways with the smallest realistic request. Used by the
+/// settings "test" button and at startup to decide which AI features to
+/// enable. Unconfigured gateways report `ok=false, detail=未配置`.
+pub fn test_gateways() -> Vec<GatewayTest> {
+    vec![test_embedding(), test_llm()]
+}
+
+/// Cached gateway capability probe. The live test is only issued at most
+/// once per 30s; between tests, the previous result (or "unconfigured")
+/// is served. Used by the frontend to enable/disable AI feature entry
+/// points.
+pub fn capabilities() -> (bool, bool) {
+    static CACHE: OnceLock<std::sync::Mutex<(Instant, Vec<GatewayTest>)>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new((Instant::now() - std::time::Duration::from_secs(60), Vec::new())));
+    let mut guard = match cache.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if guard.0.elapsed().as_secs() > 30 || guard.1.is_empty() {
+        guard.0 = Instant::now();
+        guard.1 = test_gateways();
+    }
+    let emb = guard.1.iter().find(|t| t.kind == "embedding").map(|t| t.ok).unwrap_or(false);
+    let llm = guard.1.iter().find(|t| t.kind == "llm").map(|t| t.ok).unwrap_or(false);
+    (emb, llm)
+}
+
+fn test_embedding() -> GatewayTest {
+    let cfg = crate::config::load_config();
+    if cfg.embedding_api_base.trim().is_empty() {
+        return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into() };
+    }
+    let url = format!("{}/embeddings", cfg.embedding_api_base.trim_end_matches('/'));
+    let body = serde_json::json!({ "model": cfg.embedding_model, "input": [""] });
+    match ping_post(&url, &cfg.embedding_api_key, &body) {
+        Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into() },
+        Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
+    }
+}
+
+fn test_llm() -> GatewayTest {
+    let cfg = crate::config::load_config();
+    if cfg.llm_api_base.trim().is_empty() {
+        return GatewayTest { kind: "llm", ok: false, detail: "未配置".into() };
+    }
+    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "model": cfg.llm_model,
+        "messages": [{"role":"user","content":"ping"}],
+        "max_tokens": 1
+    });
+    match ping_post(&url, &cfg.llm_api_key, &body) {
+        Ok(()) => GatewayTest { kind: "llm", ok: true, detail: "OK".into() },
+        Err(e) => GatewayTest { kind: "llm", ok: false, detail: e },
+    }
+}
+
+/// Issue a tiny POST and return Ok on any 2xx. Rejects 4xx/5xx with the
+/// status text, and network errors with the transport message.
+fn ping_post(url: &str, key: &str, body: &serde_json::Value) -> Result<(), String> {
+    let send = build_agent()
+        .post(url)
+        .set("Content-Type", "application/json")
+        .set_auth(key)
+        .send_string(&body.to_string());
+    match send {
+        Ok(r) => {
+            let status = r.status();
+            if (200..300).contains(&status) {
+                Ok(())
+            } else {
+                let mut err = String::new();
+                let _ = r.into_string().map(|s| err = s);
+                Err(format!("HTTP {status}: {}", err.trim().chars().take(120).collect::<String>()))
+            }
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 trait AuthSetter {
-    fn set_auth(self) -> Self;
+    fn set_auth(self, key: &str) -> Self;
 }
 impl AuthSetter for ureq::Request {
-    fn set_auth(self) -> Self {
-        let cfg = crate::config::load_config();
-        let key = cfg.ai_api_key.trim();
+    fn set_auth(self, key: &str) -> Self {
+        let key = key.trim();
         if key.is_empty() {
             self
         } else {
@@ -242,5 +356,15 @@ mod tests {
     fn chat_degrades_when_unconfigured() {
         // No gateway in tests: chat must not panic — returns None.
         assert!(chat("sys", "user").is_none());
+    }
+
+    #[test]
+    fn gateways_unconfigured_report_not_ok() {
+        // Tests never configure a gateway; both probes must report ok=false
+        // without panicking, and capabilities must be (false, false).
+        let tests = test_gateways();
+        assert_eq!(tests.len(), 2);
+        assert!(tests.iter().all(|t| !t.ok));
+        assert_eq!(capabilities(), (false, false));
     }
 }

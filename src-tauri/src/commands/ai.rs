@@ -12,13 +12,28 @@ pub struct SummaryResult {
     pub cached: bool,
 }
 
+/// Whether each gateway is usable right now (cached test, 30s TTL). The
+/// frontend uses this to enable/disable AI entry points and show guidance.
+#[tauri::command]
+pub fn ai_capabilities() -> crate::ai::AiCapabilities {
+    crate::ai::AiCapabilities::from_gateways(crate::ai::capabilities())
+}
+
+/// Connectivity test for the configured AI gateways. Returns one result per
+/// gateway (embedding / llm); the frontend disables the corresponding
+/// features when `ok` is false.
+#[tauri::command]
+pub fn test_ai_gateway() -> Vec<crate::ai::GatewayTest> {
+    crate::ai::test_gateways()
+}
+
 /// Generate (or fetch cached) an LLM summary for a file's extracted text.
 #[tauri::command]
 pub fn summarize_file(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<SummaryResult, String> {
-    if !crate::ai::ai_enabled() {
+    if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页填写 API Base URL".into());
     }
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -63,7 +78,7 @@ pub fn ask_documents(
     file_ids: Vec<String>,
     question: String,
 ) -> Result<String, String> {
-    if !crate::ai::ai_enabled() {
+    if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
     }
     if question.trim().is_empty() {

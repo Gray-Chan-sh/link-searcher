@@ -12,9 +12,15 @@ pub struct ConfigInfo {
     pub data_dir: String,
     pub language: String,
     pub lo_binary_path: String,
+    /// Legacy single-gateway fields (kept for backward compat; new UI uses
+    /// embedding_*/llm_* pairs).
     pub ai_api_base: String,
     pub ai_api_key: String,
+    pub embedding_api_base: String,
+    pub embedding_api_key: String,
     pub embedding_model: String,
+    pub llm_api_base: String,
+    pub llm_api_key: String,
     pub llm_model: String,
 }
 
@@ -27,7 +33,11 @@ pub fn get_config() -> Result<ConfigInfo, String> {
         lo_binary_path: config.lo_binary_path,
         ai_api_base: config.ai_api_base,
         ai_api_key: config.ai_api_key,
+        embedding_api_base: config.embedding_api_base,
+        embedding_api_key: config.embedding_api_key,
         embedding_model: config.embedding_model,
+        llm_api_base: config.llm_api_base,
+        llm_api_key: config.llm_api_key,
         llm_model: config.llm_model,
     })
 }
@@ -51,15 +61,23 @@ pub fn update_config(
         }
     }
 
-    let config = AppConfig {
+    let mut config = AppConfig {
         data_dir: new_config.data_dir.into(),
         language: new_config.language,
         lo_binary_path: new_config.lo_binary_path,
         ai_api_base: new_config.ai_api_base,
         ai_api_key: new_config.ai_api_key,
+        embedding_api_base: new_config.embedding_api_base,
+        embedding_api_key: new_config.embedding_api_key,
         embedding_model: new_config.embedding_model,
+        llm_api_base: new_config.llm_api_base,
+        llm_api_key: new_config.llm_api_key,
         llm_model: new_config.llm_model,
     };
+    // New UI writes the split pairs; mirror into the legacy single-gateway
+    // fields for any older consumers that still read ai_api_base/key.
+    config.ai_api_base = config.embedding_api_base.clone();
+    config.ai_api_key = config.embedding_api_key.clone();
     save_config(&config)
 }
 

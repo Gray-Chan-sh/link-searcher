@@ -403,7 +403,7 @@ impl IndexerService {
 
                         // Semantic vector (optional): embed the extracted text
                         // and store it. Failure is non-fatal.
-                        if crate::ai::ai_enabled() && !data.text.trim().is_empty() {
+                        if crate::ai::embedding_enabled() && !data.text.trim().is_empty() {
                             if let Some(vec) = crate::ai::embed(&data.text) {
                                 let _ = crate::db::tracker::upsert_embedding(&conn, &file_id, &vec);
                             }

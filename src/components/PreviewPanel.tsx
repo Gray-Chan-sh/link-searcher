@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, type FileDetail, type FilePreview, type SummaryResult } from '../api/files'
+import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities } from '../api/files'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
@@ -58,8 +58,11 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const [summary, setSummary] = useState<SummaryResult | null>(null)
   const [summaryLoading, setSummaryLoading] = useState(false)
   const [summaryError, setSummaryError] = useState<string | null>(null)
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const contentRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
+
+  useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
 
   const effectiveWidth = fullscreen ? Math.max(400, window.innerWidth * 0.6) : width
 
@@ -244,8 +247,13 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
             <div className="flex items-center gap-2">
               <button
                 onClick={handleSummarize}
-                disabled={summaryLoading}
-                className="px-2.5 py-1 text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/40 rounded-md hover:bg-purple-100 dark:hover:bg-purple-900/40 transition-colors disabled:opacity-50 shrink-0"
+                disabled={summaryLoading || !aiCap.llm}
+                title={
+                  aiCap.llm
+                    ? undefined
+                    : t('ai_llm_unavailable')
+                }
+                className="px-2.5 py-1 text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/40 rounded-md hover:bg-purple-100 dark:hover:bg-purple-900/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
               >
                 {summaryLoading ? <LoadingSpinner className="size-3.5" /> : '✦'}
                 <span className="ml-1">{t('ai_summarize')}</span>

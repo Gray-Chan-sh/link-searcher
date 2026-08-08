@@ -11,7 +11,7 @@ import EmptyState from '../components/EmptyState'
 import { ResultListSkeleton } from '../components/Skeleton'
 import type { SearchHit } from '../api/search'
 import { exportSearchResults } from '../api/search'
-import { openFile } from '../api/files'
+import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
 import { save } from '@tauri-apps/plugin-dialog'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
@@ -24,7 +24,10 @@ export default function SearchPage() {
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+
+  useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
 
   useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
 
@@ -139,9 +142,12 @@ useEffect(() => {
             </button>
             <button
               onClick={() => search.setSemantic(!search.semantic)}
-              title={t('semantic_search')}
+              disabled={!aiCap.embedding}
+              title={aiCap.embedding ? t('semantic_search') : t('ai_embedding_unavailable')}
               className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors shrink-0 ${
-                search.semantic
+                !aiCap.embedding
+                  ? 'text-gray-300 dark:text-gray-600 cursor-not-allowed'
+                  : search.semantic
                   ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-800'
                   : 'text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
               }`}

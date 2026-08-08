@@ -31,6 +31,15 @@ export async function askDocuments(fileIds: string[], question: string): Promise
   return invoke<string>('ask_documents', { fileIds, question })
 }
 
+export interface AiCapabilities {
+  embedding: boolean
+  llm: boolean
+}
+
+export async function aiCapabilities(): Promise<AiCapabilities> {
+  return invoke<AiCapabilities>('ai_capabilities')
+}
+
 export async function getFile(id: string): Promise<FileDetail> {
   return invoke<FileDetail>('get_file', { id })
 }
