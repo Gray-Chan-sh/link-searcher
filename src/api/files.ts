@@ -17,6 +17,20 @@ export interface DuplicateGroup {
   paths: string[]
 }
 
+export interface SummaryResult {
+  file_id: string
+  summary: string
+  cached: boolean
+}
+
+export async function summarizeFile(fileId: string): Promise<SummaryResult> {
+  return invoke<SummaryResult>('summarize_file', { fileId })
+}
+
+export async function askDocuments(fileIds: string[], question: string): Promise<string> {
+  return invoke<string>('ask_documents', { fileIds, question })
+}
+
 export async function getFile(id: string): Promise<FileDetail> {
   return invoke<FileDetail>('get_file', { id })
 }

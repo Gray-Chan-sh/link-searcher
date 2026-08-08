@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { convertFileSrc } from '@tauri-apps/api/core'
-import { getFile, getFilePreview, openFile, revealInFolder, type FileDetail, type FilePreview } from '../api/files'
+import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, type FileDetail, type FilePreview, type SummaryResult } from '../api/files'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
@@ -55,6 +55,9 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const [fullscreen, setFullscreen] = useState(false)
   const [matchIndex, setMatchIndex] = useState(0)
   const [scale, setScale] = useState(1)
+  const [summary, setSummary] = useState<SummaryResult | null>(null)
+  const [summaryLoading, setSummaryLoading] = useState(false)
+  const [summaryError, setSummaryError] = useState<string | null>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
 
@@ -75,6 +78,8 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       setPreview(null)
       setError(null)
       setMatchIndex(0)
+      setSummary(null)
+      setSummaryError(null)
       return
     }
 
@@ -102,6 +107,20 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
   const textContent = preview?.content ?? ''
   const matchCount = useMemo(() => countMatches(textContent, searchQuery), [textContent, searchQuery])
+
+  const handleSummarize = useCallback(async () => {
+    if (!fileId || summaryLoading) return
+    setSummaryLoading(true)
+    setSummaryError(null)
+    try {
+      const res = await summarizeFile(fileId)
+      setSummary(res)
+    } catch (e) {
+      setSummaryError(e instanceof Error ? e.message : 'AI 摘要失败')
+    } finally {
+      setSummaryLoading(false)
+    }
+  }, [fileId, summaryLoading])
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -217,6 +236,29 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
             <MetaRow label={t('size')} value={formatSize(meta.file_size)} />
             <MetaRow label={t('modified')} value={formatTime(meta.mtime)} />
             <MetaRow label={t('type')} value={meta.file_ext.toUpperCase()} />
+          </div>
+        )}
+
+        {(meta || textContent) && !loading && !error && (
+          <div className="px-4 py-3 space-y-2 border-b border-gray-100 dark:border-gray-800">
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleSummarize}
+                disabled={summaryLoading}
+                className="px-2.5 py-1 text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/40 rounded-md hover:bg-purple-100 dark:hover:bg-purple-900/40 transition-colors disabled:opacity-50 shrink-0"
+              >
+                {summaryLoading ? <LoadingSpinner className="size-3.5" /> : '✦'}
+                <span className="ml-1">{t('ai_summarize')}</span>
+              </button>
+            </div>
+            {summaryError && (
+              <p className="text-xs text-red-600 dark:text-red-400">{summaryError}</p>
+            )}
+            {summary && (
+              <div className="text-xs text-gray-700 dark:text-gray-300 bg-purple-50 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-800/30 rounded p-2.5">
+                {summary.summary}
+              </div>
+            )}
           </div>
         )}
 

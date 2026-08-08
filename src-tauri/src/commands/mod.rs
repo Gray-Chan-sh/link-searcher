@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod backup;
 pub mod config;
 pub mod dirs;

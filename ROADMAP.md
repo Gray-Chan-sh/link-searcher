@@ -60,7 +60,7 @@
 
 ## P3 — 远期规划
 
-- [x] **向量搜索 / AI 增强（一期）**：AI 网关（OpenAI 兼容）+ `/embeddings` + `doc_embeddings` 向量表 + 语义搜索（BM25×向量 RRF 融合）；RAG 摘要/问答待二期（需 LLM API）
+- [x] **向量搜索 / AI 增强**：一期 AI 网关+语义搜索（BM25×向量 RRF）；二期 AI 摘要 + 跨文件 RAG 问答（`/chat/completions`）
 - [ ] **监控目录热重载**：`dir_config` 变更后自动增量同步
 - [ ] **多语言界面**：日/韩文（jpn/kor OCR 已支持，UI 缺）
 - [ ] **CLI 增强**：`link-searcher index --dir` 等子命令，支持无 GUI 场景
