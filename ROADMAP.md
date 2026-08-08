@@ -14,6 +14,8 @@
 - [x] **Git 版本号**：启动日志和设置页显示 commit hash + 时间
 - [x] **日志清空改截断**：写时间戳标记，不破坏 logger 句柄
 - [x] **批量索引进度可见**：Phase 1 提取完成即标 indexed=3，UI 实时刷新
+- [x] **Phase 1 渐进可搜**：`batch_index` 分块流水线（每 250 文件提交一次），提取的同时已提交部分立即可搜索
+- [x] **索引完整性对账**：`check_index_integrity` 命令核对 DB/Tantivy 差异 + 回拨 indexed=3 孤儿；`needs_reindex` 视 3 为未完成
 - [x] **浏览页刷新按钮**
 - [x] **预览面板高度填充**
 

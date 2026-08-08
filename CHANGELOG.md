@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-08（索引完整性 · 分块流水线 + 对账命令）
+
+- **Phase 1 阶段无法搜索**：`batch_index` 原为串行两阶段（全部提取完才一次性写 Tantivy），Phase 1 期间索引无可搜文档。改为**分块流水线**（每 250 个文件：并行提取 → 立即写 Tantivy → commit），已提交的块**立即可搜索**，进度持续可见（`src-tauri/src/indexer.rs`）
+- **indexed=3 孤儿文件**（提取完成但 Tantivy 未写——崩溃留给）：`IndexedState` 补 `Extracted=3` 变体；`needs_reindex` 将 3 视为未完成、`get_files_needing_index` 含 3，扫描自动重进队列（`src-tauri/src/db/tracker.rs`、`src-tauri/src/scanner/helpers.rs`）
+- **索引完整性对账**：新命令 `check_index_integrity`——统计 DB indexed=1 数与 Tantivy 文档数差异（正差=孤儿），并将残留在 indexed=3 的文件回拨 pending，下次扫描重写（`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`）
+- **测试**：`needs_reindex_treats_extracted_as_incomplete`（indexed=1 无需重扫 / 3 需重扫 / mtime 变化重扫）；102 单元 + 3 smoke + 9 集成通过，semgrep 0
+
+---
+
 ## 2026-08-08（RAG 二期 · AI 摘要与跨文件问答）
 
 - **`ai` 模块补 `chat()`**：OpenAI 兼容 `/chat/completions`，system/user 双提示，temperature=0.3，未配置/失败优雅返回 None（`src-tauri/src/ai/mod.rs`）

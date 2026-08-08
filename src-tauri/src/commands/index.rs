@@ -19,6 +19,19 @@ pub struct IndexHealth {
 }
 
 #[derive(Serialize)]
+pub struct IndexIntegrityReport {
+    /// Files marked indexed=1 in the DB (expected to be searchable).
+    pub db_indexed: u64,
+    /// Documents actually present in the Tantivy index.
+    pub tantivy_docs: u64,
+    /// difference = db_indexed - tantivy_docs (positive means orphans).
+    pub difference: i64,
+    /// Files that were stuck at indexed=3 (extracted, never written) and
+    /// were reset to pending so a re-scan rewrites them into Tantivy.
+    pub resurrected: u64,
+}
+
+#[derive(Serialize)]
 pub struct IndexStatus {
     pub total_files: u64,
     pub indexed: u64,
@@ -416,6 +429,44 @@ pub async fn check_index_health(state: State<'_, AppState>) -> Result<IndexHealt
         num_segments,
         num_docs,
         db_integrity,
+    })
+}
+
+/// Index integrity audit: compares DB marked-indexed count vs documents
+/// actually present in Tantivy, and resurrects files stuck at indexed=3
+/// (extracted but never written — e.g. after a crash) back to pending so a
+/// re-scan rewrites them. Run after a crash or when search seems incomplete.
+#[tauri::command]
+pub fn check_index_integrity(state: State<'_, AppState>) -> Result<IndexIntegrityReport, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let db_indexed: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_tracking WHERE indexed = 1",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("{e}"))?;
+    // Files at indexed=3 never made it into Tantivy (crash between Phase-1
+    // extraction and Phase-2 write). Reset them to pending (indexed=0) so
+    // needs_reindex re-queues them on the next scan.
+    let resurrected = conn
+        .execute(
+            "UPDATE file_tracking SET indexed = 0, updated_at = ?1 WHERE indexed = 3",
+            rusqlite::params![chrono::Utc::now().timestamp()],
+        )
+        .map_err(|e| format!("{e}"))? as u64;
+    drop(conn);
+
+    let index = state.index_manager.read().map_err(|e| format!("{e}"))?;
+    let reader = index.reader().map_err(|e| format!("{e}"))?;
+    let tantivy_docs = reader.searcher().num_docs();
+    drop(index);
+
+    Ok(IndexIntegrityReport {
+        db_indexed,
+        tantivy_docs,
+        difference: db_indexed as i64 - tantivy_docs as i64,
+        resurrected,
     })
 }
 

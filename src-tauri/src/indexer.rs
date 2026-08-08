@@ -302,181 +302,165 @@ impl IndexerService {
         jobs: Vec<BatchJob>,
         progress: impl Fn(u64, u64),
     ) -> Result<Vec<BatchResult>> {
+        // Chunked pipeline: instead of extracting ALL files then writing the
+        // index once, process in chunks so committed chunks become searchable
+        // while later chunks are still extracting (Phase-1 search visibility).
+        const CHUNK: usize = 250;
         let db = self.db.clone();
         let total = jobs.len() as u64;
         let started = Instant::now();
-
-        // ── Phase 1: parallel extraction ──────────────────────────────
-        let phase1_start = Instant::now();
-        log::info!("[INDEX] Phase 1: 并行提取 {} 文件", total);
-        let extracted: Vec<Result<ExtractedData, (String, String)>> = jobs
-            .par_iter()
-            .map(|job| {
-                if self.cancel_scan.load(Ordering::Acquire) {
-                    return Err((job.file_id.clone(), "scan cancelled".to_string()));
-                }
-                let conn = match db.get() {
-                    Ok(c) => c,
-                    Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
-                };
-                Self::extract_and_index_single(job, &conn)
-            })
-            .collect();
-
-        let phase1_elapsed = phase1_start.elapsed();
-        let phase1_ok = extracted.iter().filter(|r| r.is_ok()).count();
-        let phase1_err = extracted.iter().filter(|r| r.is_err()).count();
-        log::info!(
-            "[PERF] Phase 1 完成: {phase1_ok} 成功 {phase1_err} 失败, 耗时 {:.1}s ({:.1} 文件/s)",
-            phase1_elapsed.as_secs_f64(),
-            total as f64 / phase1_elapsed.as_secs_f64().max(0.001),
-        );
-
-        // ── Phase 2: serial Tantivy write + DB tracking ──────────────
-        let phase2_start = Instant::now();
-        let mut guard = self.lock_writer()?;
-        let writer = guard
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
-        let conn = self.db.get().context("failed to get DB connection")?;
-
-        let mut results = Vec::with_capacity(total as usize);
+        let mut results: Vec<BatchResult> = Vec::with_capacity(total as usize);
         let mut success_count = 0u64;
         let mut error_count = 0u64;
-        let mut done = 0u64;
         let mut total_bytes: u64 = 0;
-        let mut last_report = done;
-        let mut last_report_time: u64 = 0;
+        let mut done = 0u64;
 
-        for extraction in extracted {
+        for chunk in jobs.chunks(CHUNK) {
             if self.cancel_scan.load(Ordering::Acquire) {
-                log::info!("[INDEX] 批处理已取消, 跳过剩余 {} 项", total as usize - done as usize);
+                log::info!("[INDEX] 批处理已取消, 跳过剩余 {} 项", total - done);
                 break;
             }
-            done += 1;
-            progress(done, total);
-            match extraction {
-                Ok(data) => {
-                    let file_id = data.file_id;
-                    if let Err(e) = Indexer::add_document(
-                        writer,
-                        &file_id,
-                        &data.file_name,
-                        &data.file_ext,
-                        &data.dir_id,
-                        &data.file_path_str,
-                        &data.text,
-                        data.mtime,
-                        data.file_size,
-                    ) {
-                        let err = format!("add_document: {e}");
-                        log::error!("[INDEX] 写入失败: {}: {}", data.file_name, err);
-                        let _ = crate::db::tracker::log_index_error(
-                            &conn,
+            let chunk_total = chunk.len() as u64;
+            log::info!(
+                "[INDEX] 处理块 {}-{} / {} (并行提取中)",
+                done + 1, done + chunk_total, total
+            );
+
+            // ── Chunk Phase 1: parallel extraction ─────────────────────
+            let chunk_start = Instant::now();
+            let extracted: Vec<Result<ExtractedData, (String, String)>> = chunk
+                .par_iter()
+                .map(|job| {
+                    if self.cancel_scan.load(Ordering::Acquire) {
+                        return Err((job.file_id.clone(), "scan cancelled".to_string()));
+                    }
+                    let conn = match db.get() {
+                        Ok(c) => c,
+                        Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
+                    };
+                    Self::extract_and_index_single(job, &conn)
+                })
+                .collect();
+
+            // ── Chunk Phase 2: serial Tantivy write + DB tracking ──────
+            let mut guard = self.lock_writer()?;
+            let writer = guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
+            let conn = self.db.get().context("failed to get DB connection")?;
+
+            for extraction in extracted {
+                if self.cancel_scan.load(Ordering::Acquire) {
+                    log::info!("[INDEX] 批处理已取消, 跳过剩余项");
+                    break;
+                }
+                done += 1;
+                progress(done, total);
+                match extraction {
+                    Ok(data) => {
+                        let file_id = data.file_id;
+                        if let Err(e) = Indexer::add_document(
+                            writer,
                             &file_id,
+                            &data.file_name,
+                            &data.file_ext,
+                            &data.dir_id,
                             &data.file_path_str,
-                            classify_error_str(&err, &data.file_ext),
-                            &err,
-                        );
+                            &data.text,
+                            data.mtime,
+                            data.file_size,
+                        ) {
+                            let err = format!("add_document: {e}");
+                            log::error!("[INDEX] 写入失败: {}: {}", data.file_name, err);
+                            let _ = crate::db::tracker::log_index_error(
+                                &conn,
+                                &file_id,
+                                &data.file_path_str,
+                                classify_error_str(&err, &data.file_ext),
+                                &err,
+                            );
+                            let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
+                            results.push(BatchResult {
+                                file_id,
+                                success: false,
+                                error: Some(err),
+                            });
+                            continue;
+                        }
+
+                        if let Err(e) =
+                            crate::db::tracker::update_indexed(&conn, &file_id, Some(&data.hash))
+                        {
+                            let err = format!("update_indexed: {e}");
+                            log::error!("[INDEX] 更新 tracking 失败: {}: {}", data.file_name, err);
+                            results.push(BatchResult {
+                                file_id,
+                                success: false,
+                                error: Some(err),
+                            });
+                            continue;
+                        }
+
+                        // Semantic vector (optional): embed the extracted text
+                        // and store it. Failure is non-fatal.
+                        if crate::ai::ai_enabled() && !data.text.trim().is_empty() {
+                            if let Some(vec) = crate::ai::embed(&data.text) {
+                                let _ = crate::db::tracker::upsert_embedding(&conn, &file_id, &vec);
+                            }
+                        }
+
+                        log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
+                        success_count += 1;
+                        total_bytes += data.file_size;
+                        results.push(BatchResult {
+                            file_id,
+                            success: true,
+                            error: None,
+                        });
+                    }
+                    Err((file_id, err)) => {
+                        error_count += 1;
+                        log::error!("[INDEX] 提取失败: {}", err);
+                        let etype = classify_error_str(&err, "");
+                        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &file_id) {
+                            let _ = crate::db::tracker::log_index_error(
+                                &conn, &file_id, &rec.path, etype, &err,
+                            );
+                        }
                         let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
                         results.push(BatchResult {
                             file_id,
                             success: false,
                             error: Some(err),
                         });
-                        continue;
                     }
-
-                    if let Err(e) =
-                        crate::db::tracker::update_indexed(&conn, &file_id, Some(&data.hash))
-                    {
-                        let err = format!("update_indexed: {e}");
-                        log::error!("[INDEX] 更新 tracking 失败: {}: {}", data.file_name, err);
-                        results.push(BatchResult {
-                            file_id,
-                            success: false,
-                            error: Some(err),
-                        });
-                        continue;
-                    }
-
-                    // Semantic vector (optional): embed the extracted text and
-                    // store it. Failure is non-fatal — keyword search still
-                    // works; semantic search simply misses this doc.
-                    if crate::ai::ai_enabled() && !data.text.trim().is_empty() {
-                        if let Some(vec) = crate::ai::embed(&data.text) {
-                            let _ = crate::db::tracker::upsert_embedding(&conn, &file_id, &vec);
-                        }
-                    }
-
-                    log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
-                    success_count += 1;
-                    total_bytes += data.file_size;
-                    results.push(BatchResult {
-                        file_id,
-                        success: true,
-                        error: None,
-                    });
-                }
-                Err((file_id, err)) => {
-                    error_count += 1;
-                    log::error!("[INDEX] 提取失败: {}", err);
-                    let etype = classify_error_str(&err, "");
-                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &file_id) {
-                        let _ = crate::db::tracker::log_index_error(
-                            &conn, &file_id, &rec.path, etype, &err,
-                        );
-                    }
-                    let _ = crate::db::tracker::mark_failed(&conn, &file_id, &err);
-                    results.push(BatchResult {
-                        file_id,
-                        success: false,
-                        error: Some(err),
-                    });
                 }
             }
-            // Progress report every 100 files or 30 seconds
-            if done - last_report >= 100
-                || (done > 0 && phase2_start.elapsed().as_secs() > last_report_time + 30)
-            {
-                let elapsed = phase2_start.elapsed().as_secs_f64();
-                log::info!(
-                    "[PERF] Phase 2: {done}/{total} ({:.1}%), {success_count} ok {error_count} err, {:.1}MB, {:.1} 文件/s, {:.1}s",
-                    done as f64 / total as f64 * 100.0,
-                    total_bytes as f64 / 1_048_576.0,
-                    done as f64 / elapsed.max(0.001),
-                    elapsed,
-                );
-                last_report = done;
-                last_report_time = phase2_start.elapsed().as_secs();
+
+            // ── Chunk commit: make this chunk's docs searchable NOW ────
+            if success_count > 0 {
+                let _ = Indexer::commit(writer);
             }
+            drop(conn);
+            drop(guard);
+
+            let chunk_elapsed = chunk_start.elapsed().as_secs_f64();
+            log::info!(
+                "[PERF] 块完成: {}-{} ({} ok, {} err), {:.1}MB, {:.1}s, {:.1} 文件/s — 本块立即可搜",
+                done - chunk_total + 1, done,
+                chunk_total, error_count,
+                total_bytes as f64 / 1_048_576.0,
+                chunk_elapsed,
+                chunk_total as f64 / chunk_elapsed.max(0.001),
+            );
         }
 
-        let phase2_elapsed = phase2_start.elapsed();
-        log::info!(
-            "[PERF] Phase 2 完成: {total} 文件, {success_count} 成功 {error_count} 失败, {:.1}MB, 耗时 {:.1}s ({:.1} 文件/s)",
-            total_bytes as f64 / 1_048_576.0,
-            phase2_elapsed.as_secs_f64(),
-            total as f64 / phase2_elapsed.as_secs_f64().max(0.001),
-        );
         let total_elapsed = started.elapsed();
         log::info!(
-            "[PERF] 批索引总计: {total} 文件, 耗时 {:.1}s ({:.1} 文件/s)",
+            "[PERF] 批索引总计: {total} 文件, {success_count} 成功 {error_count} 失败, 耗时 {:.1}s ({:.1} 文件/s)",
             total_elapsed.as_secs_f64(),
             total as f64 / total_elapsed.as_secs_f64().max(0.001),
         );
-
-        // Periodic auto-commit every N successful files.
-        if success_count > 0 {
-            let prev = self.commit_counter.fetch_add(success_count, Ordering::Relaxed);
-            let current = prev + success_count;
-            let interval = self.commit_interval.load(Ordering::Relaxed);
-            if interval > 0 && current / interval > prev / interval {
-                if let Err(e) = Indexer::commit(writer) {
-                    log::error!("[INDEX] 定期提交失败: {e}");
-                }
-            }
-        }
 
         Ok(results)
     }
