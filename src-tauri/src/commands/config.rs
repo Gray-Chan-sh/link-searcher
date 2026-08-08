@@ -12,6 +12,10 @@ pub struct ConfigInfo {
     pub data_dir: String,
     pub language: String,
     pub lo_binary_path: String,
+    pub ai_api_base: String,
+    pub ai_api_key: String,
+    pub embedding_model: String,
+    pub llm_model: String,
 }
 
 #[tauri::command]
@@ -21,6 +25,10 @@ pub fn get_config() -> Result<ConfigInfo, String> {
         data_dir: config.data_dir.to_string_lossy().to_string(),
         language: config.language,
         lo_binary_path: config.lo_binary_path,
+        ai_api_base: config.ai_api_base,
+        ai_api_key: config.ai_api_key,
+        embedding_model: config.embedding_model,
+        llm_model: config.llm_model,
     })
 }
 
@@ -47,6 +55,10 @@ pub fn update_config(
         data_dir: new_config.data_dir.into(),
         language: new_config.language,
         lo_binary_path: new_config.lo_binary_path,
+        ai_api_base: new_config.ai_api_base,
+        ai_api_key: new_config.ai_api_key,
+        embedding_model: new_config.embedding_model,
+        llm_model: new_config.llm_model,
     };
     save_config(&config)
 }

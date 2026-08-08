@@ -33,6 +33,7 @@ export default function Settings() {
   const [migrationStage, setMigrationStage] = useState<string | null>(null)
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
+  const [aiCfg, setAiCfg] = useState({ base: '', key: '', embedding: '', llm: '' })
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
@@ -76,8 +77,25 @@ export default function Settings() {
   useEffect(() => {
     if (appConfig) {
       setLoPath(appConfig.lo_binary_path)
+      setAiCfg({
+        base: appConfig.ai_api_base ?? '',
+        key: appConfig.ai_api_key ?? '',
+        embedding: appConfig.embedding_model ?? '',
+        llm: appConfig.llm_model ?? '',
+      })
     }
   }, [appConfig])
+
+  const saveAiField = async (field: keyof ConfigInfo, value: string) => {
+    if (!appConfig) return
+    try {
+      const updated = { ...appConfig, [field]: value }
+      await updateConfig(updated)
+      setAppConfig(updated)
+    } catch (err) {
+      setLocalError(err instanceof Error ? err.message : 'Failed to save AI config')
+    }
+  }
 
   const handleFunasrInstall = async () => {
     if (funasrInstalling) return
@@ -346,6 +364,40 @@ export default function Settings() {
           />
         </Section>
 
+        <Section title={t('ai_service')}>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{t('ai_service_desc')}</p>
+          <div className="space-y-3">
+            <TextField
+              label="API Base URL"
+              value={aiCfg.base}
+              onChange={v => setAiCfg({ ...aiCfg, base: v })}
+              onBlur={() => saveAiField('ai_api_base', aiCfg.base)}
+              placeholder="https://api.openai.com/v1 或 http://127.0.0.1:11434/v1"
+            />
+            <TextField
+              label="API Key (可选)"
+              value={aiCfg.key}
+              onChange={v => setAiCfg({ ...aiCfg, key: v })}
+              onBlur={() => saveAiField('ai_api_key', aiCfg.key)}
+              placeholder="sk-...  (本地 Ollama 可留空)"
+            />
+            <TextField
+              label={t('embedding_model')}
+              value={aiCfg.embedding}
+              onChange={v => setAiCfg({ ...aiCfg, embedding: v })}
+              onBlur={() => saveAiField('embedding_model', aiCfg.embedding)}
+              placeholder="text-embedding-v3-small"
+            />
+            <TextField
+              label={t('llm_model')}
+              value={aiCfg.llm}
+              onChange={v => setAiCfg({ ...aiCfg, llm: v })}
+              onBlur={() => saveAiField('llm_model', aiCfg.llm)}
+              placeholder="qwen2.5-7b-instruct"
+            />
+          </div>
+        </Section>
+
         <Section title="System">
           <ToggleField
             label="Launch on system startup"
@@ -454,8 +506,8 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   )
 }
 
-function TextField({ label, value, onChange, placeholder }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string
+function TextField({ label, value, onChange, placeholder, onBlur }: {
+  label: string; value: string; onChange: (v: string) => void; placeholder?: string; onBlur?: () => void
 }) {
   return (
     <div>
@@ -464,6 +516,7 @@ function TextField({ label, value, onChange, placeholder }: {
         type="text"
         value={value}
         onChange={e => onChange(e.target.value)}
+        onBlur={onBlur}
         placeholder={placeholder}
         className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
       />

@@ -400,6 +400,15 @@ impl IndexerService {
                         continue;
                     }
 
+                    // Semantic vector (optional): embed the extracted text and
+                    // store it. Failure is non-fatal — keyword search still
+                    // works; semantic search simply misses this doc.
+                    if crate::ai::ai_enabled() && !data.text.trim().is_empty() {
+                        if let Some(vec) = crate::ai::embed(&data.text) {
+                            let _ = crate::db::tracker::upsert_embedding(&conn, &file_id, &vec);
+                        }
+                    }
+
                     log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
                     success_count += 1;
                     total_bytes += data.file_size;

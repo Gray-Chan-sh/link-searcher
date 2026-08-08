@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-08（向量搜索 · AI 网关 · 语义搜索一期）
+
+- **AI 网关配置**：`AppConfig` 扩展 `ai_api_base/ai_api_key/embedding_model/llm_model`（`#[serde(default)]` 兼容旧配置），设置页新增「AI 服务」段（OpenAI 兼容协议：Ollama/OneAPI/vLLM 通用，留空关闭）（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src/api/config.ts`、`src/pages/Settings.tsx`）
+- **新 `ai` 模块**：ureq 调 `/embeddings`，代理/IPv4 环境兼容，401/超时优雅降级；cosine/normalize 向量工具（`src-tauri/src/ai/mod.rs`）
+- **向量存储**：`doc_embeddings(file_id, dim, vector BLOB)` 表 + upsert/get_all/delete/count；批量索引 Phase 2 写 Tantivy 时同步生成 embedding（AI 未配置则零开销跳过）（`src-tauri/src/db/tracker.rs`、`src-tauri/src/indexer.rs`）
+- **语义搜索**：`search` 命令新增 `semantic` 参数——query embed → 全库向量 cosine → 与 BM25 **RRF 融合**重排；无配置/无向量时自动降级纯关键词（`src-tauri/src/commands/search.rs`、`src-tauri/src/search/searcher.rs`）
+- **前端**：搜索页「✦ 语义」开关（localStorage 持久化），i18n zh/en（`src/hooks/useSearch.ts`、`src/pages/SearchPage.tsx`、`src/i18n/*`）
+- **测试**：6 个 ai 单测（cosine/归一化/未配置降级）+ embedding DB 往返；100 单元 + 3 smoke + 9 集成通过
+
+---
+
 ## 2026-08-08（搜索 vs 浏览不一致 · indexed=3 状态语义修正）
 
 - **已提取文件能预览但搜不到**：批量索引 Phase 1 提取完成即标 `indexed=3`，UI（Browse 状态徽章、`filter=indexed` 筛选、索引统计）把它当"已索引"显示——但 Tantivy 全文索引要到 Phase 2 才写入。结果是浏览/预览有内容、搜索无结果

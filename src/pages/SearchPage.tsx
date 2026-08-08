@@ -137,6 +137,17 @@ useEffect(() => {
             >
               {t('filters')}
             </button>
+            <button
+              onClick={() => search.setSemantic(!search.semantic)}
+              title={t('semantic_search')}
+              className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors shrink-0 ${
+                search.semantic
+                  ? 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border-blue-300 dark:border-blue-800'
+                  : 'text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+              }`}
+            >
+              ✦ {t('semantic')}
+            </button>
           </div>
 
           {search.status === 'success' && (

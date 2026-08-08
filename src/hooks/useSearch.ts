@@ -49,6 +49,9 @@ export function useSearch() {
   })
   const [sortField, setSortField] = useState<string>('score')
   const [sortOrder, setSortOrder] = useState<string>('desc')
+  const [semantic, setSemantic] = useState<boolean>(() => loadFromStorage('ls_semantic', false))
+  const semanticRef = useRef(semantic)
+  useEffect(() => { semanticRef.current = semantic }, [semantic])
   const [dirIds, setDirIds] = useState<string[]>(() => loadFromStorage(LS_FILTER_DIR_KEY, [] as string[]))
   const [dirPaths, setDirPaths] = useState<string[]>(() => loadFromStorage(LS_FILTER_PATH_KEY, [] as string[]))
   const [extFilter, setExtFilter] = useState<string[]>(() => loadFromStorage(LS_FILTER_EXT_KEY, [] as string[]))
@@ -124,7 +127,7 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     setState(s => ({ ...s, status: 'loading', query: q, page: p, error: null }))
 
     try {
-      const res: SearchResponse = await search(q, p, ps, dirs, paths, exts, sort, sortOrder)
+      const res: SearchResponse = await search(q, p, ps, dirs, paths, exts, sort, sortOrder, semanticRef.current)
       if (!ctrl.signal.aborted) {
         setState(s => ({
           ...s,
@@ -243,10 +246,12 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     dirPaths,
     extFilter,
     sortField,
+    semantic,
     suggestions,
     setQuery,
     setPage,
     setSort,
+    setSemantic: (v: boolean) => { saveToStorage('ls_semantic', v); setSemantic(v) },
     setDirIds: updateDirIds,
     setDirPaths: updateDirPaths,
     setExtFilter: updateExtFilter,

@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 use crate::db;
 use crate::scanner::helpers::TempDir;
-use crate::search::searcher::{SearchParams, SearchResponse, SortField, SearcherWrap};
+use crate::search::searcher::{SearchHit, SearchParams, SearchResponse, SortField, SearcherWrap};
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -61,6 +61,7 @@ pub async fn search(
     date_from: Option<i64>,
     date_to: Option<i64>,
     fuzzy: Option<bool>,
+    semantic: Option<bool>,
 ) -> Result<SearchResponse, String> {
     if state.is_rebuilding.load(Ordering::SeqCst) {
         return Err("索引重建中，请稍后再试".to_string());
@@ -127,6 +128,7 @@ pub async fn search(
         page: page.unwrap_or(1),
         page_size: page_size.unwrap_or(20).min(max_results).min(1000),
         fuzzy: fuzzy.unwrap_or(false),
+        semantic: semantic.unwrap_or(false),
     };
 
     let mgr = state
@@ -145,6 +147,17 @@ pub async fn search(
     let response = searcher
         .search(&params)
         .map_err(|e| format!("search failed: {e}"))?;
+
+    // Semantic rerank (optional): when enabled and the AI gateway is
+    // configured, fuse BM25 hits with embedding-cosine top-N via RRF so
+    // meaning-matches surface alongside keyword matches.
+    let mut response = response;
+    if params.semantic && crate::ai::ai_enabled() && !params.query.is_empty() {
+        match semantic_rerank(&state, &params, &response) {
+            Ok(merged) => response = merged,
+            Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
+        }
+    }
 
     let conn = state
         .db
@@ -175,6 +188,67 @@ pub async fn search(
     );
 
     Ok(response)
+}
+
+/// Semantically rerank search hits: embed the query, score every stored
+/// embedding by cosine, then fuse with the BM25 ranks via Reciprocal Rank
+/// Fusion. Returns a merged `SearchResponse` with reordered hits.
+fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &SearchResponse) -> Result<SearchResponse, String> {
+    use std::collections::HashMap;
+
+    let q_vec = crate::ai::embed(&params.query).ok_or_else(|| "query embedding failed".to_string())?;
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let rows = crate::db::tracker::get_all_embeddings(&conn).map_err(|e| e.to_string())?;
+    drop(conn);
+
+    if rows.is_empty() {
+        return Ok(bm25.clone());
+    }
+
+    // Semantic cosine scores: file_id -> score.
+    let mut scored: Vec<(String, f32)> = rows
+        .iter()
+        .map(|(fid, vec)| (fid.clone(), crate::ai::cosine(&q_vec, vec)))
+        .collect();
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // RRF fusion: score = 1/(60 + rank) summed over BM25 and semantic lists.
+    const K: f64 = 60.0;
+    let mut fusion: HashMap<String, f64> = HashMap::new();
+    for (i, hit) in bm25.hits.iter().enumerate() {
+        *fusion.entry(hit.file_id.clone()).or_insert(0.0) += 1.0 / (K + i as f64);
+    }
+    for (rank, (fid, _)) in scored.iter().enumerate() {
+        *fusion.entry(fid.clone()).or_insert(0.0) += 1.0 / (K + rank as f64);
+    }
+
+    let mut ordered: Vec<(String, f64)> = fusion.into_iter().collect();
+    ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Rebuild hit list in fused order; BM25-only hits (no embedding) go last.
+    let mut by_id: HashMap<String, SearchHit> = bm25
+        .hits
+        .iter()
+        .cloned()
+        .map(|h| (h.file_id.clone(), h))
+        .collect();
+    let mut merged: Vec<SearchHit> = ordered
+        .iter()
+        .filter_map(|(id, _)| by_id.remove(id))
+        .collect();
+    merged.extend(by_id.into_values());
+
+    let start = params.page.saturating_sub(1) * params.page_size;
+    let page_hits: Vec<SearchHit> = merged.into_iter().skip(start).take(params.page_size).collect();
+
+    Ok(SearchResponse {
+        total: bm25.total,
+        page: params.page,
+        page_size: params.page_size,
+        took_ms: bm25.took_ms,
+        hits: page_hits,
+    })
 }
 
 #[tauri::command]
@@ -288,6 +362,7 @@ pub async fn export_search_results(
         page: 1,
         page_size: export_page_size,
         fuzzy: false,
+        semantic: false,
     };
 
     let mgr = state

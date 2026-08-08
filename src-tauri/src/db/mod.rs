@@ -173,6 +173,13 @@ const CREATE_TABLES_SQL: &str = "
         dir_id      TEXT NOT NULL DEFAULT '*',
         updated_at  INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS doc_embeddings (
+        file_id     TEXT PRIMARY KEY,
+        dim         INTEGER NOT NULL,
+        vector      BLOB NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any
