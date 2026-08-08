@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-08（文档：模型存储目录澄清）
+
+- **打包版检测不到已下载模型**：用户模型在项目 `src-tauri/models/funasr/`（dev 位置），但双击运行的 .app 只认数据目录 `~/Library/Application Support/link-searcher/models/funasr/`（与 db/索引同源）。文档补清两处：USER_MANUAL 8.1 存储位置列出 `models/funasr/` 并加 dev vs 打包版差异说明；`models/funasr/README.md` 修正手动下载的错误路径 `com.linksearcher.app`（应为 `link-searcher`），并注明归档顶层目录需平铺
+
+---
+
 ## 2026-08-08（FunASR 模型下载镜像自动回退）
 
 - **GitHub 下载慢/失败时模型装不上**：`install_funasr` 之前只认 `LINK_SEARCHER_FUNASR_MIRROR=modelscope` 环境变量，普通用户不知道、下载 842MB 从 GitHub 直连可能超时。改为**双源自动回退**：默认 GitHub 先行，失败/超时（每源 180s 上限）自动切 ModelScope 镜像重试；环境变量仍可强制镜像专用（`src-tauri/src/commands/funasr.rs`）
