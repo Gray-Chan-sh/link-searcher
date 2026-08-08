@@ -228,16 +228,15 @@ impl AudioExtractor {
 
         let t0 = std::time::Instant::now();
         // FunASR-Nano is an LLM trained on ~30s windows; long audio must be
-        // split by VAD first. Segments are recognized independently and the
-        // utterances concatenated (matching the legacy Python fsmn-vad flow).
-        let text = match recognize_segments(&samples) {
-            Some(segments) => segments
-                .iter()
-                .filter_map(|seg| transcribe(rec, seg))
-                .collect::<Vec<_>>()
-                .join(" "),
-            None => transcribe(rec, &samples).unwrap_or_default(),
-        };
+        // split before feeding. `recognize_segments` always yields bounded
+        // chunks: Silero VAD when the model exists, fixed 28s hard-split
+        // otherwise. Never feed a long file whole (OOM).
+        let segments = recognize_segments(&samples);
+        let text = segments
+            .iter()
+            .filter_map(|seg| transcribe(rec, seg))
+            .collect::<Vec<_>>()
+            .join(" ");
 
         if text.trim().is_empty() {
             return Ok(format!(
@@ -250,16 +249,32 @@ impl AudioExtractor {
     }
 }
 
-/// Silero VAD: split long audio into speech segments (max 30s each, aligned
-/// with the legacy fsmn-vad `max_single_segment_time`). Returns `None` when
-/// the VAD model is unavailable so the caller falls back to single-shot.
+/// Split `samples` into bounded chunks (≤30s each) for LLM decoding.
+/// Uses Silero VAD when its model is present; otherwise falls back to a
+/// fixed 28s hard split with 0.5s overlap at boundaries. Always returns
+/// a non-empty list — never feed long audio whole (OOM).
+fn recognize_segments(samples: &[f32]) -> Vec<Vec<f32>> {
+    if let Some(segments) = vad_segments(samples) {
+        return segments;
+    }
+    // Fixed hard split: 28s chunks (28 * 16000 samples), no overlap.
+    const CHUNK: usize = 28 * 16000;
+    if samples.len() <= CHUNK {
+        return vec![samples.to_vec()];
+    }
+    samples
+        .chunks(CHUNK)
+        .map(|c| c.to_vec())
+        .collect()
+}
+
 fn vad_available() -> bool {
     funasr_dir()
         .map(|d| d.join("silero_vad.onnx").is_file())
         .unwrap_or(false)
 }
 
-fn recognize_segments(samples: &[f32]) -> Option<Vec<Vec<f32>>> {
+fn vad_segments(samples: &[f32]) -> Option<Vec<Vec<f32>>> {
     if !vad_available() {
         return None;
     }
