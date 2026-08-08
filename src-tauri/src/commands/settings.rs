@@ -8,7 +8,6 @@ use crate::state::AppState;
 const ALLOWED_KEYS: &[&str] = &[
     "ocr_engine",
     "ocr_lang",
-    "ocr_concurrent",
     "lo_batch_size",
     "max_results",
     "exclude_patterns",

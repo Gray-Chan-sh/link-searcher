@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-09（OCR 并发闸门 · 扫描件索引提速）
+
+- **扫描 PDF 索引过慢（单页 2.5~3.3s）**：根因是双层 `par_iter` 扇出（`batch_index` 文件级 × PDF 页级）叠加无并发控制的 Apple Vision 推理，几十路子进程/推理同时争抢 CPU。修复：`ocr.rs` 新增**全局并发闸门** `OcrGate`（阻塞信号量，上限 `min(CPU核数, 8)` 硬件自适应），`ocr_image_with_engine` / `ocr_image_with_regions` 两个分发入口统一持槽——一处加锁覆盖四引擎全路径（PaddleOCR/Apple Vision/Windows OCR/Tesseract），消除 OCR 过载（`src-tauri/src/extractor/ocr.rs`）
+- **删 `ocr_concurrent` 设置项**：该键只作用于 PaddleOCR 内部池却误导用户，且不再读取。清除 seed（`db/mod.rs`）、白名单（`commands/settings.rs`）、设置页 UI（`Settings.tsx`）；PaddleOCR 池固定 2 引擎，Apple Vision 由全局闸门按核数限流
+- **数据佐证**：真实库 5734 个 PDF 实测分类——59.7% 纯文字层（直接读）、35.8% 纯扫描件（整本 OCR）、3.2% 混合型；需 OCR 页约 23K。据此**否决**了页级混合提取方案（混合型占比过小，收益 <2% 且引入 wm/garbled 回归风险），保留现有 pdf-inspector + 水印/乱码/重复检测门禁不动
+- **测试**：`test_ocr_gate_limits_concurrency`（12 线程抢 3 槽峰值 ≤3）；103 单元 + 3 smoke + 9 集成通过，semgrep 0
+
+---
+
 ## 2026-08-08（索引完整性 · 分块流水线 + 对账命令）
 
 - **Phase 1 阶段无法搜索**：`batch_index` 原为串行两阶段（全部提取完才一次性写 Tantivy），Phase 1 期间索引无可搜文档。改为**分块流水线**（每 250 个文件：并行提取 → 立即写 Tantivy → commit），已提交的块**立即可搜索**，进度持续可见（`src-tauri/src/indexer.rs`）

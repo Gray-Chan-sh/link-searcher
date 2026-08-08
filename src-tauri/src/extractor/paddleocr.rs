@@ -66,23 +66,6 @@ impl EnginePool {
     }
 }
 
-static CONFIGURED_POOL_SIZE: AtomicUsize = AtomicUsize::new(0);
-
-/// Set the OCR engine pool size from the `ocr_concurrent` user setting.
-/// Must be called before the first OCR use (pool is built lazily). 0 = auto.
-pub fn set_pool_size(size: usize) {
-    CONFIGURED_POOL_SIZE.store(size.clamp(1, 8), Ordering::Relaxed);
-}
-
-fn pool_size() -> usize {
-    let configured = CONFIGURED_POOL_SIZE.load(Ordering::Relaxed);
-    if configured > 0 {
-        return configured;
-    }
-    let cores = thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    cores.clamp(1, 4)
-}
-
 static POOL: OnceLock<EnginePool> = OnceLock::new();
 
 fn write_if_missing(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
@@ -127,7 +110,7 @@ where
     let pool = match POOL.get() {
         Some(pool) => pool,
         None => {
-            let pool = EnginePool::new(pool_size())?;
+            let pool = EnginePool::new(2)?;
             let _ = POOL.set(pool); // race loser's engines are dropped
             POOL.get().expect("just set")
         }

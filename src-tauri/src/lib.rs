@@ -184,48 +184,26 @@ fn run_with_config(app_config: config::AppConfig) {
             db::init_db(&init_conn)?;
             drop(init_conn);
 
-            // Apply OCR concurrency setting before the engine pool is built
-            // (health_check below lazily constructs the pool).
-            match db_pool.get() {
-                Ok(conn) => {
-                    match conn.query_row(
-                        "SELECT value FROM app_settings WHERE key = 'ocr_concurrent'",
-                        [],
-                        |row| row.get::<_, String>(0),
-                    ) {
-                        Ok(v) => {
-                            match v.parse::<usize>() {
-                                Ok(n) => {
-                                    crate::extractor::paddleocr::set_pool_size(n);
-                                    log::info!("[STARTUP] OCR concurrency set to {} engine(s)", n);
-                                }
-                                Err(e) => log::warn!("[STARTUP] Failed to parse ocr_concurrent value '{}': {}", v, e),
-                            }
-                        }
-                Err(e) => log::warn!("[STARTUP] Failed to read ocr_concurrent setting: {}", e),
-            }
-
             // Apply LO batch size to the global batcher.
-            match conn.query_row(
-                "SELECT value FROM app_settings WHERE key = 'lo_batch_size'",
-                [],
-                |row| row.get::<_, String>(0),
-            ) {
-                Ok(v) => match v.parse::<usize>() {
-                    Ok(n) => {
-                        crate::extractor::office::LO_BATCH_SIZE
-                            .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
-                        log::info!("[STARTUP] LO batch size set to {}", n.max(1));
-                    }
-                    Err(e) => log::warn!(
-                        "[STARTUP] Failed to parse lo_batch_size value '{}': {}",
-                        v, e
-                    ),
-                },
-                Err(e) => log::warn!("[STARTUP] Failed to read lo_batch_size setting: {}", e),
-            }
+            if let Ok(conn) = db_pool.get() {
+                match conn.query_row(
+                    "SELECT value FROM app_settings WHERE key = 'lo_batch_size'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ) {
+                    Ok(v) => match v.parse::<usize>() {
+                        Ok(n) => {
+                            crate::extractor::office::LO_BATCH_SIZE
+                                .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
+                            log::info!("[STARTUP] LO batch size set to {}", n.max(1));
+                        }
+                        Err(e) => log::warn!(
+                            "[STARTUP] Failed to parse lo_batch_size value '{}': {}",
+                            v, e
+                        ),
+                    },
+                    Err(e) => log::warn!("[STARTUP] Failed to read lo_batch_size setting: {}", e),
                 }
-                Err(e) => log::warn!("[STARTUP] Failed to get DB connection for OCR concurrency: {}", e),
             }
 
             if let Ok(conn) = db_pool.get() {
