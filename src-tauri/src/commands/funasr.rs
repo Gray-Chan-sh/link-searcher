@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::state::AppState;
 
 const MODEL_ARCHIVE: &str = "sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2";
+const SILERO_VAD: &str = "silero_vad.onnx";
 const GITHUB_URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/";
 const MODELSCOPE_URL: &str =
     "https://modelscope.cn/models/csukuangfj/asr-models/resolve/master/";
@@ -114,6 +115,30 @@ fn download_inner(model_dir: &Path) -> FunasrInstallResult {
         .iter()
         .all(|f| extracted.join(f).is_file());
     if ok {
+        // Silero VAD model for long-audio segmentation (independent small
+        // file, not part of the FunASR archive).
+        let vad_dest = model_dir.join(SILERO_VAD);
+        if !vad_dest.exists() {
+            let vad_sources: Vec<String> = if std::env::var("LINK_SEARCHER_FUNASR_MIRROR").as_deref() == Ok("modelscope") {
+                vec![format!("{MODELSCOPE_URL}{SILERO_VAD}")]
+            } else {
+                vec![format!("{GITHUB_URL}{SILERO_VAD}"), format!("{MODELSCOPE_URL}{SILERO_VAD}")]
+            };
+            let mut vad_ok = false;
+            for url in &vad_sources {
+                log::info!("[FUNASR] 下载 VAD {}", url);
+                if download(url, &vad_dest).is_ok() {
+                    vad_ok = vad_dest.metadata().map(|m| m.len() > 100_000).unwrap_or(false);
+                    if vad_ok { break; }
+                    let _ = std::fs::remove_file(&vad_dest);
+                }
+            }
+            if !vad_ok {
+                let msg = "FunASR 模型下载完成，但 VAD 分段模型下载失败（不影响短音频识别）".to_string();
+                log::warn!("[FUNASR] {msg}");
+                return FunasrInstallResult { success: true, message: msg };
+            }
+        }
         let size = dir_size(&extracted) as f64 / (1024.0 * 1024.0 * 1024.0);
         log::info!("[FUNASR] 模型就绪: {} ({:.1} GiB)", extracted.display(), size);
         FunasrInstallResult { success: true, message: format!("FunASR 模型下载完成（{:.1} GB）", size) }

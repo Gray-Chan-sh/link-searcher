@@ -86,3 +86,29 @@ fn audio_extractor_full_pipeline() {
     );
     eprintln!("[PIPELINE] extract_audio output head: {}", &text[..text.len().min(200)]);
 }
+
+/// Long audio (VAD-segmented): a >1min file must not silently produce empty
+/// text. Set LINK_SEARCHER_TEST_LONG_MP3 to a long audio file.
+#[test]
+fn audio_extractor_long_audio() {
+    if !model_present() {
+        eprintln!("SKIP: FunASR model not downloaded at src-tauri/models/funasr");
+        return;
+    }
+    let mp3 = match std::env::var("LINK_SEARCHER_TEST_LONG_MP3") {
+        Ok(p) if PathBuf::from(&p).is_file() => PathBuf::from(p),
+        _ => {
+            eprintln!("SKIP: set LINK_SEARCHER_TEST_LONG_MP3 to a long audio file");
+            return;
+        }
+    };
+
+    let extractor = link_searcher_lib::extractor::audio::AudioExtractor::new();
+    let text = extractor.extract_audio(&mp3).expect("extract should not fail");
+    let body = text.replace("─── 音频文件", "").trim().to_string();
+    assert!(
+        !body.contains("无识别结果"),
+        "long audio should transcribe via VAD segments, got: {text:?}"
+    );
+    eprintln!("[LONG] extract_audio (long) output head: {}", &text[..text.len().min(300)]);
+}
