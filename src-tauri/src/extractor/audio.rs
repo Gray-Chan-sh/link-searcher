@@ -4,6 +4,45 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
+/// Locate `ffmpeg`. Searches PATH first, then the bundled/dev
+/// `ffmpeg-bin/` dir, then next to the executable, then common
+/// Homebrew prefixes — the Tauri app may not inherit the terminal PATH.
+fn find_ffmpeg_binary() -> Option<PathBuf> {
+    if Command::new("ffmpeg").arg("-version").output().is_ok() {
+        return Some(PathBuf::from("ffmpeg"));
+    }
+    let dev_path = PathBuf::from("ffmpeg-bin").join("ffmpeg");
+    if dev_path.exists() && Command::new(&dev_path).arg("-version").output().is_ok() {
+        return Some(dev_path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let bundle_path = dir.join("ffmpeg");
+            if bundle_path.exists() && Command::new(&bundle_path).arg("-version").output().is_ok() {
+                return Some(bundle_path);
+            }
+        }
+    }
+    for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
+        let candidate = PathBuf::from(prefix).join("ffmpeg");
+        if candidate.exists() && Command::new(&candidate).arg("-version").output().is_ok() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+static FFMPEG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+fn ffmpeg_path() -> Option<&'static Path> {
+    FFMPEG_PATH.get_or_init(find_ffmpeg_binary).as_deref()
+}
+
+/// Public check used by startup dependency detection and `check_dependencies`.
+pub fn ffmpeg_available() -> bool {
+    ffmpeg_path().is_some()
+}
+
 /// FunASR-Nano ONNX model files that must be present in the model dir.
 /// Layout matches `sherpa-onnx-funasr-nano-int8-2025-12-30` archive.
 const MODEL_SUBDIR: &str = "models/funasr";
@@ -139,12 +178,14 @@ impl AudioExtractor {
         // Decode to 16kHz mono WAV (full length)
         let tmp = crate::scanner::helpers::TempDir::new("ls_audio")?;
         let wav_path = tmp.path().join("audio.wav");
-        let status = Command::new("ffmpeg")
+        let ffmpeg = ffmpeg_path()
+            .ok_or_else(|| anyhow::anyhow!("ffmpeg not available. Install ffmpeg (brew install ffmpeg)"))?;
+        let status = Command::new(ffmpeg)
             .args(["-y", "-i"]).arg(path)
             .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
             .arg(&wav_path)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().context("ffmpeg not available")?;
+            .status().context("ffmpeg failed to run")?;
 
         if !status.success() || !wav_path.exists() {
             return Err(anyhow::anyhow!("ffmpeg decode failed"));
@@ -209,5 +250,20 @@ use super::Extractor;
 impl Extractor for AudioExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
         self.extract_audio(path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffmpeg_detection_finds_system_binary() {
+        if ffmpeg_available() {
+            let p = ffmpeg_path().unwrap();
+            assert!(p.exists() || p.as_os_str() == "ffmpeg");
+        }
+        // No assert on absence — this is an environment probe, not a
+        // contract; the chain must simply not panic when ffmpeg is missing.
     }
 }
