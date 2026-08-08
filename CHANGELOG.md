@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-08（目录嵌套吸收 · 添加父目录复用子目录索引）
+
+- **添加已含子目录的父目录被拒绝**：`add_dir(/A)` 因已索引 `/A/B` 报"此目录包含已索引目录"。现改为**吸收**——添加父目录时，把被包含子目录的 `file_tracking` 记录重根到父目录（`path` 加子目录相对前缀如 `B/`、`dir_id` 指向父、`indexed` 重置），删除子目录配置并停 watcher；Tantivy 旧文档按 `dir_id` 删除，父目录重扫时通过 MD5/content 去重**复用已提取内容**、只重建索引文档，不重复提取（`src-tauri/src/commands/dirs.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/search/indexer.rs`、`src-tauri/src/indexer.rs`）
+- **新增**：`tracker::absorb_subdir`（事务内批量迁移，保留 md5）、`Indexer::delete_by_dir` + `IndexerService::delete_dir`（按 dir_id 删 Tantivy 文档）
+- **测试**：`test_absorb_subdir_reroots_paths_and_dir_id` 覆盖路径重根/目录切换/md5 保留/indexed 重置；93 单元 + 3 smoke + 9 集成通过
+
+---
+
 ## 2026-08-08（长音频内存爆炸修复 · OOM）
 
 - **长音频索引导致 OOM 崩溃（18.7GB）**：用户索引 34 分钟录音（2071s）时 RSS 飙升至 18.7GB，进程被系统杀掉。根因——VAD 模型缺失时 `recognize_segments()` 返回 `None`，代码回退 `transcribe(rec, &samples)` **把整段长音频一次性喂给 FunASR-Nano（LLM 架构）**，解码内存失控

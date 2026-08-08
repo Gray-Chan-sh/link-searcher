@@ -49,20 +49,18 @@ pub async fn add_dir(
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
-    // Check for overlapping directories
     let existing_dirs = db::dir_config::list_dirs(&conn).map_err(|e| format!("{e}"))?;
     let canonical = std::path::Path::new(&path)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+    // Sub-directories already indexed and now contained by the new parent.
+    let mut contains: Vec<db::dir_config::DirConfig> = Vec::new();
     for dir in &existing_dirs {
         let existing_path = std::path::Path::new(&dir.path)
             .canonicalize()
             .unwrap_or_else(|_| std::path::PathBuf::from(&dir.path));
-        if canonical.starts_with(&existing_path) {
-            return Err(format!("此目录是已索引目录 '{}' 的子目录，请索引上级目录", dir.path));
-        }
         if existing_path.starts_with(&canonical) {
-            return Err(format!("此目录包含已索引目录 '{}'，请直接索引该目录", dir.path));
+            contains.push(dir.clone());
         }
     }
 
@@ -89,6 +87,28 @@ pub async fn add_dir(
         recursive.unwrap_or(true),
     )
     .map_err(|e| format!("failed to add directory: {e}"))?;
+
+    // Absorb contained sub-directories: re-root their file records under the
+    // new parent (path gets a relative sub-dir prefix, dir_id switches to the
+    // parent). Their Tantivy documents are deleted; re-scanning the parent
+    // re-adds them, reusing extracted content via MD5 dedup.
+    for sub in &contains {
+        let rel = std::path::Path::new(&sub.path)
+            .strip_prefix(&canonical)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        db::tracker::absorb_subdir(&conn, &sub.id, &dir.id, &rel)
+            .map_err(|e| format!("failed to absorb '{}': {e}", sub.path))?;
+        let _ = db::dir_config::remove_dir(&conn, &sub.id);
+        let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
+            dir_id: sub.id.clone(),
+        });
+        let _ = state.indexer.delete_dir(&sub.id);
+    }
+    if !contains.is_empty() {
+        let _ = state.indexer.commit();
+        log::info!("[DIRS] 吸收 {} 个子目录到 {}", contains.len(), path);
+    }
 
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StartWatch {
         dir_id: dir.id.clone(),

@@ -73,6 +73,19 @@ impl Indexer {
         Ok(())
     }
 
+    /// Delete all documents belonging to a directory (matched by `dir_id`).
+    /// Used when a sub-directory is absorbed into its parent — its documents
+    /// are dropped so re-scanning the parent re-adds them with new paths.
+    pub fn delete_by_dir(
+        writer: &mut IndexWriter,
+        dir_id: &str,
+    ) -> Result<(), TantivyError> {
+        let schema = build_schema();
+        let dir_id_field = schema.get_field("dir_id")?;
+        writer.delete_term(Term::from_field_text(dir_id_field, dir_id));
+        Ok(())
+    }
+
     /// Commit pending additions and deletions, making them visible to
     /// subsequent searches.
     ///
