@@ -150,10 +150,13 @@ pub async fn search(
 
     // Semantic rerank (optional): when enabled and the AI gateway is
     // configured, fuse BM25 hits with embedding-cosine top-N via RRF so
-    // meaning-matches surface alongside keyword matches.
+    // meaning-matches surface alongside keyword matches. Runs on a
+    // blocking thread with a short timeout so a hung embedding gateway
+    // degrades to BM25-only rather than freezing the search.
     let mut response = response;
     if params.semantic && crate::ai::embedding_enabled() && !params.query.is_empty() {
-        match semantic_rerank(&state, &params, &response) {
+        let db = state.db.clone();
+        match semantic_rerank_worker(&db, &params.query, &response, params.page, params.page_size) {
             Ok(merged) => response = merged,
             Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
         }
@@ -193,12 +196,28 @@ pub async fn search(
 /// Semantically rerank search hits: embed the query, score every stored
 /// embedding by cosine, then fuse with the BM25 ranks via Reciprocal Rank
 /// Fusion. Returns a merged `SearchResponse` with reordered hits.
-fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &SearchResponse) -> Result<SearchResponse, String> {
+fn semantic_rerank_worker(
+    pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    query: &str,
+    bm25: &SearchResponse,
+    page: usize,
+    page_size: usize,
+) -> Result<SearchResponse, String> {
     use std::collections::HashMap;
 
-    let q_vec = crate::ai::embed(&params.query).ok_or_else(|| "query embedding failed".to_string())?;
+    let q_vec = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = query.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::ai::embed(&q));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .and_then(|r| r)
+    }
+    .ok_or_else(|| "query embedding timeout (5s)".to_string())?;
 
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = pool.get().map_err(|e| format!("db error: {e}"))?;
     let rows = crate::db::tracker::get_all_embeddings(&conn).map_err(|e| e.to_string())?;
     drop(conn);
 
@@ -239,7 +258,7 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
         .collect();
 
     // Fetch metadata for semantic-only ids (top fused order, bounded).
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = pool.get().map_err(|e| format!("db error: {e}"))?;
     for (fid, _fusion) in ordered.iter().take(100) {
         if by_id.contains_key(fid) {
             continue;
@@ -258,7 +277,7 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
                 Some(md5) => crate::db::tracker::get_content(&conn, md5)
                     .ok()
                     .flatten()
-                    .map(|text| semantic_snippet(&text, &params.query))
+                    .map(|text| semantic_snippet(&text, query))
                     .unwrap_or_default(),
                 None => String::new(),
             };
@@ -289,13 +308,13 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
         .collect();
     merged.extend(by_id.into_values());
 
-    let start = params.page.saturating_sub(1) * params.page_size;
-    let page_hits: Vec<SearchHit> = merged.into_iter().skip(start).take(params.page_size).collect();
+    let start = page.saturating_sub(1) * page_size;
+    let page_hits: Vec<SearchHit> = merged.into_iter().skip(start).take(page_size).collect();
 
     Ok(SearchResponse {
         total: bm25.total,
-        page: params.page,
-        page_size: params.page_size,
+        page: page,
+        page_size: page_size,
         took_ms: bm25.took_ms,
         hits: page_hits,
     })
