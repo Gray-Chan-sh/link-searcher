@@ -24,6 +24,30 @@ pub fn llm_enabled() -> bool {
     !crate::config::load_config().llm_api_base.trim().is_empty()
 }
 
+/// Embedding models usually cap input at 512 tokens; over-length text rejects
+/// the whole gateway batch, so inputs are truncated to a safe char budget.
+const EMBED_MAX_CHARS: usize = 2000;
+
+pub fn truncate_for_embed(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= EMBED_MAX_CHARS {
+        s.to_string()
+    } else {
+        chars[..EMBED_MAX_CHARS].iter().collect()
+    }
+}
+
+/// Embed texts in `batch_size` chunks; failed texts map to `None`.
+pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>>> {
+    let batch_size = batch_size.max(1);
+    let mut out = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(batch_size) {
+        let chunk: Vec<String> = chunk.iter().map(|t| truncate_for_embed(t)).collect();
+        out.extend(embed_batch(&chunk));
+    }
+    out
+}
+
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     if texts.is_empty() || !embedding_enabled() {
         return vec![None; texts.len()];
@@ -48,7 +72,7 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
 
     let body = Req {
         model: cfg.embedding_model.clone(),
-        input: texts.to_vec(),
+        input: texts.iter().map(|t| truncate_for_embed(t)).collect(),
     };
 
     let req_body = serde_json::to_string(&body).unwrap_or_default();
@@ -358,6 +382,16 @@ mod tests {
     fn empty_batch_returns_same_len_none() {
         let r = embed_batch(&[]);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn truncate_for_embed_caps_length() {
+        let short = "abc";
+        assert_eq!(truncate_for_embed(short), "abc"); // unchanged
+        let long = "x".repeat(EMBED_MAX_CHARS + 500);
+        let t = truncate_for_embed(&long);
+        assert_eq!(t.chars().count(), EMBED_MAX_CHARS);
+        assert!(long.starts_with(&t));
     }
 
     #[test]

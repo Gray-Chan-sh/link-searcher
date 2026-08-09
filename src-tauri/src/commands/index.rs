@@ -1,5 +1,6 @@
 use std::sync::atomic::Ordering;
 
+use anyhow::Context;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -228,6 +229,16 @@ pub async fn trigger_scan(
         is_scanning.store(false, Ordering::SeqCst);
         cancel_scan.store(false, Ordering::SeqCst);
         let _ = app_clone.emit("scan-completed", serde_json::json!({}));
+
+        // After a scan, backfill any files newly indexed without embeddings
+        // (idempotent — only fills gaps). Runs in background so it never
+        // delays scan completion.
+        if crate::ai::embedding_enabled() {
+            let db_pool_bg = db_pool.clone();
+            std::thread::spawn(move || {
+                let _ = run_backfill_embeddings(&db_pool_bg);
+            });
+        }
     });
 
     Ok(())
@@ -470,6 +481,97 @@ pub fn check_index_integrity(state: State<'_, AppState>) -> Result<IndexIntegrit
     })
 }
 
+/// Backfill missing semantic embeddings for already-indexed files.
+///
+/// Reads each indexed file's extracted text from `content_index` (via md5 —
+/// no re-extraction / no OCR), embeds it in batches, and upserts into
+/// `doc_embeddings`. Idempotent: only files without an embedding are picked
+/// up, so it is safe to run repeatedly and after every scan.
+///
+/// Exposed both as a Tauri command (manual trigger) and called by the scan
+/// completion hook in the background.
+#[tauri::command]
+pub async fn backfill_embeddings(state: State<'_, AppState>) -> Result<BackfillReport, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || run_backfill_embeddings(&db))
+        .await
+        .map_err(|e| format!("backfill task failed: {e}"))?
+}
+
+fn run_backfill_embeddings(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+) -> Result<BackfillReport, String> {
+    if !crate::ai::embedding_enabled() {
+        return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
+    }
+    const BATCH: usize = 64;
+
+    let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+    let pending = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
+    let total = pending.len();
+    if total == 0 {
+        return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
+    }
+
+    log::info!("[AI] 向量回填开始: {total} 个文件缺向量");
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+    for chunk in pending.chunks(BATCH) {
+        let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+        let vecs = crate::ai::embed_batched(&texts, BATCH);
+        for ((id, _), v) in chunk.iter().zip(vecs) {
+            match v {
+                Some(vec) => {
+                    if let Err(e) = tracker::upsert_embedding(&conn, id, &vec) {
+                        log::warn!("[AI] upsert_embedding failed {}: {e}", id);
+                        failed += 1;
+                    }
+                }
+                None => failed += 1,
+            }
+        }
+        processed += chunk.len();
+        log::info!("[AI] 回填进度: {processed}/{total} (失败 {failed})");
+    }
+    log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
+    Ok(BackfillReport {
+        processed: processed as u64,
+        pending: (total - processed) as u64,
+        failed: failed as u64,
+    })
+}
+
+/// Files that are indexed (indexed=1) but lack an embedding, with their
+/// cached extracted text. The join goes through `content_index` by md5, so
+/// no re-extraction / re-OCR is needed.
+fn missing_embedding_rows(
+    conn: &rusqlite::Connection,
+) -> anyhow::Result<Vec<(String, String)>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ft.id, ci.text_content
+             FROM file_tracking ft
+             JOIN content_index ci ON ft.md5 = ci.md5
+             WHERE ft.indexed = 1 AND ft.status = 'active'
+               AND NOT EXISTS (SELECT 1 FROM doc_embeddings e WHERE e.file_id = ft.id)",
+        )
+        .context("prepare missing-embedding query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("query missing-embedding rows")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-embedding rows")
+}
+
+/// Summary of a [`backfill_embeddings`] run.
+#[derive(Serialize)]
+pub struct BackfillReport {
+    pub processed: u64,
+    pub pending: u64,
+    pub failed: u64,
+}
+
 #[tauri::command]
 pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<tracker::IndexError>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -499,4 +601,41 @@ pub async fn reindex_file(
     drop(conn);
     state.indexer.index_file(&file_id, &full_path, &rec.dir_id)
         .map_err(|e| format!("{e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn setup_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_db(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn backfill_picks_only_indexed_files_without_embedding() {
+        let conn = setup_conn();
+        conn.execute("INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d1','/tmp',1,0,0)", [])
+            .unwrap();
+        let id_a = tracker::upsert_file(&conn, "/a.txt", "d1", 1000, 10, Some("md5a")).unwrap();
+        let id_b = tracker::upsert_file(&conn, "/b.txt", "d1", 1000, 10, Some("md5b")).unwrap();
+        let id_c = tracker::upsert_file(&conn, "/c.txt", "d1", 1000, 10, Some("md5c")).unwrap();
+
+        // a: indexed + content + NO embedding → should be picked
+        tracker::store_content(&conn, "md5a", "content a", false, None).unwrap();
+        tracker::update_indexed(&conn, &id_a, Some("md5a")).unwrap();
+        // b: indexed but content missing (no md5 row) → skip
+        tracker::update_indexed(&conn, &id_b, Some("md5b")).unwrap();
+        // c: indexed + content + embedding ALREADY present → skip
+        tracker::store_content(&conn, "md5c", "content c", false, None).unwrap();
+        tracker::update_indexed(&conn, &id_c, Some("md5c")).unwrap();
+        tracker::upsert_embedding(&conn, &id_c, &[1.0, 2.0, 3.0]).unwrap();
+
+        let rows = missing_embedding_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, id_a);
+        assert_eq!(rows[0].1, "content a");
+    }
 }

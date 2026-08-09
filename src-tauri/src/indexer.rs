@@ -388,7 +388,7 @@ impl IndexerService {
                             continue;
                         }
 
-                        if let Err(e) =
+if let Err(e) =
                             crate::db::tracker::update_indexed(&conn, &file_id, Some(&data.hash))
                         {
                             let err = format!("update_indexed: {e}");
@@ -399,14 +399,6 @@ impl IndexerService {
                                 error: Some(err),
                             });
                             continue;
-                        }
-
-                        // Semantic vector (optional): embed the extracted text
-                        // and store it. Failure is non-fatal.
-                        if crate::ai::embedding_enabled() && !data.text.trim().is_empty() {
-                            if let Some(vec) = crate::ai::embed(&data.text) {
-                                let _ = crate::db::tracker::upsert_embedding(&conn, &file_id, &vec);
-                            }
                         }
 
                         log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
