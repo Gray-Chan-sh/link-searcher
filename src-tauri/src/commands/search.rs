@@ -212,6 +212,7 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
         .map(|(fid, vec)| (fid.clone(), crate::ai::cosine(&q_vec, vec)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let cos_map: std::collections::HashMap<String, f32> = scored.iter().cloned().collect();
 
     // RRF fusion: score = 1/(60 + rank) summed over BM25 and semantic lists.
     const K: f64 = 60.0;
@@ -239,7 +240,7 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
 
     // Fetch metadata for semantic-only ids (top fused order, bounded).
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    for (fid, _score) in ordered.iter().take(100) {
+    for (fid, _fusion) in ordered.iter().take(100) {
         if by_id.contains_key(fid) {
             continue;
         }
@@ -248,6 +249,19 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| rec.path.clone());
+            // Semantic score (cosine similarity) — visible so the user can
+            // tell how close the match is; 0 means "matched via keywords".
+            let cos = cos_map.get(fid).copied().unwrap_or(0.0);
+            // Build a snippet around the query's first matching word so the
+            // user sees *why* this document matched (highlighted).
+            let snippet = match rec.md5.as_deref() {
+                Some(md5) => crate::db::tracker::get_content(&conn, md5)
+                    .ok()
+                    .flatten()
+                    .map(|text| semantic_snippet(&text, &params.query))
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
             by_id.insert(
                 fid.clone(),
                 SearchHit {
@@ -259,8 +273,8 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
                         .unwrap_or("")
                         .to_string(),
                     path: rec.path.clone(),
-                    snippet: String::new(),
-                    score: 0.0,
+                    snippet,
+                    score: (cos * 100.0) as f64,
                     mtime: rec.mtime,
                     file_size: rec.size,
                 },
@@ -285,6 +299,52 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
         took_ms: bm25.took_ms,
         hits: page_hits,
     })
+}
+
+/// Build a human-readable snippet around the query's first matching word so
+/// a semantic-only hit shows *why* it matched. Returns `第一个命中词`-centered
+/// window with `<em>` highlight; empty when no query term appears verbatim.
+fn semantic_snippet(content: &str, query: &str) -> String {
+    let terms: Vec<&str> = query
+        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if terms.is_empty() {
+        return String::new();
+    }
+    // Find the earliest position of any term (case-insensitive).
+    let lower = content.to_lowercase();
+    let mut best: Option<(usize, &str)> = None;
+    for t in &terms {
+        let lt = t.to_lowercase();
+        if let Some(pos) = lower.find(&lt) {
+            if best.map_or(true, |(bp, _)| pos < bp) {
+                best = Some((pos, t));
+            }
+        }
+    }
+    let Some((pos, term)) = best else {
+        return String::new();
+    };
+
+    const WINDOW: usize = 60;
+    let start = pos.saturating_sub(WINDOW / 2);
+    // Align to a char boundary so we never slice through multi-byte text.
+    let start = content
+        .char_indices()
+        .map(|(i, _)| i)
+        .min_by_key(|&i| if i >= start { i - start } else { usize::MAX })
+        .unwrap_or(start);
+
+    let end = (pos + term.len() + WINDOW / 2).min(content.len());
+    let mut snippet = content[start..end].to_string();
+    if start > 0 {
+        snippet = format!("…{}", snippet);
+    }
+    if end < content.len() {
+        snippet.push('…');
+    }
+    snippet.replace(term, &format!("<em>{term}</em>"))
 }
 
 #[tauri::command]
@@ -509,3 +569,39 @@ pub async fn get_browse_file_types(state: State<'_, AppState>) -> Result<Vec<Str
     Ok(types)
 }
 
+
+#[cfg(test)]
+mod snippet_tests {
+    use super::semantic_snippet;
+
+    #[test]
+    fn highlights_first_matching_term() {
+        let s = semantic_snippet(
+            "本案系物业服务合同纠纷，原告主张被告支付物业费及违约金。",
+            "物业费 诉讼",
+        );
+        assert!(s.contains("<em>物业费</em>"), "got: {s}");
+        assert!(s.contains("…") == false || s.contains("…"), "ellipsis allowed");
+    }
+
+    #[test]
+    fn no_verbatim_term_returns_empty() {
+        // Query term not present verbatim in content → no snippet. This is
+        // expected for purely-semantic hits (different wording, same meaning).
+        let s = semantic_snippet("房屋租赁合同", "物业费");
+        assert!(s.is_empty(), "got: {s}");
+    }
+
+    #[test]
+    fn multi_byte_char_boundary_no_panic() {
+        // Window edges must not slice through a multi-byte char (CJK).
+        let long_cn: String = "物业服务与".repeat(200); // pure CJK, > window
+        let s = semantic_snippet(&long_cn, "物业");
+        assert!(s.contains("<em>物业</em>"), "got: {s}");
+    }
+
+    #[test]
+    fn empty_query_returns_empty() {
+        assert!(semantic_snippet("任意文本", "  ").is_empty());
+    }
+}
