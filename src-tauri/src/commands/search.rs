@@ -386,18 +386,13 @@ fn snippet_around<'a>(content: &'a str, needle: &str, wrap: impl Fn(&str) -> Str
     let pos = content.to_lowercase().find(&needle.to_lowercase());
     let Some(pos) = pos else { return head_snippet(content).replace(needle, &wrap(needle)) };
     const WINDOW: usize = 60;
-    let start = pos.saturating_sub(WINDOW / 2);
-    let start = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .min_by_key(|&i| if i >= start { i - start } else { usize::MAX })
-        .unwrap_or(start);
-    let end = (pos + needle.len() + WINDOW / 2).min(content.len());
-    let end = content
-        .char_indices()
-        .map(|(i, _)| i)
-        .min_by_key(|&i| if i >= end { i - end } else { usize::MAX })
-        .unwrap_or(end);
+
+    let start = content.floor_char_boundary(pos.saturating_sub(WINDOW / 2));
+    let end = content.ceil_char_boundary(
+        (pos + needle.len() + WINDOW / 2).min(content.len()),
+    );
+    let (start, end) = if start >= end { (pos, pos.saturating_add(needle.len())) } else { (start, end) };
+
     let mut snippet = content[start..end].to_string();
     if start > 0 { snippet = format!("…{}", snippet); }
     if end < content.len() { snippet.push('…'); }
