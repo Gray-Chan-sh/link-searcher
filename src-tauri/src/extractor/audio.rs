@@ -180,12 +180,26 @@ impl AudioExtractor {
         let wav_path = tmp.path().join("audio.wav");
         let ffmpeg = ffmpeg_path()
             .ok_or_else(|| anyhow::anyhow!("ffmpeg not available. Install ffmpeg (brew install ffmpeg)"))?;
-        let status = Command::new(ffmpeg)
+        // Cap decode at 30 minutes so the WAV and sample buffer stay bounded;
+        // poll child with a timeout so a hung decode can't stall the scan.
+        let mut child = Command::new(ffmpeg)
             .args(["-y", "-i"]).arg(path)
-            .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
+            .args(["-t", "1800", "-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
             .arg(&wav_path)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().context("ffmpeg failed to run")?;
+            .spawn().context("ffmpeg failed to run")?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let status = loop {
+            match child.try_wait()? {
+                Some(st) => break st,
+                None if std::time::Instant::now() > deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    anyhow::bail!("ffmpeg decode timed out after 300s");
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(200)),
+            }
+        };
 
         if !status.success() || !wav_path.exists() {
             return Err(anyhow::anyhow!("ffmpeg decode failed"));

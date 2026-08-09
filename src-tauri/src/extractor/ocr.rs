@@ -224,23 +224,34 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
         .arg(effective_lang)
         .stderr(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped());
-    let child = cmd.spawn().context("failed to execute tesseract — is it installed?")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(child.wait_with_output()); });
-    match rx.recv_timeout(Duration::from_secs(120)).context("tesseract wait failed")? {
-        Ok(output) => {
-            let _ = std::fs::remove_file(&pp_path);
-            if !output.status.success() {
-                anyhow::bail!("tesseract exited with code {:?}", output.status.code());
+    let mut child = cmd.spawn().context("failed to execute tesseract — is it installed?")?;
+    // Poll with a timeout instead of blocking: on timeout kill the child,
+    // reap it and remove the temp image (a broken image can hang tesseract).
+    let mut stdout_out = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => {
+                if let Some(mut so) = child.stdout.take() {
+                    std::io::Read::read_to_end(&mut so, &mut stdout_out)?;
+                }
+                break st;
             }
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            Ok(text)
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_file(&pp_path);
+                anyhow::bail!("tesseract timed out after 120s");
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
         }
-        Err(_) => {
-            let _ = Command::new("pkill").arg("-f").arg("tesseract").status();
-            anyhow::bail!("tesseract timed out after 120s");
-        }
+    };
+    let _ = std::fs::remove_file(&pp_path);
+    if !status.success() {
+        anyhow::bail!("tesseract exited with code {:?}", status.code());
     }
+    let text = String::from_utf8_lossy(&stdout_out).trim().to_string();
+    Ok(text)
 }
 
 /// Extract text from an image using the best available engine.

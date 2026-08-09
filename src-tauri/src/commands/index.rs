@@ -244,6 +244,16 @@ pub async fn trigger_scan(
     Ok(())
 }
 
+/// Truncate the index-facing tables before a rebuild. Embeddings/summaries
+/// must go too, or stale rows would rank ghost docs in semantic search.
+fn clear_index_tables(conn: &rusqlite::Connection) {
+    for table in ["file_tracking", "content_index", "doc_embeddings", "doc_summaries"] {
+        if let Err(e) = conn.execute(&format!("DELETE FROM {table}"), []) {
+            log::warn!("[SCAN] failed to clear {table}: {e}");
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn rebuild_index(
     state: State<'_, AppState>,
@@ -289,8 +299,7 @@ pub async fn rebuild_index(
 
         // 2. Clear file tracking
         if let Ok(conn) = db_pool.get() {
-            let _ = conn.execute("DELETE FROM file_tracking", []);
-            let _ = conn.execute("DELETE FROM content_index", []);
+            clear_index_tables(&conn);
             drop(conn);
         }
 
@@ -637,5 +646,31 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, id_a);
         assert_eq!(rows[0].1, "content a");
+    }
+}
+#[cfg(test)]
+mod clear_index_tables_tests {
+    use super::clear_index_tables;
+
+    fn setup_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn clears_tracking_embeddings_and_summaries() {
+        let conn = setup_conn();
+        crate::db::dir_config::add_dir(&conn, "/d", None, None, None, None, true).unwrap();
+        let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
+        let id = crate::db::tracker::upsert_file(&conn, "a.txt", &d.id, 1, 10, None).unwrap();
+        crate::db::tracker::upsert_embedding(&conn, &id, &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        crate::db::tracker::upsert_summary(&conn, &id, "summary").unwrap();
+
+        clear_index_tables(&conn);
+
+        assert_eq!(crate::db::tracker::get_files_by_dir(&conn, &d.id).unwrap().len(), 0);
+        assert_eq!(crate::db::tracker::count_embeddings(&conn).unwrap(), 0);
+        assert!(crate::db::tracker::get_summary(&conn, &id).unwrap().is_none());
     }
 }

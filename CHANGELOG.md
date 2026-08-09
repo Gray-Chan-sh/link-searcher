@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-10（P1 健壮性修复 · 扫描容错 / 音频与 OCR 超时 / 幽灵嵌入清理）
+
+- **单目录无权限导致整个扫描 abort**：三处 walkdir 迭代错误与 `entry.metadata()` 错误都经 `?` 向上传播，`~/Library` 等一个无权限子目录就让全量/增量/启动扫描整体失败。改为错误计入 `errors` 统计并继续其余文件（`scanner/mod.rs`）
+- **ffmpeg 解码无超时 + 整段解码 OOM**：`.status()` 阻塞可永久挂起扫描 worker；无上限解码使 3h 播客膨胀到 ~1.4GB `Vec<f32>`。加 `-t 1800`（30 分钟）截断 + `try_wait` 轮询 300s 超时 kill（`extractor/audio.rs`）
+- **tesseract 超时分支死代码**：`recv_timeout(...).context(...)?` 在超时时直接 `?` 传播，pkill+清理分支永不执行 → 挂死的进程/线程/临时图片全泄漏。改为 `try_wait` 轮询 120s 超时，超时 kill+wait+删临时图，并移除 `pkill` 全杀副作用（`extractor/ocr.rs`）
+- **重建索引残留幽灵嵌入**：`rebuild_index` 只清 `file_tracking`/`content_index`，`doc_embeddings`/`doc_summaries` 残留行以 RRF 1/(60+rank) 污染语义搜索排序。抽 `clear_index_tables` 四表同清，配单测（`commands/index.rs`）
+- **删除文件不清嵌入**：`delete_file` 补调 `tracker::delete_embedding`，删除后不留幽灵参与排序（`indexer.rs`）
+- **测试**：118 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（P0 审计修复 · watcher 不索引 / 导出损坏 / 目录筛选失效 / 压缩包安全）
 
 - **文件监视器新文件永不索引**：`handle_event` 在 `upsert_file` 写入 mtime 后再 `SELECT mtime` 比较，两次必然相等 → 所有 Create/Modify 事件被当虚假事件吞掉。改为用 upsert **前**的 DB 记录判定（已索引且 mtime/size 未变才跳过），抽 `should_skip_watcher_event` 并配判定表单测（`scanner/mod.rs`）
