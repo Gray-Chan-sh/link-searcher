@@ -408,16 +408,20 @@ pub fn get_total_image_files(conn: &Connection) -> Result<u64> {
 }
 
 pub fn get_ocred_count(conn: &Connection) -> Result<u64> {
-    // Count distinct files whose extracted text is non-trivial (>10 chars),
-    // regardless of the ocr_used flag (early versions may have missed setting
-    // it). This reflects actual searchable content, not just the OCR metadata.
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(DISTINCT ft.md5) FROM file_tracking ft \
-         JOIN content_index ci ON ft.md5 = ci.md5 \
-         WHERE ft.status = 'active' AND length(ci.text_content) > 10",
-        [],
-        |row| row.get(0),
-    )?;
+    let exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
+    let mut count: i64 = 0;
+    for ext in &exts {
+        count += conn
+            .query_row(
+                "SELECT COUNT(DISTINCT ft.md5) FROM file_tracking ft \
+                 JOIN content_index ci ON ft.md5 = ci.md5 \
+                 WHERE ft.status = 'active' AND ft.path LIKE ?1 \
+                 AND length(ci.text_content) > 10",
+                rusqlite::params![format!("%.{}", ext)],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+    }
     Ok(count as u64)
 }
 
