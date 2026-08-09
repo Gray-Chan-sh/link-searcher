@@ -213,17 +213,6 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     }, 200)
   }, [])
 
-  // Debounced search effect: triggers after 300ms of inactivity on the query
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      const f = filtersRef.current
-      const key = `${deferredQuery}|1|${f.sortField}|${f.sortOrder}`
-      if (key === lastSubmittedRef.current) return
-      executeSearch(deferredQuery, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
-    }, 300)
-    return () => clearTimeout(timer)
-  }, [deferredQuery, executeSearch, filtersRef])
-
   // setSort: update sort field/order and immediately re-execute search with current filters
   const setSort = useCallback((sort: string) => {
     setSortField(sort)
