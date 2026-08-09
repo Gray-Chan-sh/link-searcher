@@ -272,14 +272,27 @@ fn semantic_rerank_worker(
             // tell how close the match is; 0 means "matched via keywords".
             let cos = cos_map.get(fid).copied().unwrap_or(0.0);
             // Build a snippet around the query's first matching word so the
-            // user sees *why* this document matched (highlighted).
-            let snippet = match rec.md5.as_deref() {
+            // user sees *why* this document matched (highlighted). When no
+            // word overlap exists (pure semantic hit), prefix the similarity
+            // percentage so the user can judge relevance.
+            let raw_snippet = match rec.md5.as_deref() {
                 Some(md5) => crate::db::tracker::get_content(&conn, md5)
                     .ok()
                     .flatten()
                     .map(|text| semantic_snippet(&text, query))
                     .unwrap_or_default(),
                 None => String::new(),
+            };
+            let snippet = if raw_snippet.contains("<em>") {
+                raw_snippet
+            } else if cos > 0.0 {
+                format!(
+                    "[语义相似度 {}%] {}",
+                    (cos * 100.0) as u32,
+                    raw_snippet,
+                )
+            } else {
+                raw_snippet
             };
             by_id.insert(
                 fid.clone(),
