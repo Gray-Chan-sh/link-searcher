@@ -17,6 +17,24 @@ const TEXT_FORMATS: &[&str] = &[
     "ps1", "env", "conf", "properties",
 ];
 
+/// Reject entry names that could escape the extraction temp dir (zip-slip):
+/// absolute paths or any path segment of `..` (both `/` and `\` separators).
+fn is_safe_archive_name(name: &str) -> bool {
+    !Path::new(name).is_absolute()
+        && !name
+            .replace('\\', "/")
+            .split('/')
+            .any(|seg| seg == "..")
+}
+
+/// Read at most `cap` bytes; `over` is true when the input exceeded the cap
+/// (a zip entry's declared size may lie).
+fn read_capped<R: Read>(reader: R, cap: u64) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::new();
+    let n = reader.take(cap + 1).read_to_end(&mut buf)? as u64;
+    Ok((buf, n > cap))
+}
+
 pub struct ArchiveExtractor;
 
 impl ArchiveExtractor {
@@ -69,14 +87,14 @@ impl ArchiveExtractor {
         let mut file_count: usize = 0;
 
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).context("read zip entry")?;
+            let entry = archive.by_index(i).context("read zip entry")?;
             let entry_name = entry.name().to_owned();
             let entry_size = entry.size();
 
             if entry.is_dir() || entry_size == 0 {
                 continue;
             }
-            if total_size + entry_size > MAX_TOTAL_SIZE || file_count >= MAX_FILES {
+            if file_count >= MAX_FILES || MAX_TOTAL_SIZE.saturating_sub(total_size) == 0 {
                 if !output.is_empty() {
                     output.push('\n');
                 }
@@ -88,11 +106,14 @@ impl ArchiveExtractor {
                 continue;
             }
 
-            total_size += entry_size;
+            let cap = MAX_TOTAL_SIZE.saturating_sub(total_size).min(MAX_SINGLE_FILE);
+            let (buf, over) = read_capped(entry, cap).context("read zip entry data")?;
+            if over {
+                append_skip(&mut output, &entry_name, "解压超过上限");
+                continue;
+            }
+            total_size += buf.len() as u64;
             file_count += 1;
-
-            let mut buf = Vec::with_capacity(entry_size as usize);
-            entry.read_to_end(&mut buf).context("read zip entry data")?;
 
             append_entry(&mut output, &entry_name, &buf, lang)?;
         }
@@ -139,7 +160,7 @@ impl ArchiveExtractor {
             if entry_type.is_dir() || entry_size == 0 {
                 continue;
             }
-            if total_size + entry_size > MAX_TOTAL_SIZE || file_count >= MAX_FILES {
+            if file_count >= MAX_FILES || MAX_TOTAL_SIZE.saturating_sub(total_size) == 0 {
                 if !output.is_empty() {
                     output.push('\n');
                 }
@@ -151,11 +172,14 @@ impl ArchiveExtractor {
                 continue;
             }
 
-            total_size += entry_size;
+            let cap = MAX_TOTAL_SIZE.saturating_sub(total_size).min(MAX_SINGLE_FILE);
+            let (buf, over) = read_capped(&mut entry, cap).context("read tar entry")?;
+            if over {
+                append_skip(&mut output, &entry_name, "解压超过上限");
+                continue;
+            }
+            total_size += buf.len() as u64;
             file_count += 1;
-
-            let mut buf = Vec::with_capacity(entry_size as usize);
-            entry.read_to_end(&mut buf).context("read tar entry")?;
 
             append_entry(&mut output, &entry_name, &buf, lang)?;
         }
@@ -170,17 +194,16 @@ impl ArchiveExtractor {
 
     fn extract_single_compressed(&self, path: &Path, lang: &str, compression: &str) -> Result<String> {
         let file = fs::File::open(path).context("open compressed")?;
-        let mut reader: Box<dyn Read> = match compression {
+        let reader: Box<dyn Read> = match compression {
             "gz" => Box::new(flate2::read::GzDecoder::new(BufReader::new(file))),
             "bz2" => Box::new(bzip2::read::BzDecoder::new(BufReader::new(file))),
             "xz" => Box::new(xz2::read::XzDecoder::new(BufReader::new(file))),
             _ => return Err(anyhow::anyhow!("unsupported compression: {compression}")),
         };
 
-        let mut buf = Vec::new();
-        let size = reader.read_to_end(&mut buf).context("decompress")? as u64;
-        if size > MAX_SINGLE_FILE {
-            return Err(anyhow::anyhow!("解压后文件过大 ({size} 字节)"));
+        let (buf, over) = read_capped(reader, MAX_SINGLE_FILE).context("decompress")?;
+        if over {
+            return Err(anyhow::anyhow!("解压后文件过大 ({} 字节)", buf.len()));
         }
 
         let stem = path
@@ -230,6 +253,10 @@ fn append_entry(output: &mut String, name: &str, buf: &[u8], lang: &str) -> Resu
     }
 
     if is_supported_ext(&ext) {
+        if !is_safe_archive_name(name) {
+            append_skip(output, name, "危险路径");
+            return Ok(());
+        }
         let tmp = TempDir::new("ls_arc")?;
         let tmp_path = tmp.path().join(name);
         if let Some(parent) = tmp_path.parent() {
@@ -280,4 +307,32 @@ fn is_supported_ext(ext: &str) -> bool {
             | "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
             | "odt" | "ods" | "odp" | "rtf" | "epub"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn archive_name_safety() {
+        assert!(is_safe_archive_name("docs/report.pdf"));
+        assert!(is_safe_archive_name("sub/dir/file.txt"));
+        assert!(!is_safe_archive_name("../evil.pdf"));
+        assert!(!is_safe_archive_name("a/../../evil.pdf"));
+        assert!(!is_safe_archive_name("/etc/passwd"));
+        assert!(!is_safe_archive_name("..\\..\\evil.pdf"));
+        assert!(!is_safe_archive_name(".."));
+    }
+
+    #[test]
+    fn read_capped_limits_actual_bytes() {
+        let data = b"0123456789";
+        let (buf, over) = read_capped(Cursor::new(data), 5).unwrap();
+        assert_eq!(buf.len(), 6);
+        assert!(over);
+        let (buf, over) = read_capped(Cursor::new(data), 10).unwrap();
+        assert_eq!(buf.len(), 10);
+        assert!(!over);
+    }
 }
