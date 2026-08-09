@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-09（语义命中词重叠定位 · 五笔输入修复）
+
+- **语义命中无法定位"为什么相关"**：`semantic_snippet` 用整词子串匹配——查询"物业费"不是文档"物业管理费"的子串（jieba 切成 物业/管理费），无匹配就回退开头、无高亮。改为**词重叠定位**：jieba 分词查询 + 文档，查询词取 2 字前缀（"物业"）匹配文档词，高亮含重叠的完整文档词——搜"物业费纠纷"可高亮"物业管理费合同案件"（`src-tauri/src/commands/search.rs`）
+- **防整段误高亮**：初版按"CJK 连续串"捕获，纯中文文档会整句高亮。改为**按文档 jieba 词**匹配，仅高亮单个复合词
+- **五笔输入被打断**：搜索框 `onChange` 在每个 IME 组合击键触发 suggest，五笔编码被记录/干扰。加 `onCompositionStart/End`——组合期间不触发 `onFetchSuggestions`，结束后补一次（`src/components/SearchBar.tsx`）
+- **测试**：`composite_word_overlap_highlighted`（用户场景）+ 6 项 snippet 测试通过；113 单元 + 3 smoke + 11 集成，semgrep 0
+
+---
+
 ## 2026-08-09（语义向量回填 · 免重索引生成向量）
 
 - **首次启用 AI 需重新索引**：向量只在 `batch_index` 内联生成，历史已索引文件（如 8500+）配好网关后必须全量重扫才能获得语义搜索能力。新增**回填命令** `backfill_embeddings`——从 `content_index` 按 md5 读取已提取文本（**不重提娶、不重跑 OCR**），`embed_batched` 分批（64/批）embed 后幂等 upsert 到 `doc_embeddings`，只补缺失向量（`src-tauri/src/commands/index.rs`）
