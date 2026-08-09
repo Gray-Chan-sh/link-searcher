@@ -27,6 +27,7 @@ export default function AiChat() {
     if (sessions.length === 0) {
       createChatSession().then(id => {
         setActiveId(id)
+        setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [] })
         refreshList()
       }).catch(() => {})
     } else {
