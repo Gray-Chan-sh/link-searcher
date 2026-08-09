@@ -75,7 +75,7 @@ export default function SearchBar({
 
   const handleCompositionEnd = useCallback((e: React.CompositionEvent) => {
     compositionRef.current = false
-    const value = e.currentTarget.value
+    const value = (e.currentTarget as HTMLInputElement).value
     onQueryChange(value)
     onFetchSuggestions(value)
     setSelectedIdx(-1)
