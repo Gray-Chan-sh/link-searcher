@@ -408,10 +408,13 @@ pub fn get_total_image_files(conn: &Connection) -> Result<u64> {
 }
 
 pub fn get_ocred_count(conn: &Connection) -> Result<u64> {
+    // Count distinct files whose extracted text is non-trivial (>10 chars),
+    // regardless of the ocr_used flag (early versions may have missed setting
+    // it). This reflects actual searchable content, not just the OCR metadata.
     let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM file_tracking ft \
+        "SELECT COUNT(DISTINCT ft.md5) FROM file_tracking ft \
          JOIN content_index ci ON ft.md5 = ci.md5 \
-         WHERE ft.status = 'active' AND ci.ocr_used = 1",
+         WHERE ft.status = 'active' AND length(ci.text_content) > 10",
         [],
         |row| row.get(0),
     )?;
