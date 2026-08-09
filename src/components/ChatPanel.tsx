@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, type ChatMessage, type SmartSearchResponse } from '../api/files'
+import { smartSearch, conversationAsk, openFile, saveChatHistory, loadChatHistory, type ChatMessage, type SmartSearchResponse } from '../api/files'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -14,7 +15,33 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
   const [loading, setLoading] = useState(false)
   const [sourceIds, setSourceIds] = useState<string[]>([])
   const [sourceFiles, setSourceFiles] = useState<string[]>([])
+  const [showSources, setShowSources] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Load persisted conversation on mount.
+  useEffect(() => {
+    loadChatHistory()
+      .then(session => {
+        if (session.messages.length > 0) {
+          setMessages(session.messages)
+          setSourceIds(session.source_ids)
+          setSourceFiles(session.source_files)
+        }
+      })
+      .catch(() => {})
+  }, [])
+
+  // Persist whenever the conversation changes (after initial load is done).
+  const loadedRef = useRef(false)
+  useEffect(() => {
+    if (messages.length > 0 || sourceIds.length > 0) {
+      loadedRef.current = true
+    }
+  }, [messages, sourceIds])
+  useEffect(() => {
+    if (!loadedRef.current) return
+    saveChatHistory(messages, sourceIds, sourceFiles).catch(() => {})
+  }, [messages, sourceIds, sourceFiles])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -36,12 +63,12 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
         setSourceIds(res.source_ids)
         setSourceFiles(res.source_files)
         const assistantMsg: ChatMessage = { role: 'assistant', content: res.answer }
-        setMessages([...updated, assistantMsg])
+        setMessages(prev => [...prev, assistantMsg])
       } else {
         // Follow-up — conversation_ask with existing source docs
         const answer = await conversationAsk([...updated], sourceIds)
         const assistantMsg: ChatMessage = { role: 'assistant', content: answer }
-        setMessages([...updated, assistantMsg])
+        setMessages(prev => [...prev, assistantMsg])
       }
     } catch (e) {
       const err = e instanceof Error ? e.message : '请求失败'
@@ -56,6 +83,8 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
     setSourceIds([])
     setSourceFiles([])
     setInput('')
+    setShowSources(false)
+    saveChatHistory([], [], []).catch(() => {})
   }, [])
 
   if (!llmEnabled) {
@@ -68,17 +97,39 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Source files indicator */}
+      {/* Source files header */}
       {sourceFiles.length > 0 && (
-        <div className="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 bg-purple-50 dark:bg-purple-900/10 border-b border-purple-100 dark:border-purple-800/30 flex items-center gap-2">
-          <span className="text-purple-600 dark:text-purple-400">✦</span>
-          <span>{t('source_files', { n: sourceFiles.length })}</span>
-          <button
-            onClick={handleNewSession}
-            className="ml-auto text-purple-600 dark:text-purple-400 hover:underline"
-          >
-            {t('new_session')}
-          </button>
+        <div className="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 bg-purple-50 dark:bg-purple-900/10 border-b border-purple-100 dark:border-purple-800/30">
+          <div className="flex items-center gap-2">
+            <span className="text-purple-600 dark:text-purple-400">✦</span>
+            <button
+              onClick={() => setShowSources(v => !v)}
+              className="hover:text-purple-600 dark:hover:text-purple-300"
+            >
+              {t('source_files', { n: sourceFiles.length })}
+              <span className="ml-1 text-gray-400">{showSources ? '▲' : '▼'}</span>
+            </button>
+            <button
+              onClick={handleNewSession}
+              className="ml-auto text-purple-600 dark:text-purple-400 hover:underline"
+            >
+              {t('new_session')}
+            </button>
+          </div>
+          {showSources && (
+            <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
+              {sourceFiles.map((f, i) => (
+                <button
+                  key={`${f}-${i}`}
+                  onClick={() => sourceIds[i] && openFile(sourceIds[i])}
+                  className="block w-full text-left px-2 py-1 rounded hover:bg-purple-100 dark:hover:bg-purple-900/30 truncate text-purple-700 dark:text-purple-300 hover:underline"
+                  title={f}
+                >
+                  📄 {f}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -91,12 +142,15 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
         )}
         {messages.map((m, i) => (
           <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] px-3 py-2 rounded-lg text-sm whitespace-pre-wrap ${
+            <div className={`max-w-[85%] px-3 py-2 rounded-lg text-sm ${
               m.role === 'user'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200'
+                ? 'bg-blue-600 text-white whitespace-pre-wrap'
+                : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 prose prose-sm max-w-full dark:prose-invert'
             }`}>
-              {m.content}
+              {m.role === 'user'
+                ? m.content
+                : <ReactMarkdown>{m.content}</ReactMarkdown>
+              }
             </div>
           </div>
         ))}

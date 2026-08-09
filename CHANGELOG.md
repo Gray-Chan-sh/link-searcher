@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-08-10（AI 聊天请求失败 · 9router 流式响应 JSON 解析）
+
+- **AI 聊天回答「请求失败」但网关测试通过**：9router 等 OpenAI 兼容网关默认返回 **SSE 流式响应**（`data:{...}\n` 多行），`chat()` 的 serde 当单个 JSON 解析 → `trailing characters` 错误 → 返回 None → 前端报失败。服务器端 OUT 0 是流式空 delta（`src-tauri/src/ai/mod.rs`）
+- **修复**：`chat()` 请求体加 `stream: false` 强制非流式单 JSON
+
+---
+
+## 2026-08-10（AI 聊天体验增强 · 持久化/来源/Markdown/打开）
+
+- **对话持久化**：新增 `save_chat_history`/`load_chat_history` 命令——会话存 `data_dir/chat_history.json`，重启恢复（`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`）
+- **来源文件可见**：顶部「基于 n 份文档」可展开为文件列表（来源是相对路径，显示可读文件名）；跟随响应的 `source_ids`/`source_files`
+- **Markdown 渲染**：引入 `react-markdown`，assistant 回答渲染加粗/列表/代码块，用户消息保持纯文本（`src/components/ChatPanel.tsx`）
+- **点击打开引用**：来源列表项点击 → `openFile(source_id)` 打开对应文件
+- **测试**：113 单元 + 3 smoke + 11 集成通过，build 通过（bundle +117KB），semgrep 0
+
+---
+
 ## 2026-08-09（语义命中词重叠定位 · 五笔输入修复）
 
 - **语义命中无法定位"为什么相关"**：`semantic_snippet` 用整词子串匹配——查询"物业费"不是文档"物业管理费"的子串（jieba 切成 物业/管理费），无匹配就回退开头、无高亮。改为**词重叠定位**：jieba 分词查询 + 文档，查询词取 2 字前缀（"物业"）匹配文档词，高亮含重叠的完整文档词——搜"物业费纠纷"可高亮"物业管理费合同案件"（`src-tauri/src/commands/search.rs`）

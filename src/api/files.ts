@@ -59,6 +59,20 @@ export async function conversationAsk(messages: ChatMessage[], sourceIds: string
   return invoke<string>('conversation_ask', { messages, sourceIds })
 }
 
+export interface ChatSession {
+  messages: ChatMessage[]
+  source_ids: string[]
+  source_files: string[]
+}
+
+export async function saveChatHistory(messages: ChatMessage[], sourceIds: string[], sourceFiles: string[]): Promise<void> {
+  return invoke<void>('save_chat_history', { messages, sourceIds, sourceFiles })
+}
+
+export async function loadChatHistory(): Promise<ChatSession> {
+  return invoke<ChatSession>('load_chat_history')
+}
+
 export async function getFile(id: string): Promise<FileDetail> {
   return invoke<FileDetail>('get_file', { id })
 }
