@@ -560,6 +560,10 @@ if let Err(e) =
         if let Err(e) = crate::db::tracker::mark_deleted(&conn, file_id) {
             log::warn!("[INDEX] mark_deleted failed {}: {e}", file_id);
         }
+        // 同步清理该文件的语义嵌入，避免删除后残留幽灵参与排序。
+        if let Err(e) = crate::db::tracker::delete_embedding(&conn, file_id) {
+            log::warn!("[INDEX] delete_embedding failed {}: {e}", file_id);
+        }
 
         Ok(())
     }

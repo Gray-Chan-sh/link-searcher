@@ -150,7 +150,10 @@ impl Scanner {
             .into_iter()
             .filter_entry(|e| !is_excluded(e.path(), &exclude))
         {
-            let entry = entry.context("walkdir error")?;
+            let Ok(entry) = entry else {
+                errors += 1;
+                continue;
+            };
             if !entry.file_type().is_file() { continue; }
             if self.cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] 扫描已取消, 停止遍历");
@@ -169,7 +172,7 @@ impl Scanner {
             processed += 1;
             let name = entry.file_name().to_string_lossy().to_string();
 
-            let meta = entry.metadata().context("failed to read metadata")?;
+            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
             let existing = tracker::get_file_by_path(&conn, &rel_path)?;
@@ -290,7 +293,10 @@ impl Scanner {
         let mut processed = 0u64;
 
         for entry in walker {
-            let entry = entry.context("walkdir error")?;
+            let Ok(entry) = entry else {
+                errors += 1;
+                continue;
+            };
             if !entry.file_type().is_file() { continue; }
             if !extension_allowed(entry.path(), &include_exts) {
                 if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
@@ -302,7 +308,7 @@ impl Scanner {
                 log::info!("[SCAN] 扫描已取消, 停止遍历");
                 break;
             }
-            let meta = entry.metadata().context("failed to read metadata")?;
+            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
@@ -410,7 +416,10 @@ impl Scanner {
         let mut processed = 0u64;
 
         for entry in walker {
-            let entry = entry.context("walkdir error")?;
+            let Ok(entry) = entry else {
+                errors += 1;
+                continue;
+            };
             if !entry.file_type().is_file() { continue; }
             if !extension_allowed(entry.path(), &include_exts) {
                 if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
@@ -422,7 +431,7 @@ impl Scanner {
                 log::info!("[SCAN] 启动扫描已取消, 停止遍历");
                 break;
             }
-            let meta = entry.metadata().context("failed to read metadata")?;
+            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
