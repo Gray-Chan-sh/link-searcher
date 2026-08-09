@@ -200,6 +200,7 @@ const zh: Record<string, string> = {
 
     // Search bar / results
     recent_searches: '最近搜索',
+    clear_history: '清除历史',
     copy_name: '复制名称',
     score: '得分：{score}',
 

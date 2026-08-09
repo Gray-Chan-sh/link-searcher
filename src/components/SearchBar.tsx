@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { getSearchHistory, type SearchHistoryEntry } from '../api/search'
+import { getSearchHistory, clearSearchHistory, type SearchHistoryEntry } from '../api/search'
 import { useI18n } from '../i18n'
 import { SearchIcon, XIcon, LoadingSpinner } from '../icons'
 
@@ -36,6 +36,15 @@ export default function SearchBar({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [query])
+
+  const handleClearHistory = useCallback(async () => {
+    try {
+      await clearSearchHistory()
+      setHistory([])
+    } catch {
+      /* ignore clear failure */
+    }
+  }, [])
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -155,8 +164,15 @@ export default function SearchBar({
           )}
           {showHistory && (
             <>
-              <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider">
-              {t('recent_searches')}
+              <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider flex items-center justify-between">
+                <span>{t('recent_searches')}</span>
+                <button
+                  onClick={handleClearHistory}
+                  className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors normal-case"
+                  title={t('clear_history')}
+                >
+                  {t('clear_history')}
+                </button>
               </div>
               {history.map((entry, i) => (
                 <button
