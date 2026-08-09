@@ -10,6 +10,7 @@ interface SearchBarProps {
   onQueryChange: (q: string) => void
   onFetchSuggestions: (prefix: string) => void
   onClearSuggestions: () => void
+  onSubmit: () => void
 }
 
 export default function SearchBar({
@@ -19,10 +20,12 @@ export default function SearchBar({
   onQueryChange,
   onFetchSuggestions,
   onClearSuggestions,
+  onSubmit,
 }: SearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
   const compositionRef = useRef(false)
+  const suggestTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const [focused, setFocused] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(-1)
   const [history, setHistory] = useState<SearchHistoryEntry[]>([])
@@ -59,25 +62,27 @@ export default function SearchBar({
   }, [])
 
   const handleInput = useCallback((value: string) => {
-    // During an IME composition (e.g. Wubi/Pinyin) every keystroke fires
-    // onChange with the raw editor buffer (compose code, not the final
-    // characters). Fetching suggestions then would hijack the input; defer
-    // until composition ends.
     if (compositionRef.current) {
       onQueryChange(value)
       setSelectedIdx(-1)
       return
     }
     onQueryChange(value)
-    onFetchSuggestions(value)
     setSelectedIdx(-1)
+    clearTimeout(suggestTimerRef.current)
+    suggestTimerRef.current = setTimeout(() => {
+      onFetchSuggestions(value)
+    }, 300)
   }, [onQueryChange, onFetchSuggestions])
 
   const handleCompositionEnd = useCallback((e: React.CompositionEvent) => {
     compositionRef.current = false
     const value = (e.currentTarget as HTMLInputElement).value
     onQueryChange(value)
-    onFetchSuggestions(value)
+    clearTimeout(suggestTimerRef.current)
+    suggestTimerRef.current = setTimeout(() => {
+      onFetchSuggestions(value)
+    }, 300)
     setSelectedIdx(-1)
   }, [onQueryChange, onFetchSuggestions])
 
@@ -125,6 +130,9 @@ export default function SearchBar({
       } else {
         selectHistory(item)
       }
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      onSubmit()
     } else if (e.key === 'Escape') {
       onClearSuggestions()
       setSelectedIdx(-1)
@@ -155,13 +163,23 @@ export default function SearchBar({
           placeholder={`${t('search_placeholder')} (⌘K)`}
           aria-label={t('search')}
           data-search-input="true"
-          className="w-full pl-9 pr-8 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
+          className="w-full pl-9 pr-20 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
         />
-        {query && (
-          <button onClick={clear} className="absolute right-3 p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors" aria-label={t('clear_search')}>
-            <XIcon className="size-3.5 text-gray-400" />
+        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-0.5">
+          <button
+            onClick={onSubmit}
+            disabled={loading}
+            className="p-1.5 rounded hover:bg-blue-100 dark:hover:bg-blue-900/30 text-blue-600 dark:text-blue-400 transition-colors disabled:opacity-40"
+            aria-label={t('search')}
+          >
+            <SearchIcon className="size-3.5" />
           </button>
-        )}
+          {query && (
+            <button onClick={clear} className="p-0.5 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors" aria-label={t('clear_search')}>
+              <XIcon className="size-3.5 text-gray-400" />
+            </button>
+          )}
+        </div>
       </div>
 
       {(showSuggestions || showHistory) && (
