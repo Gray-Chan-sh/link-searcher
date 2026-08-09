@@ -40,6 +40,25 @@ export async function aiCapabilities(): Promise<AiCapabilities> {
   return invoke<AiCapabilities>('ai_capabilities')
 }
 
+export interface SmartSearchResponse {
+  answer: string
+  source_ids: string[]
+  source_files: string[]
+}
+
+export interface ChatMessage {
+  role: string
+  content: string
+}
+
+export async function smartSearch(query: string): Promise<SmartSearchResponse> {
+  return invoke<SmartSearchResponse>('smart_search', { query })
+}
+
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[]): Promise<string> {
+  return invoke<string>('conversation_ask', { messages, sourceIds })
+}
+
 export async function getFile(id: string): Promise<FileDetail> {
   return invoke<FileDetail>('get_file', { id })
 }

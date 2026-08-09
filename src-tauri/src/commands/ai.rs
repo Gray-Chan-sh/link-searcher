@@ -1,4 +1,5 @@
-//! AI gateway commands: per-file summaries and cross-document Q&A (RAG).
+//! AI gateway commands: per-file summaries, cross-document Q&A (RAG),
+//! smart search, and multi-turn conversation.
 
 use serde::Serialize;
 use tauri::State;
@@ -123,6 +124,158 @@ pub async fn ask_documents(
         .await
         .unwrap_or(None)
         .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())
+}
+
+#[derive(Serialize)]
+pub struct SmartSearchResponse {
+    pub answer: String,
+    pub source_ids: Vec<String>,
+    pub source_files: Vec<String>,
+}
+
+/// Search + RAG: use BM25 to find the most relevant documents, extract
+/// their text, and let the LLM answer the query based on those materials.
+/// Returns a textual answer plus the list of source files used.
+#[tauri::command]
+pub async fn smart_search(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<SmartSearchResponse, String> {
+    use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
+
+    if !crate::ai::llm_enabled() {
+        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+    }
+    if query.trim().is_empty() {
+        return Err("问题不能为空".into());
+    }
+
+    // ── BM25 + content extraction (sync, must complete before any await) ──
+    let (context, source_ids, source_files) = {
+        let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
+        let reader = mgr.reader().map_err(|e| format!("{e}"))?;
+        let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
+        drop(mgr);
+
+        let params = SearchParams {
+            query: query.to_lowercase(),
+            dir_ids: None, file_ids: None, ext_filter: None,
+            date_from: None, date_to: None,
+            sort: SortField::Score, sort_order: "desc".to_string(),
+            page: 1, page_size: 15, fuzzy: false, semantic: false,
+        };
+        let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
+
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let mut docs: Vec<String> = Vec::new();
+        let mut sids: Vec<String> = Vec::new();
+        let mut sf: Vec<String> = Vec::new();
+        for hit in result.hits.iter().take(10) {
+                if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
+                    if let Some(md5) = &rec.md5 {
+                        if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                            if !text.trim().is_empty() {
+                                docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                                sids.push(hit.file_id.clone());
+                                sf.push(rec.path.clone());
+                            }
+                        }
+                    }
+                }
+        }
+        drop(conn);
+        (docs.join("\n\n---\n\n"), sids, sf)
+    };
+
+    if context.trim().is_empty() {
+        return Err("未找到相关文档内容".into());
+    }
+
+    let system = "你是严谨的文档分析助手。仅基于提供的材料回答，不臆造事实。回答简洁有条理，引用具体文件时标注来源。如果材料不足以回答，请明确说明。";
+    let user_msg = format!("基于以下材料回答问题：\n\n{}\n\n问题：{}", context, query);
+
+    let answer = tokio::task::spawn_blocking(move || crate::ai::chat(system, &user_msg))
+        .await
+        .unwrap_or(None)
+        .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())?;
+
+    Ok(SmartSearchResponse { answer, source_ids, source_files })
+}
+
+/// Multi-turn conversation: continue a chat using previously-selected
+/// source documents as the knowledge base. `messages` includes the full
+/// conversation history (alternating user/assistant roles).
+#[tauri::command]
+pub async fn conversation_ask(
+    state: State<'_, AppState>,
+    messages: Vec<ChatMessage>,
+    source_ids: Vec<String>,
+) -> Result<String, String> {
+    if !crate::ai::llm_enabled() {
+        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+    }
+    if messages.is_empty() {
+        return Err("对话不能为空".into());
+    }
+
+    // Reload document context from the previously-identified sources.
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let mut docs: Vec<String> = Vec::new();
+    for fid in &source_ids {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
+            if let Some(md5) = &rec.md5 {
+                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                    if !text.trim().is_empty() {
+                        docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                    }
+                }
+            }
+        }
+    }
+    drop(conn);
+
+    let context = docs.join("\n\n---\n\n");
+    let context = truncate_text(&context, 24000);
+
+    // Build the full message array: system + context note + history + current question.
+    // The last message in `messages` is the latest user query.
+    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
+    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let last_n = messages.len().saturating_sub(1);
+
+    // The conversation LLM call sends the full history as separate user/assistant
+    // turns (mimicking OpenAI chat format).
+    let answer = tokio::task::spawn_blocking(move || {
+        // Simplified: concatenate history + current question into a single prompt.
+        // Full multi-turn chat API support requires switching to /chat/completions
+        // with messages array — which we already have in ai::chat. But chat()
+        // currently takes system+user only. For true multi-turn we'd add a
+        // messages-based variant. For now, include the last question and a short
+        // prefix of the history as user context.
+        let user_msg = if messages.len() > 1 {
+            let mut history_str = String::from("对话历史：\n");
+            for m in messages.iter().take(last_n) {
+                history_str.push_str(&format!("[{}] {}\n",
+                    if m.role == "user" { "用户" } else { "助手" },
+                    truncate_text(&m.content, 500)));
+            }
+            format!("{}\n当前问题：{}", history_str, last_q)
+        } else {
+            last_q
+        };
+        crate::ai::chat(&system, &user_msg)
+    })
+        .await
+        .unwrap_or(None)
+        .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())?;
+
+    Ok(answer)
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
 }
 
 fn truncate_text(s: &str, max_chars: usize) -> String {
