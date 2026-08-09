@@ -1,146 +1,39 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { getSearchHistory, clearSearchHistory, type SearchHistoryEntry } from '../api/search'
+import { useCallback, useRef, useState } from 'react'
 import { useI18n } from '../i18n'
 import { SearchIcon, XIcon, LoadingSpinner } from '../icons'
 
 interface SearchBarProps {
   query: string
   loading: boolean
-  suggestions: string[]
   onQueryChange: (q: string) => void
-  onFetchSuggestions: (prefix: string) => void
-  onClearSuggestions: () => void
   onSubmit: () => void
 }
 
 export default function SearchBar({
   query,
   loading,
-  suggestions,
   onQueryChange,
-  onFetchSuggestions,
-  onClearSuggestions,
   onSubmit,
 }: SearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
-  const compositionRef = useRef(false)
-  const suggestTimerRef = useRef<ReturnType<typeof setTimeout>>()
   const [focused, setFocused] = useState(false)
-  const [selectedIdx, setSelectedIdx] = useState(-1)
-  const [history, setHistory] = useState<SearchHistoryEntry[]>([])
-
-  useEffect(() => {
-    getSearchHistory().then(setHistory).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    if (query) {
-      getSearchHistory().then(setHistory).catch(() => {})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query])
-
-  const handleClearHistory = useCallback(async () => {
-    try {
-      await clearSearchHistory()
-      setHistory([])
-    } catch {
-      /* ignore clear failure */
-    }
-  }, [])
-
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        inputRef.current?.focus()
-      }
-    }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
-  }, [])
 
   const handleInput = useCallback((value: string) => {
-    if (compositionRef.current) {
-      onQueryChange(value)
-      setSelectedIdx(-1)
-      return
-    }
     onQueryChange(value)
-    setSelectedIdx(-1)
-    clearTimeout(suggestTimerRef.current)
-    suggestTimerRef.current = setTimeout(() => {
-      onFetchSuggestions(value)
-    }, 300)
-  }, [onQueryChange, onFetchSuggestions])
-
-  const handleCompositionEnd = useCallback((e: React.CompositionEvent) => {
-    compositionRef.current = false
-    const value = (e.currentTarget as HTMLInputElement).value
-    onQueryChange(value)
-    clearTimeout(suggestTimerRef.current)
-    suggestTimerRef.current = setTimeout(() => {
-      onFetchSuggestions(value)
-    }, 300)
-    setSelectedIdx(-1)
-  }, [onQueryChange, onFetchSuggestions])
+  }, [onQueryChange])
 
   const clear = useCallback(() => {
     onQueryChange('')
-    onClearSuggestions()
-    setSelectedIdx(-1)
     inputRef.current?.focus()
-  }, [onQueryChange, onClearSuggestions])
-
-  const selectSuggestion = useCallback((s: string) => {
-    onQueryChange(s)
-    onClearSuggestions()
-    setSelectedIdx(-1)
-    inputRef.current?.focus()
-  }, [onQueryChange, onClearSuggestions])
-
-  const selectHistory = useCallback((entry: SearchHistoryEntry) => {
-    onQueryChange(entry.query)
-    onClearSuggestions()
-    setSelectedIdx(-1)
-    inputRef.current?.focus()
-  }, [onQueryChange, onClearSuggestions])
+  }, [onQueryChange])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    const dropdown = query.trim().length === 0
-      ? history
-      : suggestions.length > 0
-        ? [...suggestions, ...history]
-        : []
-
-    if (!dropdown.length) return
-
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      setSelectedIdx(i => Math.min(i + 1, dropdown.length - 1))
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setSelectedIdx(i => Math.max(i - 1, -1))
-    } else if (e.key === 'Enter' && selectedIdx >= 0) {
-      e.preventDefault()
-      const item = dropdown[selectedIdx]
-      if (typeof item === 'string') {
-        selectSuggestion(item)
-      } else {
-        selectHistory(item)
-      }
-    } else if (e.key === 'Enter') {
+    if (e.key === 'Enter') {
       e.preventDefault()
       onSubmit()
-    } else if (e.key === 'Escape') {
-      onClearSuggestions()
-      setSelectedIdx(-1)
     }
-  }, [suggestions, history, query, selectedIdx, selectSuggestion, selectHistory, onClearSuggestions])
-
-  const showSuggestions = focused && suggestions.length > 0 && query.trim().length > 0
-  const showHistory = focused && history.length > 0
+  }, [onSubmit])
 
   return (
     <div className="relative">
@@ -155,8 +48,6 @@ export default function SearchBar({
           type="text"
           value={query}
           onChange={e => handleInput(e.target.value)}
-          onCompositionStart={() => { compositionRef.current = true }}
-          onCompositionEnd={handleCompositionEnd}
           onKeyDown={handleKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => setFocused(false), 150)}
@@ -181,55 +72,6 @@ export default function SearchBar({
           )}
         </div>
       </div>
-
-      {(showSuggestions || showHistory) && (
-        <div className="absolute top-full left-0 right-0 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 overflow-hidden">
-          {showSuggestions && suggestions.map((s, i) => (
-            <button
-              key={s}
-              onMouseDown={() => selectSuggestion(s)}
-              className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                i === selectedIdx
-                  ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-                  : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'
-              }`}
-            >
-              {s}
-            </button>
-          ))}
-          {showSuggestions && showHistory && (
-            <div className="border-t border-gray-200 dark:border-gray-700" />
-          )}
-          {showHistory && (
-            <>
-              <div className="px-3 py-1.5 text-xs font-medium text-gray-400 dark:text-gray-500 uppercase tracking-wider flex items-center justify-between">
-                <span>{t('recent_searches')}</span>
-                <button
-                  onClick={handleClearHistory}
-                  className="text-gray-400 hover:text-red-500 dark:hover:text-red-400 transition-colors normal-case"
-                  title={t('clear_history')}
-                >
-                  {t('clear_history')}
-                </button>
-              </div>
-              {history.map((entry, i) => (
-                <button
-                  key={entry.id}
-                  onMouseDown={() => selectHistory(entry)}
-                  className={`w-full text-left px-3 py-2 text-sm transition-colors flex items-center justify-between ${
-                    i === (showSuggestions ? selectedIdx - suggestions.length : selectedIdx)
-                      ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300'
-                      : 'text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-750'
-                  }`}
-                >
-                  <span className="truncate">{entry.query}</span>
-                  <span className="text-xs text-gray-400 shrink-0 ml-2">{t('results_count', { total: entry.result_count })}</span>
-                </button>
-              ))}
-            </>
-          )}
-        </div>
-      )}
     </div>
   )
 }
