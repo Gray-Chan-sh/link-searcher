@@ -301,54 +301,101 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
     })
 }
 
-/// Build a human-readable snippet around the query's first matching word so
-/// a semantic-only hit shows *why* it matched. When no query term appears
-/// verbatim (the typical purely-semantic hit — different wording, same
-/// meaning) we fall back to the document's opening text so the user still
-/// sees what the file is about, instead of a blank preview.
+/// Build a human-readable snippet around the region where the document
+/// best overlaps the query, so a semantic-only hit shows *why* it matched.
+/// Documents rarely share the exact query string; more often they contain a
+/// longer composite word that embeds the query (e.g. query "物业费" appears
+/// inside "物业管理费合同纠纷"). We jieba-tokenise the query, then capture
+/// the longest run of CJK characters containing a matched token and
+/// highlight it. Falls back to the document opening when nothing overlaps.
 fn semantic_snippet(content: &str, query: &str) -> String {
-    let terms: Vec<&str> = query
-        .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-        .filter(|t| !t.is_empty())
+    let jieba = &crate::search::schema::JIEBA;
+    let terms: Vec<String> = jieba
+        .cut(query, false)
+        .into_iter()
+        .map(|t| t.word.to_string())
+        .filter(|t| t.chars().any(|c| c.is_ascii_alphanumeric() || !c.is_ascii()))
         .collect();
-    // Fallback: leading chunk (no highlight) so a semantic-only hit is
-    // still human-readable as a preview.
     if terms.is_empty() {
         return head_snippet(content);
     }
-    // Find the earliest position of any term (case-insensitive).
-    let lower = content.to_lowercase();
-    let mut best: Option<(usize, &str)> = None;
+
+    // For every query token build a short "grapheme prefix" (first 2 chars)
+    // so a composite doc word is matched even when the full token isn't a
+    // substring (jieba: 物业费 vs 物业+管理费 → prefix 物业 matches).
+    let mut prefixes: Vec<(String, String)> = Vec::new(); // (token, prefix)
     for t in &terms {
-        let lt = t.to_lowercase();
-        if let Some(pos) = lower.find(&lt) {
-            if best.map_or(true, |(bp, _)| pos < bp) {
-                best = Some((pos, t));
-            }
+        let prefix: String = t.chars().take(2).collect();
+        if prefix.chars().count() == 2 {
+            prefixes.push((t.clone(), prefix));
         }
     }
-    let Some((pos, term)) = best else {
+    // Also include the full token when short single-char tokens (especially notable
+    // for "费"/"律" alone) to preserve precision for 1-char CJK queries.
+    for t in &terms {
+        if t.chars().count() < 2 {
+            prefixes.push((t.clone(), t.clone()));
+        }
+    }
+
+    // Tokenise the document once; a matching window is a single doc token
+    // that contains any query token's 2-char prefix (or the full short token).
+    let doc_tokens: Vec<&str> = jieba
+        .cut(content, false)
+        .into_iter()
+        .map(|t| t.word)
+        .collect();
+
+    let mut matches: Vec<&str> = Vec::new();
+    for dt in &doc_tokens {
+        let dtl = dt.to_lowercase();
+        if prefixes
+            .iter()
+            .any(|(tok, pre)| dtl.contains(pre.to_lowercase().as_str()) || dtl.contains(tok.as_str()))
+        {
+            matches.push(dt);
+        }
+    }
+    // Deduplicate preserved order of first occurrence.
+    let mut seen = std::collections::HashSet::new();
+    matches.retain(|m| seen.insert(*m));
+
+    let best_word = matches
+        .iter()
+        .max_by_key(|w| {
+            let hits = prefixes
+                .iter()
+                .filter(|(tok, pre)| {
+                    let wl = w.to_lowercase();
+                    wl.contains(&pre.to_lowercase()) || wl.contains(tok.as_str())
+                })
+                .count();
+            (hits, w.chars().count())
+        })
+        .copied();
+    let Some(matched) = best_word else {
         return head_snippet(content);
     };
 
+    snippet_around(content, matched, |c| format!("<em>{c}</em>"))
+}
+
+/// Wrap `t` with highlight; used via closure to keep ownership simple.
+fn snippet_around<'a>(content: &'a str, needle: &str, wrap: impl Fn(&str) -> String) -> String {
+    let pos = content.to_lowercase().find(&needle.to_lowercase());
+    let Some(pos) = pos else { return head_snippet(content).replace(needle, &wrap(needle)) };
     const WINDOW: usize = 60;
     let start = pos.saturating_sub(WINDOW / 2);
-    // Align to a char boundary so we never slice through multi-byte text.
     let start = content
         .char_indices()
         .map(|(i, _)| i)
         .min_by_key(|&i| if i >= start { i - start } else { usize::MAX })
         .unwrap_or(start);
-
-    let end = (pos + term.len() + WINDOW / 2).min(content.len());
+    let end = (pos + needle.len() + WINDOW / 2).min(content.len());
     let mut snippet = content[start..end].to_string();
-    if start > 0 {
-        snippet = format!("…{}", snippet);
-    }
-    if end < content.len() {
-        snippet.push('…');
-    }
-    snippet.replace(term, &format!("<em>{term}</em>"))
+    if start > 0 { snippet = format!("…{}", snippet); }
+    if end < content.len() { snippet.push('…'); }
+    snippet.replace(needle, &wrap(needle))
 }
 
 /// First up-to-~100 chars of content, char-boundary safe, with ellipsis.
@@ -587,6 +634,7 @@ pub async fn get_browse_file_types(state: State<'_, AppState>) -> Result<Vec<Str
 
 #[cfg(test)]
 mod snippet_tests {
+
     use super::{head_snippet, semantic_snippet};
 
     #[test]
@@ -628,5 +676,16 @@ mod snippet_tests {
         // 空/无词查询：仍回退开头片段（预览可见），不空白。
         let s = semantic_snippet("任意文本内容", "  ");
         assert!(s.contains("任意文本"), "got: {s}");
+    }
+
+    #[test]
+    fn composite_word_overlap_highlighted() {
+        // 用户场景: 查询"物业费纠纷" 命中含"物业管理费合同案件"的文档。
+        // snippet 应捕获并高亮更长复合词(而非必须精确等于查询词)。
+        let s = semantic_snippet(
+            "本案系物业管理费合同案件。原告主张被告支付拖欠的物业管理费。",
+            "物业费纠纷",
+        );
+        assert!(s.contains("<em>"), "应高亮重叠词: {s}");
     }
 }

@@ -22,6 +22,7 @@ export default function SearchBar({
 }: SearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
+  const compositionRef = useRef(false)
   const [focused, setFocused] = useState(false)
   const [selectedIdx, setSelectedIdx] = useState(-1)
   const [history, setHistory] = useState<SearchHistoryEntry[]>([])
@@ -58,6 +59,23 @@ export default function SearchBar({
   }, [])
 
   const handleInput = useCallback((value: string) => {
+    // During an IME composition (e.g. Wubi/Pinyin) every keystroke fires
+    // onChange with the raw editor buffer (compose code, not the final
+    // characters). Fetching suggestions then would hijack the input; defer
+    // until composition ends.
+    if (compositionRef.current) {
+      onQueryChange(value)
+      setSelectedIdx(-1)
+      return
+    }
+    onQueryChange(value)
+    onFetchSuggestions(value)
+    setSelectedIdx(-1)
+  }, [onQueryChange, onFetchSuggestions])
+
+  const handleCompositionEnd = useCallback((e: React.CompositionEvent) => {
+    compositionRef.current = false
+    const value = e.currentTarget.value
     onQueryChange(value)
     onFetchSuggestions(value)
     setSelectedIdx(-1)
@@ -129,6 +147,8 @@ export default function SearchBar({
           type="text"
           value={query}
           onChange={e => handleInput(e.target.value)}
+          onCompositionStart={() => { compositionRef.current = true }}
+          onCompositionEnd={handleCompositionEnd}
           onKeyDown={handleKeyDown}
           onFocus={() => setFocused(true)}
           onBlur={() => setTimeout(() => setFocused(false), 150)}
