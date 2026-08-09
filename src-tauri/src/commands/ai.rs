@@ -291,39 +291,160 @@ fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("chat_history.json")
 }
 
-/// Save the AI conversation (messages + source files) to
-/// `data_dir/chat_history.json`. Preserved across app restarts.
-#[tauri::command]
-pub fn save_chat_history(
-    state: State<'_, AppState>,
-    messages: Vec<ChatMessage>,
-    source_ids: Vec<String>,
-    source_files: Vec<String>,
-) -> Result<(), String> {
-    let path = chat_history_path(&state.data_dir);
-    let payload = serde_json::json!({
-        "messages": messages,
-        "source_ids": source_ids,
-        "source_files": source_files,
-    });
-    std::fs::write(&path, serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("写入聊天记录失败: {e}"))
-}
-
-/// Load the persisted conversation, if any. Returns empty arrays when none.
-#[tauri::command]
-pub fn load_chat_history(state: State<'_, AppState>) -> Result<ChatSession, String> {
-    let path = chat_history_path(&state.data_dir);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str::<ChatSession>(&content)
-            .map_err(|e| format!("解析聊天记录失败: {e}")),
-        Err(_) => Ok(ChatSession::default()),
-    }
-}
-
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatSession {
+    pub id: String,
+    pub title: String,
+    pub created_at: i64,
+    pub updated_at: i64,
     pub messages: Vec<ChatMessage>,
     pub source_ids: Vec<String>,
     pub source_files: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ChatSessionMeta {
+    pub id: String,
+    pub title: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ChatHistoryFile {
+    sessions: Vec<ChatSession>,
+}
+
+fn now_ts() -> i64 {
+    chrono::Utc::now().timestamp()
+}
+
+fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
+    let path = chat_history_path(data_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(c) => serde_json::from_str(&c).unwrap_or_default(),
+        Err(_) => ChatHistoryFile::default(),
+    }
+}
+
+fn write_history(data_dir: &std::path::Path, h: &ChatHistoryFile) -> Result<(), String> {
+    let path = chat_history_path(data_dir);
+    let json = serde_json::to_string_pretty(h).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("写入聊天记录失败: {e}"))
+}
+
+/// Generate a short title from the first user message (first ~20 chars).
+fn title_from_first_message(session: &ChatSession) -> String {
+    session
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map(|m| {
+            let trimmed: String = m.content.chars().take(20).collect();
+            if trimmed.is_empty() { "新会话".to_string() } else { trimmed }
+        })
+        .unwrap_or_else(|| "新会话".to_string())
+}
+
+/// List all chat sessions, newest first.
+#[tauri::command]
+pub fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionMeta>, String> {
+    let mut h = read_history(&state.data_dir);
+    h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(h.sessions
+        .into_iter()
+        .map(|s| ChatSessionMeta { id: s.id, title: s.title, updated_at: s.updated_at })
+        .collect())
+}
+
+/// Create a new empty session. Returns its id.
+#[tauri::command]
+pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
+    let now = now_ts();
+    let session = ChatSession {
+        id: uuid::Uuid::new_v4().to_string(),
+        title: "新会话".to_string(),
+        created_at: now,
+        updated_at: now,
+        messages: vec![],
+        source_ids: vec![],
+        source_files: vec![],
+    };
+    let id = session.id.clone();
+    let mut h = read_history(&state.data_dir);
+    if h.sessions.len() >= 50 {
+        h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        h.sessions.pop();
+    }
+    h.sessions.push(session);
+    write_history(&state.data_dir, &h)?;
+    Ok(id)
+}
+
+/// Delete a session by id.
+#[tauri::command]
+pub fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let mut h = read_history(&state.data_dir);
+    h.sessions.retain(|s| s.id != id);
+    write_history(&state.data_dir, &h)
+}
+
+/// Load a full session by id. Returns None if not found.
+#[tauri::command]
+pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Option<ChatSession>, String> {
+    let h = read_history(&state.data_dir);
+    Ok(h.sessions.into_iter().find(|s| s.id == id))
+}
+
+/// Save (create or update) a session. If the session is new or has no title,
+/// derives a title from the first user message.
+#[tauri::command]
+pub fn save_chat_session(
+    state: State<'_, AppState>,
+    session: ChatSession,
+) -> Result<(), String> {
+    let mut h = read_history(&state.data_dir);
+    let now = now_ts();
+    let mut session = session;
+    session.updated_at = now;
+    if session.title.is_empty() || session.title == "新会话" {
+        session.title = title_from_first_message(&session);
+    }
+    let exists = h.sessions.iter_mut().find(|s| s.id == session.id);
+    match exists {
+        Some(existing) => *existing = session,
+        None => h.sessions.push(session),
+    }
+    write_history(&state.data_dir, &h)
+}
+
+/// Export a session as Markdown text (chat transcript with file refs).
+#[tauri::command]
+pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    let h = read_history(&state.data_dir);
+    let session = h
+        .sessions
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "会话不存在".to_string())?;
+
+    let mut md = String::new();
+    md.push_str(&format!("# {}\n\n", session.title));
+    if let Some(first) = session.messages.first() {
+        md.push_str(&format!("> 开始于 {}\n\n", first.content.chars().take(30).collect::<String>()));
+    } else {
+        md.push_str(&format!("> 空会话\n\n"));
+    }
+    for m in &session.messages {
+        if m.role == "user" {
+            md.push_str(&format!("## 问\n\n{}\n\n", m.content));
+        } else {
+            md.push_str(&format!("## 答\n\n{}\n\n", m.content));
+        }
+    }
+    md.push_str("\n---\n**引用文件:**\n");
+    for f in &session.source_files {
+        md.push_str(&format!("- {}\n", f));
+    }
+    md.push_str(&format!("\n_导出时间: {}\n", now_ts()));
+    Ok(md)
 }

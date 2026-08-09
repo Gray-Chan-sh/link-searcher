@@ -11,6 +11,16 @@
 
 ---
 
+## 2026-08-10（AI 对话管理 · 多会话/自动标题/导出/删除）
+
+- **多会话**：`chat_history.json` 升级为会话数组——`list/create/delete/load/save_chat_session` 命令，左侧栏会话列表（新建 ✅/切换/删除 🗑），上限 50 个，最近优先
+- **自动标题**：保存时若会话无标题，取首条用户消息前 20 字
+- **导出 Markdown**：`export_chat_session` 生成「问/答」转写 + 引用文件清单，前端 `save` 对话框落地
+- **前端**：AiChat 页左侧会话侧栏 + 聊天区；ChatPanel 改为受控组件（session/onSessionChange）管理
+- **测试**：113 单元 + 3 smoke + 11 集成通过，build 通过，semgrep 0
+
+---
+
 ## 2026-08-10（AI 聊天体验增强 · 持久化/来源/Markdown/打开）
 
 - **对话持久化**：新增 `save_chat_history`/`load_chat_history` 命令——会话存 `data_dir/chat_history.json`，重启恢复（`src-tauri/src/commands/ai.rs`、`src-tauri/src/lib.rs`）

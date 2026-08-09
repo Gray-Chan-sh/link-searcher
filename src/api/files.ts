@@ -51,6 +51,22 @@ export interface ChatMessage {
   content: string
 }
 
+export interface ChatSession {
+  id: string
+  title: string
+  created_at: number
+  updated_at: number
+  messages: ChatMessage[]
+  source_ids: string[]
+  source_files: string[]
+}
+
+export interface ChatSessionMeta {
+  id: string
+  title: string
+  updated_at: number
+}
+
 export async function smartSearch(query: string): Promise<SmartSearchResponse> {
   return invoke<SmartSearchResponse>('smart_search', { query })
 }
@@ -59,18 +75,28 @@ export async function conversationAsk(messages: ChatMessage[], sourceIds: string
   return invoke<string>('conversation_ask', { messages, sourceIds })
 }
 
-export interface ChatSession {
-  messages: ChatMessage[]
-  source_ids: string[]
-  source_files: string[]
+export async function listChatSessions(): Promise<ChatSessionMeta[]> {
+  return invoke<ChatSessionMeta[]>('list_chat_sessions')
 }
 
-export async function saveChatHistory(messages: ChatMessage[], sourceIds: string[], sourceFiles: string[]): Promise<void> {
-  return invoke<void>('save_chat_history', { messages, sourceIds, sourceFiles })
+export async function createChatSession(): Promise<string> {
+  return invoke<string>('create_chat_session')
 }
 
-export async function loadChatHistory(): Promise<ChatSession> {
-  return invoke<ChatSession>('load_chat_history')
+export async function deleteChatSession(id: string): Promise<void> {
+  return invoke<void>('delete_chat_session', { id })
+}
+
+export async function loadChatSession(id: string): Promise<ChatSession | null> {
+  return invoke<ChatSession | null>('load_chat_session', { id })
+}
+
+export async function saveChatSession(session: ChatSession): Promise<void> {
+  return invoke<void>('save_chat_session', { session })
+}
+
+export async function exportChatSession(id: string): Promise<string> {
+  return invoke<string>('export_chat_session', { id })
 }
 
 export async function getFile(id: string): Promise<FileDetail> {
