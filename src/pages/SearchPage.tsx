@@ -200,7 +200,7 @@ useEffect(() => {
         {chatMode ? (
           <ChatPanel llmEnabled={aiCap.llm} />
         ) : (
-          <div className="flex-1 overflow-y-auto">
+          <>
           {search.status === 'idle' && (
             <EmptyState
               icon={<SearchIcon className="size-12" />}
@@ -309,7 +309,7 @@ useEffect(() => {
             </button>
           </div>
         )}
-      </div>
+      </>
       )}
 
       <PreviewPanel
