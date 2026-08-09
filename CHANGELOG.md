@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-10（P0 审计修复 · watcher 不索引 / 导出损坏 / 目录筛选失效 / 压缩包安全）
+
+- **文件监视器新文件永不索引**：`handle_event` 在 `upsert_file` 写入 mtime 后再 `SELECT mtime` 比较，两次必然相等 → 所有 Create/Modify 事件被当虚假事件吞掉。改为用 upsert **前**的 DB 记录判定（已索引且 mtime/size 未变才跳过），抽 `should_skip_watcher_event` 并配判定表单测（`scanner/mod.rs`）
+- **导出 CSV 双重损坏**：后端返回 TempDir 内路径但 RAII drop 即删文件，且前端把路径字符串当内容写入。后端改为直接返回内容字符串，删除临时文件逻辑，前端零改动（`commands/search.rs`、`tests/test_pdf_ocr.rs`）
+- **目录树筛选永远返回空**：前端传绝对路径、DB 存相对路径，`LIKE '绝对%'` 永不匹配。新增 `resolve_dir_paths`：绝对路径映射到所属 `(dir_id, rel)`，匹配 `path=? OR path LIKE 'rel/%'`，顺带修掉 `docs` 误匹配 `docs2/` 的前缀边界 bug；search 与 export 共用，配内存 DB 单测（`commands/search.rs`）
+- **压缩包 zip-slip 路径穿越（CWE-22）**：归档条目名直接 join 临时目录可经 `../`/绝对路径写出。`append_entry` 写盘前校验 `is_safe_archive_name`（拒绝 `..` 段与绝对路径），拒绝时标记"危险路径"跳过（`extractor/archive.rs`）
+- **压缩包解压无上限（zip bomb）**：上限只查声明大小，`read_to_end` 实际字节不限。抽 `read_capped`（`take(cap+1)` 按**实际**解压字节封顶），zip/tar/单文件压缩三处应用，超限跳过/报错、内存有界（`extractor/archive.rs`）
+- **pre-existing 测试 bug**：`test_pdf_ocr.rs` 用 `&text[..500]` 切 CJK 文本触发非字符边界 panic，改 `floor_char_boundary(500)`
+- **测试**：117 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 聊天请求失败 · 9router 流式响应 JSON 解析）
 
 - **AI 聊天回答「请求失败」但网关测试通过**：9router 等 OpenAI 兼容网关默认返回 **SSE 流式响应**（`data:{...}\n` 多行），`chat()` 的 serde 当单个 JSON 解析 → `trailing characters` 错误 → 返回 None → 前端报失败。服务器端 OUT 0 是流式空 delta（`src-tauri/src/ai/mod.rs`）

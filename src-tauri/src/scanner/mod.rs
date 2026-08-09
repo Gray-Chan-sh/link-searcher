@@ -18,7 +18,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use std::collections::HashMap;
 
 use crate::db::dir_config;
-use crate::db::tracker;
+use crate::db::tracker::{self, FileRecord};
 use crate::indexer::{BatchJob, IndexerService};
 
 pub use watcher::{ChangeKind, FileChangeEvent, FileWatcher, WatcherCommand};
@@ -43,6 +43,12 @@ pub struct ScanResult {
     pub modified: u64,
     pub errors: u64,
     pub duration_ms: u64,
+}
+
+/// Skip when already indexed and unchanged — spurious Modify events (e.g.
+/// Finder QuickLook atime bump) must not trigger re-indexing.
+fn should_skip_watcher_event(rec: &FileRecord, mtime: i64, size: u64) -> bool {
+    rec.indexed == 1 && rec.mtime == mtime && rec.size == size
 }
 
 /// Walks a directory tree, discovers files, and indexes them via
@@ -583,7 +589,8 @@ impl Scanner {
                 // Skip files already marked as failed — soffice side-effects
                 // (mtime bump, lock-file create/delete) would otherwise
                 // trigger an infinite re-index loop on broken docs.
-                if let Some(rec) = tracker::get_file_by_path(&conn, &rel_path)? {
+                let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+                if let Some(rec) = &existing {
                     if rec.indexed == 2 {
                         // Failed — skip to avoid infinite re-index loop
                         return Ok(());
@@ -592,18 +599,12 @@ impl Scanner {
 
                 let file_id = tracker::upsert_file(&conn, &rel_path, &event.dir_id, mtime, size, None)?;
 
-                // Skip when the file is already indexed AND neither mtime
-                // nor size has changed — watcher may fire spurious Modify
-                // events (e.g. Finder QuickLook / atime bump on open) that
-                // don't reflect actual content changes.
-                let skip = conn
-                    .query_row(
-                        "SELECT mtime FROM file_tracking WHERE id=?1",
-                        rusqlite::params![file_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map(|last_mtime| last_mtime == mtime)
-                    .unwrap_or(false);
+                // Compare against the PRE-upsert record: upsert_file
+                // overwrites mtime, so a post-upsert lookup always matches
+                // and would swallow every Create/Modify event.
+                let skip = existing
+                    .as_ref()
+                    .is_some_and(|rec| should_skip_watcher_event(rec, mtime, size));
                 drop(conn);
                 if skip {
                     return Ok(());
@@ -740,5 +741,35 @@ mod tests {
         assert_eq!(top.len(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod watcher_skip_tests {
+    use crate::db::tracker::FileRecord;
+
+    fn rec(indexed: i64) -> FileRecord {
+        FileRecord {
+            id: "id".into(),
+            path: "p".into(),
+            dir_id: "d".into(),
+            mtime: 100,
+            size: 5,
+            md5: None,
+            status: "active".into(),
+            indexed,
+            error_msg: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn skip_only_when_indexed_and_unchanged() {
+        assert!(super::should_skip_watcher_event(&rec(1), 100, 5));
+        assert!(!super::should_skip_watcher_event(&rec(1), 101, 5));
+        assert!(!super::should_skip_watcher_event(&rec(1), 100, 6));
+        assert!(!super::should_skip_watcher_event(&rec(0), 100, 5));
+        assert!(!super::should_skip_watcher_event(&rec(3), 100, 5));
     }
 }

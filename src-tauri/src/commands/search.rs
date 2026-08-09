@@ -3,7 +3,6 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 
 use crate::db;
-use crate::scanner::helpers::TempDir;
 use crate::search::searcher::{SearchHit, SearchParams, SearchResponse, SortField, SearcherWrap};
 use crate::state::AppState;
 
@@ -47,6 +46,60 @@ fn file_type_name(ext: &str) -> String {
     }
 }
 
+/// Resolve absolute directory-tree paths (frontend filter) to `file_ids`.
+///
+/// DB stores paths RELATIVE to each dir root, so a raw absolute prefix
+/// never matches. Map each path to its owning dir plus a relative prefix,
+/// matching `(dir_id, rel)` or `(dir_id, rel/…)` — this also excludes
+/// sibling dirs that merely share a prefix (`docs` vs `docs2`).
+fn resolve_dir_paths(
+    conn: &rusqlite::Connection,
+    paths: &[String],
+) -> Result<Option<Vec<String>>, String> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let dirs = crate::db::dir_config::list_dirs(conn).map_err(|e| format!("db error: {e}"))?;
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+    let mut matched = false;
+    for p in paths {
+        let p_path = std::path::Path::new(p);
+        for d in &dirs {
+            let Ok(rel) = crate::scanner::helpers::to_relative(&d.path, p_path) else {
+                continue;
+            };
+            matched = true;
+            if rel.is_empty() {
+                clauses.push("dir_id = ?");
+                params.push(d.id.clone());
+            } else {
+                let escaped = rel.replace('%', "\\%").replace('_', "\\_");
+                clauses.push("dir_id = ? AND (path = ? OR path LIKE ? ESCAPE '\\')");
+                params.push(d.id.clone());
+                params.push(escaped.clone());
+                params.push(format!("{escaped}/%"));
+            }
+            break;
+        }
+    }
+    if !matched {
+        // Selected paths aren't under any monitored root — nothing to search.
+        return Ok(Some(Vec::new()));
+    }
+    let sql = format!(
+        "SELECT id FROM file_tracking WHERE status = 'active' AND ({})",
+        clauses.join(" OR ")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|e| format!("db query error: {e}"))?;
+    Ok(Some(rows.filter_map(|r| r.ok()).collect()))
+}
+
 #[tauri::command]
 pub async fn search(
     state: State<'_, AppState>,
@@ -68,37 +121,18 @@ pub async fn search(
     }
     // Resolve dir_paths to file_ids via SQLite path prefix matching.
     let file_ids = if let Some(paths) = &dir_paths {
-        if paths.is_empty() {
-            None
-        } else {
-            let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let likes: Vec<String> = paths.iter().map(|p| {
-                let escaped = p.replace('%', "\\%").replace('_', "\\_");
-                format!("{}%", escaped)
-            }).collect();
-            let sql = format!(
-                "SELECT id FROM file_tracking WHERE status = 'active' AND ({})",
-                std::iter::repeat("path LIKE ? ESCAPE '\\'")
-                    .take(likes.len())
-                    .collect::<Vec<_>>()
-                    .join(" OR ")
-            );
-            let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
-            let params: Vec<&dyn rusqlite::types::ToSql> = likes.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-            let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))
-                .map_err(|e| format!("db query error: {e}"))?;
-            let ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-            if ids.is_empty() {
-                return Ok(SearchResponse {
-                    total: 0,
-                    page: page.unwrap_or(1),
-                    page_size: page_size.unwrap_or(20),
-                    took_ms: 0,
-                    hits: Vec::new(),
-                });
-            }
-            Some(ids)
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let ids = resolve_dir_paths(&conn, paths)?;
+        if ids.as_ref().is_some_and(|v| v.is_empty()) {
+            return Ok(SearchResponse {
+                total: 0,
+                page: page.unwrap_or(1),
+                page_size: page_size.unwrap_or(20),
+                took_ms: 0,
+                hits: Vec::new(),
+            });
         }
+        ids
     } else {
         None
     };
@@ -485,31 +519,12 @@ pub async fn export_search_results(
 ) -> Result<String, String> {
     // Resolve dir_paths to file_ids via SQLite path prefix matching.
     let file_ids = if let Some(paths) = &dir_paths {
-        if paths.is_empty() {
-            None
-        } else {
-            let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let likes: Vec<String> = paths.iter().map(|p| {
-                let escaped = p.replace('%', "\\%").replace('_', "\\_");
-                format!("{}%", escaped)
-            }).collect();
-            let sql = format!(
-                "SELECT id FROM file_tracking WHERE status = 'active' AND ({})",
-                std::iter::repeat("path LIKE ? ESCAPE '\\'")
-                    .take(likes.len())
-                    .collect::<Vec<_>>()
-                    .join(" OR ")
-            );
-            let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
-            let params: Vec<&dyn rusqlite::types::ToSql> = likes.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
-            let rows = stmt.query_map(params.as_slice(), |row| row.get::<_, String>(0))
-                .map_err(|e| format!("db query error: {e}"))?;
-            let ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-            if ids.is_empty() && !paths.is_empty() {
-                return Ok(String::new());
-            }
-            Some(ids)
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let ids = resolve_dir_paths(&conn, paths)?;
+        if ids.as_ref().is_some_and(|v| v.is_empty()) {
+            return Ok(String::new());
         }
+        ids
     } else {
         None
     };
@@ -560,34 +575,34 @@ pub async fn export_search_results(
         .search(&params)
         .map_err(|e| format!("search failed: {e}"))?;
 
-    let tmp_dir = TempDir::new("ls_export").map_err(|e| format!("failed to create temp dir: {e}"))?;
-    let tmp_path = tmp_dir.path().join(format!("export.{}", format));
-    let mut file = std::fs::File::create(&tmp_path).map_err(|e| format!("failed to create export file: {e}"))?;
-    use std::io::Write;
-
+    let mut content = String::new();
     match format.as_str() {
         "csv" => {
-            writeln!(file, "file_name,file_ext,path,score,mtime,file_size").map_err(|e| format!("write error: {e}"))?;
+            content.push_str("file_name,file_ext,path,score,mtime,file_size\n");
             for hit in &response.hits {
-                writeln!(file, "\"{}\",\"{}\",\"{}\",{},{},{}",
+                content.push_str(&format!(
+                    "\"{}\",\"{}\",\"{}\",{},{},{}\n",
                     hit.file_name.replace('"', "\"\""),
                     hit.file_ext.replace('"', "\"\""),
                     hit.path.replace('"', "\"\""),
                     hit.score,
                     hit.mtime,
                     hit.file_size,
-                ).map_err(|e| format!("write error: {e}"))?;
+                ));
             }
         }
         _ => {
             for hit in &response.hits {
-                writeln!(file, "{} ({}): {}", hit.file_name, hit.file_ext, hit.snippet).map_err(|e| format!("write error: {e}"))?;
+                content.push_str(&format!(
+                    "{} ({}): {}\n",
+                    hit.file_name, hit.file_ext, hit.snippet
+                ));
             }
         }
     };
     drop(searcher);
     drop(mgr);
-    Ok(tmp_path.to_string_lossy().to_string())
+    Ok(content)
 }
 #[tauri::command]
 pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileTypeStat>, String> {
@@ -700,5 +715,40 @@ mod snippet_tests {
             "物业费纠纷",
         );
         assert!(s.contains("<em>"), "应高亮重叠词: {s}");
+    }
+}
+
+#[cfg(test)]
+mod dir_path_resolve_tests {
+    use super::resolve_dir_paths;
+
+    fn setup_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        conn
+    }
+
+    #[test]
+    fn absolute_paths_map_to_relative_prefixes() {
+        let conn = setup_conn();
+        crate::db::dir_config::add_dir(&conn, "/home/docs", None, None, None, None, true)
+            .unwrap();
+        let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
+        crate::db::tracker::upsert_file(&conn, "report.pdf", &d.id, 1, 10, None).unwrap();
+        crate::db::tracker::upsert_file(&conn, "sub/note.md", &d.id, 1, 10, None).unwrap();
+        crate::db::tracker::upsert_file(&conn, "docs2/sibling.md", &d.id, 1, 10, None).unwrap();
+
+        let ids = resolve_dir_paths(&conn, &["/home/docs".into()]).unwrap().unwrap();
+        assert_eq!(ids.len(), 3);
+
+        let ids = resolve_dir_paths(&conn, &["/home/docs/sub".into()]).unwrap().unwrap();
+        assert_eq!(ids.len(), 1);
+        let note = crate::db::tracker::get_file_by_path(&conn, "sub/note.md").unwrap().unwrap();
+        assert!(ids.contains(&note.id));
+
+        let ids = resolve_dir_paths(&conn, &["/elsewhere/x".into()]).unwrap().unwrap();
+        assert!(ids.is_empty());
+
+        assert!(resolve_dir_paths(&conn, &[]).unwrap().is_none());
     }
 }

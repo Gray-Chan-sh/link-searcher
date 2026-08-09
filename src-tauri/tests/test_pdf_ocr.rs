@@ -12,7 +12,7 @@ fn test_ocr_20111201() {
     match extractor.extract_with_lang(pdf, "chi_sim", None) {
         Ok(text) => {
             eprintln!("SUCCESS: {} chars", text.len());
-            let preview = if text.len() > 500 { &text[..500] } else { &text };
+            let preview = if text.len() > 500 { &text[..text.floor_char_boundary(500)] } else { &text };
             eprintln!("PREVIEW:\n{}", preview);
         }
         Err(e) => eprintln!("FAILED: {e}"),
