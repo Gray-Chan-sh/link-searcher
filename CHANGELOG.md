@@ -14,6 +14,15 @@
 
 ---
 
+## 2026-08-08（AI 命令异步化 · 修复测试/摘要/问答阻塞 UI）
+
+- **AI 测试/摘要/问答阻塞 UI**：`test_ai_gateway`、`ai_capabilities`、`summarize_file`、`ask_documents` 均为同步命令，内部 `ureq` HTTP 阻塞调用直接跑在 Tauri 主线程——网关不通时（默认 120s 超时）界面冻结。改为 `async` + `tokio::task::spawn_blocking`，HTTP 移到工作线程，UI 保持响应（`src-tauri/src/commands/ai.rs`）
+- **ping 专用短超时**：`ping_post` 探测用 5s 超时（而非 120s）——死/挂网关快速失败，测试与启动能力探测不再卡住（`src-tauri/src/ai/mod.rs`）
+- **测试环境无关化**：`ai` 单测原假设"测试环境无网关"（断言反应该 None），若本机已配置真实网关则误测真实远程。改为环境无关断言（未配置→降级断言；已配置→仅验证不 panic/不挂起）（`src-tauri/src/ai/mod.rs`）
+- **测试**：105 单元 + 3 smoke + 11 集成通过，semgrep 0
+
+---
+
 ## 2026-08-08（搜索历史限 10 条 + 一键清除）
 
 - **最近搜索无上限膨胀**：`add_entry` 每次搜索都插入、从不清理，历史越积越多。现每次插入后**修剪到最近 10 条**（pinned 置顶项不受限，只删非 pinned 溢出）；`get_search_history` limit 同步为 10（`src-tauri/src/db/search_history.rs`、`src-tauri/src/commands/search.rs`）

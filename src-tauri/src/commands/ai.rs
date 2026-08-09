@@ -15,21 +15,29 @@ pub struct SummaryResult {
 /// Whether each gateway is usable right now (cached test, 30s TTL). The
 /// frontend uses this to enable/disable AI entry points and show guidance.
 #[tauri::command]
-pub fn ai_capabilities() -> crate::ai::AiCapabilities {
-    crate::ai::AiCapabilities::from_gateways(crate::ai::capabilities())
+pub async fn ai_capabilities() -> crate::ai::AiCapabilities {
+    // The underlying probe does blocking HTTP; run it off the UI thread so
+    // a slow/hanging gateway cannot freeze the command.
+    tokio::task::spawn_blocking(|| {
+        crate::ai::AiCapabilities::from_gateways(crate::ai::capabilities())
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// Connectivity test for the configured AI gateways. Returns one result per
 /// gateway (embedding / llm); the frontend disables the corresponding
 /// features when `ok` is false.
 #[tauri::command]
-pub fn test_ai_gateway() -> Vec<crate::ai::GatewayTest> {
-    crate::ai::test_gateways()
+pub async fn test_ai_gateway() -> Vec<crate::ai::GatewayTest> {
+    tokio::task::spawn_blocking(crate::ai::test_gateways)
+        .await
+        .unwrap_or_default()
 }
 
 /// Generate (or fetch cached) an LLM summary for a file's extracted text.
 #[tauri::command]
-pub fn summarize_file(
+pub async fn summarize_file(
     state: State<'_, AppState>,
     file_id: String,
 ) -> Result<SummaryResult, String> {
@@ -60,11 +68,11 @@ pub fn summarize_file(
     }
     let text = truncate_text(text.as_str(), 8000);
 
-    let summary = crate::ai::chat(
-        "你是文档摘要助手。用简洁的中文总结以下文档内容，突出主题、关键信息与结论，不超过150字。",
-        &text,
-    )
-    .ok_or_else(|| "AI 请求失败（检查 API 配置或网络）".to_string())?;
+    let system = "你是文档摘要助手。用简洁的中文总结以下文档内容，突出主题、关键信息与结论，不超过150字。";
+    let summary = tokio::task::spawn_blocking(move || crate::ai::chat(system, &text))
+        .await
+        .unwrap_or(None)
+        .ok_or_else(|| "AI 请求失败（检查 API 配置或网络）".to_string())?;
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let _ = crate::db::tracker::upsert_summary(&conn, &file_id, &summary);
@@ -73,7 +81,7 @@ pub fn summarize_file(
 
 /// Ask a question over one or more documents' extracted text (RAG).
 #[tauri::command]
-pub fn ask_documents(
+pub async fn ask_documents(
     state: State<'_, AppState>,
     file_ids: Vec<String>,
     question: String,
@@ -110,7 +118,10 @@ pub fn ask_documents(
         context = truncate_text(&context, 24000),
     );
 
-    crate::ai::chat("你是严谨的文档分析助手。仅基于提供的材料回答，不臆造事实，回答简洁有条理。", &user_msg)
+    let system = "你是严谨的文档分析助手。仅基于提供的材料回答，不臆造事实，回答简洁有条理。";
+    tokio::task::spawn_blocking(move || crate::ai::chat(system, &user_msg))
+        .await
+        .unwrap_or(None)
         .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())
 }
 
