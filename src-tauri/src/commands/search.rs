@@ -302,15 +302,19 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
 }
 
 /// Build a human-readable snippet around the query's first matching word so
-/// a semantic-only hit shows *why* it matched. Returns `第一个命中词`-centered
-/// window with `<em>` highlight; empty when no query term appears verbatim.
+/// a semantic-only hit shows *why* it matched. When no query term appears
+/// verbatim (the typical purely-semantic hit — different wording, same
+/// meaning) we fall back to the document's opening text so the user still
+/// sees what the file is about, instead of a blank preview.
 fn semantic_snippet(content: &str, query: &str) -> String {
     let terms: Vec<&str> = query
         .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
         .filter(|t| !t.is_empty())
         .collect();
+    // Fallback: leading chunk (no highlight) so a semantic-only hit is
+    // still human-readable as a preview.
     if terms.is_empty() {
-        return String::new();
+        return head_snippet(content);
     }
     // Find the earliest position of any term (case-insensitive).
     let lower = content.to_lowercase();
@@ -324,7 +328,7 @@ fn semantic_snippet(content: &str, query: &str) -> String {
         }
     }
     let Some((pos, term)) = best else {
-        return String::new();
+        return head_snippet(content);
     };
 
     const WINDOW: usize = 60;
@@ -345,6 +349,17 @@ fn semantic_snippet(content: &str, query: &str) -> String {
         snippet.push('…');
     }
     snippet.replace(term, &format!("<em>{term}</em>"))
+}
+
+/// First up-to-~100 chars of content, char-boundary safe, with ellipsis.
+/// Used as a no-highlight fallback for purely-semantic hits.
+fn head_snippet(content: &str) -> String {
+    const LIMIT: usize = 100;
+    if content.chars().count() <= LIMIT {
+        return content.to_string();
+    }
+    let cut = content.char_indices().nth(LIMIT).map(|(i, _)| i).unwrap_or(content.len());
+    format!("{}…", &content[..cut])
 }
 
 #[tauri::command]
@@ -572,7 +587,7 @@ pub async fn get_browse_file_types(state: State<'_, AppState>) -> Result<Vec<Str
 
 #[cfg(test)]
 mod snippet_tests {
-    use super::semantic_snippet;
+    use super::{head_snippet, semantic_snippet};
 
     #[test]
     fn highlights_first_matching_term() {
@@ -585,11 +600,19 @@ mod snippet_tests {
     }
 
     #[test]
-    fn no_verbatim_term_returns_empty() {
-        // Query term not present verbatim in content → no snippet. This is
-        // expected for purely-semantic hits (different wording, same meaning).
-        let s = semantic_snippet("房屋租赁合同", "物业费");
-        assert!(s.is_empty(), "got: {s}");
+    fn no_verbatim_term_falls_back_to_head() {
+        // 纯语义命中（词不字面出现）：回退文档开头片段，不空白。
+        let s = semantic_snippet("房屋租赁合同是当事人之间就房屋租赁权利义务所达成的协议", "物业费");
+        assert!(s.contains("房屋租赁合同"), "got: {s}");
+        assert!(!s.contains("<em>"), "no highlight for non-verbatim term: {s}");
+    }
+
+    #[test]
+    fn head_snippet_truncates_cjk_safely() {
+        let long: String = "物业费".repeat(200);
+        let s = head_snippet(&long);
+        assert!(s.ends_with('…'));
+        assert!(s.len() <= 400, "got {} bytes", s.len());
     }
 
     #[test]
@@ -601,7 +624,9 @@ mod snippet_tests {
     }
 
     #[test]
-    fn empty_query_returns_empty() {
-        assert!(semantic_snippet("任意文本", "  ").is_empty());
+    fn empty_query_falls_back_to_head() {
+        // 空/无词查询：仍回退开头片段（预览可见），不空白。
+        let s = semantic_snippet("任意文本内容", "  ");
+        assert!(s.contains("任意文本"), "got: {s}");
     }
 }
