@@ -2,46 +2,28 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, openFile, saveChatHistory, loadChatHistory, type ChatMessage, type SmartSearchResponse } from '../api/files'
+import { smartSearch, conversationAsk, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
 
 interface ChatPanelProps {
   llmEnabled: boolean
+  session: ChatSession | null
+  onSessionChange: (session: ChatSession | null) => void
 }
 
-export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
+export default function ChatPanel({ llmEnabled, session, onSessionChange }: ChatPanelProps) {
   const { t } = useI18n()
-  const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const [sourceIds, setSourceIds] = useState<string[]>([])
-  const [sourceFiles, setSourceFiles] = useState<string[]>([])
   const [showSources, setShowSources] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
-  // Load persisted conversation on mount.
-  useEffect(() => {
-    loadChatHistory()
-      .then(session => {
-        if (session.messages.length > 0) {
-          setMessages(session.messages)
-          setSourceIds(session.source_ids)
-          setSourceFiles(session.source_files)
-        }
-      })
-      .catch(() => {})
-  }, [])
+  const messages = session?.messages ?? []
+  const sourceIds = session?.source_ids ?? []
+  const sourceFiles = session?.source_files ?? []
 
-  // Persist whenever the conversation changes (after initial load is done).
-  const loadedRef = useRef(false)
-  useEffect(() => {
-    if (messages.length > 0 || sourceIds.length > 0) {
-      loadedRef.current = true
-    }
-  }, [messages, sourceIds])
-  useEffect(() => {
-    if (!loadedRef.current) return
-    saveChatHistory(messages, sourceIds, sourceFiles).catch(() => {})
-  }, [messages, sourceIds, sourceFiles])
+  const patchSession = useCallback((patch: Partial<ChatSession>) => {
+    if (session) onSessionChange({ ...session, ...patch })
+  }, [session, onSessionChange])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -49,43 +31,31 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
 
   const handleSend = useCallback(async () => {
     const q = input.trim()
-    if (!q || loading) return
+    if (!q || loading || !session) return
     setInput('')
     const userMsg: ChatMessage = { role: 'user', content: q }
-    const updated = [...messages, userMsg]
-    setMessages(updated)
-    setLoading(true)
+    patchSession({ messages: [...messages, userMsg] })
 
+    setLoading(true)
     try {
       if (sourceIds.length === 0) {
-        // First message — do smart_search
         const res: SmartSearchResponse = await smartSearch(q)
-        setSourceIds(res.source_ids)
-        setSourceFiles(res.source_files)
-        const assistantMsg: ChatMessage = { role: 'assistant', content: res.answer }
-        setMessages(prev => [...prev, assistantMsg])
+        patchSession({
+          messages: [...messages, userMsg, { role: 'assistant', content: res.answer }],
+          source_ids: res.source_ids,
+          source_files: res.source_files,
+        })
       } else {
-        // Follow-up — conversation_ask with existing source docs
-        const answer = await conversationAsk([...updated], sourceIds)
-        const assistantMsg: ChatMessage = { role: 'assistant', content: answer }
-        setMessages(prev => [...prev, assistantMsg])
+        const answer = await conversationAsk([...messages, userMsg], sourceIds)
+        patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: answer }] })
       }
     } catch (e) {
       const err = e instanceof Error ? e.message : '请求失败'
-      setMessages([...updated, { role: 'assistant', content: `❌ ${err}` }])
+      patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${err}` }] })
     } finally {
       setLoading(false)
     }
-  }, [input, loading, messages, sourceIds])
-
-  const handleNewSession = useCallback(() => {
-    setMessages([])
-    setSourceIds([])
-    setSourceFiles([])
-    setInput('')
-    setShowSources(false)
-    saveChatHistory([], [], []).catch(() => {})
-  }, [])
+  }, [input, loading, session, messages, sourceIds, patchSession])
 
   if (!llmEnabled) {
     return (
@@ -97,7 +67,6 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      {/* Source files header */}
       {sourceFiles.length > 0 && (
         <div className="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 bg-purple-50 dark:bg-purple-900/10 border-b border-purple-100 dark:border-purple-800/30">
           <div className="flex items-center gap-2">
@@ -108,12 +77,6 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
             >
               {t('source_files', { n: sourceFiles.length })}
               <span className="ml-1 text-gray-400">{showSources ? '▲' : '▼'}</span>
-            </button>
-            <button
-              onClick={handleNewSession}
-              className="ml-auto text-purple-600 dark:text-purple-400 hover:underline"
-            >
-              {t('new_session')}
             </button>
           </div>
           {showSources && (
@@ -133,7 +96,6 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
         </div>
       )}
 
-      {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {messages.length === 0 && (
           <div className="text-center text-sm text-gray-400 py-12">
@@ -162,7 +124,6 @@ export default function ChatPanel({ llmEnabled }: ChatPanelProps) {
         )}
       </div>
 
-      {/* Input */}
       <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
         <input
           type="text"
