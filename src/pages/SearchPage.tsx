@@ -132,6 +132,7 @@ useEffect(() => {
                 onQueryChange={search.setQuery}
                 onFetchSuggestions={search.fetchSuggestions}
                 onClearSuggestions={search.clearSuggestions}
+                onSubmit={search.submitSearch}
               />
             </div>
             <button
