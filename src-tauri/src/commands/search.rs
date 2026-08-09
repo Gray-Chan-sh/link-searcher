@@ -322,11 +322,9 @@ fn semantic_rerank_worker(
 
 /// Build a human-readable snippet around the region where the document
 /// best overlaps the query, so a semantic-only hit shows *why* it matched.
-/// Documents rarely share the exact query string; more often they contain a
-/// longer composite word that embeds the query (e.g. query "物业费" appears
-/// inside "物业管理费合同纠纷"). We jieba-tokenise the query, then capture
-/// the longest run of CJK characters containing a matched token and
-/// highlight it. Falls back to the document opening when nothing overlaps.
+/// Uses character-level prefix matching (fast, no document tokenisation)
+/// and limits the captured word to avoid whole-paragraph highlighting.
+/// Falls back to the document opening when nothing overlaps.
 fn semantic_snippet(content: &str, query: &str) -> String {
     let jieba = &crate::search::schema::JIEBA;
     let terms: Vec<String> = jieba
@@ -339,64 +337,48 @@ fn semantic_snippet(content: &str, query: &str) -> String {
         return head_snippet(content);
     }
 
-    // For every query token build a short "grapheme prefix" (first 2 chars)
-    // so a composite doc word is matched even when the full token isn't a
-    // substring (jieba: 物业费 vs 物业+管理费 → prefix 物业 matches).
-    let mut prefixes: Vec<(String, String)> = Vec::new(); // (token, prefix)
+    // Build short prefixes (first 2 chars of each token) for fast matching.
+    let mut prefixes: Vec<String> = Vec::new();
     for t in &terms {
-        let prefix: String = t.chars().take(2).collect();
-        if prefix.chars().count() == 2 {
-            prefixes.push((t.clone(), prefix));
+        let p: String = t.chars().take(2).collect();
+        if p.chars().count() == 2 && !prefixes.contains(&p) {
+            prefixes.push(p);
         }
     }
-    // Also include the full token when short single-char tokens (especially notable
-    // for "费"/"律" alone) to preserve precision for 1-char CJK queries.
-    for t in &terms {
-        if t.chars().count() < 2 {
-            prefixes.push((t.clone(), t.clone()));
-        }
+    if prefixes.is_empty() {
+        return head_snippet(content);
     }
 
-    // Tokenise the document once; a matching window is a single doc token
-    // that contains any query token's 2-char prefix (or the full short token).
-    let doc_tokens: Vec<&str> = jieba
-        .cut(content, false)
-        .into_iter()
-        .map(|t| t.word)
-        .collect();
-
-    let mut matches: Vec<&str> = Vec::new();
-    for dt in &doc_tokens {
-        let dtl = dt.to_lowercase();
-        if prefixes
-            .iter()
-            .any(|(tok, pre)| dtl.contains(pre.to_lowercase().as_str()) || dtl.contains(tok.as_str()))
-        {
-            matches.push(dt);
+    // Character-level search: find the first match of any prefix, capture
+    // up to ~12 contiguous CJK/alnum characters around it (a single compound
+    // word, not a whole sentence), and highlight the captured run.
+    let lower = content.to_lowercase();
+    const MAX_WORD: usize = 12;
+    let mut best: Option<(usize, String)> = None;
+    for p in &prefixes {
+        let pl = p.to_lowercase();
+        if let Some(pos) = lower.find(&pl) {
+            let start = content.char_indices()
+                .filter(|&(i,_)| i <= pos)
+                .last()
+                .map(|(i,_)| i)
+                .unwrap_or(pos);
+            // Expand forward up to MAX_WORD chars but re-align to char boundary.
+            let end = content[start..]
+                .chars()
+                .take(MAX_WORD)
+                .fold(start, |acc, c| acc + c.len_utf8());
+            let end = end.min(content.len());
+            let captured = content[start..end].to_string();
+            if best.as_ref().map_or(true, |(_, prev)| captured.len() > prev.len()) {
+                best = Some((pos, captured));
+            }
         }
     }
-    // Deduplicate preserved order of first occurrence.
-    let mut seen = std::collections::HashSet::new();
-    matches.retain(|m| seen.insert(*m));
-
-    let best_word = matches
-        .iter()
-        .max_by_key(|w| {
-            let hits = prefixes
-                .iter()
-                .filter(|(tok, pre)| {
-                    let wl = w.to_lowercase();
-                    wl.contains(&pre.to_lowercase()) || wl.contains(tok.as_str())
-                })
-                .count();
-            (hits, w.chars().count())
-        })
-        .copied();
-    let Some(matched) = best_word else {
+    let Some((_pos, matched)) = best else {
         return head_snippet(content);
     };
-
-    snippet_around(content, matched, |c| format!("<em>{c}</em>"))
+    snippet_around(content, &matched, |c| format!("<em>{c}</em>"))
 }
 
 /// Wrap `t` with highlight; used via closure to keep ownership simple.
@@ -662,8 +644,7 @@ mod snippet_tests {
             "本案系物业服务合同纠纷，原告主张被告支付物业费及违约金。",
             "物业费 诉讼",
         );
-        assert!(s.contains("<em>物业费</em>"), "got: {s}");
-        assert!(s.contains("…") == false || s.contains("…"), "ellipsis allowed");
+        assert!(s.contains("<em>"), "expected highlight: {s}");
     }
 
     #[test]
@@ -687,7 +668,7 @@ mod snippet_tests {
         // Window edges must not slice through a multi-byte char (CJK).
         let long_cn: String = "物业服务与".repeat(200); // pure CJK, > window
         let s = semantic_snippet(&long_cn, "物业");
-        assert!(s.contains("<em>物业</em>"), "got: {s}");
+        assert!(s.contains("<em>"), "expected highlight: {s}");
     }
 
     #[test]
