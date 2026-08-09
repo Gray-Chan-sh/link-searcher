@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useRef } from 'react'
 import { useI18n } from '../i18n'
 import { SearchIcon, XIcon, LoadingSpinner } from '../icons'
 
@@ -17,7 +17,6 @@ export default function SearchBar({
 }: SearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
-  const [focused, setFocused] = useState(false)
 
   const handleInput = useCallback((value: string) => {
     onQueryChange(value)
@@ -49,8 +48,6 @@ export default function SearchBar({
           value={query}
           onChange={e => handleInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setTimeout(() => setFocused(false), 150)}
           placeholder={`${t('search_placeholder')} (⌘K)`}
           aria-label={t('search')}
           data-search-input="true"
