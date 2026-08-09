@@ -16,6 +16,7 @@ import Settings from './pages/Settings'
 import LogViewer from './pages/LogViewer'
 import FileTypes from './pages/FileTypes'
 import Browse from './pages/Browse'
+import AiChat from './pages/AiChat'
 import StatusBar from './components/StatusBar'
 import OnboardingWizard from './components/OnboardingWizard'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -34,6 +35,7 @@ export default function App() {
     { to: '/logs', label: t('logs'), icon: FileTextIcon },
     { to: '/file-types', label: t('file_types'), icon: FileTextIcon },
     { to: '/settings', label: t('settings'), icon: GearIcon },
+    { to: '/chat', label: t('ai_chat'), icon: FileTextIcon },
   ] as const
 
   useEffect(() => {
@@ -131,6 +133,7 @@ export default function App() {
             <Route path="logs" element={<LogViewer />} />
             <Route path="file-types" element={<FileTypes />} />
             <Route path="settings" element={<Settings />} />
+            <Route path="chat" element={<AiChat />} />
           </Routes>
         </main>
         <StatusBar />

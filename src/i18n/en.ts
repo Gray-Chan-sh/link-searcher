@@ -47,6 +47,7 @@ const en: Record<string, string> = {
     ai_embedding_unavailable: 'Embedding gateway not configured or failed test — semantic search unavailable (configure in Settings)',
     ai_llm_unavailable: 'LLM gateway not configured or failed test — AI features unavailable (configure in Settings)',
     ai_chat: 'AI Chat',
+    ai_chat_desc: 'Ask AI questions based on your documents, with multi-turn follow-ups',
     chat_placeholder: 'Ask a question, AI answers based on your documents…',
     ask_question: 'Ask a question…',
     ask_followup: 'Follow-up…',
