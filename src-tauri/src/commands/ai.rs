@@ -286,3 +286,44 @@ fn truncate_text(s: &str, max_chars: usize) -> String {
         chars[..max_chars].iter().collect()
     }
 }
+
+fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("chat_history.json")
+}
+
+/// Save the AI conversation (messages + source files) to
+/// `data_dir/chat_history.json`. Preserved across app restarts.
+#[tauri::command]
+pub fn save_chat_history(
+    state: State<'_, AppState>,
+    messages: Vec<ChatMessage>,
+    source_ids: Vec<String>,
+    source_files: Vec<String>,
+) -> Result<(), String> {
+    let path = chat_history_path(&state.data_dir);
+    let payload = serde_json::json!({
+        "messages": messages,
+        "source_ids": source_ids,
+        "source_files": source_files,
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("写入聊天记录失败: {e}"))
+}
+
+/// Load the persisted conversation, if any. Returns empty arrays when none.
+#[tauri::command]
+pub fn load_chat_history(state: State<'_, AppState>) -> Result<ChatSession, String> {
+    let path = chat_history_path(&state.data_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<ChatSession>(&content)
+            .map_err(|e| format!("解析聊天记录失败: {e}")),
+        Err(_) => Ok(ChatSession::default()),
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ChatSession {
+    pub messages: Vec<ChatMessage>,
+    pub source_ids: Vec<String>,
+    pub source_files: Vec<String>,
+}
