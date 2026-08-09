@@ -128,10 +128,7 @@ useEffect(() => {
               <SearchBar
                 query={search.query}
                 loading={search.status === 'loading'}
-                suggestions={search.suggestions}
                 onQueryChange={search.setQuery}
-                onFetchSuggestions={search.fetchSuggestions}
-                onClearSuggestions={search.clearSuggestions}
                 onSubmit={search.submitSearch}
               />
             </div>
