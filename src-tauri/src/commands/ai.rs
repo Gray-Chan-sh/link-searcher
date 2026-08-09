@@ -321,7 +321,36 @@ fn now_ts() -> i64 {
 fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
     let path = chat_history_path(data_dir);
     match std::fs::read_to_string(&path) {
-        Ok(c) => serde_json::from_str(&c).unwrap_or_default(),
+        Ok(c) => {
+            // Migrate the legacy single-session structure ({messages,...} at
+            // top level) into the multi-session layout: wrap it as one session.
+            #[derive(serde::Deserialize)]
+            struct Legacy {
+                messages: Vec<ChatMessage>,
+                source_ids: Vec<String>,
+                source_files: Vec<String>,
+            }
+            if let Ok(legacy) = serde_json::from_str::<Legacy>(&c) {
+                let now = now_ts();
+                let title = legacy
+                    .messages
+                    .iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| m.content.chars().take(20).collect::<String>())
+                    .unwrap_or_else(|| "历史对话".to_string());
+                let session = ChatSession {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    title: if title.is_empty() { "历史对话".to_string() } else { title },
+                    created_at: now,
+                    updated_at: now,
+                    messages: legacy.messages,
+                    source_ids: legacy.source_ids,
+                    source_files: legacy.source_files,
+                };
+                return ChatHistoryFile { sessions: vec![session] };
+            }
+            serde_json::from_str(&c).unwrap_or_default()
+        }
         Err(_) => ChatHistoryFile::default(),
     }
 }
