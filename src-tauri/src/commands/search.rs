@@ -226,13 +226,49 @@ fn semantic_rerank(state: &State<'_, AppState>, params: &SearchParams, bm25: &Se
     let mut ordered: Vec<(String, f64)> = fusion.into_iter().collect();
     ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Rebuild hit list in fused order; BM25-only hits (no embedding) go last.
+    // Rebuild hit list in fused order. The semantic side may surface docs
+    // that BM25 never matched — those must be materialised from the DB
+    // (file_name/path/mtime/size) instead of being silently dropped, or a
+    // pure-semantic query (different wording, same meaning) returns nothing.
     let mut by_id: HashMap<String, SearchHit> = bm25
         .hits
         .iter()
         .cloned()
         .map(|h| (h.file_id.clone(), h))
         .collect();
+
+    // Fetch metadata for semantic-only ids (top fused order, bounded).
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    for (fid, _score) in ordered.iter().take(100) {
+        if by_id.contains_key(fid) {
+            continue;
+        }
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
+            let file_name = std::path::Path::new(&rec.path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| rec.path.clone());
+            by_id.insert(
+                fid.clone(),
+                SearchHit {
+                    file_id: fid.clone(),
+                    file_name,
+                    file_ext: std::path::Path::new(&rec.path)
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    path: rec.path.clone(),
+                    snippet: String::new(),
+                    score: 0.0,
+                    mtime: rec.mtime,
+                    file_size: rec.size,
+                },
+            );
+        }
+    }
+    drop(conn);
+
     let mut merged: Vec<SearchHit> = ordered
         .iter()
         .filter_map(|(id, _)| by_id.remove(id))
