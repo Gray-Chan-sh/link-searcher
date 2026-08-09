@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useDeferredValue } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { search, suggest, type SearchHit, type SearchResponse } from '../api/search'
 
 const LS_FILTER_DIR_KEY = 'ls_filter_dirs'
@@ -73,8 +73,6 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const lastSubmittedRef = useRef('')
 
-  // Deferred query for useDeferredValue-based debounce
-  const deferredQuery = useDeferredValue(state.query)
 
   // Filter ref to always hold the latest values (avoids closure staleness)
   const filtersRef = useRef<{
