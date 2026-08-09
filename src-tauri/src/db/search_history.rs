@@ -27,16 +27,39 @@ pub fn add_entry(
     filters: Option<&str>,
     result_count: u64,
 ) -> Result<String> {
-    let now = chrono::Utc::now().timestamp_millis();
     let id = Uuid::new_v4().to_string();
     let rc = result_count as i64;
+
+    // Guarantee strictly increasing created_at so ORDER BY is stable even
+    // for rapid successive inserts landing in the same millisecond.
+    let now = chrono::Utc::now().timestamp_millis();
+    let last: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(created_at), 0) FROM search_history",
+            [],
+            |r| r.get(0),
+        )
+        .context("failed to read latest history timestamp")?;
+    let created_at = now.max(last + 1);
 
     conn.execute(
         "INSERT INTO search_history (id, query, dir_ids, filters, result_count, pinned, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
-        rusqlite::params![id, query, dir_ids, filters, rc, now],
+        rusqlite::params![id, query, dir_ids, filters, rc, created_at],
     )
     .context("failed to add search history entry")?;
+
+    // Trim to the 10 most recent entries, keeping pinned ones: prevents the
+    // history from growing unboundedly. Pinned rows are excluded from the
+    // limit; only unpinned excess is deleted.
+    conn.execute(
+        "DELETE FROM search_history WHERE pinned = 0 AND id IN (
+            SELECT id FROM search_history WHERE pinned = 0
+            ORDER BY created_at DESC LIMIT -1 OFFSET 10
+         )",
+        [],
+    )
+    .context("failed to trim search history")?;
 
     Ok(id)
 }
@@ -169,5 +192,17 @@ mod tests {
     fn test_delete_missing_is_error() {
         let conn = setup_conn();
         assert!(delete_entry(&conn, "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_add_trims_to_ten() {
+        let conn = setup_conn();
+        for i in 0..15 {
+            add_entry(&conn, &format!("q{i}"), None, None, 0).unwrap();
+        }
+        let entries = list_recent(&conn, 100).unwrap();
+        assert_eq!(entries.len(), 10, "history should be trimmed to 10");
+        assert_eq!(entries[0].query, "q14", "newest first");
+        assert_eq!(entries[9].query, "q5");
     }
 }

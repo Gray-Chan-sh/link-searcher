@@ -70,6 +70,10 @@ export async function getSearchHistory(): Promise<SearchHistoryEntry[]> {
   return invoke<SearchHistoryEntry[]>('get_search_history')
 }
 
+export async function clearSearchHistory(): Promise<void> {
+  return invoke<void>('clear_search_history')
+}
+
 export async function exportSearchResults(
   query: string,
   dirIds?: string[],

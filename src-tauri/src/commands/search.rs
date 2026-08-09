@@ -276,7 +276,7 @@ pub async fn get_search_history(state: State<'_, AppState>) -> Result<Vec<Histor
         .db
         .get()
         .map_err(|e| format!("db connection failed: {e}"))?;
-    let entries = db::search_history::list_recent(&conn, 100)
+    let entries = db::search_history::list_recent(&conn, 10)
         .map_err(|e| format!("failed to list history: {e}"))?;
     Ok(entries
         .into_iter()
@@ -287,9 +287,19 @@ pub async fn get_search_history(state: State<'_, AppState>) -> Result<Vec<Histor
             filters: e.filters,
             result_count: e.result_count,
             pinned: e.pinned,
-            created_at: e.created_at,
+created_at: e.created_at,
         })
         .collect())
+}
+
+/// Clear the entire search history (all entries, pinned included).
+#[tauri::command]
+pub async fn clear_search_history(state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| format!("db connection failed: {e}"))?;
+    db::search_history::clear_history(&conn).map_err(|e| format!("failed to clear history: {e}"))
 }
 
 #[tauri::command]

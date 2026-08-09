@@ -14,6 +14,15 @@
 
 ---
 
+## 2026-08-08（搜索历史限 10 条 + 一键清除）
+
+- **最近搜索无上限膨胀**：`add_entry` 每次搜索都插入、从不清理，历史越积越多。现每次插入后**修剪到最近 10 条**（pinned 置顶项不受限，只删非 pinned 溢出）；`get_search_history` limit 同步为 10（`src-tauri/src/db/search_history.rs`、`src-tauri/src/commands/search.rs`）
+- **created_at 严格递增**：修复 同一毫秒多条插入时 created_at 相同 → 修剪边界随机删的隐患（`now.max(last+1)`）（`src-tauri/src/db/search_history.rs`）
+- **一键清除**：新命令 `clear_search_history`（全清含 pinned）+ SearchBar 历史标题旁「清除历史」按钮（前端清除后本地 state 立即清空）（`src-tauri/src/commands/search.rs`、`src-tauri/src/lib.rs`、`src/api/search.ts`、`src/components/SearchBar.tsx`、`src/i18n/*`）
+- **测试**：`test_add_trims_to_ten`（15 条→10，最新在前）、`test_add_and_list` 通过；105 单元 + 3 smoke + 11 集成通过，semgrep 0
+
+---
+
 ## 2026-08-08（AI 网关拆分 · 可用性测试与降级）
 
 - **Embedding / LLM 网关独立配置**：`AppConfig` 从单 `ai_api_base/key` 拆为 `embedding_api_base/key` + `llm_api_base/key` 两组（各自模型名）；旧单网关配置自动迁移到两组；`update_config` 回写 legacy 字段向后兼容（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`）

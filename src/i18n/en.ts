@@ -200,6 +200,7 @@ const en: Record<string, string> = {
 
     // Search bar / results
     recent_searches: 'Recent searches',
+    clear_history: 'Clear history',
     copy_name: 'Copy Name',
     score: 'Score: {score}',
 
