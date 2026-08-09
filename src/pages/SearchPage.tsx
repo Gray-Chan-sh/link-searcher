@@ -8,7 +8,6 @@ import FilterPanel from '../components/FilterPanel'
 import ResultList from '../components/ResultList'
 import PreviewPanel from '../components/PreviewPanel'
 import EmptyState from '../components/EmptyState'
-import ChatPanel from '../components/ChatPanel'
 import { ResultListSkeleton } from '../components/Skeleton'
 import type { SearchHit } from '../api/search'
 import { exportSearchResults } from '../api/search'
@@ -24,7 +23,6 @@ export default function SearchPage() {
   const [selectedHit, setSelectedHit] = useState<SearchHit | null>(null)
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
-  const [chatMode, setChatMode] = useState(false)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
@@ -140,18 +138,6 @@ useEffect(() => {
             >
               {t('filters')}
             </button>
-            {aiCap.llm && (
-            <button
-              onClick={() => setChatMode(v => !v)}
-              className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors shrink-0 ${
-                chatMode
-                  ? 'text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border-purple-300 dark:border-purple-800'
-                  : 'text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              ✦ {t('ai_chat')}
-            </button>
-            )}
             <button
               onClick={() => search.setSemantic(!search.semantic)}
               disabled={!aiCap.embedding}
@@ -199,8 +185,7 @@ useEffect(() => {
           )}
         </div>
 
-        {chatMode && <ChatPanel llmEnabled={aiCap.llm} />}
-        <div className="flex-1 overflow-y-auto" style={{ display: chatMode ? 'none' : 'block' }}>
+        <div className="flex-1 overflow-y-auto">
           {search.status === 'idle' && (
             <EmptyState
               icon={<SearchIcon className="size-12" />}
@@ -262,7 +247,7 @@ useEffect(() => {
           )}
         </div>
 
-        {!chatMode && search.status === 'success' && totalPages > 1 && (
+        {search.status === 'success' && totalPages > 1 && (
           <div className="flex items-center justify-center gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-800">
             <button
               onClick={() => search.setPage(search.page - 1)}
