@@ -4,8 +4,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
-import { getDuplicates, type DuplicateGroup } from '../api/files'
+import { getIndexErrors, backfillEmbeddings, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
+import { getDuplicates, aiCapabilities, type DuplicateGroup } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
@@ -25,6 +25,9 @@ export default function IndexStatus() {
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
   const [dupesLoading, setDupesLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
+  const [backfilling, setBackfilling] = useState(false)
+  const [embedCapable, setEmbedCapable] = useState(false)
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
   const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
   const [showErrors, setShowErrors] = useState(false)
@@ -32,6 +35,10 @@ export default function IndexStatus() {
   const [retrying, setRetrying] = useState(false)
   const [lastDelta, setLastDelta] = useState<{ added: number; deleted: number; modified: number; errors: number } | null>(null)
   const [scanPhase, setScanPhase] = useState<string | null>(null)
+
+  useEffect(() => {
+    aiCapabilities().then(c => setEmbedCapable(c.embedding)).catch(() => {})
+  }, [])
 
   useEffect(() => {
     const unlisten = listenScanProgress(p => setScanPhase(p.phase ?? null))
@@ -86,7 +93,7 @@ export default function IndexStatus() {
     }
   }, [status?.scan_delta])
 
-  const handleRebuild = async () => {
+const handleRebuild = async () => {
     const confirmed = await ask(
         t('confirm_rebuild'),
         { title: t('rebuild_index'), kind: 'warning' }
@@ -95,6 +102,23 @@ export default function IndexStatus() {
     setRebuilding(true)
     await rebuild()
     setRebuilding(false)
+  }
+
+  const handleBackfill = async () => {
+    setBackfilling(true)
+    setBackfillMsg(null)
+    try {
+      const r = await backfillEmbeddings()
+      setBackfillMsg(
+        r.processed > 0
+          ? `✓ ${r.processed} 个已补齐${r.failed > 0 ? `，${r.failed} 个失败` : ''}`
+          : '✓ 无缺失向量'
+      )
+    } catch (e) {
+      setBackfillMsg(String(e))
+    } finally {
+      setBackfilling(false)
+    }
   }
 
   const retryFailed = async () => {
@@ -156,6 +180,15 @@ export default function IndexStatus() {
             </button>
           )}
           <button
+            onClick={handleBackfill}
+            disabled={backfilling || !embedCapable || status?.is_scanning}
+            title={embedCapable ? '补齐缺失的语义向量（不重新提取/OCR）' : 'AI Embedding 网关未配置'}
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/40 disabled:opacity-50 transition-colors"
+          >
+            {backfilling && <LoadingSpinner className="size-4" />}
+            ✦ 补齐语义向量
+          </button>
+          <button
             onClick={handleRebuild}
             disabled={rebuilding}
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 rounded-lg disabled:opacity-50 transition-colors"
@@ -165,6 +198,12 @@ export default function IndexStatus() {
           </button>
         </div>
       </div>
+
+      {backfillMsg && (
+        <div className="mb-4 px-4 py-3 text-sm text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
+          {backfillMsg}
+        </div>
+      )}
 
       {loading && (
         <div className="grid grid-cols-4 gap-4 mb-6">

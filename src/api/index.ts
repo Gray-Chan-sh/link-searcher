@@ -17,6 +17,16 @@ export async function getIndexStatus(): Promise<IndexStatus> {
   return invoke<IndexStatus>('get_index_status')
 }
 
+export interface BackfillReport {
+  processed: number
+  pending: number
+  failed: number
+}
+
+export async function backfillEmbeddings(): Promise<BackfillReport> {
+  return invoke<BackfillReport>('backfill_embeddings')
+}
+
 export async function triggerScan(dirId?: string): Promise<void> {
   return invoke('trigger_scan', { dirId: dirId ?? null })
 }

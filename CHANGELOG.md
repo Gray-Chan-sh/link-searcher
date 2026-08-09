@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-08-09（语义向量回填 · 免重索引生成向量）
+
+- **首次启用 AI 需重新索引**：向量只在 `batch_index` 内联生成，历史已索引文件（如 8500+）配好网关后必须全量重扫才能获得语义搜索能力。新增**回填命令** `backfill_embeddings`——从 `content_index` 按 md5 读取已提取文本（**不重提娶、不重跑 OCR**），`embed_batched` 分批（64/批）embed 后幂等 upsert 到 `doc_embeddings`，只补缺失向量（`src-tauri/src/commands/index.rs`）
+- **扫描结束自动回填**：`trigger_scan`/`rebuild_index` 完成后，若 embedding 网关已配置，后台线程自动跑回填——增量索引新文件即时获得向量，无需手动（`src-tauri/src/commands/index.rs`）
+- **移除索引期串行 embedding**：删除 `indexer.rs` 内每文件 `ai::embed()` HTTP 调用（AI 网关开启时会把批量索引拖成龟速且失败 120s 超时），向量生成职责完全移交回填（`src-tauri/src/indexer.rs`）
+- **embed 输入截断 + 分批**：`embed_batch` 统一截断到 2000 字符（embedding 模型 512 token 窗口，超长文本会导致网关拒绝整批）；新增 `embed_batched(texts, batch_size)` 分批入口（`src-tauri/src/ai/mod.rs`）
+- **前端**：索引页新增「✦ 补齐语义向量」按钮（AI 未配置置灰），展示补齐/失败数（`src/pages/IndexStatus.tsx`、`src/api/index.ts`）
+- **修复 UI 无响应**：`backfill_embeddings` 实现为同步 `#[tauri::command]` 会在主线程跑完全部批量 HTTP（8500 文件 × 分批），阻塞 UI。改为 `async fn` + `spawn_blocking`（与 `trigger_scan` 同模式），阻塞工作在后台线程（`src-tauri/src/commands/index.rs`）
+- **USER_MANUAL**：7.5 AI 功能「语义搜索」更新为"补齐语义向量，无需重新索引"（`USER_MANUAL.md`）
+- **测试**：`backfill_picks_only_indexed_files_without_embedding`（缺口 SQL：只选 indexed=1 ∧ 无向量 ∧ 有文本）、`truncate_for_embed_caps_length`；108 单元 + 3 smoke + 9 集成（含 pre-existing OCR 测试失败 1 项）+ 6 IPC 通过，semgrep 0
+- **已知预先存在问题（非本次引入）**：`tests/test_pdf_ocr.rs::test_ocr_20111201` 用 `&text[..500]` 字节切片预览中文文本，OCR 成功（4913 字符）但打印时 panic——修复项独立于本次
+
+---
+
 ## 2026-08-09（OCR 并发闸门 · 扫描件索引提速）
 
 - **扫描 PDF 索引过慢（单页 2.5~3.3s）**：根因是双层 `par_iter` 扇出（`batch_index` 文件级 × PDF 页级）叠加无并发控制的 Apple Vision 推理，几十路子进程/推理同时争抢 CPU。修复：`ocr.rs` 新增**全局并发闸门** `OcrGate`（阻塞信号量，上限 `min(CPU核数, 8)` 硬件自适应），`ocr_image_with_engine` / `ocr_image_with_regions` 两个分发入口统一持槽——一处加锁覆盖四引擎全路径（PaddleOCR/Apple Vision/Windows OCR/Tesseract），消除 OCR 过载（`src-tauri/src/extractor/ocr.rs`）
@@ -11,6 +25,13 @@
 - **数据佐证**：真实库 5734 个 PDF 实测分类——59.7% 纯文字层（直接读）、35.8% 纯扫描件（整本 OCR）、3.2% 混合型；需 OCR 页约 23K。据此**否决**了页级混合提取方案（混合型占比过小，收益 <2% 且引入 wm/garbled 回归风险），保留现有 pdf-inspector + 水印/乱码/重复检测门禁不动
 - **测试**：`test_ocr_gate_limits_concurrency`（12 线程抢 3 槽峰值 ≤3）；103 单元 + 3 smoke + 9 集成通过，semgrep 0
 - **修复过时断言**：`test_ipc_get_settings` 断言 `ocr_lang=eng` 但 seed 早已是 `chi_sim`（f4f1803 改默认语言时漏同步测试），断言改为 `chi_sim`；同步修正 `file_tracking` 无关的 `app_settings` DDL 兜底 `DEFAULT 'eng' → 'chi_sim'`（`src-tauri/tests/ipc_test.rs`、`src-tauri/src/db/mod.rs`）
+
+---
+
+## 2026-08-08（文档 · 语义搜索使用方法增强）
+
+- **USER_MANUAL 新增 2.8 语义搜索章节**：概念（按意思搜）+ 例子（欠费催缴→逾期未缴纳）+ 使用前提（配置 Embedding 网关 / 测试连接 / 触发扫描生成向量）+ 步骤 + 与普通搜索对比表 + 注意事项（未配置/测试失败时的降级行为）
+- **设置表更新**：AI 服务项从旧单网关（API Base URL/Key）改为双网关 6 项（Embedding 与 LLM 各自 Base/Key/Model）+ 测试连接；7.5 节同步说明两组独立网关、可用性置灰降级
 
 ---
 

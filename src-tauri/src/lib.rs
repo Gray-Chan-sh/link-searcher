@@ -17,7 +17,7 @@ use crate::commands::ai::{ai_capabilities, ask_documents, summarize_file, test_a
 use crate::commands::config::{get_config, migrate_data, restart_app, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reindex_file, trigger_scan};
+use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reindex_file, trigger_scan};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs};
@@ -109,6 +109,7 @@ fn run_with_config(app_config: config::AppConfig) {
             get_unsupported_ext_stats,
             check_index_health,
             check_index_integrity,
+            backfill_embeddings,
             get_logs,
             clear_logs,
             get_version,
