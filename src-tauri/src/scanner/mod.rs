@@ -591,7 +591,23 @@ impl Scanner {
                 }
 
                 let file_id = tracker::upsert_file(&conn, &rel_path, &event.dir_id, mtime, size, None)?;
+
+                // Skip when the file is already indexed AND neither mtime
+                // nor size has changed — watcher may fire spurious Modify
+                // events (e.g. Finder QuickLook / atime bump on open) that
+                // don't reflect actual content changes.
+                let skip = conn
+                    .query_row(
+                        "SELECT mtime FROM file_tracking WHERE id=?1",
+                        rusqlite::params![file_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map(|last_mtime| last_mtime == mtime)
+                    .unwrap_or(false);
                 drop(conn);
+                if skip {
+                    return Ok(());
+                }
                 match self.indexer.index_file(&file_id, file_path, &event.dir_id) {
                     Ok(()) => log::info!("[WATCHER] indexed: {path_str}"),
                     Err(e) => log::error!("[WATCHER] failed to index {path_str}: {e}"),
