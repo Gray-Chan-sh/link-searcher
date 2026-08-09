@@ -4,7 +4,7 @@ import { openFile, revealInFolder } from '../api/files'
 import { useI18n } from '../i18n'
 import { formatSize, formatTime } from '../utils/format'
 
-const ITEM_HEIGHT = 72
+const ITEM_HEIGHT = 80
 const OVERSCAN = 5
 
 interface ContextMenu {
@@ -80,7 +80,7 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
               key={hit.file_id}
               onClick={() => onSelect(hit)}
               onContextMenu={(e) => handleContextMenu(e, hit)}
-              className={`absolute left-0 right-0 w-full text-left px-4 py-3 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50 ${
+              className={`absolute left-0 right-0 w-full text-left px-4 py-3 transition-colors hover:bg-gray-50 dark:hover:bg-gray-800/50 overflow-hidden ${
                 selectedId === hit.file_id ? 'bg-blue-50 dark:bg-blue-900/20' : ''
               }`}
               style={{ top: actualIndex * ITEM_HEIGHT, height: ITEM_HEIGHT }}
