@@ -131,6 +131,11 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         messages: Vec<Msg>,
         temperature: f32,
         max_tokens: u32,
+        // Force a single non-streamed JSON response. Some OpenAI-compatible
+        // gateways (e.g. router proxies) default to SSE streaming, which our
+        // JSON parser can't read (would otherwise fail with
+        // "trailing characters" and the request would look like a failure).
+        stream: bool,
     }
     #[derive(Deserialize)]
     struct Resp {
@@ -149,6 +154,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         ],
         temperature: 0.3,
         max_tokens: 1024,
+        stream: false,
     };
     let req_body = match serde_json::to_string(&req) {
         Ok(b) => b,
