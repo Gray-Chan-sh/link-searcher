@@ -21,6 +21,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   const scrollRef = useRef<HTMLDivElement>(null)
   // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
   const latestReqIdRef = useRef(0)
+  // 自发起防护：handleSend 设置 pending 后，恢复 effect 不应把自己刚发起
+  // 的请求当作"残留 pending"再重跑一次（否则每轮追问都会并发两个请求）。
+  const skipResumeRef = useRef(false)
   // 事件回调需要"最新"会话值（组件卸载/会话切换后仍可能收到迟到事件）。
   const sessionRef = useRef(session)
   const messagesRef = useRef<ChatMessage[]>([])
@@ -127,6 +130,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     const userMsg: ChatMessage = { role: 'user', content: q }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
+    skipResumeRef.current = true
     patchSession({
       messages: [...messages, userMsg],
       pending_query: q,
@@ -157,6 +161,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   // 后续再以流式替代）。
   useEffect(() => {
     if (!session?.pending_query) return
+    // 本组件刚发起的请求（handleSend）不恢复——避免并发双请求。
+    if (skipResumeRef.current) {
+      skipResumeRef.current = false
+      return
+    }
     const q = session.pending_query
     const reqId = ++latestReqIdRef.current
     const base = session.messages
