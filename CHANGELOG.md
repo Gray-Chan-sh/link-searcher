@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-10（AI 探测超时 5s→15s —— combo 网关 4-12s 调度导致探测 flaky）
+
+- **设置页测试/聊天页探测"很难通过、时好时坏"**：程序日志实锤 `timed out reading response`——`ping_post` 探测超时 5s，而 9router combo 模型（oc/deepseek-v4-flash-free）TTFT 通常 4-12s（proxy 日志 `DONE 4197ms~11887ms`）→ 大半探测 5s 内收不到响应被判 false，少数 <5s 碰巧通过。`IN 0 OUT 0` 是 `max_tokens:1` ping 探测的正常表现（HTTP 200 即通过），非故障（`src-tauri/src/ai/mod.rs`）
+- **修复**：`ping_post` 增加 timeout 参数——LLM 探测 5s→**15s**（容忍 combo 调度；最大观测 TTFT 11.9s 留 3s 余量），Embedding 探测保持 5s（localhost 秒回）
+- **测试**：124 单元全过，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 能力判定不一致 —— 缓存 vs 实时 + 静默失败）
 
 - **设置页测试通过但聊天页显示"LLM 网关未配置或未通过测试"**：`capabilities()` 有 30s 缓存（启动时一次失败的探测结果被缓存为 llm=false），而设置页"测试"是实时探测绕过缓存；且 AiChat `aiCapabilities().catch(() => {})` 静默吞错，aiCap 保持初始 false 永久显示不可用（`src-tauri/src/ai/mod.rs`、`src/pages/AiChat.tsx`）

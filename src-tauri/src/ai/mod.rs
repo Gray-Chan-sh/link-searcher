@@ -304,7 +304,7 @@ fn test_embedding() -> GatewayTest {
     }
     let url = format!("{}/embeddings", cfg.embedding_api_base.trim_end_matches('/'));
     let body = serde_json::json!({ "model": cfg.embedding_model, "input": [""] });
-    match ping_post(&url, &cfg.embedding_api_key, &body) {
+    match ping_post(&url, &cfg.embedding_api_key, &body, std::time::Duration::from_secs(5)) {
         Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into() },
         Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
     }
@@ -321,21 +321,23 @@ fn test_llm() -> GatewayTest {
         "messages": [{"role":"user","content":"ping"}],
         "max_tokens": 1
     });
-    match ping_post(&url, &cfg.llm_api_key, &body) {
+    match ping_post(&url, &cfg.llm_api_key, &body, std::time::Duration::from_secs(15)) {
         Ok(()) => GatewayTest { kind: "llm", ok: true, detail: "OK".into() },
         Err(e) => GatewayTest { kind: "llm", ok: false, detail: e },
     }
 }
 
 /// Issue a tiny POST and return Ok on any 2xx. Rejects 4xx/5xx with the
-/// status text, and network errors with the transport message.
-fn ping_post(url: &str, key: &str, body: &serde_json::Value) -> Result<(), String> {
-    // Connectivity probes use a short timeout so a dead/hanging gateway
-    // fails fast instead of blocking the settings "test" or the startup
-    // capability probe for the full request timeout.
-    let agent = ureq::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build();
+/// status text, and network errors with the transport message. `timeout`
+/// differs per gateway: combo proxies (9router) take 4-12s to schedule a
+/// model, so a 5s probe would flakily "fail" a healthy gateway.
+fn ping_post(
+    url: &str,
+    key: &str,
+    body: &serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<(), String> {
+    let agent = ureq::builder().timeout(timeout).build();
     let send = agent
         .post(url)
         .set("Content-Type", "application/json")
