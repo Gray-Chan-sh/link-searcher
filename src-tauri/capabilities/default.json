@@ -25,6 +25,6 @@
     "autostart:default"
   ],
   "fs": {
-    "scope": ["$APPDATA/**", "$APPLOCALDATA/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**"]
+    "scope": ["$APPDATA/**", "$APPLOCALDATA/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**", "$DIALOG_FILES/**"]
   }
 }

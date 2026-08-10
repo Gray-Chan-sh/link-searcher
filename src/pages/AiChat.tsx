@@ -95,7 +95,10 @@ export default function AiChat() {
       const md = await exportChatSession(activeId)
       const path = await save({ defaultPath: 'ai-chat.md', filters: [{ name: 'Markdown', extensions: ['md'] }] })
       if (path) await writeTextFile(path, md)
-    } catch { /* ignore */ }
+    } catch (e) {
+      // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
+      alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
   }, [activeId])
 
   return (
