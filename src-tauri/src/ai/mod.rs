@@ -138,7 +138,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
             ChatMsg { role: "user".into(), content: user.into() },
         ],
         temperature: 0.3,
-        max_tokens: 1024,
+        max_tokens: 4096,
         stream: false,
     };
     let req_body = match serde_json::to_string(&req) {
@@ -238,7 +238,9 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn build_agent() -> ureq::Agent {
-    let mut builder = ureq::builder().timeout(std::time::Duration::from_secs(120));
+    // Long enough for slow local LLMs (e.g. MLX at ~15 tok/s, 4096 tokens
+    // out ≈ 275s); connectivity probes use their own short timeout.
+    let mut builder = ureq::builder().timeout(std::time::Duration::from_secs(300));
     for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
         if let Ok(p) = std::env::var(var) {
             if !p.is_empty() {

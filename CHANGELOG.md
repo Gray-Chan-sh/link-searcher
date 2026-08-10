@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-10（AI 长回答截断 —— max_tokens 1024→4096 + 请求超时 120s→300s）
+
+- **本地 omlx（Qwen3.6-35B）回答被截断**：omlx 日志 `finish_reason=length, max_tokens=1024`——`chat()` 的 `max_tokens=1024` 上限太小，计算/分析类回答（如"1600 万收费计算"）写到一半被截断。另 `build_agent` 120s 全请求超时不足以覆盖慢速本地模型（~15 tok/s × 4096 tokens ≈ 275s）（`src-tauri/src/ai/mod.rs`）
+- **修复**：`chat()` `max_tokens` 1024 → **4096**；`build_agent` 超时 120s → **300s**（探测用独立 5s/15s 短超时不受影响）
+- **测试**：124 单元全过，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 问答检索 —— 问句 PhraseQuery 陷阱修复 + 错误透传 + 批量重提取）
 
 - **AI 问答"未找到相关文档内容"实锤根因**：Tantivy QueryParser 把裸多词 CJK 查询解析为 **slop-0 PhraseQuery**（`parse` Debug 实证：`PhraseQuery[(0,小城),(2,律师),(2,律师收费),(4,收费)]`）——要求所有词在文档中按同一连续位置出现。自然语言问句必然 0 命中；短词/精确短语（"小城收费"）位置吻合才碰巧命中（内存索引隔离实验复现）
