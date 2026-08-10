@@ -32,6 +32,15 @@
 
 ---
 
+## 2026-08-11（Wave 2 — 路线图 P1/P2/P3 三项落地）
+
+- **T3 启动扫描异步化+进度**：`lib.rs` 启动扫描从 `|_|{}` 丢进度改为 `emit("scan-progress", ScanEventPayload)`（复用 trigger_scan 结构供前端统一监听）；新建 `logs/session.rs` 模块（`SessionLog::open/write/close`）附加会话日志契约（`src-tauri/src/logs/session.rs` + `mod.rs`、`lib.rs`、`commands/index.rs`）
+- **T7 索引会话日志**：`trigger_scan`/`rebuild_index`/`add_dir` 吸收三处触发点打开/关闭会话日志（`logs/scan-{ts}.log`）；`get_logs` 加 `session_id` 参数安全读取会话文件；新增 `list_session_logs` 命令按 mtime 降序返回会话文件名列表（`commands/index.rs`、`dirs.rs`、`logs.rs`、`lib.rs`）
+- **T12 多轮 RAG 补全**：四子项(a) `rewrite_query` 指代改写（`它/这个/上述/该/那` 开头或<4字时拼接最近用户关键词）；(b) `bm25_relevant_hits` 支持 `semantic:true`（embed + RRF 融合 K=60）；(c) `EvidenceItem` 结构化引用（`{file_id, path, snippet}`）加入 `SmartSearchResponse`/`AiDone`/`PreparedSmart`/`PreparedConversation`；(d) `ChatSession` 增加 `per_turn_evidence`（serde default 兼容旧记录，前端 ChatPanel done 处理中记录每轮 source_ids）；+4 单测（`commands/ai.rs`、`api/files.ts`、`ChatPanel.tsx`）
+- **整体验证**：138 单元全过、`cargo check` 零 error 零 warning、`npx tsc` 零错误、`semgrep --severity ERROR` 零发现
+
+---
+
 ## 2026-08-11（Wave 1 — 路线图 P0/P1/P2 六项落地）
 
 - **T14 音频 STT 过期条目标记**：ROADMAP.md P3 删除已完成的音频 STT 行（`ROADMAP.md`）

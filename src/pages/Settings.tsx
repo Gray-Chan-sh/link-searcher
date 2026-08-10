@@ -5,8 +5,9 @@ import { listen } from '@tauri-apps/api/event'
 import { useSettings } from '../hooks/useSettings'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
-import { LoadingSpinner } from '../icons'
-import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
+import { LoadingSpinner, PlusIcon } from '../icons'
+import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
+import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { checkDependencies, getVersion, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
 
 const OCR_LANGS = [
@@ -34,11 +35,21 @@ export default function Settings() {
   const [migrationStage, setMigrationStage] = useState<string | null>(null)
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [loPath, setLoPath] = useState<string>('')
-  const [aiCfg, setAiCfg] = useState<Partial<ConfigInfo>>({})
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [caps, setCaps] = useState<AiCapabilities | null>(null)
+  const [aiWarn, setAiWarn] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editDraft, setEditDraft] = useState<{ name: string; baseUrl: string; apiKey: string; keyTouched: boolean; reveal: boolean } | null>(null)
+  const [savingId, setSavingId] = useState<string | null>(null)
+  const [testingId, setTestingId] = useState<string | null>(null)
+  const [testOutcome, setTestOutcome] = useState<{ id: string; ok: boolean; detail: string } | null>(null)
+  const [refreshingId, setRefreshingId] = useState<string | null>(null)
+  const [refreshMsg, setRefreshMsg] = useState<{ id: string; text: string; isError: boolean } | null>(null)
+  const [adding, setAdding] = useState(false)
+  const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -76,27 +87,146 @@ export default function Settings() {
   }, [])
 
   useEffect(() => {
+    aiCapabilities().then(setCaps).catch(() => {})
+  }, [])
+
+  useEffect(() => {
     if (appConfig) {
       setLoPath(appConfig.lo_binary_path)
-      setAiCfg({
-        embedding_api_base: appConfig.embedding_api_base ?? '',
-        embedding_api_key: appConfig.embedding_api_key ?? '',
-        embedding_model: appConfig.embedding_model ?? '',
-        llm_api_base: appConfig.llm_api_base ?? '',
-        llm_api_key: appConfig.llm_api_key ?? '',
-        llm_model: appConfig.llm_model ?? '',
-      })
     }
   }, [appConfig])
 
-  const saveAiField = async (field: keyof ConfigInfo, value: string) => {
+  const persistProviders = async (providers: ProviderInfo[]) => {
     if (!appConfig) return
+    const updated = { ...appConfig, providers }
+    await updateConfig(updated)
+    setAppConfig(updated)
+  }
+
+  const setProvidersLocal = (updater: (ps: ProviderInfo[]) => ProviderInfo[]) => {
+    setAppConfig(c => (c ? { ...c, providers: updater(c.providers) } : c))
+  }
+
+  const providerInUse = (p: ProviderInfo) =>
+    (appConfig?.active_embedding_model_id ?? '').startsWith(`${p.id}:`) ||
+    (appConfig?.active_llm_model_id ?? '').startsWith(`${p.id}:`)
+
+  const modelOptions = (kind: 'embedding' | 'llm'): { value: string; label: string }[] =>
+    (appConfig?.providers ?? []).flatMap(p =>
+      p.models
+        .filter(m => m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
+        .map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} / ${m.id}` })),
+    )
+
+  const handleActiveModel = async (kind: 'embedding' | 'llm', modelId: string) => {
+    if (!appConfig) return
+    const key = kind === 'embedding' ? 'active_embedding_model_id' : 'active_llm_model_id'
+    const prev = appConfig[key]
+    setAppConfig({ ...appConfig, [key]: modelId })
     try {
-      const updated = { ...appConfig, [field]: value }
-      await updateConfig(updated)
-      setAppConfig(updated)
-    } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Failed to save AI config')
+      await setActiveModel(kind, modelId)
+      aiCapabilities().then(setCaps).catch(() => {})
+    } catch (e) {
+      setAppConfig(c => (c ? { ...c, [key]: prev } : c))
+      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
+    }
+  }
+
+  const handleTestProvider = async (p: ProviderInfo) => {
+    setTestingId(p.id)
+    setTestOutcome(null)
+    try {
+      const r = await testProvider(p.base_url, p.api_key)
+      setTestOutcome({ id: p.id, ok: r.ok, detail: r.detail })
+    } catch (e) {
+      setTestOutcome({ id: p.id, ok: false, detail: e instanceof Error ? e.message : String(e) })
+    } finally {
+      setTestingId(null)
+    }
+  }
+
+  const handleRefreshProvider = async (p: ProviderInfo) => {
+    setRefreshingId(p.id)
+    setRefreshMsg(null)
+    try {
+      const models = await refreshProviderModels(p.id)
+      setProvidersLocal(ps => ps.map(x => (x.id === p.id ? { ...x, models } : x)))
+      setRefreshMsg({ id: p.id, text: t('ai_refresh_done', { n: models.length }), isError: false })
+    } catch (e) {
+      setRefreshMsg({ id: p.id, text: e instanceof Error ? e.message : String(e), isError: true })
+    } finally {
+      setRefreshingId(null)
+    }
+  }
+
+  const handleDeleteProvider = async (p: ProviderInfo) => {
+    try {
+      await deleteProvider(p.id)
+      setProvidersLocal(ps => ps.filter(x => x.id !== p.id))
+    } catch (e) {
+      setAiWarn(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const openEdit = (p: ProviderInfo) => {
+    setEditingId(p.id)
+    setEditDraft({ name: p.name, baseUrl: p.base_url, apiKey: maskApiKey(p.api_key), keyTouched: false, reveal: false })
+  }
+
+  const handleSaveEdit = async (p: ProviderInfo) => {
+    if (!editDraft) return
+    const mask = maskApiKey(p.api_key)
+    const finalKey = editDraft.keyTouched && editDraft.apiKey !== '' && editDraft.apiKey !== mask ? editDraft.apiKey : p.api_key
+    setSavingId(p.id)
+    try {
+      await persistProviders(
+        (appConfig?.providers ?? []).map(x =>
+          x.id === p.id
+            ? { ...x, name: editDraft.name, base_url: editDraft.baseUrl, api_key: finalKey }
+            : x,
+        ),
+      )
+      setEditingId(null)
+      setEditDraft(null)
+    } catch (e) {
+      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
+    } finally {
+      setSavingId(null)
+    }
+  }
+
+  const handleModelType = async (p: ProviderInfo, modelId: string, modelType: ModelType) => {
+    try {
+      await persistProviders(
+        (appConfig?.providers ?? []).map(x =>
+          x.id === p.id
+            ? { ...x, models: x.models.map(m => (m.id === modelId ? { ...m, model_type: modelType } : m)) }
+            : x,
+        ),
+      )
+    } catch (e) {
+      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
+    }
+  }
+
+  const handleAddProvider = async () => {
+    if (!newProv.name.trim() || !newProv.baseUrl.trim()) {
+      setAiWarn(t('ai_add_required'))
+      return
+    }
+    try {
+      const out = await addProvider(newProv.name.trim(), newProv.baseUrl.trim(), newProv.apiKey)
+      if (out.pull_error) setAiWarn(t('ai_pull_error', { detail: out.pull_error }))
+      setProvidersLocal(ps => [
+        ...ps,
+        { id: out.id, name: newProv.name.trim(), base_url: newProv.baseUrl.trim(), api_key: newProv.apiKey, models: [] },
+      ])
+      const fresh = await getConfig()
+      setAppConfig(fresh)
+      setAdding(false)
+      setNewProv({ name: '', baseUrl: '', apiKey: '' })
+    } catch (e) {
+      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
     }
   }
 
@@ -376,82 +506,242 @@ export default function Settings() {
 
         <Section title={t('ai_service')}>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{t('ai_service_desc')}</p>
-          <div className="space-y-4">
-            <div className="space-y-3 p-3 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
-              <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                <span className="size-1.5 rounded-full bg-purple-500" />
-                {t('embedding_gateway')}
-              </div>
-              <TextField
-                label="Base URL"
-                value={aiCfg.embedding_api_base ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, embedding_api_base: v })}
-                onBlur={() => saveAiField('embedding_api_base', aiCfg.embedding_api_base ?? '')}
-                placeholder="http://127.0.0.1:11434/v1 或 https://api.openai.com/v1"
-              />
-              <TextField
-                label="API Key (可选)"
-                value={aiCfg.embedding_api_key ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, embedding_api_key: v })}
-                onBlur={() => saveAiField('embedding_api_key', aiCfg.embedding_api_key ?? '')}
-                placeholder="sk-...（本地可留空）"
-              />
-              <TextField
-                label={t('embedding_model')}
-                value={aiCfg.embedding_model ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, embedding_model: v })}
-                onBlur={() => saveAiField('embedding_model', aiCfg.embedding_model ?? '')}
-                placeholder="text-embedding-v3-small"
-              />
+          {aiWarn && (
+            <div className="px-3 py-2 text-xs text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-900 rounded-lg">
+              {aiWarn}
             </div>
-            <div className="space-y-3 p-2 bg-gray-50 dark:bg-gray-800/50 border border-gray-200 dark:border-gray-700 rounded-lg">
-              <div className="text-xs font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
-                <span className="size-1.5 rounded-full bg-blue-500" />
-                {t('llm_gateway')}
-              </div>
-              <TextField
-                label="Base URL"
-                value={aiCfg.llm_api_base ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, llm_api_base: v })}
-                onBlur={() => saveAiField('llm_api_base', aiCfg.llm_api_base ?? '')}
-                placeholder="http://127.0.0.1:11434/v1 或 https://api.openai.com/v1"
-              />
-              <TextField
-                label="API Key (可选)"
-                value={aiCfg.llm_api_key ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, llm_api_key: v })}
-                onBlur={() => saveAiField('llm_api_key', aiCfg.llm_api_key ?? '')}
-                placeholder="sk-...（本地可留空）"
-              />
-              <TextField
-                label={t('llm_model')}
-                value={aiCfg.llm_model ?? ''}
-                onChange={v => setAiCfg({ ...aiCfg, llm_model: v })}
-                onBlur={() => saveAiField('llm_model', aiCfg.llm_model ?? '')}
-                placeholder="qwen2.5-7b-instruct"
-              />
-            </div>
-            <div className="flex items-center gap-2 pt-1">
-              <button
-                onClick={testAi}
-                disabled={aiTestLoading}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50 transition-colors"
-              >
-                {aiTestLoading ? '…' : t('test_ai_gateways')}
-              </button>
-            </div>
+          )}
+
+          <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">{t('ai_current_usage')}</div>
+          <div className="space-y-3">
+            <UsageSelect
+              label={t('embedding_model')}
+              value={appConfig?.active_embedding_model_id ?? ''}
+              onChange={v => handleActiveModel('embedding', v)}
+              options={modelOptions('embedding')}
+              cap={caps?.embedding}
+              notSelectedLabel={t('ai_not_selected')}
+              checkingLabel={t('ai_checking')}
+              availableLabel={t('ai_available')}
+              notConfiguredLabel={t('ai_not_configured')}
+            />
+            <UsageSelect
+              label={t('llm_model')}
+              value={appConfig?.active_llm_model_id ?? ''}
+              onChange={v => handleActiveModel('llm', v)}
+              options={modelOptions('llm')}
+              cap={caps?.llm}
+              notSelectedLabel={t('ai_not_selected')}
+              checkingLabel={t('ai_checking')}
+              availableLabel={t('ai_available')}
+              notConfiguredLabel={t('ai_not_configured')}
+            />
+          </div>
+
+          <div className="pt-2 space-y-1 flex items-center gap-2 flex-wrap">
+            <button
+              onClick={testAi}
+              disabled={aiTestLoading}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-50 transition-colors"
+            >
+              {aiTestLoading ? '…' : t('test_ai_gateways')}
+            </button>
             {aiTest && (
-              <div className="space-y-1">
+              <div className="flex items-center gap-3">
                 {aiTest.map((r, i) => (
-                  <div key={i} className={`flex items-center gap-2 text-xs ${r.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                  <div key={i} className={`flex items-center gap-1 text-xs ${r.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                     <span>{r.ok ? '✓' : '✗'}</span>
-                    <span className="font-medium w-20">{r.kind === 'embedding' ? t('embedding_gateway') : t('llm_gateway')}</span>
-                    <span className="text-gray-500 dark:text-gray-400 truncate">{r.detail}</span>
+                    <span className="font-medium">{r.kind === 'embedding' ? t('embedding_gateway') : t('llm_gateway')}</span>
+                    <span className="text-gray-500 dark:text-gray-400 truncate max-w-48">{r.detail}</span>
                   </div>
                 ))}
               </div>
             )}
           </div>
+
+          <div>
+            <div className="text-xs font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-2 mb-2">
+              <span className="size-1.5 rounded-full bg-purple-500" />
+              {t('ai_providers')}
+            </div>
+            {(appConfig?.providers ?? []).length === 0 ? (
+              <p className="text-xs text-gray-500 dark:text-gray-400">{t('ai_no_provider')}</p>
+            ) : (
+              <div className="space-y-2">
+                {(appConfig?.providers ?? []).map(p => (
+                  <div key={p.id} className="p-3 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">{p.name}</p>
+                        <p className="text-xs text-gray-500 dark:text-gray-400 font-mono truncate">{p.base_url}</p>
+                      </div>
+                      <span className="text-xs text-gray-500 dark:text-gray-400 shrink-0">{t('ai_models_count', { n: p.models.length })}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5 mt-2">
+                      <RowAction onClick={() => handleTestProvider(p)} disabled={testingId === p.id}>
+                        {testingId === p.id ? '…' : t('ai_test')}
+                      </RowAction>
+                      <RowAction onClick={() => openEdit(p)}>{t('ai_edit')}</RowAction>
+                      <RowAction onClick={() => handleRefreshProvider(p)} disabled={refreshingId === p.id}>
+                        {refreshingId === p.id ? '…' : t('refresh')}
+                      </RowAction>
+                      <RowAction danger onClick={() => handleDeleteProvider(p)} disabled={providerInUse(p)} title={providerInUse(p) ? t('ai_delete_in_use') : undefined}>
+                        {t('delete')}
+                      </RowAction>
+                    </div>
+                    {testOutcome?.id === p.id && (
+                      <div className={`mt-2 flex items-center gap-1 text-xs ${testOutcome.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                        <span>{testOutcome.ok ? '✓' : '✗'}</span>
+                        <span className="font-medium shrink-0">{testOutcome.ok ? t('ai_test_ok') : t('ai_test_fail')}</span>
+                        <span className="text-gray-500 dark:text-gray-400 truncate">{testOutcome.detail}</span>
+                      </div>
+                    )}
+                    {refreshMsg?.id === p.id && (
+                      <div className={`mt-2 text-xs ${refreshMsg.isError ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}`}>
+                        {refreshMsg.text}
+                      </div>
+                    )}
+                    {p.models.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
+                        {p.models.map(m => (
+                          <div key={m.id} className="flex items-center gap-2">
+                            <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
+                            <select
+                              title={t('ai_model_type')}
+                              value={m.model_type}
+                              onChange={e => handleModelType(p, m.id, e.target.value as ModelType)}
+                              className="px-1.5 py-0.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+                            >
+                              <option value="Embedding">{t('ai_type_embedding')}</option>
+                              <option value="Llm">{t('ai_type_llm')}</option>
+                              <option value="Unknown">{t('ai_type_unknown')}</option>
+                            </select>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {editingId === p.id && editDraft && (
+                      <div className="mt-3 space-y-3 p-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_name')}</label>
+                          <input
+                            type="text"
+                            value={editDraft.name}
+                            onChange={e => setEditDraft({ ...editDraft, name: e.target.value })}
+                            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_base_url')}</label>
+                          <input
+                            type="text"
+                            value={editDraft.baseUrl}
+                            onChange={e => setEditDraft({ ...editDraft, baseUrl: e.target.value })}
+                            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_api_key')}</label>
+                          <div className="flex gap-1.5">
+                            <input
+                              type={editDraft.reveal ? 'text' : 'password'}
+                              value={editDraft.reveal && !editDraft.keyTouched ? p.api_key : editDraft.apiKey}
+                              onChange={e => setEditDraft({ ...editDraft, apiKey: e.target.value, keyTouched: true })}
+                              placeholder={t('ai_key_placeholder')}
+                              className="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setEditDraft(d => {
+                                if (!d) return d
+                                const reveal = !d.reveal
+                                return { ...d, reveal, apiKey: d.keyTouched ? d.apiKey : (reveal ? p.api_key : maskApiKey(p.api_key)) }
+                              })}
+                              title={editDraft.reveal ? t('ai_hide_key') : t('ai_show_key')}
+                              className="px-2.5 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 border border-gray-200 dark:border-gray-700 rounded-lg bg-gray-50 dark:bg-gray-800 transition-colors"
+                            >
+                              👁
+                            </button>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleSaveEdit(p)}
+                            disabled={savingId === p.id}
+                            className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded disabled:opacity-50 transition-colors"
+                          >
+                            {savingId === p.id ? '…' : t('ai_save')}
+                          </button>
+                          <button
+                            onClick={() => { setEditingId(null); setEditDraft(null) }}
+                            className="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors"
+                          >
+                            {t('cancel')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {!adding ? (
+            <button
+              onClick={() => setAdding(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+            >
+              <PlusIcon className="size-3.5" />
+              {t('ai_add_provider')}
+            </button>
+          ) : (
+            <div className="space-y-3 p-3 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_name')}</label>
+                <input
+                  type="text"
+                  value={newProv.name}
+                  onChange={e => setNewProv({ ...newProv, name: e.target.value })}
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_base_url')}</label>
+                <input
+                  type="text"
+                  value={newProv.baseUrl}
+                  onChange={e => setNewProv({ ...newProv, baseUrl: e.target.value })}
+                  placeholder="http://127.0.0.1:11434/v1"
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('ai_api_key')}</label>
+                <input
+                  type="text"
+                  value={newProv.apiKey}
+                  onChange={e => setNewProv({ ...newProv, apiKey: e.target.value })}
+                  placeholder={t('ai_key_placeholder')}
+                  className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleAddProvider}
+                  className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+                >
+                  {t('ai_save')}
+                </button>
+                <button
+                  onClick={() => setAdding(false)}
+                  className="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded transition-colors"
+                >
+                  {t('cancel')}
+                </button>
+              </div>
+            </div>
+          )}
         </Section>
 
         <Section title="System">
@@ -652,6 +942,68 @@ function ToggleField({ label, checked, onChange }: {
       />
       <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
     </label>
+  )
+}
+
+function maskApiKey(key: string): string {
+  if (!key) return ''
+  return key.length <= 4 ? '****' : `****${key.slice(-4)}`
+}
+
+function UsageSelect({ label, value, onChange, options, cap, notSelectedLabel, checkingLabel, availableLabel, notConfiguredLabel }: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: { value: string; label: string }[]
+  cap: boolean | undefined
+  notSelectedLabel: string
+  checkingLabel: string
+  availableLabel: string
+  notConfiguredLabel: string
+}) {
+  return (
+    <div>
+      <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</label>
+      <div className="flex items-center gap-2">
+        <select
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          className="flex-1 min-w-0 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+        >
+          <option value="">{notSelectedLabel}</option>
+          {options.map(o => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+        <span className={`shrink-0 text-xs ${cap ? 'text-green-600 dark:text-green-400' : 'text-gray-400 dark:text-gray-500'}`}>
+          {cap === undefined ? checkingLabel : cap ? availableLabel : notConfiguredLabel}
+        </span>
+      </div>
+    </div>
+  )
+}
+
+function RowAction({ onClick, disabled, title, danger, children }: {
+  onClick: () => void
+  disabled?: boolean
+  title?: string
+  danger?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`px-2 py-1 text-xs font-medium rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+        danger
+          ? 'text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 hover:bg-red-100 dark:hover:bg-red-900/40'
+          : 'text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700'
+      }`}
+    >
+      {children}
+    </button>
   )
 }
 

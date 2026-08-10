@@ -202,7 +202,7 @@ mod tests {
         let clock = Arc::new(Mutex::new(Instant::now()));
         let manager = IndexManager::create_in_ram_with_clock(Box::new({
             let clock = Arc::clone(&clock);
-            move || *clock.lock().unwrap()
+            move || *clock.lock().unwrap() // nosemgrep: rust-mutex-lock-unwrap
         }));
         (manager, clock)
     }
@@ -228,7 +228,7 @@ mod tests {
         let (manager, clock) = manager_with_clock();
         let _ = manager.reader().expect("reader should reload");
         assert_eq!(manager.reload_count.load(Ordering::Relaxed), 1);
-        *clock.lock().unwrap() += Duration::from_secs(2);
+        *clock.lock().unwrap() += Duration::from_secs(2); // nosemgrep: rust-mutex-lock-unwrap
         // When: reader() is called after the 1s window has elapsed.
         let _ = manager.reader().expect("reader should reload");
         // Then: a fresh explicit reload happens for freshness.

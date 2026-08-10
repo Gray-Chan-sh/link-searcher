@@ -102,10 +102,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
         const sourcesPatch = p.source_ids.length > 0
           ? { source_ids: p.source_ids, source_files: p.source_files }
           : {}
+        const userTurns = messagesRef.current.filter(m => m.role === 'user').length
+        const perTurnPatch = p.source_ids.length > 0
+          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), { turn_index: userTurns - 1, file_ids: p.source_ids }] }
+          : {}
         onSessionChange({
           ...cur,
           messages: [...messagesRef.current, { role: 'assistant', content: p.full_text + took }],
           ...sourcesPatch,
+          ...perTurnPatch,
           pending_query: null,
           pending_started_at: null,
         })
