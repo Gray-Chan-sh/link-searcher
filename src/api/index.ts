@@ -49,6 +49,10 @@ export async function reindexFile(fileId: string): Promise<void> {
   return invoke('reindex_file', { fileId })
 }
 
+export async function reindexFiles(ids: string[]): Promise<ReextractReport> {
+  return invoke<ReextractReport>('reindex_files', { fileIds: ids })
+}
+
 export async function cancelScan(): Promise<void> {
   return invoke('cancel_scan')
 }

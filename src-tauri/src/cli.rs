@@ -1,7 +1,12 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use clap::Parser;
 
+use crate::boot;
 use crate::config;
+use crate::db;
+use crate::scanner::{FileWatcher, WatcherCommand};
 use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 use crate::search::IndexManager;
 
@@ -9,12 +14,23 @@ use crate::search::IndexManager;
 #[command(name = "link-searcher", about = "Cross-platform full-text search")]
 pub enum Cli {
     /// Search the index from the command line
-    Search {
+    #[command(visible_alias = "search")]
+    Index {
         /// Search query
         query: String,
         /// Max results
         #[arg(short, long, default_value = "10")]
         limit: usize,
+    },
+    /// Scan a directory (or all configured dirs) and exit
+    Scan {
+        /// Directory to scan; defaults to all configured directories
+        dir: Option<String>,
+    },
+    /// Watch a directory for file changes in real time
+    Watch {
+        /// Directory to watch
+        dir: String,
     },
     /// Check index health
     Health,
@@ -23,7 +39,7 @@ pub enum Cli {
 pub fn run_cli() -> Result<()> {
     let cli = Cli::parse();
     match cli {
-        Cli::Search { query, limit } => {
+        Cli::Index { query, limit } => {
             let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);
 
@@ -57,6 +73,96 @@ pub fn run_cli() -> Result<()> {
                 "--- {} results in {}ms ---",
                 result.total, result.took_ms
             );
+        }
+        Cli::Scan { dir } => {
+            let data_dir = config::load_config().data_dir;
+            let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+            let dirs = match dir {
+                Some(d) => {
+                    let path = std::fs::canonicalize(&d)
+                        .with_context(|| format!("cannot access directory: {d}"))?;
+                    vec![ensure_dir_config(&bootstrap, &path)?]
+                }
+                None => {
+                    let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+                    let dirs = db::dir_config::list_dirs(&conn).context("failed to list dirs")?;
+                    drop(conn);
+                    if dirs.is_empty() {
+                        println!(
+                            "No configured directories. Pass one: link-searcher scan /path"
+                        );
+                    }
+                    dirs.into_iter()
+                        .map(|d| (d.id, PathBuf::from(d.path)))
+                        .collect()
+                }
+            };
+            for (dir_id, dir_path) in &dirs {
+                eprintln!("\n[scan] scanning {} ...", dir_path.display());
+                let result = bootstrap
+                    .scanner
+                    .full_scan(dir_id, |prog| {
+                        eprint!(
+                            "\r[scan] {} {}/{} {}",
+                            prog.phase, prog.processed, prog.total, prog.current_file
+                        );
+                    })
+                    .with_context(|| format!("scan failed for {}", dir_path.display()))?;
+                eprintln!();
+                println!(
+                    "{}: {} files, {} indexed (added {}, modified {}, deleted {}, errors {}) in {} ms",
+                    dir_path.display(),
+                    result.total_files,
+                    result.indexed,
+                    result.added,
+                    result.modified,
+                    result.deleted,
+                    result.errors,
+                    result.duration_ms,
+                );
+            }
+        }
+        Cli::Watch { dir } => {
+            let data_dir = config::load_config().data_dir;
+            let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+            let path = std::fs::canonicalize(&dir)
+                .with_context(|| format!("cannot access directory: {dir}"))?;
+            let (dir_id, dir_path) = ensure_dir_config(&bootstrap, &path)?;
+
+            let (watcher, event_rx) = FileWatcher::new();
+            let watch_tx = watcher.tx().clone();
+            watch_tx
+                .send(WatcherCommand::StartWatch {
+                    dir_id: dir_id.clone(),
+                    path: dir_path.clone(),
+                })
+                .context("failed to start watcher")?;
+
+            // Baseline scan first so existing files are tracked — mirrors the
+            // GUI startup ordering (R3-11): StartWatch precedes the scan.
+            let result = bootstrap
+                .scanner
+                .startup_scan(&dir_id, |prog| {
+                    eprint!(
+                        "\r[scan] {} {}/{} {}",
+                        prog.phase, prog.processed, prog.total, prog.current_file
+                    );
+                })
+                .with_context(|| format!("baseline scan failed for {}", dir_path.display()))?;
+            eprintln!();
+            println!(
+                "[watch] watching {} ({} files, {} indexed) — press Ctrl-C to stop",
+                dir_path.display(),
+                result.total_files,
+                result.indexed
+            );
+
+            let scanner = bootstrap.scanner.clone();
+            for event in event_rx {
+                if let Err(e) = scanner.handle_event(event) {
+                    eprintln!("[watch] error: {e}");
+                }
+            }
         }
         Cli::Health => {
             let data_dir = config::load_config().data_dir;
@@ -133,4 +239,24 @@ pub fn run_cli() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Register `path` in `dir_config` (reusing an existing entry) and return its
+/// `(dir_id, canonical path)`.
+fn ensure_dir_config(bootstrap: &boot::Bootstrap, path: &Path) -> Result<(String, PathBuf)> {
+    let path_str = path.to_string_lossy().to_string();
+    let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+    let existing = db::dir_config::list_dirs(&conn)
+        .context("failed to list dirs")?
+        .into_iter()
+        .find(|d| Path::new(&d.path) == path);
+    if let Some(d) = existing {
+        drop(conn);
+        return Ok((d.id, path.to_path_buf()));
+    }
+    let created =
+        db::dir_config::add_dir(&conn, &path_str, None, None, None, None, true)
+            .context("failed to register directory")?;
+    drop(conn);
+    Ok((created.id, path.to_path_buf()))
 }

@@ -724,6 +724,75 @@ pub async fn reextract_missing_content(
     .map_err(|e| format!("task panicked: {e}"))?
 }
 
+/// Batch re-index of user-selected files. Reuses `reindex_file`'s per-file
+/// path (clear dedup cache → delete stale Tantivy doc → index_file), run in
+/// `spawn_blocking` so a large selection doesn't block the event loop.
+/// `reindex_file` itself stays for single-file/restore paths.
+#[tauri::command]
+pub async fn reindex_files(
+    state: State<'_, AppState>,
+    file_ids: Vec<String>,
+) -> Result<ReextractReport, String> {
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let (mut ok, mut failed) = (0u64, 0u64);
+        for file_id in file_ids {
+            let conn = match db_pool.get() {
+                Ok(c) => c,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let rec = match tracker::get_file_by_id(&conn, &file_id)
+                .map_err(|e| format!("{e}"))
+                .and_then(|r| r.ok_or_else(|| "file not found".to_string()))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[REINDEX_FILES] {file_id}: {e}");
+                    failed += 1;
+                    continue;
+                }
+            };
+            let dir = match db::dir_config::get_dir(&conn, &rec.dir_id)
+                .map_err(|e| format!("{e}"))
+                .and_then(|d| d.ok_or_else(|| "dir config not found".to_string()))
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("[REINDEX_FILES] {file_id}: {e}");
+                    failed += 1;
+                    continue;
+                }
+            };
+            // Clear the dedup cache for this file's hash so re-extraction
+            // actually runs (important when OCR language changed).
+            if let Some(ref md5) = rec.md5 {
+                let _ = tracker::delete_content(&conn, md5);
+            }
+            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            drop(conn);
+            // Must delete the stale Tantivy doc first — re-adding without it
+            // leaves a duplicate document for the same file.
+            if let Err(e) = indexer.delete_document_only(&file_id) {
+                log::warn!("[REINDEX_FILES] delete stale doc failed {file_id}: {e}");
+            }
+            match indexer.index_file(&file_id, &full_path, &rec.dir_id) {
+                Ok(()) => ok += 1,
+                Err(e) => {
+                    log::warn!("[REINDEX_FILES] {}: {e}", rec.path);
+                    failed += 1;
+                }
+            }
+        }
+        Ok(ReextractReport { processed: ok + failed, ok, failed })
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?
+}
+
 #[tauri::command]
 pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<tracker::IndexError>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
