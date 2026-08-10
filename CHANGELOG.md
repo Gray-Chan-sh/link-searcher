@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-10（AI 聊天「请求失败」—— SSE 流式响应解析兜底）
+
+- **聊天偶发「AI 请求失败（检查网关配置或网络）」**：日志显示根因是 `chat request failed: trailing characters at line 1 column NNNN`——该 OpenAI 兼容网关（router 代理）部分请求仍返回 SSE 流式（`data:{...}` 多帧），即使请求体带 `stream:false`。ureq 读到多帧文本时 serde 单 JSON 解析失败 → chat() 返回 None → 前端报"请求失败"。另有 `timed out reading response`（网关慢，120s 超时）另一形态（`src-tauri/src/ai/mod.rs`）
+- **修复（治本，不依赖网关行为）**：`chat()` 解析改为 `parse_chat_response`——先按纯 JSON 解析，失败则回退扫描 `data: {...}` 行取最后一条有效 payload（跳过 `[DONE]`）。任何 OpenAI 兼容网关（流式/非流式）都能拿到回答，不再报"请求失败"；损坏响应仍返回 Err 保持降级语义
+- **测试**：新增 3 例（纯 JSON / SSE 多帧取末帧 / 损坏响应 Err）；124 单元 + 9 集成 + 6 IPC + 2 OCR 全过，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 聊天发送按钮无响应 —— 旧版 chat_history 迁移 id 不稳定）
 
 - **发送按钮点击无反应（持久）**：`chat_history.json` 为旧版单会话格式时，`read_history` 的 legacy 迁移只在内存包装、**每次调用都生成新随机 UUID** → `list_chat_sessions` 与 `load_chat_session` 两次独立读取 id 必然不同 → load 返回 None → 前端 `activeSession` 置 null 且 `activeId` 锁死 → `handleSend` 静默 return。三个缺陷叠加（`commands/ai.rs`、`AiChat.tsx`、`ChatPanel.tsx`）

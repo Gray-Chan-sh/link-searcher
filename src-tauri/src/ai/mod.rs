@@ -120,15 +120,10 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     let cfg = crate::config::load_config();
     let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
 
-    #[derive(Serialize, Deserialize)]
-    struct Msg {
-        role: String,
-        content: String,
-    }
     #[derive(Serialize)]
     struct Req {
         model: String,
-        messages: Vec<Msg>,
+        messages: Vec<ChatMsg>,
         temperature: f32,
         max_tokens: u32,
         // Force a single non-streamed JSON response. Some OpenAI-compatible
@@ -137,20 +132,12 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         // "trailing characters" and the request would look like a failure).
         stream: bool,
     }
-    #[derive(Deserialize)]
-    struct Resp {
-        choices: Vec<Choice>,
-    }
-    #[derive(Deserialize)]
-    struct Choice {
-        message: Msg,
-    }
 
     let req = Req {
         model: cfg.llm_model.clone(),
         messages: vec![
-            Msg { role: "system".into(), content: system.into() },
-            Msg { role: "user".into(), content: user.into() },
+            ChatMsg { role: "system".into(), content: system.into() },
+            ChatMsg { role: "user".into(), content: user.into() },
         ],
         temperature: 0.3,
         max_tokens: 1024,
@@ -169,10 +156,10 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         .set_auth(&cfg.llm_api_key)
         .send_string(&req_body);
 
-    let parsed: Result<Resp, String> = send_result
+    let parsed: Result<ChatResp, String> = send_result
         .map_err(|e| e.to_string())
         .and_then(|r| r.into_string().map_err(|e| e.to_string()))
-        .and_then(|body| serde_json::from_str::<Resp>(&body).map_err(|e| e.to_string()));
+        .and_then(|body| parse_chat_response(&body));
 
     match parsed {
         Ok(resp) => resp.choices.into_iter().next().map(|c| c.message.content),
@@ -181,6 +168,40 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
             None
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChatMsg {
+    role: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct ChatResp {
+    choices: Vec<ChatChoice>,
+}
+
+#[derive(Deserialize)]
+struct ChatChoice {
+    message: ChatMsg,
+}
+
+/// Parse a chat-completions response. Some OpenAI-compatible gateways
+/// stream (SSE `data: {...}` frames) even with `stream: false`; falling
+/// back to the last non-DONE payload keeps those working instead of
+/// surfacing a spurious "trailing characters" failure.
+fn parse_chat_response(body: &str) -> Result<ChatResp, String> {
+    if let Ok(r) = serde_json::from_str::<ChatResp>(body) {
+        return Ok(r);
+    }
+    body.lines()
+        .filter_map(|l| l.strip_prefix("data:").map(str::trim))
+        .filter(|l| !l.is_empty() && *l != "[DONE]")
+        .last()
+        .ok_or_else(|| "no SSE data payload in response".to_string())
+        .and_then(|payload| {
+            serde_json::from_str::<ChatResp>(payload).map_err(|e| e.to_string())
+        })
 }
 
 pub fn normalize(v: &mut [f32]) {
@@ -422,5 +443,30 @@ mod tests {
             assert!(!tests[1].ok);
         }
         let _ = capabilities();
+    }
+
+    #[test]
+    fn parse_chat_response_handles_plain_json() {
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"你好"}}]}"#;
+        let resp = parse_chat_response(body).unwrap();
+        assert_eq!(resp.choices[0].message.content, "你好");
+    }
+
+    #[test]
+    fn parse_chat_response_falls_back_to_sse_frames() {
+        // Some gateways stream (SSE) even with stream:false — the last
+        // non-DONE payload must win.
+        let body = concat!(
+            "data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"早\"}}]}\n\n",
+            "data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"你好\"}}]}\n\n",
+            "data: [DONE]\n",
+        );
+        let resp = parse_chat_response(body).unwrap();
+        assert_eq!(resp.choices[0].message.content, "你好");
+    }
+
+    #[test]
+    fn parse_chat_response_rejects_garbage() {
+        assert!(parse_chat_response("<html>gateway error</html>").is_err());
     }
 }
