@@ -11,6 +11,14 @@
 
 ---
 
+## 2026-08-10（追问动态依据 —— 来源列表随问题更新）
+
+- **追问仍用首问快照来源,新文件/新问题不改变依据**：`conversation_ask` 只加载固定 `source_ids`。改为**动态依据**：按追问问题（jieba 分词 OR）重新 BM25 检索 top-10，与**仍有效**的旧来源合并（剔除已删除/内容缺失的文件,去重,上限 15）→ 模型依据与来源列表跟随最新问题（`commands/ai.rs`：新增 `bm25_relevant_hits`、`prepare_conversation_prompt` 返回合并后的 `source_ids/source_files`）
+- **前端列表更新**：`conversation_ask_stream` 的 `ai-done` 现携带合并后来源 → ChatPanel 已有的来源 patch 逻辑自动更新「基于 N 份文档」（去旧加新）
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 流式输出 + 回复耗时标注）
 
 - **流式输出**：网关支持时逐字/逐段实时显示回答，不再等完成一次性输出。新增 `chat_stream`（SSE `data:` 帧解析 + 每帧 emit `ai-chunk` 事件 + 结束 `ai-done`）与流式命令 `smart_search_stream`/`conversation_ask_stream`（`session_id` 分发，Tauri 事件通道）；前端 `listenAiStream` 增量渲染在"思考中"下方，done 写回完整消息。网关忽略 `stream` 时自动回退一次性解析（非流式网关无感兼容）（`ai/mod.rs`、`commands/ai.rs`、`lib.rs`、`src/api/files.ts`、`ChatPanel.tsx`）

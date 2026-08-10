@@ -310,16 +310,86 @@ pub async fn smart_search_stream(
     Ok(())
 }
 
-/// Shared conversation prompt assembly: reload document context from the
-/// selected source ids and build the system + user prompt strings.
+/// BM25 retrieval returning top relevant `(file_id, path)` hits — tokenised
+/// as explicit OR (a raw question would parse as an exact phrase and miss).
+fn bm25_relevant_hits(
+    state: &tauri::State<'_, AppState>,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<(String, String)>, String> {
+    use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
+    let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
+    let reader = mgr.reader().map_err(|e| format!("{e}"))?;
+    let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
+    drop(mgr);
+
+    let params = SearchParams {
+        query: crate::search::schema::split_query_terms(&query.to_lowercase()),
+        dir_ids: None, file_ids: None, ext_filter: None,
+        date_from: None, date_to: None,
+        sort: SortField::Score, sort_order: "desc".to_string(),
+        page: 1, page_size: limit, fuzzy: false, semantic: false,
+    };
+    let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let mut out = Vec::new();
+    for hit in result.hits {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
+            if rec.status == "active" && rec.md5.is_some() {
+                out.push((hit.file_id, rec.path));
+            }
+        }
+    }
+    drop(conn);
+    Ok(out)
+}
+
+/// Assembled conversation prompt + the (possibly updated) source file list
+/// backing it. Follow-up questions re-retrieve relevant documents so the
+/// answer (and the frontend source list) reflects the newest question.
+struct PreparedConversation {
+    system: String,
+    user_msg: String,
+    source_ids: Vec<String>,
+    source_files: Vec<String>,
+}
+
 fn prepare_conversation_prompt(
     state: &tauri::State<'_, AppState>,
     messages: &[ChatMessage],
     source_ids: &[String],
-) -> Result<(String, String), String> {
+) -> Result<PreparedConversation, String> {
+    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    // 动态依据：保留仍有效的旧来源，并按追问问题 BM25 命中补齐（去重, ≤15）。
+    let new_hits = if last_q.trim().is_empty() {
+        Vec::new()
+    } else {
+        bm25_relevant_hits(state, &last_q, 10)?
+    };
+
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut docs: Vec<String> = Vec::new();
+    let mut merged: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for fid in source_ids {
+        if seen.contains(fid) {
+            continue;
+        }
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
+            if rec.status == "active" && rec.md5.is_some() {
+                seen.insert(fid.clone());
+                merged.push((fid.clone(), rec.path.clone()));
+            }
+        }
+    }
+    for (fid, path) in new_hits {
+        if seen.insert(fid.clone()) && merged.len() < 15 {
+            merged.push((fid, path));
+        }
+    }
+
+    let mut docs: Vec<String> = Vec::new();
+    for (fid, _) in &merged {
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
             if let Some(md5) = &rec.md5 {
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
@@ -332,9 +402,11 @@ fn prepare_conversation_prompt(
     }
     drop(conn);
 
+    let source_ids_final = merged.iter().map(|(id, _)| id.clone()).collect();
+    let source_files_final = merged.iter().map(|(_, p)| p.clone()).collect();
+
     let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
     let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
-    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
     let last_n = messages.len().saturating_sub(1);
     let user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");
@@ -347,7 +419,7 @@ fn prepare_conversation_prompt(
     } else {
         last_q
     };
-    Ok((system, user_msg))
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final })
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
@@ -372,7 +444,8 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let (system, user_msg) = prepare_conversation_prompt(&state, &messages, &source_ids)?;
+    let PreparedConversation { system, user_msg, .. } =
+        prepare_conversation_prompt(&state, &messages, &source_ids)?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -413,7 +486,8 @@ pub async fn conversation_ask_stream(
     );
     crate::ai::reset_ai_cancel();
 
-    let (system, user_msg) = prepare_conversation_prompt(&state, &messages, &source_ids)?;
+    let PreparedConversation { system, user_msg, source_ids, source_files } =
+        prepare_conversation_prompt(&state, &messages, &source_ids)?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -430,8 +504,8 @@ pub async fn conversation_ask_stream(
         full_text: result.text.unwrap_or_default(),
         took_ms: result.took_ms,
         cancelled: result.cancelled,
-        source_ids: Vec::new(),
-        source_files: Vec::new(),
+        source_ids,
+        source_files,
     });
     Ok(())
 }
