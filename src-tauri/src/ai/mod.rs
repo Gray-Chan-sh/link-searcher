@@ -278,25 +278,28 @@ impl AiCapabilities {
 }
 
 /// Ping both gateways with the smallest realistic request. Used by the
-/// settings "test" button and at startup to decide which AI features to
-/// enable. Unconfigured gateways report `ok=false, detail=未配置`.
+/// settings "test" button and for capability probes. The two probes run in
+/// parallel: the LLM one may take many seconds to schedule a model, and
+/// serial order would make it start only after the embedding probe finishes.
 pub fn test_gateways() -> Vec<GatewayTest> {
-    let tests = vec![test_embedding(), test_llm()];
+    let failed = |kind: &'static str| GatewayTest { kind, ok: false, detail: "probe panicked".into() };
+    let emb_handle = std::thread::spawn(test_embedding);
+    let llm_handle = std::thread::spawn(test_llm);
+    let tests = vec![
+        emb_handle.join().unwrap_or_else(|_| failed("embedding")),
+        llm_handle.join().unwrap_or_else(|_| failed("llm")),
+    ];
     for t in &tests {
         log::info!("[AI] capability probe: {} = {} ({})", t.kind, t.ok, t.detail);
     }
     tests
 }
 
-/// Frontend-facing capability flags from a live probe. Always re-probes so
-/// the chat page agrees with the settings "test" button — the old 30s cache
-/// let one stale (failed) probe leave the chat page showing "unconfigured"
-/// while settings had just passed.
+/// Frontend-facing capability flags from CONFIGURATION ONLY (no network).
+/// LLM is an optional feature: opening the chat page must not block on a
+/// gateway probe (which the settings "test" button handles explicitly).
 pub fn capabilities() -> (bool, bool) {
-    let tests = test_gateways();
-    let emb = tests.iter().find(|t| t.kind == "embedding").map(|t| t.ok).unwrap_or(false);
-    let llm = tests.iter().find(|t| t.kind == "llm").map(|t| t.ok).unwrap_or(false);
-    (emb, llm)
+    (embedding_enabled(), llm_enabled())
 }
 
 fn test_embedding() -> GatewayTest {
@@ -323,7 +326,7 @@ fn test_llm() -> GatewayTest {
         "messages": [{"role":"user","content":"ping"}],
         "max_tokens": 1
     });
-    match ping_post(&url, &cfg.llm_api_key, &body, std::time::Duration::from_secs(15)) {
+    match ping_post(&url, &cfg.llm_api_key, &body, std::time::Duration::from_secs(30)) {
         Ok(()) => GatewayTest { kind: "llm", ok: true, detail: "OK".into() },
         Err(e) => GatewayTest { kind: "llm", ok: false, detail: e },
     }

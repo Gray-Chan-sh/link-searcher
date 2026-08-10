@@ -11,6 +11,15 @@
 
 ---
 
+## 2026-08-10（AI 探测独立化 —— 页面判定纯配置, 网络探测仅设置页测试）
+
+- **LLM 探测被 embedding 探测拖累 / 页面加载被网络探测阻塞**：`capabilities()` 每次做两个网络探测（embedding 先跑完 LLM 才启动）→ AI 聊天页打开要等探测、embedding 网关挂了就拖死整个页面。LLM 是可选项，不应阻塞
+  - **修复①**：`capabilities()` 改为**纯配置判断**（零网络、瞬时）——LLM/embedding 配置了即可用，页面不阻塞（`ai/mod.rs`）
+  - **修复②**：`test_gateways()`（设置页「测试」专用）改**线程并行**探测 embedding+llm，总耗时 = max 而非和；LLM 探测超时 15s→30s
+- **测试**：124 单元全过，tsc 0 错误
+
+---
+
 ## 2026-08-10（AI 长回答截断 —— max_tokens 1024→4096 + 请求超时 120s→300s）
 
 - **本地 omlx（Qwen3.6-35B）回答被截断**：omlx 日志 `finish_reason=length, max_tokens=1024`——`chat()` 的 `max_tokens=1024` 上限太小，计算/分析类回答（如"1600 万收费计算"）写到一半被截断。另 `build_agent` 120s 全请求超时不足以覆盖慢速本地模型（~15 tok/s × 4096 tokens ≈ 275s）（`src-tauri/src/ai/mod.rs`）
