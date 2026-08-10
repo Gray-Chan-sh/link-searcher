@@ -187,9 +187,9 @@ export default function Browse() {
     setIndexLog(null)
     try {
       const lines: string[] = await invoke('get_logs', { lines: 500, fileId })
-      setIndexLog(lines.join('\n') || '未找到此文件的索引日志')
+      setIndexLog(lines.join('\n') || t('no_index_log_for_file'))
     } catch {
-      setIndexLog('获取日志失败')
+      setIndexLog(t('failed_load_index_log'))
     } finally {
       setIndexLogLoading(false)
     }
@@ -204,7 +204,7 @@ export default function Browse() {
       const answer = await askDocuments([...selectedIds], askQuestion.trim())
       setAskAnswer(answer)
     } catch (e) {
-      setAskAnswer(e instanceof Error ? e.message : 'AI 问答失败')
+      setAskAnswer(e instanceof Error ? e.message : t('ai_ask_failed'))
     } finally {
       setAskLoading(false)
     }
@@ -572,14 +572,14 @@ export default function Browse() {
               setContextMenu(null); setSelectedIds(new Set()); loadFiles()
             }}
           >
-            {selectedIds.size > 1 ? `批量重新索引 (${selectedIds.size})` : t('reindex')}
+            {selectedIds.size > 1 ? t('batch_reindex', { n: selectedIds.size }) : t('reindex')}
           </button>
           {selectedIds.size <= 1 ? (
             <button
               className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
               onClick={() => { viewIndexLog(contextMenu.item.file_id); setContextMenu(null) }}
             >
-              查看索引日志
+              {t('view_index_log')}
             </button>
           ) : null}
         </div>
@@ -589,11 +589,11 @@ export default function Browse() {
         <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center" onClick={() => setIndexLog(null)}>
           <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[70vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
-              <span className="text-sm font-medium">索引日志</span>
+              <span className="text-sm font-medium">{t('index_log_title')}</span>
               <button onClick={() => setIndexLog(null)} className="text-gray-400 hover:text-gray-600">×</button>
             </div>
             <pre className="p-4 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
-              {indexLogLoading ? '加载中...' : indexLog}
+              {indexLogLoading ? t('loading') : indexLog}
             </pre>
           </div>
         </div>

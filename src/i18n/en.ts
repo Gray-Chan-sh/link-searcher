@@ -93,6 +93,8 @@ const en: Record<string, string> = {
     ask_select_files: 'Select files in the table first (multi-select supported)',
     chinese: '中文',
     english: 'English',
+    japanese: '日本語',
+    korean: '한국어',
     dependencies: 'External Dependencies',
     installed: 'Installed',
     not_installed: 'Not Installed',
@@ -130,6 +132,12 @@ const en: Record<string, string> = {
     ocr_test_success: 'OCR test passed',
     ocr_test_failed: 'OCR test failed',
     test_ocr: 'Test OCR Engine',
+    no_index_log_for_file: 'No index log found for this file',
+    failed_load_index_log: 'Failed to load index log',
+    ai_ask_failed: 'AI query failed',
+    batch_reindex: 'Batch re-index ({n})',
+    view_index_log: 'View index log',
+    index_log_title: 'Index Log',
 
     // Shared UI
     all: 'All',

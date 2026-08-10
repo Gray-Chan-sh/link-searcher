@@ -20,6 +20,8 @@ const OCR_LANGS = [
 const LANG_OPTIONS = [
   { value: 'zh', labelKey: 'chinese' },
   { value: 'en', labelKey: 'english' },
+  { value: 'ja', labelKey: 'japanese' },
+  { value: 'ko', labelKey: 'korean' },
 ]
 
 export default function Settings() {
@@ -304,7 +306,7 @@ export default function Settings() {
   }
 
   const handleChangeLang = async (newLang: string) => {
-    await setLang(newLang as 'zh' | 'en')
+    await setLang(newLang as 'zh' | 'en' | 'ja' | 'ko')
   }
 
   const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'PaddleOCR'))

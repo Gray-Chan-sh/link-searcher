@@ -1,10 +1,12 @@
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
 import zh from './zh'
 import en from './en'
+import ja from './ja'
+import ko from './ko'
 import { getConfig, updateConfig } from '../api/config'
 
-type Lang = 'zh' | 'en'
-const translations: Record<Lang, Record<string, string>> = { zh, en }
+type Lang = 'zh' | 'en' | 'ja' | 'ko'
+const translations: Record<Lang, Record<string, string>> = { zh, en, ja, ko }
 
 interface I18nContextType {
     t: (key: string, params?: Record<string, string | number>) => string
@@ -23,7 +25,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         getConfig().then(c => {
-            if (c.language === 'en' || c.language === 'zh') {
+            if (c.language === 'en' || c.language === 'zh' || c.language === 'ja' || c.language === 'ko') {
                 setLangState(c.language as Lang)
             }
         }).catch(() => {})

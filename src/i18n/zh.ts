@@ -93,6 +93,8 @@ const zh: Record<string, string> = {
     ask_select_files: '请先在表格中选中文件（可多选）',
     chinese: '中文',
     english: 'English',
+    japanese: '日本語',
+    korean: '한국어',
     dependencies: '外部依赖',
     installed: '已安装',
     not_installed: '未安装',
@@ -130,6 +132,12 @@ const zh: Record<string, string> = {
     ocr_test_success: '识别成功',
     ocr_test_failed: '识别失败',
     test_ocr: '测试 OCR 引擎',
+    no_index_log_for_file: '未找到此文件的索引日志',
+    failed_load_index_log: '获取索引日志失败',
+    ai_ask_failed: 'AI 问答失败',
+    batch_reindex: '批量重新索引 ({n})',
+    view_index_log: '查看索引日志',
+    index_log_title: '索引日志',
 
     // Shared UI
     all: '全部',
