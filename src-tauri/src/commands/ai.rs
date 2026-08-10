@@ -135,11 +135,21 @@ pub async fn ask_documents(
         .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())
 }
 
+/// Structured citation backing an AI answer: which file, its path, and a
+/// short snippet of the supporting passage (first ~200 chars).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EvidenceItem {
+    pub file_id: String,
+    pub path: String,
+    pub snippet: String,
+}
+
 #[derive(Serialize)]
 pub struct SmartSearchResponse {
     pub answer: String,
     pub source_ids: Vec<String>,
     pub source_files: Vec<String>,
+    pub evidence: Vec<EvidenceItem>,
 }
 
 /// Streaming AI payloads emitted over Tauri events (frontend listens and
@@ -158,6 +168,7 @@ struct AiDone {
     cancelled: bool,
     source_ids: Vec<String>,
     source_files: Vec<String>,
+    evidence: Vec<EvidenceItem>,
 }
 
 /// BM25 retrieval + content assembly shared by one-shot and streaming
@@ -167,6 +178,7 @@ struct PreparedSmart {
     user_msg: String,
     source_ids: Vec<String>,
     source_files: Vec<String>,
+    evidence: Vec<EvidenceItem>,
 }
 
 fn prepare_smart_prompt(
@@ -175,7 +187,7 @@ fn prepare_smart_prompt(
 ) -> Result<PreparedSmart, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 
-    let (context, source_ids, source_files) = {
+    let (context, source_ids, source_files, evidence) = {
         let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
         let reader = mgr.reader().map_err(|e| format!("{e}"))?;
         let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
@@ -196,6 +208,7 @@ fn prepare_smart_prompt(
         let mut docs: Vec<String> = Vec::new();
         let mut sids: Vec<String> = Vec::new();
         let mut sf: Vec<String> = Vec::new();
+        let mut ev: Vec<EvidenceItem> = Vec::new();
         for hit in result.hits.iter().take(10) {
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
                 if let Some(md5) = &rec.md5 {
@@ -204,13 +217,18 @@ fn prepare_smart_prompt(
                             docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                             sids.push(hit.file_id.clone());
                             sf.push(rec.path.clone());
+                            ev.push(EvidenceItem {
+                                file_id: hit.file_id.clone(),
+                                path: rec.path.clone(),
+                                snippet: truncate_text(&text, 200),
+                            });
                         }
                     }
                 }
             }
         }
         drop(conn);
-        (docs.join("\n\n---\n\n"), sids, sf)
+        (docs.join("\n\n---\n\n"), sids, sf, ev)
     };
 
     if context.trim().is_empty() {
@@ -223,6 +241,7 @@ fn prepare_smart_prompt(
         user_msg: format!("基于以下材料回答问题：\n\n{}\n\n问题：{}", context, query),
         source_ids,
         source_files,
+        evidence,
     })
 }
 
@@ -243,7 +262,7 @@ pub async fn smart_search(
     log::info!("[AI] smart_search: query={}", query);
     crate::ai::reset_ai_cancel();
 
-    let PreparedSmart { system, user_msg, source_ids, source_files } =
+    let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
         prepare_smart_prompt(&state, &query)?;
 
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
@@ -265,7 +284,7 @@ pub async fn smart_search(
         source_ids.len()
     );
 
-    Ok(SmartSearchResponse { answer, source_ids, source_files })
+    Ok(SmartSearchResponse { answer, source_ids, source_files, evidence })
 }
 
 /// Streaming variant of [`smart_search`]: emits `ai-chunk` events as the
@@ -286,7 +305,7 @@ pub async fn smart_search_stream(
     log::info!("[AI] smart_search_stream: query={}", query);
     crate::ai::reset_ai_cancel();
 
-    let PreparedSmart { system, user_msg, source_ids, source_files } =
+    let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
         prepare_smart_prompt(&state, &query)?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
@@ -306,16 +325,151 @@ pub async fn smart_search_stream(
         cancelled: result.cancelled,
         source_ids,
         source_files,
+        evidence,
     });
     Ok(())
 }
 
+/// Rule-based query rewrite for follow-up questions: when `last_q` starts
+/// with a deictic pronoun (它/这个/那个/上述/该/那/此) or is too short to
+/// retrieve on, prepend keywords from the most recent *previous* user
+/// message so BM25 sees the referents the pronoun points back to.
+/// (ponytail: an LLM rewrite could replace pronouns contextually — wire a
+/// gateway call here when per-turn rewrite latency is acceptable.)
+fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> String {
+    const DEICTIC: &[&str] = &["它", "这个", "那个", "上述", "上文", "该", "那", "此"];
+    let q = last_q.trim();
+    let needs_rewrite = q.chars().count() < 4 || DEICTIC.iter().any(|p| q.starts_with(p));
+    if !needs_rewrite {
+        return q.to_string();
+    }
+    let parent = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.trim())
+        .find(|c| !c.is_empty() && *c != q);
+    let Some(parent) = parent else { return q.to_string() };
+    let kws = parent_keywords(parent, 3);
+    if kws.is_empty() {
+        return q.to_string();
+    }
+    format!("{} {}", kws.join(" "), q)
+}
+
+fn is_rewrite_stopword(w: &str) -> bool {
+    matches!(w,
+        "它" | "这个" | "那个" | "上述" | "上文" | "该" | "那" | "此"
+        | "的" | "了" | "吗" | "呢" | "啊" | "什么" | "如何" | "怎么" | "怎样"
+        | "请" | "一下" | "我" | "你" | "是" | "在" | "有" | "和" | "与" | "及"
+        | "对" | "于" | "一个" | "会" | "能" | "让")
+}
+
+fn parent_keywords(text: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for t in crate::search::schema::JIEBA.cut(text, false) {
+        let w = t.word.trim();
+        if w.chars().count() < 2 || is_rewrite_stopword(w) {
+            continue;
+        }
+        if !out.iter().any(|k: &String| k == w) {
+            out.push(w.to_string());
+        }
+        if out.len() >= max {
+            break;
+        }
+    }
+    out
+}
+
+/// Reciprocal Rank Fusion: score = Σ 1/(k + rank) summed over two
+/// pre-sorted lists (best-first). Lists must be ordered by score descending;
+/// fusion uses position as rank (0‑based → 1/(k+0), 1/(k+1), …).
+fn rrf_fuse(
+    bm25_ranked: &[(String, f64)],
+    semantic_ranked: &[(String, f32)],
+    k: f64,
+) -> Vec<(String, f64)> {
+    let mut fusion = std::collections::HashMap::new();
+    for (i, (fid, _)) in bm25_ranked.iter().enumerate() {
+        *fusion.entry(fid.clone()).or_insert(0.0) += 1.0 / (k + i as f64);
+    }
+    for (i, (fid, _)) in semantic_ranked.iter().enumerate() {
+        *fusion.entry(fid.clone()).or_insert(0.0) += 1.0 / (k + i as f64);
+    }
+    let mut ordered: Vec<(String, f64)> = fusion.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ordered
+}
+
+/// Semantic rerank of BM25 hits: embed the query, score the stored
+/// embeddings of the BM25 candidates by cosine, fuse both orders via RRF,
+/// and return the fused `(file_id, path)` list. `None` when any step fails
+/// (embedding gateway down, no stored vectors) — caller falls back to BM25.
+fn semantic_fuse(
+    conn: &rusqlite::Connection,
+    query: &str,
+    bm25_hits: &[(String, String)],
+) -> Option<Vec<(String, String)>> {
+    let q_vec = {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = query.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::ai::embed(&q));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .ok()
+            .and_then(|r| r)
+    }?;
+    let rows = crate::db::tracker::get_all_embeddings(conn).ok()?;
+    let bm25_ids: std::collections::HashSet<&str> =
+        bm25_hits.iter().map(|(f, _)| f.as_str()).collect();
+    let emb_map: std::collections::HashMap<&str, &Vec<f32>> = rows
+        .iter()
+        .filter(|(fid, _)| bm25_ids.contains(fid.as_str()))
+        .map(|(fid, v)| (fid.as_str(), v))
+        .collect();
+    if emb_map.is_empty() {
+        return None;
+    }
+    let mut semantic_ranked: Vec<(String, f32)> = bm25_hits
+        .iter()
+        .filter_map(|(fid, _)| {
+            emb_map
+                .get(fid.as_str())
+                .map(|v| (fid.clone(), crate::ai::cosine(&q_vec, v)))
+        })
+        .collect();
+    semantic_ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let path_map: std::collections::HashMap<&str, &str> =
+        bm25_hits.iter().map(|(f, p)| (f.as_str(), p.as_str())).collect();
+    let bm25_ranked: Vec<(String, f64)> =
+        bm25_hits.iter().map(|(f, _)| (f.clone(), 0.0)).collect();
+    let fused = rrf_fuse(&bm25_ranked, &semantic_ranked, 60.0);
+    Some(
+        fused
+            .into_iter()
+            .filter_map(|(fid, _)| path_map.get(fid.as_str()).map(|p| (fid, (*p).to_string())))
+            .collect(),
+    )
+}
+
 /// BM25 retrieval returning top relevant `(file_id, path)` hits — tokenised
 /// as explicit OR (a raw question would parse as an exact phrase and miss).
+/// When `semantic` is true and the embedding gateway is configured, reranks
+/// the BM25 candidates via RRF fusion with embedding cosine scores
+/// (gracefully falls back to BM25-only on any failure).
 fn bm25_relevant_hits(
     state: &tauri::State<'_, AppState>,
     query: &str,
     limit: usize,
+    semantic: bool,
 ) -> Result<Vec<(String, String)>, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
     let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
@@ -323,26 +477,39 @@ fn bm25_relevant_hits(
     let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
     drop(mgr);
 
+    // When semantic fusion is active we fetch more candidates for the RRF pool.
+    let fetch = if semantic && crate::ai::embedding_enabled() {
+        limit.max(100)
+    } else {
+        limit
+    };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
         dir_ids: None, file_ids: None, ext_filter: None,
         date_from: None, date_to: None,
         sort: SortField::Score, sort_order: "desc".to_string(),
-        page: 1, page_size: limit, fuzzy: false, semantic: false,
+        page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
     let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut out = Vec::new();
+    let mut bm25_hits: Vec<(String, String)> = Vec::new();
     for hit in result.hits {
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
             if rec.status == "active" && rec.md5.is_some() {
-                out.push((hit.file_id, rec.path));
+                bm25_hits.push((hit.file_id, rec.path));
             }
         }
     }
+
+    if semantic && crate::ai::embedding_enabled() && !bm25_hits.is_empty() {
+        if let Some(fused) = semantic_fuse(&conn, query, &bm25_hits) {
+            drop(conn);
+            return Ok(fused.into_iter().take(limit).collect());
+        }
+    }
     drop(conn);
-    Ok(out)
+    Ok(bm25_hits.into_iter().take(limit).collect())
 }
 
 /// Assembled conversation prompt + the (possibly updated) source file list
@@ -353,6 +520,7 @@ struct PreparedConversation {
     user_msg: String,
     source_ids: Vec<String>,
     source_files: Vec<String>,
+    evidence: Vec<EvidenceItem>,
 }
 
 fn prepare_conversation_prompt(
@@ -361,11 +529,14 @@ fn prepare_conversation_prompt(
     source_ids: &[String],
 ) -> Result<PreparedConversation, String> {
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    // 动态依据：保留仍有效的旧来源，并按追问问题 BM25 命中补齐（去重, ≤15）。
+    // 追问改写：把"省略/指代"补全为可检索问句，再进 BM25（可检索性优先）。
+    let search_q = rewrite_query(&last_q, messages);
+    // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
+    // 语义开启时对追问做 BM25+embedding RRF 融合重排。
     let new_hits = if last_q.trim().is_empty() {
         Vec::new()
     } else {
-        bm25_relevant_hits(state, &last_q, 10)?
+        bm25_relevant_hits(state, &search_q, 10, crate::ai::embedding_enabled())?
     };
 
     const MAX_SOURCES: usize = 15;
@@ -410,12 +581,18 @@ fn prepare_conversation_prompt(
     keep_old(&mut merged, &mut seen, true);  // 第二遍: 其余按最近补槽
 
     let mut docs: Vec<String> = Vec::new();
+    let mut evidence: Vec<EvidenceItem> = Vec::new();
     for (fid, _) in &merged {
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
             if let Some(md5) = &rec.md5 {
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
                         docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                        evidence.push(EvidenceItem {
+                            file_id: fid.clone(),
+                            path: rec.path.clone(),
+                            snippet: truncate_text(&text, 200),
+                        });
                     }
                 }
             }
@@ -440,7 +617,7 @@ fn prepare_conversation_prompt(
     } else {
         last_q
     };
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence })
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
@@ -507,7 +684,7 @@ pub async fn conversation_ask_stream(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, source_ids, source_files } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence } =
         prepare_conversation_prompt(&state, &messages, &source_ids)?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
@@ -527,6 +704,7 @@ pub async fn conversation_ask_stream(
         cancelled: result.cancelled,
         source_ids,
         source_files,
+        evidence,
     });
     Ok(())
 }
@@ -550,6 +728,15 @@ fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("chat_history.json")
 }
 
+/// One turn's source file references, recorded when a conversation turn
+/// completes so the session history can show which documents backed each
+/// user/assistant exchange.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PerTurnEvidence {
+    pub turn_index: usize,
+    pub file_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatSession {
     pub id: String,
@@ -564,6 +751,9 @@ pub struct ChatSession {
     pub pending_query: Option<String>,
     #[serde(default)]
     pub pending_started_at: Option<i64>,
+    /// 每轮问答用到的 source 文件引用（0‑based turn index）。
+    #[serde(default)]
+    pub per_turn_evidence: Vec<PerTurnEvidence>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -614,6 +804,7 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     source_files: legacy.source_files,
                     pending_query: None,
                     pending_started_at: None,
+                    per_turn_evidence: vec![],
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -669,6 +860,7 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
         source_files: vec![],
         pending_query: None,
         pending_started_at: None,
+        per_turn_evidence: vec![],
     };
     let id = session.id.clone();
     let mut h = read_history(&state.data_dir);
@@ -778,5 +970,99 @@ mod history_tests {
         assert!(content.contains("\"sessions\""));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rag_tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage { role: role.into(), content: content.into() }
+    }
+
+    #[test]
+    fn rewrite_query_expands_demonstrative_followup_with_parent_keywords() {
+        let history = vec![
+            msg("user", "季度报告的主要结论是什么"),
+            msg("assistant", "结论是营收增长 20%。"),
+            msg("user", "它的风险有哪些"),
+        ];
+        let rewritten = rewrite_query("它的风险有哪些", &history);
+        assert!(!rewritten.starts_with("它"), "deictic head must be replaced: {rewritten}");
+        assert!(rewritten.contains("季度"), "must carry parent keywords: {rewritten}");
+        assert!(rewritten.contains("报告"), "must carry parent keywords: {rewritten}");
+    }
+
+    #[test]
+    fn rewrite_query_returns_original_for_self_contained_question() {
+        let history = vec![msg("user", "季度报告")];
+        let rewritten = rewrite_query("为什么营收下降", &history);
+        assert_eq!(rewritten, "为什么营收下降");
+    }
+
+    #[test]
+    fn rewrite_query_short_question_borrows_parent_keywords() {
+        let history = vec![
+            msg("user", "如何配置索引目录"),
+            msg("assistant", "在设置页添加目录即可。"),
+            msg("user", "增量呢"),
+        ];
+        let rewritten = rewrite_query("增量呢", &history);
+        assert!(rewritten.contains("索引"), "short follow-up must borrow parent keywords: {rewritten}");
+    }
+
+    #[test]
+    fn rrf_fuse_ranks_common_docs_first() {
+        let bm25 = vec![
+            ("a".to_string(), 5.0),
+            ("b".to_string(), 4.0),
+            ("c".to_string(), 3.0),
+        ];
+        let sem = vec![
+            ("a".to_string(), 0.9),
+            ("d".to_string(), 0.8),
+            ("b".to_string(), 0.2),
+        ];
+        let fused = rrf_fuse(&bm25, &sem, 60.0);
+        // "a" in both lists at rank 0 → highest fused score.
+        assert_eq!(fused[0].0, "a");
+        let pos = |id: &str| fused.iter().position(|(f, _)| f == id).unwrap();
+        assert!(pos("b") < pos("c"), "b (in both) must outrank c (BM25-only)");
+        assert!(pos("b") < pos("d"), "b (in both) must outrank d (semantic-only)");
+    }
+
+    #[test]
+    fn evidence_item_json_round_trip_preserves_all_fields() {
+        let e = EvidenceItem {
+            file_id: "f1".into(),
+            path: "a.pdf".into(),
+            snippet: "摘要内容".into(),
+        };
+        let json = serde_json::to_string(&e).unwrap();
+        let back: EvidenceItem = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.file_id, "f1");
+        assert_eq!(back.path, "a.pdf");
+        assert_eq!(back.snippet, "摘要内容");
+    }
+
+    #[test]
+    fn chat_session_deserializes_legacy_json_without_per_turn_evidence() {
+        let legacy = r#"{"id":"s1","title":"t","created_at":1,"updated_at":2,"messages":[],"source_ids":[],"source_files":[]}"#;
+        let s: ChatSession = serde_json::from_str(legacy).unwrap();
+        assert!(s.per_turn_evidence.is_empty(), "legacy records must default to empty");
+        // Round-trip: a session with per-turn evidence survives serialization.
+        let with_turn = ChatSession {
+            per_turn_evidence: vec![PerTurnEvidence {
+                turn_index: 0,
+                file_ids: vec!["f1".into()],
+            }],
+            ..s
+        };
+        let json = serde_json::to_string(&with_turn).unwrap();
+        let back: ChatSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.per_turn_evidence.len(), 1);
+        assert_eq!(back.per_turn_evidence[0].turn_index, 0);
+        assert_eq!(back.per_turn_evidence[0].file_ids, vec!["f1".to_string()]);
     }
 }

@@ -26,7 +26,7 @@
 
 ### AI 增强（可选）
 
-配置一个 **OpenAI 兼容** 的模型网关（设置页「AI 服务」：Ollama / OneAPI / vLLM / 各类中转均可，留空关闭）后：
+在设置页「AI 服务」中**添加 AI Provider**（OpenAI 兼容网关：Ollama / OneAPI / vLLM / 各类中转均可，留空关闭），保存时自动拉取模型列表并按名字分类为 embedding / LLM，再从「当前使用」下拉框分别选择 embedding 与 LLM 模型：
 
 | 功能 | 说明 |
 |------|------|

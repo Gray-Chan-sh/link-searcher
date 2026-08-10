@@ -5,6 +5,7 @@ pub mod config;
 pub mod db;
 pub mod extractor;
 pub mod indexer;
+pub mod logs;
 pub mod scanner;
 pub mod search;
 pub mod state;
@@ -20,7 +21,7 @@ use crate::commands::files::{download_files, get_duplicates, get_file, get_file_
 use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, trigger_scan};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
-use crate::commands::logs::{clear_logs, get_logs};
+use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
 use crate::indexer::IndexerService;
@@ -123,6 +124,7 @@ fn run_with_config(app_config: config::AppConfig) {
             check_index_integrity,
             backfill_embeddings,
             get_logs,
+            list_session_logs,
             clear_logs,
             get_version,
             install_funasr,
@@ -318,6 +320,7 @@ fn run_with_config(app_config: config::AppConfig) {
                 }
             });
 
+            let logs_dir = data_dir.join("logs");
             let app_state = AppState::new(
                 db_pool.clone(),
                 index_manager,
@@ -388,6 +391,16 @@ fn run_with_config(app_config: config::AppConfig) {
             std::thread::spawn(move || {
                 use crate::extractor::{office, pdf};
 
+                // Per-scan session log (optional — scan proceeds without it).
+                let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
+                    .map_err(|e| log::warn!("[STARTUP] 无法创建会话日志: {e}"))
+                    .ok();
+                let mut sess = |line: String| {
+                    if let Some(ref mut f) = slog {
+                        let _ = crate::logs::session::SessionLog::write(f, &line);
+                    }
+                };
+
                 log::info!("[STARTUP] 检查系统依赖...");
 
                 let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
@@ -420,13 +433,31 @@ fn run_with_config(app_config: config::AppConfig) {
                 }
 
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
+                sess(format!("[STARTUP] 开始扫描 {} 个目录", dirs.len()));
                 for dir in &dirs {
-                    match scanner_ref.startup_scan(&dir.id, |_| {}) {
-                        Ok(r) => log::info!(
-                            "[STARTUP] {}: {} files, {} indexed, {} errors",
-                            dir.path, r.total_files, r.indexed, r.errors
-                        ),
-                        Err(e) => log::error!("[STARTUP] {} 扫描失败: {e}", dir.path),
+                    let result = scanner_ref.startup_scan(&dir.id, |prog| {
+                        let _ = app_handle.emit("scan-progress", crate::commands::index::ScanEventPayload {
+                            phase: prog.phase.into(),
+                            current: prog.processed,
+                            total: prog.total,
+                            current_file: prog.current_file,
+                            dir_id: dir.id.clone(),
+                        });
+                    });
+                    match result {
+                        Ok(r) => {
+                            let line = format!(
+                                "[STARTUP] {}: {} files, {} indexed, {} errors",
+                                dir.path, r.total_files, r.indexed, r.errors
+                            );
+                            log::info!("{line}");
+                            sess(line);
+                        }
+                        Err(e) => {
+                            let line = format!("[STARTUP] {} 扫描失败: {e}", dir.path);
+                            log::error!("{line}");
+                            sess(line);
+                        }
                     }
                 }
 
@@ -449,6 +480,13 @@ fn run_with_config(app_config: config::AppConfig) {
                     }
                 } else {
                     log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold=100 MiB)");
+                }
+
+                // Close session log before signalling completion.
+                sess("[STARTUP] 启动扫描完成".to_string());
+                drop(sess);
+                if let Some(f) = slog {
+                    crate::logs::session::SessionLog::close(f);
                 }
 
                 app_handle.emit("scan-completed", serde_json::json!({}))

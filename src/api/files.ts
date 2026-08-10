@@ -41,15 +41,27 @@ export async function aiCapabilities(): Promise<AiCapabilities> {
   return invoke<AiCapabilities>('ai_capabilities')
 }
 
+export interface EvidenceItem {
+  file_id: string
+  path: string
+  snippet: string
+}
+
 export interface SmartSearchResponse {
   answer: string
   source_ids: string[]
   source_files: string[]
+  evidence?: EvidenceItem[]
 }
 
 export interface ChatMessage {
   role: string
   content: string
+}
+
+export interface PerTurnEvidence {
+  turn_index: number
+  file_ids: string[]
 }
 
 export interface ChatSession {
@@ -62,6 +74,7 @@ export interface ChatSession {
   source_files: string[]
   pending_query?: string | null
   pending_started_at?: number | null
+  per_turn_evidence?: PerTurnEvidence[]
 }
 
 export async function cancelAiRequest(): Promise<void> {
@@ -90,6 +103,7 @@ export interface AiDonePayload {
   cancelled: boolean
   source_ids: string[]
   source_files: string[]
+  evidence?: EvidenceItem[]
 }
 
 export async function smartSearchStream(query: string, sessionId: string): Promise<void> {
