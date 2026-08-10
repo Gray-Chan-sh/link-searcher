@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-10（P2 一致性修复 · Office 扩展名 / 大小写搜索 / 取消不标失败 / 移位检测）
+
+- **Office 新格式永不索引**：`docm/xlsm/xlsb/pptm/ppsm/ppsx/pps/pot` 在 office 提取器支持但 `extract_text`/`classify_ext`/`get_supported_extensions` dispatch 缺失，被当未知格式跳过。三处补齐 8 个扩展名（`extractor/mod.rs`）
+- **大写英文搜不到**：jieba tokenizer 未 lowercase 而查询统一小写 → "Report.pdf" 索引 token "Report" 匹配不到查询 "report"。tokenizer 加 `LowerCaser`，索引侧与查询侧归一（中文不受影响）；`filename:` 从整词 TermQuery 改为 RegexQuery `(?i).*xxx.*`——任意位置子串 + 大小写不敏感，兑现 README"正则匹配任意位置"（`search/schema.rs`、`search/searcher.rs`）
+  - ⚠️ **存量索引需「索引重建」后大小写搜索才完全生效**（tokenizer 配置变更不影响旧数据）
+- **取消扫描把文件永久标 failed**：phase1 取消返回 "scan cancelled"，phase2 统一 `mark_failed` → indexed=2 且不在 needs_reindex 列表 → 永久卡失败。取消项改为跳过标记，保持 pending 待下次扫描自动重试（`indexer.rs`）
+- **include_exts 过滤误删记录**：删检测用 disk_set（仅含被允许 ext）比对，磁盘上被过滤的文件其记录被当删除。三处删检测跳过「被 include_exts 过滤且磁盘仍存在」的记录（`scanner/mod.rs`）
+- **文件移位检测死代码**：walk 已为新路径建记录 → guard `is_none()` 恒 false → MD5 匹配分支永不执行，moved 恒 0、移动文件被当删除+重索引。去掉恒 false guard，MD5 匹配时硬删新记录 B（`hard_delete_file` + `delete_document_only`）、原记录 A 接管新路径——A 保留 md5/内容**不重提取**，兑现 README"移位检测不重提取"（`scanner/mod.rs`、`db/tracker.rs`、`indexer.rs`）
+- **测试**：120 单元（+2：hard_delete 释放 UNIQUE path、filename 任意位置/大小写）+ 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（P1 健壮性修复 · 扫描容错 / 音频与 OCR 超时 / 幽灵嵌入清理）
 
 - **单目录无权限导致整个扫描 abort**：三处 walkdir 迭代错误与 `entry.metadata()` 错误都经 `?` 向上传播，`~/Library` 等一个无权限子目录就让全量/增量/启动扫描整体失败。改为错误计入 `errors` 统计并继续其余文件（`scanner/mod.rs`）

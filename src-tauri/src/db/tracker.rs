@@ -115,6 +115,18 @@ pub fn mark_deleted(conn: &Connection, file_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Permanently remove a tracked row (releases its UNIQUE path). Used when a
+/// freshly-walked record is superseded by a moved file's original record.
+pub fn hard_delete_file(conn: &Connection, file_id: &str) -> Result<()> {
+    let n = conn
+        .execute("DELETE FROM file_tracking WHERE id=?1", rusqlite::params![file_id])
+        .context("hard_delete_file failed")?;
+    if n == 0 {
+        anyhow::bail!("file not found: {file_id}");
+    }
+    Ok(())
+}
+
 pub fn update_file_path(conn: &Connection, file_id: &str, new_path: &str, new_dir_id: &str) -> Result<()> {
     let file_ext = extension_of(new_path);
     let n = conn
@@ -777,5 +789,21 @@ mod tests {
 
         delete_embedding(&conn, "f1").unwrap();
         assert_eq!(count_embeddings(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_hard_delete_releases_unique_path() {
+        let conn = db();
+        let dir_id = "d1";
+        let id_a = upsert_file(&conn, "a.txt", dir_id, 1, 10, None).unwrap();
+        let id_b = upsert_file(&conn, "b.txt", dir_id, 1, 10, None).unwrap();
+
+        // Hard-deleting b frees its path so a's path can be moved onto it.
+        hard_delete_file(&conn, &id_b).unwrap();
+        assert!(get_file_by_path(&conn, "b.txt").unwrap().is_none());
+        update_file_path(&conn, &id_a, "b.txt", dir_id).unwrap();
+
+        let moved = get_file_by_path(&conn, "b.txt").unwrap().expect("a now owns b.txt");
+        assert_eq!(moved.id, id_a);
     }
 }
