@@ -244,3 +244,9 @@ fn test_extract_slide_number() {
     assert_eq!(super::extract_slide_number("ppt/slides/slide0.xml"), 0);
     assert_eq!(super::extract_slide_number("ppt/slides/notaslide.xml"), 0);
 }
+
+fn lo_baseline_chars(path: &Path) -> Option<usize> {
+    let stem = path.file_stem()?.to_str()?;
+    let txt = Path::new("/tmp/ls-rwml-poc/lo_out").join(format!("{stem}.txt"));
+    std::fs::read_to_string(txt).ok().map(|s| s.len())
+}

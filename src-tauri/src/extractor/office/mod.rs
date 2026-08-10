@@ -591,6 +591,40 @@ impl OfficeExtractor {
         }
     }
 
+    fn doc_rs_then_lo(path: &Path) -> anyhow::Result<String> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "[OFFICE] rwml read {:?} failed: {e}, falling to LO",
+                    path.file_name()
+                );
+                return Self::lo_fallback(path);
+            }
+        };
+        match rwml::extract_text(&bytes) {
+            Ok(t) if !t.trim().is_empty() => {
+                log::info!("[OFFICE] rwml: {} chars from {:?}", t.len(), path.file_name());
+                Ok(t)
+            }
+            Ok(_) => {
+                log::info!(
+                    "[OFFICE] rwml empty for {:?} (empty/corrupted file)",
+                    path.file_name()
+                );
+                Ok(String::new())
+            }
+            Err(e) => {
+                log::warn!(
+                    "[OFFICE] rwml {:?} for {:?}, falling to LO",
+                    e,
+                    path.file_name()
+                );
+                Self::lo_fallback(path)
+            }
+        }
+    }
+
     fn lo_fallback(path: &Path) -> anyhow::Result<String> {
         if lo_binary().is_some() {
             Self::lo_extract(path)
@@ -611,7 +645,8 @@ impl Extractor for OfficeExtractor {
             .unwrap_or_default();
 
         match ext.as_str() {
-            "docx" | "doc" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb"
+            "doc" => OfficeExtractor::doc_rs_then_lo(path),
+            "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb"
             | "ppt" | "pptx" | "pptm" | "ppsm" | "ppsx" | "pps" | "pot"
             | "odt" | "ods" | "odp" | "rtf" | "epub" | "csv" => {
                 OfficeExtractor::anydoc_then_lo(path)

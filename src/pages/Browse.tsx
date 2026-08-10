@@ -28,7 +28,7 @@ export default function Browse() {
   const [items, setItems] = useState<FileItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
-  const [pageSize] = useState(20)
+  const [pageSize, setPageSize] = useState(20)
   const [filter, setFilter] = usePersistentState<FilterType>(LS_KEY_FILTER, params.get('filter') as FilterType || 'all')
   const [ext, setExt] = usePersistentState<string>(LS_KEY_EXT, params.get('ext') || '')
   const [availableExts, setAvailableExts] = useState<string[]>([])
@@ -55,6 +55,42 @@ export default function Browse() {
   type ColKey = keyof typeof colWidths
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
+  const rowHeightRef = useRef<number | null>(null)
+  // Fallback row height while no data row rendered yet (loading / empty):
+  // text-xs line-height 16px + py-1 padding 8px + 1px row border = 25px.
+  // ponytail: fixed estimate — drifts if row font/padding changes. Upgrade:
+  // render a hidden probe row (or read computed styles) once at mount.
+  const EST_ROW_HEIGHT = 25
+
+  useEffect(() => {
+    const el = tableRef.current
+    if (!el) return
+    const measure = () => {
+      const row = el.querySelector<HTMLTableRowElement>('tbody tr')
+      if (row) rowHeightRef.current = row.getBoundingClientRect().height
+      const rowH = rowHeightRef.current ?? EST_ROW_HEIGHT
+      setPageSize(Math.min(1000, Math.max(1, Math.floor(el.clientHeight / rowH))))
+    }
+    measure()
+    const ro = new ResizeObserver(measure)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Rows render only after data loads, so the real height can't be read on mount.
+  useEffect(() => {
+    const el = tableRef.current
+    if (!el) return
+    const row = el.querySelector<HTMLTableRowElement>('tbody tr')
+    if (row) {
+      rowHeightRef.current = row.getBoundingClientRect().height
+      setPageSize(Math.min(1000, Math.max(1, Math.floor(el.clientHeight / rowHeightRef.current))))
+    }
+  }, [items])
+
+  useEffect(() => {
+    setPage(1)
+  }, [pageSize])
 
   useEffect(() => {
     const close = () => setContextMenu(null)
