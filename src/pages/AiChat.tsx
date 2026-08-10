@@ -9,11 +9,17 @@ import ChatPanel from '../components/ChatPanel'
 export default function AiChat() {
   const { t } = useI18n()
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [capFailed, setCapFailed] = useState(false)
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
 
-  useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
+  const refreshCapabilities = useCallback(() => {
+    setCapFailed(false)
+    aiCapabilities().then(setAiCap).catch(() => setCapFailed(true))
+  }, [])
+
+  useEffect(() => { refreshCapabilities() }, [refreshCapabilities])
 
   const refreshList = useCallback(async () => {
     try { setSessions(await listChatSessions()) } catch { /* ignore */ }
@@ -148,6 +154,16 @@ export default function AiChat() {
         </div>
         {aiCap.llm ? (
           <ChatPanel llmEnabled session={activeSession} onSessionChange={handleSessionChange} />
+        ) : capFailed ? (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
+            <span>{t('ai_llm_unavailable')}</span>
+            <button
+              onClick={refreshCapabilities}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
+            >
+              {t('retry')}
+            </button>
+          </div>
         ) : (
           <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
             {t('ai_llm_unavailable')}
