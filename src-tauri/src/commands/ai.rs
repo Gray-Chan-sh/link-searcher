@@ -6,6 +6,15 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// Cancel the currently in-flight AI chat request. Marks a one-shot flag;
+/// the running request completes in the background but its result is
+/// discarded. Safe to call with no request in flight.
+#[tauri::command]
+pub async fn cancel_ai_request() -> Result<(), String> {
+    crate::ai::cancel_ai();
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub struct SummaryResult {
     pub file_id: String,
@@ -150,6 +159,7 @@ pub async fn smart_search(
         return Err("问题不能为空".into());
     }
     log::info!("[AI] smart_search: query={}", query);
+    crate::ai::reset_ai_cancel();
 
     // ── BM25 + content extraction (sync, must complete before any await) ──
     let (context, source_ids, source_files) = {
@@ -202,7 +212,18 @@ let params = SearchParams {
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(system, &user_msg))
         .await
         .unwrap_or(None)
-        .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())?;
+        .ok_or_else(|| {
+            if crate::ai::ai_cancelled() {
+                "请求已取消".to_string()
+            } else {
+                "AI 请求失败（检查网关配置或网络）".to_string()
+            }
+        })?;
+    // A late cancellation arrived while the LLM was still generating:
+    // discard the answer.
+    if crate::ai::ai_cancelled() {
+        return Err("请求已取消".into());
+    }
 
     Ok(SmartSearchResponse { answer, source_ids, source_files })
 }
@@ -227,6 +248,7 @@ pub async fn conversation_ask(
         messages.len(),
         source_ids.len()
     );
+    crate::ai::reset_ai_cancel();
 
     // Reload document context from the previously-identified sources.
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -277,7 +299,16 @@ pub async fn conversation_ask(
     })
         .await
         .unwrap_or(None)
-        .ok_or_else(|| "AI 请求失败（检查网关配置或网络）".to_string())?;
+        .ok_or_else(|| {
+            if crate::ai::ai_cancelled() {
+                "请求已取消".to_string()
+            } else {
+                "AI 请求失败（检查网关配置或网络）".to_string()
+            }
+        })?;
+    if crate::ai::ai_cancelled() {
+        return Err("请求已取消".into());
+    }
 
     Ok(answer)
 }
@@ -310,6 +341,11 @@ pub struct ChatSession {
     pub messages: Vec<ChatMessage>,
     pub source_ids: Vec<String>,
     pub source_files: Vec<String>,
+    /// 进行中的 AI 请求（前端据此恢复"思考中"状态）。
+    #[serde(default)]
+    pub pending_query: Option<String>,
+    #[serde(default)]
+    pub pending_started_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -358,6 +394,8 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     messages: legacy.messages,
                     source_ids: legacy.source_ids,
                     source_files: legacy.source_files,
+                    pending_query: None,
+                    pending_started_at: None,
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -411,6 +449,8 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
         messages: vec![],
         source_ids: vec![],
         source_files: vec![],
+        pending_query: None,
+        pending_started_at: None,
     };
     let id = session.id.clone();
     let mut h = read_history(&state.data_dir);

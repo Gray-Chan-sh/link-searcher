@@ -1,9 +1,9 @@
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -14,13 +14,18 @@ interface ChatPanelProps {
 export default function ChatPanel({ llmEnabled, session, onSessionChange }: ChatPanelProps) {
   const { t } = useI18n()
   const [input, setInput] = useState('')
-  const [loading, setLoading] = useState(false)
   const [showSources, setShowSources] = useState(false)
+  const [clockNow, setClockNow] = useState(() => Date.now())
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
+  const latestReqIdRef = useRef(0)
 
   const messages = session?.messages ?? []
   const sourceIds = session?.source_ids ?? []
   const sourceFiles = session?.source_files ?? []
+  // loading 由会话持久字段驱动 —— 切页/切会话再切回可恢复"思考中"。
+  const pendingStartedAt = session?.pending_started_at ?? null
+  const loading = pendingStartedAt != null
 
   const patchSession = useCallback((patch: Partial<ChatSession>) => {
     if (session) onSessionChange({ ...session, ...patch })
@@ -28,45 +33,124 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages])
+  }, [messages, loading])
+
+  // 请求进行中每秒走表，驱动 "mm:ss" 计时。
+  useEffect(() => {
+    if (!loading) return
+    setClockNow(Date.now())
+    const it = setInterval(() => setClockNow(Date.now()), 1000)
+    return () => clearInterval(it)
+  }, [loading])
+
+  const elapsedText = useMemo(() => {
+    if (!pendingStartedAt) return ''
+    const s = Math.max(0, Math.floor((clockNow - pendingStartedAt) / 1000))
+    const mm = String(Math.floor(s / 60)).padStart(2, '0')
+    const ss = String(s % 60).padStart(2, '0')
+    return `${mm}:${ss}`
+  }, [pendingStartedAt, clockNow])
+
+  const errText = (e: unknown) =>
+    e instanceof Error && e.message
+      ? e.message
+      : typeof e === 'string'
+        ? e
+        : typeof e === 'object' && e !== null && 'message' in e
+          ? String((e as { message: unknown }).message)
+          : String(e)
+
+  const handleCancel = useCallback(async () => {
+    if (!loading) return
+    if (!confirm('确认取消当前回答？')) return
+    cancelAiRequest().catch(() => {})
+    latestReqIdRef.current += 1
+    patchSession({ pending_query: null, pending_started_at: null, messages })
+  }, [loading, patchSession, messages])
 
   const handleSend = useCallback(async () => {
     const q = input.trim()
     if (!q || loading || !session) return
     setInput('')
     const userMsg: ChatMessage = { role: 'user', content: q }
-    patchSession({ messages: [...messages, userMsg] })
+    const reqId = ++latestReqIdRef.current
+    const startedAt = Date.now()
+    patchSession({
+      messages: [...messages, userMsg],
+      pending_query: q,
+      pending_started_at: startedAt,
+    })
 
-    setLoading(true)
     try {
       if (sourceIds.length === 0) {
         const res: SmartSearchResponse = await smartSearch(q)
+        if (latestReqIdRef.current !== reqId) return
         patchSession({
           messages: [...messages, userMsg, { role: 'assistant', content: res.answer }],
           source_ids: res.source_ids,
           source_files: res.source_files,
+          pending_query: null,
+          pending_started_at: null,
         })
       } else {
         const answer = await conversationAsk([...messages, userMsg], sourceIds)
-        patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: answer }] })
+        if (latestReqIdRef.current !== reqId) return
+        patchSession({
+          messages: [...messages, userMsg, { role: 'assistant', content: answer }],
+          pending_query: null,
+          pending_started_at: null,
+        })
       }
     } catch (e) {
-      // Surface the backend's real error string — Tauri's reject value may
-      // be an Error, a string, or an object, so be tolerant instead of
-      // collapsing everything to a generic "请求失败".
-      const err =
-        e instanceof Error && e.message
-          ? e.message
-          : typeof e === 'string'
-            ? e
-            : typeof e === 'object' && e !== null && 'message' in e
-              ? String((e as { message: unknown }).message)
-              : String(e)
-      patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${err}` }] })
-    } finally {
-      setLoading(false)
+      if (latestReqIdRef.current !== reqId) return
+      patchSession({
+        messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${errText(e)}` }],
+        pending_query: null,
+        pending_started_at: null,
+      })
     }
   }, [input, loading, session, messages, sourceIds, patchSession])
+
+  // 恢复挂起的请求：加载到带 pending 的会话（切页/切会话后返回），
+  // 用会话中已保存的用户消息直接重跑，结果写回并清除 pending。
+  useEffect(() => {
+    if (!session?.pending_query) return
+    const q = session.pending_query
+    const reqId = ++latestReqIdRef.current
+    ;(async () => {
+      const base = session.messages
+      try {
+        if (sourceIds.length === 0) {
+          const res: SmartSearchResponse = await smartSearch(q)
+          if (latestReqIdRef.current !== reqId) return
+          patchSession({
+            messages: [...base, { role: 'assistant', content: res.answer }],
+            source_ids: res.source_ids,
+            source_files: res.source_files,
+            pending_query: null,
+            pending_started_at: null,
+          })
+        } else {
+          const answer = await conversationAsk(base, sourceIds)
+          if (latestReqIdRef.current !== reqId) return
+          patchSession({
+            messages: [...base, { role: 'assistant', content: answer }],
+            pending_query: null,
+            pending_started_at: null,
+          })
+        }
+      } catch (e) {
+        if (latestReqIdRef.current !== reqId) return
+        patchSession({
+          messages: [...base, { role: 'assistant', content: `❌ ${errText(e)}` }],
+          pending_query: null,
+          pending_started_at: null,
+        })
+      }
+    })()
+    // 仅当会话/挂起问题变化时触发，避免重发期间重复执行。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, session?.pending_query])
 
   if (!llmEnabled) {
     return (
@@ -130,7 +214,13 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
         {loading && (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <LoadingSpinner className="size-3.5" />
-            <span>{t('thinking')}</span>
+            <span>{t('thinking')} {elapsedText}</span>
+            <button
+              onClick={handleCancel}
+              className="ml-1 px-1.5 py-0.5 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors"
+            >
+              {t('cancel')}
+            </button>
           </div>
         )}
       </div>

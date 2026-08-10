@@ -162,6 +162,7 @@ const en: Record<string, string> = {
 
     // Index status
     index_status_overview: 'Overview of the document index and scanning status',
+    cancel: 'Cancel',
     cancel_scan: 'Cancel Scan',
     incl_errors: 'incl. errors',
     index_progress: 'Index Progress',

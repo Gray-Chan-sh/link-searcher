@@ -162,6 +162,7 @@ const zh: Record<string, string> = {
 
     // Index status
     index_status_overview: '文档索引与扫描状态概览',
+    cancel: '取消',
     cancel_scan: '取消扫描',
     incl_errors: '含错误',
     index_progress: '索引进度',
