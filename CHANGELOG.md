@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-10（AI 全链路日志 —— 消除"无痕失败"盲区）
+
+- **AI 聊天过程无成功路径日志**：`chat()` 只在失败时 warn、`smart_search`/`conversation_ask` 无入口记录，导致异常时 app.log 看不到任何痕迹（曾误判为"请求没发出"）。补全链路 INFO 日志：
+  - `chat()`：请求前记 `model`/`user` 字符数，响应后记 `content` 字符数（`src-tauri/src/ai/mod.rs`）
+  - `smart_search`：入口记 `query`；BM25 无相关内容时 warn「未找到相关文档内容」（`src-tauri/src/commands/ai.rs`）
+  - `conversation_ask`：入口记 `messages`/`source_ids` 数量
+- 配合 9router proxy 日志（`succeeded` + `IN 0 OUT 0`）可端到端定位：app 发出请求体 vs proxy/model 侧差异
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 聊天「请求失败」—— SSE 流式响应解析兜底）
 
 - **聊天偶发「AI 请求失败（检查网关配置或网络）」**：日志显示根因是 `chat request failed: trailing characters at line 1 column NNNN`——该 OpenAI 兼容网关（router 代理）部分请求仍返回 SSE 流式（`data:{...}` 多帧），即使请求体带 `stream:false`。ureq 读到多帧文本时 serde 单 JSON 解析失败 → chat() 返回 None → 前端报"请求失败"。另有 `timed out reading response`（网关慢，120s 超时）另一形态（`src-tauri/src/ai/mod.rs`）

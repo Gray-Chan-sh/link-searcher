@@ -150,6 +150,11 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
             return None;
         }
     };
+    log::info!(
+        "[AI] chat request: model={} user_chars={}",
+        cfg.llm_model,
+        user.chars().count()
+    );
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
@@ -162,7 +167,14 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         .and_then(|body| parse_chat_response(&body));
 
     match parsed {
-        Ok(resp) => resp.choices.into_iter().next().map(|c| c.message.content),
+        Ok(resp) => {
+            let content = resp.choices.into_iter().next().map(|c| c.message.content);
+            log::info!(
+                "[AI] chat response: ok, content_chars={}",
+                content.as_deref().map(|c| c.chars().count()).unwrap_or(0)
+            );
+            content
+        }
         Err(e) => {
             log::warn!("[AI] chat request failed: {e}");
             None
