@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-08-10（AI 回答 Markdown 渲染 —— 引入 remark-gfm 支持 GFM 表格）
+
+- **AI 回答的表格/删除线/任务列表渲染为原始文本**：ReactMarkdown 未启用 GFM 插件（Tables/strikethrough 属 GFM 扩展），LLM 输出的 `| header | ... |` 表格显示为纯管道符文本。安装 `remark-gfm` 并挂载 `remarkPlugins`（`src/components/ChatPanel.tsx`、`package.json`）
+- **测试**：tsc 0 错误
+
+---
+
 ## 2026-08-10（AI 长回答截断 —— max_tokens 1024→4096 + 请求超时 120s→300s）
 
 - **本地 omlx（Qwen3.6-35B）回答被截断**：omlx 日志 `finish_reason=length, max_tokens=1024`——`chat()` 的 `max_tokens=1024` 上限太小，计算/分析类回答（如"1600 万收费计算"）写到一半被截断。另 `build_agent` 120s 全请求超时不足以覆盖慢速本地模型（~15 tok/s × 4096 tokens ≈ 275s）（`src-tauri/src/ai/mod.rs`）
