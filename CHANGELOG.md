@@ -32,6 +32,14 @@
 
 ---
 
+## 2026-08-11（Wave 4 — 多语言界面 + RAG 内容分析决策）
+
+- **T10 多语言界面(ja/ko)**：新增 `ja.ts`/`ko.ts` 全量字典（各 258 键，diff 确认与 en/zh 键集一致）；`index.tsx` 扩 `Lang` union + 加入配置文件语言白名单；`Settings.tsx` 语言选项加日/韩；`Browse.tsx` 7 处硬编码中文抽为 `t('key')`（`src/i18n/*`、`Settings.tsx`、`Browse.tsx`）
+- **T13 RAG 内容分析决策**：路线图 P3 此条**标记为待独立规划**（本地 LLM 摘要/主题聚类/跨文件关联需新接口设计 + 派生数据存储 schema，超出本次批量范围）——ROADMAP.md P3 保留但注明"需独立设计"，不实现
+- **整体验证**：138 单元全过、`cargo check` 零 error、`npx tsc` 零错误、`semgrep --severity ERROR` 零发现
+
+---
+
 ## 2026-08-11（Wave 3 — 路线图 P2/P3 三项落地）
 
 - **T8 批量 reindex_files**：新增 `reindex_files(file_ids)` 命令（`spawn_blocking` 循环：清 dedup 缓存→`delete_document_only`→`index_file`，防重复文档）；前端 `reindexFiles(ids)` + Browse 从逐文件 `forEach` 改为单次批量 IPC（`commands/index.rs`、`lib.rs`、`api/index.ts`、`Browse.tsx`）
