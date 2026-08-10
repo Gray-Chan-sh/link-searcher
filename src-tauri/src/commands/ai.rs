@@ -368,10 +368,22 @@ fn prepare_conversation_prompt(
         bm25_relevant_hits(state, &last_q, 10)?
     };
 
+    const MAX_SOURCES: usize = 15;
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut merged: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // 新检索优先：追问要主导依据更新（否则旧来源累积顶满上限,
+    // 新文档永远挤不进来, 退化为"只围绕第一轮文档回答"）。
+    for (fid, path) in new_hits {
+        if seen.insert(fid.clone()) {
+            merged.push((fid, path));
+        }
+    }
+    // 旧来源只补充剩余槽位（去重, 上限以内仅供上下文底垫）。
     for fid in source_ids {
+        if merged.len() >= MAX_SOURCES {
+            break;
+        }
         if seen.contains(fid) {
             continue;
         }
@@ -380,11 +392,6 @@ fn prepare_conversation_prompt(
                 seen.insert(fid.clone());
                 merged.push((fid.clone(), rec.path.clone()));
             }
-        }
-    }
-    for (fid, path) in new_hits {
-        if seen.insert(fid.clone()) && merged.len() < 15 {
-            merged.push((fid, path));
         }
     }
 
