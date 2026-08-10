@@ -24,7 +24,6 @@ static TEXT_EXTRACTOR: LazyLock<text::TextExtractor> = LazyLock::new(text::TextE
 static PDF_EXTRACTOR: LazyLock<pdf::PdfExtractor> = LazyLock::new(pdf::PdfExtractor::new);
 static OFFICE_EXTRACTOR: LazyLock<office::OfficeExtractor> =
     LazyLock::new(office::OfficeExtractor::new);
-static IMAGE_EXTRACTOR: LazyLock<image::ImageExtractor> = LazyLock::new(image::ImageExtractor::new);
 static ARCHIVE_EXTRACTOR: LazyLock<archive::ArchiveExtractor> = LazyLock::new(archive::ArchiveExtractor::new);
 static AUDIO_EXTRACTOR: LazyLock<audio::AudioExtractor> = LazyLock::new(audio::AudioExtractor::new);
 
