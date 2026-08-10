@@ -25,6 +25,14 @@
 
 ---
 
+## 2026-08-10（追问来源列表不更新 —— 恢复 effect 自触发防重）
+
+- **追问后「基于 N 份文档」不更新**：日志实锤每轮追问并发两个请求（`conversation_ask_stream` + `conversation_ask`）——`handleSend` 设置 `pending` 后, 恢复挂起请求的 effect 把自己刚发起的请求当成"残留 pending"重跑（非流式, 不携带新来源）→ 与流式 done 竞争写回, 覆盖了来源列表更新
+- **修复**：恢复 effect 加自触发防护（`skipResumeRef`）——`handleSend` 置 pending 前打标, 恢复 effect 检测到本组件刚发起则跳过; 仅切页/重启后挂载的残留 pending 才恢复（`src/components/ChatPanel.tsx`）
+- **测试**：tsc 0 错误
+
+---
+
 ## 2026-08-10（追问旧来源保留策略 —— 对话中提到过的文件优先）
 
 - **旧来源如何保留**：追问依据合并改为「新检索 top-10 优先」→ 旧来源中**对话消息里被提及的文件**（stem/文件名出现在任一条 user/assistant 消息 = 用户实际使用过）最优先保留 → 其余旧来源按最近加入倒序补槽（去重, 总上限 15）（`commands/ai.rs`）
