@@ -5,21 +5,6 @@ import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { smartSearch, conversationAsk, cancelAiRequest, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
 
-// 模块级活跃 AI 请求注册表（不随组件卸载消失）：页面/会话切换后
-// 返回时挂接同一请求结果，避免向 LLM 网关重复发起请求。
-interface ActiveAiResult {
-  ok: boolean
-  answer?: string
-  error?: string
-  sourceIds?: string[]
-  sourceFiles?: string[]
-}
-interface ActiveAiRequest {
-  result?: ActiveAiResult
-  listeners: Set<(r: ActiveAiResult) => void>
-}
-const activeAiRequests = new Map<string, ActiveAiRequest>()
-
 interface ChatPanelProps {
   llmEnabled: boolean
   session: ChatSession | null
@@ -80,23 +65,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     if (!confirm('确认取消当前回答？')) return
     cancelAiRequest().catch(() => {})
     latestReqIdRef.current += 1
-    // 从注册表移除：切回时不再等待这个已被取消的请求。
-    if (session?.id) activeAiRequests.delete(session.id)
     patchSession({ pending_query: null, pending_started_at: null, messages })
-  }, [loading, patchSession, messages, session])
-
-  const runRequest = useCallback(async (q: string, src: string[], history: ChatMessage[]): Promise<ActiveAiResult> => {
-    try {
-      if (src.length === 0) {
-        const res: SmartSearchResponse = await smartSearch(q)
-        return { ok: true, answer: res.answer, sourceIds: res.source_ids, sourceFiles: res.source_files }
-      }
-      const answer = await conversationAsk(history, src)
-      return { ok: true, answer }
-    } catch (e) {
-      return { ok: false, error: errText(e) }
-    }
-  }, [])
+  }, [loading, patchSession, messages])
 
   const handleSend = useCallback(async () => {
     const q = input.trim()
@@ -105,77 +75,79 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     const userMsg: ChatMessage = { role: 'user', content: q }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
-    const history = messages
     patchSession({
-      messages: [...history, userMsg],
+      messages: [...messages, userMsg],
       pending_query: q,
       pending_started_at: startedAt,
     })
 
-    const req: ActiveAiRequest = { listeners: new Set() }
-    req.listeners.add((result) => {
-      if (latestReqIdRef.current !== reqId) return
-      const base = [...history, userMsg]
-      if (result.ok) {
+    try {
+      if (sourceIds.length === 0) {
+        const res: SmartSearchResponse = await smartSearch(q)
+        if (latestReqIdRef.current !== reqId) return
         patchSession({
-          messages: [...base, { role: 'assistant', content: result.answer ?? '' }],
-          source_ids: result.sourceIds,
-          source_files: result.sourceFiles,
+          messages: [...messages, userMsg, { role: 'assistant', content: res.answer }],
+          source_ids: res.source_ids,
+          source_files: res.source_files,
           pending_query: null,
           pending_started_at: null,
         })
       } else {
+        const answer = await conversationAsk([...messages, userMsg], sourceIds)
+        if (latestReqIdRef.current !== reqId) return
         patchSession({
-          messages: [...base, { role: 'assistant', content: `❌ ${result.error}` }],
+          messages: [...messages, userMsg, { role: 'assistant', content: answer }],
           pending_query: null,
           pending_started_at: null,
         })
       }
-    })
-    activeAiRequests.set(session.id, req)
-    void (async () => {
-      const result = await runRequest(q, sourceIds, history)
-      req.result = result
-      activeAiRequests.delete(session.id)
-      req.listeners.forEach(fn => fn())
-    })()
-  }, [input, loading, session, messages, sourceIds, patchSession, runRequest])
+    } catch (e) {
+      if (latestReqIdRef.current !== reqId) return
+      patchSession({
+        messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${errText(e)}` }],
+        pending_query: null,
+        pending_started_at: null,
+      })
+    }
+  }, [input, loading, session, messages, sourceIds, patchSession])
 
-  // 恢复挂起的请求：加载到带 pending 的会话（切页/切会话后返回）。
-  // 同一进程内原请求仍在注册表里 → 只挂接等待其结果（不重复请求 LLM）；
-  // 仅当注册表无记录（如 app 重启）才重发。
+  // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
+  // 问题（若进程内原请求尚未结束，会重复消耗一次生成——可用性优先，
+  // 后续再以流式替代）。
   useEffect(() => {
     if (!session?.pending_query) return
+    const q = session.pending_query
+    const reqId = ++latestReqIdRef.current
     const base = session.messages
-    const apply = (result: ActiveAiResult) => {
-      if (result.ok) {
+    ;(async () => {
+      try {
+        if (sourceIds.length === 0) {
+          const res: SmartSearchResponse = await smartSearch(q)
+          if (latestReqIdRef.current !== reqId) return
+          patchSession({
+            messages: [...base, { role: 'assistant', content: res.answer }],
+            source_ids: res.source_ids,
+            source_files: res.source_files,
+            pending_query: null,
+            pending_started_at: null,
+          })
+        } else {
+          const answer = await conversationAsk(base, sourceIds)
+          if (latestReqIdRef.current !== reqId) return
+          patchSession({
+            messages: [...base, { role: 'assistant', content: answer }],
+            pending_query: null,
+            pending_started_at: null,
+          })
+        }
+      } catch (e) {
+        if (latestReqIdRef.current !== reqId) return
         patchSession({
-          messages: [...base, { role: 'assistant', content: result.answer ?? '' }],
-          source_ids: result.sourceIds,
-          source_files: result.sourceFiles,
-          pending_query: null,
-          pending_started_at: null,
-        })
-      } else {
-        patchSession({
-          messages: [...base, { role: 'assistant', content: `❌ ${result.error}` }],
+          messages: [...base, { role: 'assistant', content: `❌ ${errText(e)}` }],
           pending_query: null,
           pending_started_at: null,
         })
       }
-    }
-    const existing = activeAiRequests.get(session.id)
-    if (existing) {
-      if (existing.result) { apply(existing.result); return }
-      existing.listeners.add(apply)
-      return () => { existing.listeners.delete(apply) }
-    }
-    // 原请求已不存在（进程重启 / 取消后残留）——重发，这是唯一重发场景。
-    const reqId = ++latestReqIdRef.current
-    void (async () => {
-      const result = await runRequest(session.pending_query as string, sourceIds, base)
-      if (latestReqIdRef.current !== reqId) return
-      apply(result)
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.pending_query])
