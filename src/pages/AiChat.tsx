@@ -41,9 +41,18 @@ export default function AiChat() {
     setActiveId(id)
     try {
       const s = await loadChatSessionById(id)
-      setActiveSession(s)
-    } catch { /* ignore */ }
-  }, [])
+      if (s) {
+        setActiveSession(s)
+      } else {
+        // Session vanished (e.g. stale id from a not-yet-persisted file):
+        // release activeId so the ensure-session effect re-runs and self-heals.
+        setActiveId(null)
+        refreshList()
+      }
+    } catch {
+      setActiveId(null)
+    }
+  }, [refreshList])
 
   const handleNewSession = useCallback(async () => {
     try {

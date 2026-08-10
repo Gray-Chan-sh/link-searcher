@@ -324,6 +324,8 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
         Ok(c) => {
             // Migrate the legacy single-session structure ({messages,...} at
             // top level) into the multi-session layout: wrap it as one session.
+            // The result is persisted immediately — otherwise every read would
+            // mint a fresh random id and list/load would never agree.
             #[derive(serde::Deserialize)]
             struct Legacy {
                 messages: Vec<ChatMessage>,
@@ -347,7 +349,9 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     source_ids: legacy.source_ids,
                     source_files: legacy.source_files,
                 };
-                return ChatHistoryFile { sessions: vec![session] };
+                let migrated = ChatHistoryFile { sessions: vec![session] };
+                let _ = write_history(data_dir, &migrated);
+                return migrated;
             }
             serde_json::from_str(&c).unwrap_or_default()
         }
@@ -476,4 +480,35 @@ pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<Str
     }
     md.push_str(&format!("\n_导出时间: {}\n", now_ts()));
     Ok(md)
+}
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_history_migrates_once_and_keeps_stable_id() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Legacy single-session top-level layout.
+        let legacy = r#"{"messages":[{"role":"user","content":"hello"}],"source_files":["a.pdf"],"source_ids":["f1"]}"#;
+        std::fs::write(chat_history_path(&dir), legacy).unwrap();
+
+        // First read migrates (and persists) it as one session.
+        let first = read_history(&dir);
+        assert_eq!(first.sessions.len(), 1);
+        let id = first.sessions[0].id.clone();
+
+        // A second read must return the SAME id — list_chat_sessions and
+        // load_chat_session are separate read_history calls.
+        let second = read_history(&dir);
+        assert_eq!(second.sessions.len(), 1);
+        assert_eq!(second.sessions[0].id, id);
+
+        // File is now the multi-session layout.
+        let content = std::fs::read_to_string(chat_history_path(&dir)).unwrap();
+        assert!(content.contains("\"sessions\""));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
