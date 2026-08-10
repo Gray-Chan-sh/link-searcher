@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-10（AI 能力判定不一致 —— 缓存 vs 实时 + 静默失败）
+
+- **设置页测试通过但聊天页显示"LLM 网关未配置或未通过测试"**：`capabilities()` 有 30s 缓存（启动时一次失败的探测结果被缓存为 llm=false），而设置页"测试"是实时探测绕过缓存；且 AiChat `aiCapabilities().catch(() => {})` 静默吞错，aiCap 保持初始 false 永久显示不可用（`src-tauri/src/ai/mod.rs`、`src/pages/AiChat.tsx`）
+  - **修复①**：`capabilities()` 去掉 30s 缓存，每次实时探测——聊天页与设置页永远一致（`ai/mod.rs`）
+  - **修复②**：AiChat mount 时强制刷新探测；探测失败显示「重试」按钮而非静默 false（`AiChat.tsx`）
+  - **修复③**：`test_gateways` 每次探测打 INFO 日志（`embedding/llm = ok/detail`）——探测结果可追踪（`ai/mod.rs`）
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 全链路日志 —— 消除"无痕失败"盲区）
 
 - **AI 聊天过程无成功路径日志**：`chat()` 只在失败时 warn、`smart_search`/`conversation_ask` 无入口记录，导致异常时 app.log 看不到任何痕迹（曾误判为"请求没发出"）。补全链路 INFO 日志：

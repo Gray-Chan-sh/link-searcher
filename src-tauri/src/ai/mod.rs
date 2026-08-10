@@ -5,8 +5,6 @@
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
 use std::collections::HashMap;
-use std::sync::OnceLock;
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -281,26 +279,21 @@ impl AiCapabilities {
 /// settings "test" button and at startup to decide which AI features to
 /// enable. Unconfigured gateways report `ok=false, detail=未配置`.
 pub fn test_gateways() -> Vec<GatewayTest> {
-    vec![test_embedding(), test_llm()]
+    let tests = vec![test_embedding(), test_llm()];
+    for t in &tests {
+        log::info!("[AI] capability probe: {} = {} ({})", t.kind, t.ok, t.detail);
+    }
+    tests
 }
 
-/// Cached gateway capability probe. The live test is only issued at most
-/// once per 30s; between tests, the previous result (or "unconfigured")
-/// is served. Used by the frontend to enable/disable AI feature entry
-/// points.
+/// Frontend-facing capability flags from a live probe. Always re-probes so
+/// the chat page agrees with the settings "test" button — the old 30s cache
+/// let one stale (failed) probe leave the chat page showing "unconfigured"
+/// while settings had just passed.
 pub fn capabilities() -> (bool, bool) {
-    static CACHE: OnceLock<std::sync::Mutex<(Instant, Vec<GatewayTest>)>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| std::sync::Mutex::new((Instant::now() - std::time::Duration::from_secs(60), Vec::new())));
-    let mut guard = match cache.lock() {
-        Ok(g) => g,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if guard.0.elapsed().as_secs() > 30 || guard.1.is_empty() {
-        guard.0 = Instant::now();
-        guard.1 = test_gateways();
-    }
-    let emb = guard.1.iter().find(|t| t.kind == "embedding").map(|t| t.ok).unwrap_or(false);
-    let llm = guard.1.iter().find(|t| t.kind == "llm").map(|t| t.ok).unwrap_or(false);
+    let tests = test_gateways();
+    let emb = tests.iter().find(|t| t.kind == "embedding").map(|t| t.ok).unwrap_or(false);
+    let llm = tests.iter().find(|t| t.kind == "llm").map(|t| t.ok).unwrap_or(false);
     (emb, llm)
 }
 
