@@ -126,7 +126,7 @@ pub async fn search(
         if ids.as_ref().is_some_and(|v| v.is_empty()) {
             return Ok(SearchResponse {
                 total: 0,
-                page: page.unwrap_or(1),
+page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*page_size) OOM
                 page_size: page_size.unwrap_or(20),
                 took_ms: 0,
                 hits: Vec::new(),
@@ -189,8 +189,25 @@ pub async fn search(
     // degrades to BM25-only rather than freezing the search.
     let mut response = response;
     if params.semantic && crate::ai::embedding_enabled() && !params.query.is_empty() {
+        // 全库 top-N BM25（同过滤、不分页）作 RRF 的 BM25 侧融合源：
+        // 页内 20 条的 page-local rank 会让第 2+ 页命中完全不参与融合。
+        let mut top_params = params.clone();
+        top_params.page = 1;
+        top_params.page_size = BM25_FUSION_TOP_N;
         let db = state.db.clone();
-        match semantic_rerank_worker(&db, &params.query, &response, params.page, params.page_size) {
+        match searcher
+            .search(&top_params)
+            .map_err(|e| format!("search failed: {e}"))
+            .and_then(|top| {
+                semantic_rerank_worker(
+                    &db,
+                    &params.query,
+                    &response,
+                    &top.hits,
+                    params.page,
+                    params.page_size,
+                )
+            }) {
             Ok(merged) => response = merged,
             Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
         }
@@ -227,13 +244,21 @@ pub async fn search(
     Ok(response)
 }
 
+/// How many corpus-wide BM25 hits feed the semantic RRF fusion. Fusing
+/// page-local ranks would let page-2+ hits never participate.
+const BM25_FUSION_TOP_N: usize = 100;
+
 /// Semantically rerank search hits: embed the query, score every stored
 /// embedding by cosine, then fuse with the BM25 ranks via Reciprocal Rank
 /// Fusion. Returns a merged `SearchResponse` with reordered hits.
+///
+/// `bm25` is the current page's response (baseline/fallback); `bm25_top` is
+/// the corpus-wide top-N used for the BM25 side of the fusion.
 fn semantic_rerank_worker(
     pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
     query: &str,
     bm25: &SearchResponse,
+    bm25_top: &[SearchHit],
     page: usize,
     page_size: usize,
 ) -> Result<SearchResponse, String> {
@@ -270,7 +295,7 @@ fn semantic_rerank_worker(
     // RRF fusion: score = 1/(60 + rank) summed over BM25 and semantic lists.
     const K: f64 = 60.0;
     let mut fusion: HashMap<String, f64> = HashMap::new();
-    for (i, hit) in bm25.hits.iter().enumerate() {
+    for (i, hit) in bm25_top.iter().enumerate() {
         *fusion.entry(hit.file_id.clone()).or_insert(0.0) += 1.0 / (K + i as f64);
     }
     for (rank, (fid, _)) in scored.iter().enumerate() {

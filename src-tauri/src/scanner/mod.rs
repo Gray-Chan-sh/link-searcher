@@ -145,6 +145,12 @@ impl Scanner {
         let mut modified = 0u64;
         let mut deleted = 0u64;
 
+        // Bulk-load tracked records once instead of a per-file indexed SELECT.
+        let records: HashMap<String, FileRecord> = tracker::get_files_by_dir(&conn, dir_id)?
+            .into_iter()
+            .map(|r| (r.path.clone(), r))
+            .collect();
+
         for entry in walkdir::WalkDir::new(&config.path)
             .follow_links(false)
             .into_iter()
@@ -175,7 +181,7 @@ impl Scanner {
             let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
-            let existing = tracker::get_file_by_path(&conn, &rel_path)?;
+            let existing = records.get(&rel_path).cloned();
             let needs_index = needs_reindex(&existing, mtime);
             if let Some(r) = &existing {
                 if r.mtime != mtime { modified += 1; }

@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-10（核心搜索正确性 · 重复文档 / 语义融合源 / 全量扫描查询 / 分页上限）
+
+- **update_indexed 失败致 Tantivy 重复文档**：`add_document` 成功后 DB 写失败，文档已入索引而记录保持 pending → 每次扫描重试再 add、重复累积。失败分支补 `delete_document` 回滚，索引与 DB 恢复原子（`indexer.rs`）
+- **语义重排 BM25 只取当前页**：RRF 融合的 BM25 侧 rank 来自已分页的 20 条（page-local），第 2+ 页命中从不参与融合、排序失真。rerank 前先跑全库 top-100 BM25（同过滤不分页）作融合源，worker 融合后按页码分页——各页结果一致（`commands/search.rs`）
+- **full_scan 逐文件索引查询 O(N)**：每文件一条 `get_file_by_path`（每文件 prepare+SELECT），incremental 已是 bulk HashMap。full_scan 改为循环前一次批量载入 `HashMap<rel_path, FileRecord>`，循环内 O(1) 查内存（`scanner/mod.rs`）
+- **page 未限幅 OOM**：`page` 无上限，`limit = page*page_size`（≤1000）可被请求到 10⁹ 级 `TopDocs::with_limit`。`page.clamp(1, 10_000)` 封顶（20/页 → 20 万条翻页上限）（`commands/search.rs`）
+- **测试**：120 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（P2 一致性修复 · Office 扩展名 / 大小写搜索 / 取消不标失败 / 移位检测）
 
 - **Office 新格式永不索引**：`docm/xlsm/xlsb/pptm/ppsm/ppsx/pps/pot` 在 office 提取器支持但 `extract_text`/`classify_ext`/`get_supported_extensions` dispatch 缺失，被当未知格式跳过。三处补齐 8 个扩展名（`extractor/mod.rs`）
