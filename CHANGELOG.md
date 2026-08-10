@@ -11,6 +11,15 @@
 
 ---
 
+## 2026-08-10（AI 聊天导出无文件 —— fs scope 白名单 + 错误被吞）
+
+- **导出"能用"但找不到文件**：capabilities `fs.scope` 仅白名单 `$APPDATA/$DOCUMENT/$DESKTOP/$DOWNLOAD` 等，保存到白名单外路径（如 `/Volumes/Data`）时 `writeTextFile` 被 scope 拒绝 → 抛错 → AiChat `catch { /* ignore */ }` 静默吞掉 → 无文件也无提示
+  - **修复①**：fs.scope 追加 `$DIALOG_FILES/**`（Tauri 对"用户对话框选中的文件"动态授权的 scope 项——save 对话框选任意位置即可写）（`src-tauri/capabilities/default.json`）
+  - **修复②**：AiChat 导出 catch 弹 `alert` 显示真实错误，不再静默吞（`src/pages/AiChat.tsx`）
+- **测试**：tsc 0 错误，cargo check 通过
+
+---
+
 ## 2026-08-10（追问动态依据 —— 来源列表随问题更新）
 
 - **追问仍用首问快照来源,新文件/新问题不改变依据**：`conversation_ask` 只加载固定 `source_ids`。改为**动态依据**：按追问问题（jieba 分词 OR）重新 BM25 检索 top-10，与**仍有效**的旧来源合并（剔除已删除/内容缺失的文件,去重,上限 15）→ 模型依据与来源列表跟随最新问题（`commands/ai.rs`：新增 `bm25_relevant_hits`、`prepare_conversation_prompt` 返回合并后的 `source_ids/source_files`）
