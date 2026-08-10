@@ -153,7 +153,7 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // setQuery: only updates query state. Debounced search is triggered separately.
   const setQuery = useCallback((q: string) => {
-    setState(s => ({ ...s, query: q.toLowerCase() }))
+    setState(s => ({ ...s, query: q }))
   }, [])
 
   // Immediate search (for Enter key) – uses latest filters from ref
@@ -211,6 +211,14 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     }, 200)
   }, [])
 
+  const toggleSemantic = useCallback((v: boolean) => {
+    saveToStorage('ls_semantic', v)
+    setSemantic(v)
+    semanticRef.current = v // sync ref so the immediate re-search sees the new value
+    const f = filtersRef.current
+    executeSearch(state.query, 1, f.pageSize, f.dirIds, f.extFilter, f.dirPaths, f.sortField, f.sortOrder)
+  }, [executeSearch, state.query, filtersRef])
+
   // setSort: update sort field/order and immediately re-execute search with current filters
   const setSort = useCallback((sort: string) => {
     setSortField(sort)
@@ -238,7 +246,7 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     setQuery,
     setPage,
     setSort,
-    setSemantic: (v: boolean) => { saveToStorage('ls_semantic', v); setSemantic(v) },
+    setSemantic: toggleSemantic,
     setDirIds: updateDirIds,
     setDirPaths: updateDirPaths,
     setExtFilter: updateExtFilter,

@@ -9,6 +9,7 @@ pub mod windows_ocr;
 pub mod pdf;
 mod text;
 
+use std::io::Read;
 use std::path::Path;
 use std::sync::LazyLock;
 
@@ -61,12 +62,19 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" => {
             AUDIO_EXTRACTOR.extract_audio(path)
         }
-        // Unknown format: try reading as plain text
-        _ => match std::fs::read_to_string(path) {
-            Ok(text) if !text.trim().is_empty() => Ok(text),
-            Ok(_) => Err(anyhow::anyhow!("empty file or binary content: {ext}")),
-            Err(e) => Err(anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}")),
-        },
+        // Unknown format: try reading as plain text (capped — a 50GB video
+        // or image file must not be read fully into memory).
+        _ => {
+            let mut buf = Vec::with_capacity(10 * 1024 * 1024);
+            std::fs::File::open(path)
+                .and_then(|mut f| f.take(10 * 1024 * 1024).read_to_end(&mut buf))
+                .map_err(|e| anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}"))?;
+            match std::str::from_utf8(&buf) {
+                Ok(text) if !text.trim().is_empty() => Ok(text.to_string()),
+                Ok(_) => Err(anyhow::anyhow!("empty file or binary content: {ext}")),
+                Err(_) => Err(anyhow::anyhow!("unsupported format '{ext}': binary content, cannot read as text")),
+            }
+        }
     }
 }
 

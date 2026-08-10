@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
@@ -68,12 +68,12 @@ fn pdfinfo_path() -> Option<&'static Path> {
 fn get_pdf_page_count(path: &Path) -> Result<u32> {
     // Try pdfinfo first — handles broken streams that lopdf rejects
     if let Some(bin) = pdfinfo_path() {
-        let output = Command::new(bin)
-            .arg(path)
-            .output()
-            .context("pdfinfo failed")?;
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut cmd = Command::new(bin);
+        cmd.arg(path);
+        let (status, stdout) = run_with_timeout(cmd, Duration::from_secs(60))
+            .unwrap_or((None, Vec::new()));
+        if status.map(|s| s.success()).unwrap_or(false) {
+            let stdout = String::from_utf8_lossy(&stdout);
             for line in stdout.lines() {
                 if let Some(val) = line.strip_prefix("Pages:") {
                     return val.trim().parse::<u32>().context("invalid pdfinfo Pages output");
@@ -86,16 +86,44 @@ fn get_pdf_page_count(path: &Path) -> Result<u32> {
     Ok(doc.get_pages().len() as u32)
 }
 
+/// Run a command with a timeout, capturing stdout. A broken/crafted PDF can
+/// hang poppler forever; the timeout lets the scan worker move on. A timeout
+/// yields `Ok((None, vec![]))` so callers can fall back.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
+    cmd.stdout(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break st,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Ok((None, Vec::new()));
+            }
+            None => std::thread::sleep(Duration::from_millis(200)),
+        }
+    };
+    let mut out = Vec::new();
+    if let Some(mut so) = child.stdout.take() {
+        std::io::Read::read_to_end(&mut so, &mut out)?;
+    }
+    Ok((Some(status), out))
+}
+
 /// Extract text via pdftotext (poppler) and check for watermarks/repetition.
 /// Used as a fallback when lopdf cannot parse the PDF but the text layer is
 /// still valid (common for digitally generated PDFs with stream errors).
 fn try_pdftotext_extract(path: &Path) -> Option<String> {
     let bin = pdftotext_path()?;
-    let output = Command::new(bin).arg(path).arg("-").output().ok()?;
-    if !output.status.success() {
+    let mut cmd = Command::new(bin);
+    cmd.arg(path).arg("-");
+    let (status, stdout) = run_with_timeout(cmd, Duration::from_secs(120)).ok()?;
+    let status = status?;
+    if !status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = String::from_utf8_lossy(&stdout).to_string();
     if text.len() < 100 {
         return None;
     }
