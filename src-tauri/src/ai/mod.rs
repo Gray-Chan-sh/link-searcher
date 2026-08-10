@@ -6,20 +6,84 @@
 
 use std::collections::HashMap;
 
+use crate::config::{ModelType, ProviderConfig};
 use serde::{Deserialize, Serialize};
+
+/// Resolved endpoint for a model role: the provider + model id in use.
+#[derive(Debug, Clone)]
+pub struct ActiveEndpoint {
+    pub base_url: String,
+    pub api_key: String,
+    pub model_id: String,
+}
+
+impl ActiveEndpoint {
+    fn new(p: &ProviderConfig, model_id: &str) -> Self {
+        Self {
+            base_url: p.base_url.clone(),
+            api_key: p.api_key.clone(),
+            model_id: model_id.to_string(),
+        }
+    }
+}
+
+/// Resolve the endpoint for a model role from the active selection
+/// (`provider_id:model_id`). Returns None when unconfigured or dangling.
+fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> Option<ActiveEndpoint> {
+    let active_id = match kind {
+        ModelType::Embedding => &cfg.active_embedding_model_id,
+        ModelType::Llm => &cfg.active_llm_model_id,
+        ModelType::Unknown => return None,
+    };
+    if active_id.is_empty() {
+        return None;
+    }
+    let (provider_id, model_id) = active_id.split_once(':')?;
+    let provider = cfg.providers.iter().find(|p| p.id == provider_id)?;
+    if !provider.models.iter().any(|m| m.id == model_id) {
+        return None;
+    }
+    Some(ActiveEndpoint::new(provider, model_id))
+}
+
+/// Classify a model id by name heuristics. Pure function, user-overridable.
+pub fn classify_model_by_name(id: &str) -> ModelType {
+    let lower = id.to_lowercase();
+    const EMBED_HINTS: &[&str] = &[
+        "embed", "text-embedding", "bge", "m3", "minilm", "e5-", "gte-", "nomic-embed",
+        "jina-embeddings", "mxbai-embed", "all-minilm",
+    ];
+    const LLM_HINTS: &[&str] = &[
+        "instruct", "chat", "llm", "gpt", "qwen", "deepseek", "gemma", "llama", "mistral",
+        "mixtral", "yi-", "glm", "phi", "command-r", "claude", "gemini",
+    ];
+    for h in EMBED_HINTS {
+        if lower.contains(h) {
+            return ModelType::Embedding;
+        }
+    }
+    for h in LLM_HINTS {
+        if lower.contains(h) {
+            return ModelType::Llm;
+        }
+    }
+    // No特征命中：默认视为对话模型（绝大多数 provider/models 是 LLM；
+    // 真正无特征的 embedding 极罕见, 且 UI 可手动改类型）。
+    ModelType::Llm
+}
 
 pub fn ai_enabled() -> bool {
     embedding_enabled() || llm_enabled()
 }
 
-/// True when the embedding gateway is configured (semantic search usable).
+/// True when an embedding model is active (semantic search usable).
 pub fn embedding_enabled() -> bool {
-    !crate::config::load_config().embedding_api_base.trim().is_empty()
+    resolve_active_endpoint(&crate::config::load_config(), ModelType::Embedding).is_some()
 }
 
-/// True when the LLM gateway is configured (summary / RAG usable).
+/// True when an LLM model is active (summary / RAG usable).
 pub fn llm_enabled() -> bool {
-    !crate::config::load_config().llm_api_base.trim().is_empty()
+    resolve_active_endpoint(&crate::config::load_config(), ModelType::Llm).is_some()
 }
 
 /// Embedding models usually cap input at 512 tokens; over-length text rejects
@@ -47,11 +111,14 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
 }
 
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
-    if texts.is_empty() || !embedding_enabled() {
-        return vec![None; texts.len()];
-    }
     let cfg = crate::config::load_config();
-    let url = format!("{}/embeddings", cfg.embedding_api_base.trim_end_matches('/'));
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
+        return vec![None; texts.len()];
+    };
+    if texts.is_empty() {
+        return vec![];
+    }
+    let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
 
     #[derive(Serialize)]
     struct Req {
@@ -69,7 +136,7 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     }
 
     let body = Req {
-        model: cfg.embedding_model.clone(),
+        model: ep.model_id.clone(),
         input: texts.iter().map(|t| truncate_for_embed(t)).collect(),
     };
 
@@ -77,7 +144,7 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
-        .set_auth(&cfg.embedding_api_key)
+        .set_auth(&ep.api_key)
         .send_string(&req_body);
 
     let parsed: Result<Resp, String> = send_result
@@ -112,14 +179,14 @@ pub fn embed(text: &str) -> Option<Vec<f32>> {
 /// text. `system` is the instruction, `user` the task/content. Returns `None`
 /// when unconfigured or the request fails (downgrade, never block).
 pub fn chat(system: &str, user: &str) -> Option<String> {
-    if !llm_enabled() {
-        return None;
-    }
     let cfg = crate::config::load_config();
-    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
+    let Some(ep) = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm) else {
+        return None;
+    };
+    let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
     let req = ChatReq {
-        model: cfg.llm_model.clone(),
+        model: ep.model_id.clone(),
         messages: vec![
             ChatMsg { role: "system".into(), content: system.into() },
             ChatMsg { role: "user".into(), content: user.into() },
@@ -137,13 +204,13 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     };
     log::info!(
         "[AI] chat request: model={} user_chars={}",
-        cfg.llm_model,
+        ep.model_id,
         user.chars().count()
     );
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
-        .set_auth(&cfg.llm_api_key)
+        .set_auth(&ep.api_key)
         .send_string(&req_body);
 
     let parsed: Result<ChatResp, String> = send_result
@@ -191,10 +258,13 @@ pub fn chat_stream(
         return failed;
     }
     let cfg = crate::config::load_config();
-    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
+    let Some(ep) = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm) else {
+        return failed;
+    };
+    let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
     let req_body = match serde_json::to_string(&ChatReq {
-        model: cfg.llm_model.clone(),
+        model: ep.model_id.clone(),
         messages: vec![
             ChatMsg { role: "system".into(), content: system.into() },
             ChatMsg { role: "user".into(), content: user.into() },
@@ -211,14 +281,14 @@ pub fn chat_stream(
     };
     log::info!(
         "[AI] chat stream request: model={} user_chars={}",
-        cfg.llm_model,
+        ep.model_id,
         user.chars().count()
     );
 
     let send_result = build_agent()
         .post(&url)
         .set("Content-Type", "application/json")
-        .set_auth(&cfg.llm_api_key)
+        .set_auth(&ep.api_key)
         .send_string(&req_body);
     let mut reader = match send_result {
         Ok(r) if (200..300).contains(&r.status()) => r.into_reader(),
@@ -466,14 +536,58 @@ pub fn capabilities() -> (bool, bool) {
     (embedding_enabled(), llm_enabled())
 }
 
+/// Pull a provider's model list from `GET {base_url}/models`, classified by
+/// name heuristics. Returns `(models, err?)` — an error string when the
+/// request failed (caller keeps the old list).
+pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config::ModelConfig>, Option<String>) {
+    #[derive(Deserialize)]
+    struct ModelsResp {
+        #[serde(default)]
+        data: Vec<ModelEntry>,
+    }
+    #[derive(Deserialize)]
+    struct ModelEntry {
+        id: String,
+    }
+
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let agent = ureq::builder().timeout(std::time::Duration::from_secs(30)).build();
+    let mut req = agent.get(&url);
+    if !api_key.trim().is_empty() {
+        req = req.set("Authorization", &format!("Bearer {}", api_key.trim()));
+    }
+    let parsed: Result<ModelsResp, String> = req
+        .call()
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+        .and_then(|body| serde_json::from_str::<ModelsResp>(&body).map_err(|e| e.to_string()));
+    match parsed {
+        Ok(resp) => {
+            let models = resp
+                .data
+                .into_iter()
+                .map(|m| {
+                    let id = m.id;
+                    crate::config::ModelConfig {
+                        id: id.clone(),
+                        model_type: classify_model_by_name(&id),
+                    }
+                })
+                .collect::<Vec<_>>();
+            (models, None)
+        }
+        Err(e) => (Vec::new(), Some(e)),
+    }
+}
+
 fn test_embedding() -> GatewayTest {
     let cfg = crate::config::load_config();
-    if cfg.embedding_api_base.trim().is_empty() {
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
         return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into() };
-    }
-    let url = format!("{}/embeddings", cfg.embedding_api_base.trim_end_matches('/'));
-    let body = serde_json::json!({ "model": cfg.embedding_model, "input": [""] });
-    match ping_post(&url, &cfg.embedding_api_key, &body, std::time::Duration::from_secs(5)) {
+    };
+    let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "model": ep.model_id, "input": [""] });
+    match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(5)) {
         Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into() },
         Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
     }
@@ -481,16 +595,16 @@ fn test_embedding() -> GatewayTest {
 
 fn test_llm() -> GatewayTest {
     let cfg = crate::config::load_config();
-    if cfg.llm_api_base.trim().is_empty() {
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
         return GatewayTest { kind: "llm", ok: false, detail: "未配置".into() };
-    }
-    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
+    };
+    let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
-        "model": cfg.llm_model,
+        "model": ep.model_id,
         "messages": [{"role":"user","content":"ping"}],
         "max_tokens": 1
     });
-    match ping_post(&url, &cfg.llm_api_key, &body, std::time::Duration::from_secs(30)) {
+    match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(30)) {
         Ok(()) => GatewayTest { kind: "llm", ok: true, detail: "OK".into() },
         Err(e) => GatewayTest { kind: "llm", ok: false, detail: e },
     }
@@ -598,6 +712,42 @@ mod tests {
     }
 
     #[test]
+    fn classify_model_by_name_heuristics() {
+        use crate::config::ModelType;
+        assert_eq!(classify_model_by_name("bge-m3-mlx-fp16"), ModelType::Embedding);
+        assert_eq!(classify_model_by_name("text-embedding-v3-small"), ModelType::Embedding);
+        assert_eq!(classify_model_by_name("nomic-embed-text"), ModelType::Embedding);
+        assert_eq!(classify_model_by_name("qwen2.5-7b-instruct"), ModelType::Llm);
+        assert_eq!(classify_model_by_name("Huihui-gemma-4-12B-it-abliterated-mlx-4bit"), ModelType::Llm);
+        assert_eq!(classify_model_by_name("gpt-4o"), ModelType::Llm);
+        assert_eq!(classify_model_by_name("custom-thing"), ModelType::Llm);
+        assert_eq!(classify_model_by_name("Qwen-EMBED-2"), ModelType::Embedding);
+    }
+
+    #[test]
+    fn resolve_active_endpoint_valid_and_dangling() {
+        use crate::config::{AppConfig, ModelConfig, ProviderConfig};
+        let cfg = AppConfig {
+            providers: vec![ProviderConfig {
+                id: "p1".into(),
+                name: "x".into(),
+                base_url: "http://x/v1".into(),
+                api_key: "k".into(),
+                models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding }],
+            }],
+            active_embedding_model_id: "p1:m1".into(),
+            active_llm_model_id: "p1:ghost".into(),
+            ..AppConfig::default()
+        };
+        let ep = resolve_active_endpoint(&cfg, ModelType::Embedding).expect("valid active");
+        assert_eq!(ep.base_url, "http://x/v1");
+        assert_eq!(ep.api_key, "k");
+        assert_eq!(ep.model_id, "m1");
+        assert!(resolve_active_endpoint(&cfg, ModelType::Llm).is_none(), "dangling llm must be None");
+        assert!(resolve_active_endpoint(&cfg, ModelType::Unknown).is_none());
+    }
+
+    #[test]
     fn chat_degrades_when_unconfigured() {
         // Environment-independent: chat must complete (None when not
         // configured; Some/None against a real gateway within timeout).
@@ -611,11 +761,10 @@ mod tests {
         // gateways configured, ok may be true.
         let tests = test_gateways();
         assert_eq!(tests.len(), 2);
-        let cfg = crate::config::load_config();
-        if cfg.embedding_api_base.trim().is_empty() {
+        if !embedding_enabled() {
             assert!(!tests[0].ok);
         }
-        if cfg.llm_api_base.trim().is_empty() {
+        if !llm_enabled() {
             assert!(!tests[1].ok);
         }
         let _ = capabilities();

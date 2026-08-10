@@ -22,6 +22,12 @@ pub struct ConfigInfo {
     pub llm_api_base: String,
     pub llm_api_key: String,
     pub llm_model: String,
+    #[serde(default)]
+    pub providers: Vec<crate::config::ProviderConfig>,
+    #[serde(default)]
+    pub active_embedding_model_id: String,
+    #[serde(default)]
+    pub active_llm_model_id: String,
 }
 
 #[tauri::command]
@@ -39,6 +45,9 @@ pub fn get_config() -> Result<ConfigInfo, String> {
         llm_api_base: config.llm_api_base,
         llm_api_key: config.llm_api_key,
         llm_model: config.llm_model,
+        providers: config.providers,
+        active_embedding_model_id: config.active_embedding_model_id,
+        active_llm_model_id: config.active_llm_model_id,
     })
 }
 
@@ -73,12 +82,157 @@ pub fn update_config(
         llm_api_base: new_config.llm_api_base,
         llm_api_key: new_config.llm_api_key,
         llm_model: new_config.llm_model,
+        providers: new_config.providers,
+        active_embedding_model_id: new_config.active_embedding_model_id,
+        active_llm_model_id: new_config.active_llm_model_id,
     };
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.
     config.ai_api_base = config.embedding_api_base.clone();
     config.ai_api_key = config.embedding_api_key.clone();
     save_config(&config)
+}
+
+/// Add a new AI provider. `models` is pulled from `GET {base}/models` when
+/// the request succeeds; on failure the provider is still saved with empty
+/// models and the error is returned for the UI to toast.
+#[tauri::command]
+pub fn add_provider(
+    name: String,
+    base_url: String,
+    api_key: String,
+) -> Result<ProviderOutcome, String> {
+    let mut config = load_config();
+    let id = uuid::Uuid::new_v4().to_string();
+    let (models, pull_err) = if base_url.trim().is_empty() {
+        (Vec::new(), None)
+    } else {
+        crate::ai::list_provider_models(&base_url, &api_key)
+    };
+    config.providers.push(crate::config::ProviderConfig {
+        id: id.clone(),
+        name,
+        base_url: base_url.trim().to_string(),
+        api_key,
+        models,
+    });
+    save_config(&config)?;
+    Ok(ProviderOutcome { id, pull_error: pull_err })
+}
+
+/// Edit an existing provider's name/base/key. Models are NOT re-pulled here
+/// (use `refresh_provider_models`); changed credentials keep the cached list
+/// until the user refreshes.
+#[tauri::command]
+pub fn update_provider(
+    id: String,
+    name: String,
+    base_url: String,
+    api_key: String,
+) -> Result<(), String> {
+    let mut config = load_config();
+    let Some(p) = config.providers.iter_mut().find(|p| p.id == id) else {
+        return Err(format!("provider not found: {id}"));
+    };
+    p.name = name;
+    p.base_url = base_url.trim().to_string();
+    p.api_key = api_key;
+    save_config(&config)
+}
+
+/// Delete a provider and its cached models. Refuses when it is the active
+/// embedding or LLM endpoint (the UI disables delete in that case too).
+#[tauri::command]
+pub fn delete_provider(id: String) -> Result<(), String> {
+    let mut config = load_config();
+    if config.active_embedding_model_id.starts_with(&format!("{id}:"))
+        || config.active_llm_model_id.starts_with(&format!("{id}:"))
+    {
+        return Err("该 Provider 正在使用中，请先切换当前模型".into());
+    }
+    config.providers.retain(|p| p.id != id);
+    save_config(&config)
+}
+
+/// Re-pull a provider's model list, merging by model id: existing model types
+/// (including user overrides) are kept, new models are auto-classified.
+/// Returns the updated list plus any pull error for the UI.
+#[tauri::command]
+pub fn refresh_provider_models(id: String) -> Result<Vec<crate::config::ModelConfig>, String> {
+    let mut config = load_config();
+    let Some(p) = config.providers.iter_mut().find(|p| p.id == id) else {
+        return Err(format!("provider not found: {id}"));
+    };
+    let (fresh, pull_err) = crate::ai::list_provider_models(&p.base_url, &p.api_key);
+    if fresh.is_empty() {
+        // Pull failed or empty: keep the old list untouched.
+        return if let Some(e) = pull_err {
+            Err(format!("拉取失败: {e}"))
+        } else {
+            Ok(p.models.clone())
+        };
+    }
+    // Merge: keep user-overridden types for ids that already exist.
+    let old_by_id: std::collections::HashMap<&str, crate::config::ModelType> = p
+        .models
+        .iter()
+        .map(|m| (m.id.as_str(), m.model_type))
+        .collect();
+    p.models = fresh
+        .into_iter()
+        .map(|m| crate::config::ModelConfig {
+            // Keep user-overridden types, but never keep an old Unknown —
+            // re-classification (e.g. classifier changes) must take effect.
+            model_type: old_by_id
+                .get(m.id.as_str())
+                .copied()
+                .filter(|t| *t != crate::config::ModelType::Unknown)
+                .unwrap_or(m.model_type),
+            ..m
+        })
+        .collect();
+    let result = p.models.clone();
+    drop(p);
+    save_config(&config)?;
+    Ok(result)
+}
+
+/// Set (or clear, with empty id) which model is used for a role.
+#[tauri::command]
+pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
+    let mut config = load_config();
+    let field = match kind.as_str() {
+        "embedding" => &mut config.active_embedding_model_id,
+        "llm" => &mut config.active_llm_model_id,
+        _ => return Err(format!("unknown kind: {kind}")),
+    };
+    *field = model_id;
+    save_config(&config)
+}
+
+/// Test a provider's connectivity (GET /models). Returns ok + detail.
+#[tauri::command]
+pub fn test_provider(base_url: String, api_key: String) -> Result<ProviderTest, String> {
+    if base_url.trim().is_empty() {
+        return Err("base_url 不能为空".into());
+    }
+    let (models, pull_err) = crate::ai::list_provider_models(&base_url, &api_key);
+    match pull_err {
+        None => Ok(ProviderTest { ok: true, detail: format!("连通成功，发现 {} 个模型", models.len()) }),
+        Some(e) => Ok(ProviderTest { ok: false, detail: e }),
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ProviderOutcome {
+    pub id: String,
+    pub pull_error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+pub struct ProviderTest {
+    pub ok: bool,
+    pub detail: String,
 }
 
 #[tauri::command]

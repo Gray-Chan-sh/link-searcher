@@ -4,10 +4,34 @@
 
 ---
 
+## 2026-08-10（AI 模型管理 · 多 Provider 支持）
+
+- **AI 配置从"各一个"升级为"模型管理"**：`AppConfig` 新增 `providers: Vec<ProviderConfig>` + `active_embedding_model_id`/`active_llm_model_id`（`provider_id:model_id`），可添加/编辑/删除多个 AI Provider，下拉框选择当前使用的 embedding / LLM 模型（`src-tauri/src/config.rs`）
+- **模型自动拉取 + 分类**：新增 `list_provider_models`（`GET {base}/models`），按名字启发式分类（`classify_model_by_name`：embed/text-embedding/bge/m3/minilm… → Embedding；instruct/chat/gpt/qwen/deepseek/gemma… → LLM），未命中归 Unknown，用户可在 UI 手动纠偏（`src-tauri/src/ai/mod.rs`）
+- **刷新合并不覆盖纠偏**：`refresh_provider_models` 按模型 id 合并——已存在模型的类型以用户手动值为准，新增模型自动分类；拉取失败保留旧列表并返回错误（`src-tauri/src/commands/config.rs`）
+- **新命令**：`add_provider`（保存时自动拉取模型，失败不阻塞保存）、`update_provider`、`delete_provider`（使用中的 provider 禁删）、`refresh_provider_models`、`set_active_model`（空串=停用）、`test_provider`（连通性探测）（`src-tauri/src/commands/config.rs`、`src-tauri/src/lib.rs`）
+- **AI 运行时全部走 active 反查**：`embed/chat/chat_stream/embedding_enabled/llm_enabled/capabilities/test_gateways` 由 `resolve_active_endpoint` 指向当前选中模型；悬空 active（provider 被改或模型消失）静默降级为未配置（`src-tauri/src/ai/mod.rs`）
+- **旧配置自动迁移**：启动时若 `providers` 为空且旧 `embedding_api_base`/`llm_api_base` 非空 → 自动生成默认 Provider + 种子模型记录 + active 指向；旧字段保留兼容（`src-tauri/src/config.rs`）
+- **前端设置页重写**：「当前使用」下拉置顶（跨 Provider 合并同类模型，显示能力探测状态）；Provider 行内展开编辑（名称/base_url/掩码 API Key + 小眼睛切换）；行内测试/刷新/删除（在用 provider 禁用）；模型子列表行内类型下拉；「添加 Provider」内联表单自动拉取（`src/pages/Settings.tsx`、`src/api/config.ts`、`src/i18n/{zh,en}.ts`）
+- **测试**：`classify_model_by_name_heuristics`、`resolve_active_endpoint_valid_and_dangling`、`migrate_legacy_gateways_seeds_providers_and_active/noop_when_empty`、`provider_find_model_matches_by_id`；129 单元 + 6 IPC 通过，semgrep 0，tsc 0
+- **已知 wire 约定**：`ModelType` serde 序列化为 PascalCase（`"Embedding"`/`"Llm"`/`"Unknown"`），前端类型与筛选已按此匹配（内部格式，无外部消费者）
+
+---
+
 ## 2026-08-10（AI 回答 Markdown 渲染 —— 引入 remark-gfm 支持 GFM 表格）
 
 - **AI 回答的表格/删除线/任务列表渲染为原始文本**：ReactMarkdown 未启用 GFM 插件（Tables/strikethrough 属 GFM 扩展），LLM 输出的 `| header | ... |` 表格显示为纯管道符文本。安装 `remark-gfm` 并挂载 `remarkPlugins`（`src/components/ChatPanel.tsx`、`package.json`）
 - **测试**：tsc 0 错误
+
+---
+
+## 2026-08-10（Provider 模型分类兜底 —— 无特征模型默认 LLM）
+
+- **9router 等 provider 的模型（如 `coding`、`openrouter/…`、`agnes/…`）不出现在 LLM 下拉**：`classify_model_by_name` 对无特征命中的模型返回 `Unknown`，前端 LLM 下拉过滤 `model_type === 'Llm'` 看不到
+  - **修复①**：分类兜底 `Unknown → Llm`——绝大多数 provider/models 是对话模型；真正无特征的 embedding 极罕见且 UI 可手动改类型（`ai/mod.rs`）
+  - **修复②**：`refresh_provider_models` merge 不再保留旧 `Unknown` 分类（否则改 classifier 后老 provider 刷新仍不生效）——Unknown 让位新分类，用户手动改过的非 Unknown 类型保留（`commands/config.rs`）
+  - **生效方式**：设置页对该 provider 点一次「刷新模型列表」重新分类；或删除重加
+- **测试**：129 单元全过（分类兜底断言更新），semgrep ERROR 0 发现
 
 ---
 
