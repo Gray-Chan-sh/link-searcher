@@ -379,21 +379,35 @@ fn prepare_conversation_prompt(
             merged.push((fid, path));
         }
     }
-    // 旧来源只补充剩余槽位（去重, 上限以内仅供上下文底垫）。
-    for fid in source_ids {
-        if merged.len() >= MAX_SOURCES {
-            break;
-        }
-        if seen.contains(fid) {
-            continue;
-        }
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-            if rec.status == "active" && rec.md5.is_some() {
-                seen.insert(fid.clone());
-                merged.push((fid.clone(), rec.path.clone()));
+    // 旧来源的保留信号：*对话中提到过的文件*最值得留（用户/助手引用过 =
+    // 实际在使用）；其次按最近加入倒序补槽。上限以内仅供上下文底垫。
+    let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+    let mentioned = |rec_path: &str| -> bool {
+        let stem = std::path::Path::new(rec_path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+        (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
+    };
+    let mut keep_old = |merged: &mut Vec<(String, String)>, seen: &mut std::collections::HashSet<String>, skip_mentioned: bool| {
+        for fid in source_ids.iter().rev() {
+            if merged.len() >= MAX_SOURCES {
+                break;
             }
+            if seen.contains(fid) {
+                continue;
+            }
+            let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
+            if rec.status != "active" || rec.md5.is_none() {
+                continue;
+            }
+            if mentioned(&rec.path) == skip_mentioned {
+                continue;
+            }
+            seen.insert(fid.clone());
+            merged.push((fid.clone(), rec.path.clone()));
         }
-    }
+    };
+    keep_old(&mut merged, &mut seen, false); // 第一遍: 对话中提到过的
+    keep_old(&mut merged, &mut seen, true);  // 第二遍: 其余按最近补槽
 
     let mut docs: Vec<String> = Vec::new();
     for (fid, _) in &merged {
