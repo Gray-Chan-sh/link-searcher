@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-10（AI 聊天发送按钮无响应 —— 旧版 chat_history 迁移 id 不稳定）
+
+- **发送按钮点击无反应（持久）**：`chat_history.json` 为旧版单会话格式时，`read_history` 的 legacy 迁移只在内存包装、**每次调用都生成新随机 UUID** → `list_chat_sessions` 与 `load_chat_session` 两次独立读取 id 必然不同 → load 返回 None → 前端 `activeSession` 置 null 且 `activeId` 锁死 → `handleSend` 静默 return。三个缺陷叠加（`commands/ai.rs`、`AiChat.tsx`、`ChatPanel.tsx`）
+  - **修复①（根因）**：legacy 迁移后立即写回文件持久化，后续读取直接走多会话结构，id 稳定（`ai.rs`）
+  - **修复②（自愈）**：`loadSession` 收到 null 时释放 `activeId`，让 ensure-session effect 重跑（`AiChat.tsx`）
+  - **修复③（观感）**：发送按钮 `disabled` 加 `!session` 条件，不再"可点无反应"（`ChatPanel.tsx`）
+- **测试**：新增 `legacy_history_migrates_once_and_keeps_stable_id` 单测（迁移写回 + 二次读取 id 一致 + 文件变多会话结构）；121 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（必做项修复 · 未知扩展 OOM / PDF 挂起 / 幽灵记录 / 前端开关）
 
 - **未知扩展名整文件读入内存 OOM**：不在支持列表的 `.mp4`/`.iso`/`.db` 等被 `read_to_string` 整体读入（50GB 视频 → 分配 50GB → 崩溃）。改为有上限读取（10MB，与 text.rs 一致），超限/二进制内容直接判不支持（`extractor/mod.rs`）

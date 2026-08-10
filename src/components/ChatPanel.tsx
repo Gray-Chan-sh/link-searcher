@@ -136,7 +136,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
         />
         <button
           onClick={handleSend}
-          disabled={loading || !input.trim()}
+          disabled={loading || !input.trim() || !session}
           className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
         >
           {t('send')}
