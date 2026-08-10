@@ -87,7 +87,6 @@ npm run tauri dev
 ### D. 搜索流程
 
 ```mermaid
-```mermaid
 flowchart TD
     A["搜索请求"] --> B["过滤解析<br/>目录(相对路径映射) / 扩展名 / 日期"]
     B --> C["Tantivy BM25 检索<br/>(jieba 分词, 全小写归一)"]
@@ -100,7 +99,6 @@ flowchart TD
     I --> J["按页码切片返回"]
     F --> K["记入搜索历史"]
     J --> K
-```
 ```
 
 每条结果含文件名、路径、摘要（关键词高亮）、评分、时间、大小。
@@ -238,7 +236,6 @@ flowchart TD
 ### A. 文件扫描与索引
 
 ```mermaid
-```mermaid
 flowchart TD
     A["触发扫描<br/>(启动 / 手动 / 定时)"] --> B{"扫描类型"}
     B -->|"全量 full_scan"| C["两阶段: 先计数(3s 超时保护)<br/>再遍历"]
@@ -258,7 +255,6 @@ flowchart TD
     L --> N
     N --> O["commit 索引 → 扫描完成报告<br/>(added/modified/deleted/errors)"]
 ```
-```
 
 | 操作 | 说明 |
 |------|------|
@@ -272,7 +268,6 @@ flowchart TD
 ### B. 实时文件监控
 
 ```mermaid
-```mermaid
 flowchart LR
     A["文件系统事件 (notify)"] --> B["300ms 防抖合并"]
     B --> C{"事件类型"}
@@ -283,7 +278,6 @@ flowchart LR
     C -->|"Failed 记录"| D
     F --> H["写日志 + 索引即时更新"]
     G --> H
-```
 ```
 
 - **启动扫描**：应用启动时自动增量扫描
@@ -296,7 +290,6 @@ flowchart LR
 
 ### C. 文本提取管线
 
-```mermaid
 ```mermaid
 flowchart TD
     A["文件路径"] --> B{"按扩展名路由"}
@@ -314,7 +307,6 @@ flowchart TD
     G --> J
     H --> J
     I --> J["提取文本 → store_content<br/>(按 md5 去重, 相同文件复用)"]
-```
 ```
 
 ### 6.1 内置引擎
@@ -363,7 +355,6 @@ flowchart TD
 ### E. AI 问答（RAG）
 
 ```mermaid
-```mermaid
 flowchart TD
     A["用户提问"] --> B{"会话中已有来源文件?"}
     B -->|"否 (首问)"| C["smart_search"]
@@ -378,7 +369,6 @@ flowchart TD
     J --> K
     K --> L["前端 ReactMarkdown 渲染<br/>(remark-gfm 支持表格)"]
     L --> M["回答写入会话并持久化<br/>chat_history.json"]
-```
 ```
 
 配置好「AI 服务」后可用（Embedding 与 LLM 是两组独立网关，可指向不同服务器）：
@@ -398,7 +388,6 @@ flowchart TD
 ### F. 数据生命周期（索引页操作）
 
 ```mermaid
-```mermaid
 flowchart TD
     A["索引状态页操作区"] --> B{"选择操作"}
     B -->|"重建索引"| C["临时索引目录全新构建<br/>清空 file_tracking / content_index<br/>/ doc_embeddings / doc_summaries<br/>→ 全量重扫"]
@@ -411,7 +400,6 @@ flowchart TD
     E --> H
     F --> H
     G --> H["完成后自检 / 提示结果"]
-```
 ```
 
 ### 8.1 存储位置
