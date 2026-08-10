@@ -11,6 +11,15 @@
 
 ---
 
+## 2026-08-10（AI 等待体验 —— 取消总超时 / 思考计时 / 请求可取消 / 状态恢复）
+
+- **① 取消回复超时**：`build_agent` 去掉 300s 总超时 → `timeout_connect 15s`（不可达立即失败）+ `timeout_read 60min`（安全网，非生成限制）——可达但慢的本地模型可完整生成（`ai/mod.rs`）
+- **② 思考中 + 经过时间 + 可取消**：`ChatPanel` 加载态改为「⚙ 思考中 mm:ss」每秒计时 + 「取消」按钮（确认后调新命令 `cancel_ai_request` 置一次性取消标志）；后端 `smart_search`/`conversation_ask` 完成时检查标志丢弃结果并返回"请求已取消"；前端用请求标识防迟到响应（`api/files.ts` cancelAiRequest、`ChatPanel.tsx`、`commands/ai.rs`、`lib.rs`）
+- **③ 状态恢复**：`ChatSession` 新增持久字段 `pending_query/pending_started_at`（serde default 兼容旧记录）——请求进行中写入会话文件；切页/切会话再切回时加载到 pending 即恢复"思考中 mm:ss"并**自动重跑该问题**，完成/取消后取回最新结果或原始状态（`commands/ai.rs`、`ChatPanel.tsx`）
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 探测独立化 —— 页面判定纯配置, 网络探测仅设置页测试）
 
 - **LLM 探测被 embedding 探测拖累 / 页面加载被网络探测阻塞**：`capabilities()` 每次做两个网络探测（embedding 先跑完 LLM 才启动）→ AI 聊天页打开要等探测、embedding 网关挂了就拖死整个页面。LLM 是可选项，不应阻塞

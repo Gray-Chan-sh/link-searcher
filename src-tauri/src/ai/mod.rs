@@ -238,9 +238,13 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 fn build_agent() -> ureq::Agent {
-    // Long enough for slow local LLMs (e.g. MLX at ~15 tok/s, 4096 tokens
-    // out ≈ 275s); connectivity probes use their own short timeout.
-    let mut builder = ureq::builder().timeout(std::time::Duration::from_secs(300));
+    // No total-request timeout: a reachable-but-slow local LLM must be able
+    // to stream a long answer to completion. Connect fails fast (15s) so an
+    // unreachable gateway errors immediately; the per-read cap (60min) is a
+    // safety net, not a generation limit.
+    let mut builder = ureq::builder()
+        .timeout_connect(std::time::Duration::from_secs(15))
+        .timeout_read(std::time::Duration::from_secs(60 * 60));
     for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
         if let Ok(p) = std::env::var(var) {
             if !p.is_empty() {
@@ -252,6 +256,23 @@ fn build_agent() -> ureq::Agent {
         }
     }
     builder.build()
+}
+
+/// One-shot AI cancellation flag. Set by the frontend "cancel" action; the
+/// in-flight chat request completes in the background but its result is
+/// discarded (the caller checks the flag after the call returns).
+static AI_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn cancel_ai() {
+    AI_CANCEL.store(true, std::sync::atomic::Ordering::Release);
+}
+
+pub fn reset_ai_cancel() {
+    AI_CANCEL.store(false, std::sync::atomic::Ordering::Release);
+}
+
+pub fn ai_cancelled() -> bool {
+    AI_CANCEL.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Per-gateway connectivity test result.

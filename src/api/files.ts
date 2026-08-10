@@ -59,6 +59,12 @@ export interface ChatSession {
   messages: ChatMessage[]
   source_ids: string[]
   source_files: string[]
+  pending_query?: string | null
+  pending_started_at?: number | null
+}
+
+export async function cancelAiRequest(): Promise<void> {
+  return invoke<void>('cancel_ai_request')
 }
 
 export interface ChatSessionMeta {
