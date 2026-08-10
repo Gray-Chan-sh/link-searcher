@@ -149,6 +149,7 @@ pub async fn smart_search(
     if query.trim().is_empty() {
         return Err("问题不能为空".into());
     }
+    log::info!("[AI] smart_search: query={}", query);
 
     // ── BM25 + content extraction (sync, must complete before any await) ──
     let (context, source_ids, source_files) = {
@@ -188,6 +189,7 @@ pub async fn smart_search(
     };
 
     if context.trim().is_empty() {
+        log::warn!("[AI] smart_search: no relevant document content found");
         return Err("未找到相关文档内容".into());
     }
 
@@ -217,6 +219,11 @@ pub async fn conversation_ask(
     if messages.is_empty() {
         return Err("对话不能为空".into());
     }
+    log::info!(
+        "[AI] conversation_ask: messages={} source_ids={}",
+        messages.len(),
+        source_ids.len()
+    );
 
     // Reload document context from the previously-identified sources.
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
