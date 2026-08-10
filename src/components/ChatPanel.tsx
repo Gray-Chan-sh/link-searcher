@@ -50,7 +50,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
         patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: answer }] })
       }
     } catch (e) {
-      const err = e instanceof Error ? e.message : '请求失败'
+      // Surface the backend's real error string — Tauri's reject value may
+      // be an Error, a string, or an object, so be tolerant instead of
+      // collapsing everything to a generic "请求失败".
+      const err =
+        e instanceof Error && e.message
+          ? e.message
+          : typeof e === 'string'
+            ? e
+            : typeof e === 'object' && e !== null && 'message' in e
+              ? String((e as { message: unknown }).message)
+              : String(e)
       patchSession({ messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${err}` }] })
     } finally {
       setLoading(false)

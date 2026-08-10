@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-10（AI 问答检索 —— 问句 PhraseQuery 陷阱修复 + 错误透传 + 批量重提取）
+
+- **AI 问答"未找到相关文档内容"实锤根因**：Tantivy QueryParser 把裸多词 CJK 查询解析为 **slop-0 PhraseQuery**（`parse` Debug 实证：`PhraseQuery[(0,小城),(2,律师),(2,律师收费),(4,收费)]`）——要求所有词在文档中按同一连续位置出现。自然语言问句必然 0 命中；短词/精确短语（"小城收费"）位置吻合才碰巧命中（内存索引隔离实验复现）
+  - **修复**：新增 `split_query_terms`（jieba 分词 + 显式 `OR` 连接，跳过单字噪声如"的"）——显式 OR 解析为 BooleanQuery 任意词命中；`smart_search` 用它替换整句（`search/schema.rs`、`commands/ai.rs`）。CLI 实测：`小城 OR 律师 OR 收费规则` 命中，整句 0
+- **前端吞真实错误**：ChatPanel catch 兼容 Error/字符串/对象透传后端错误，不再一律"请求失败"（`src/components/ChatPanel.tsx`）
+- **批量重提取缺失内容**：新命令 `reextract_missing_content`（判定：md5 存在但 content_index 无记录的历史提取失败文件），先删陈旧 Tantivy 文档再重提取防重复文档，`spawn_blocking` 后台执行；索引状态页新增「↻ 重提取缺失内容」按钮（`commands/index.rs`、`lib.rs`、`src/api/index.ts`、`IndexStatus.tsx`）
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 探测超时 5s→15s —— combo 网关 4-12s 调度导致探测 flaky）
 
 - **设置页测试/聊天页探测"很难通过、时好时坏"**：程序日志实锤 `timed out reading response`——`ping_post` 探测超时 5s，而 9router combo 模型（oc/deepseek-v4-flash-free）TTFT 通常 4-12s（proxy 日志 `DONE 4197ms~11887ms`）→ 大半探测 5s 内收不到响应被判 false，少数 <5s 碰巧通过。`IN 0 OUT 0` 是 `max_tokens:1` ping 探测的正常表现（HTTP 200 即通过），非故障（`src-tauri/src/ai/mod.rs`）

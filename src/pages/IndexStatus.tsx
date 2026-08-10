@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, reextractMissingContent, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
 import { getDuplicates, aiCapabilities, type DuplicateGroup } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -26,6 +26,7 @@ export default function IndexStatus() {
   const [dupesLoading, setDupesLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [backfilling, setBackfilling] = useState(false)
+  const [reextracting, setReextracting] = useState(false)
   const [embedCapable, setEmbedCapable] = useState(false)
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
@@ -121,6 +122,23 @@ const handleRebuild = async () => {
     }
   }
 
+  const handleReextract = async () => {
+    setReextracting(true)
+    setBackfillMsg(null)
+    try {
+      const r = await reextractMissingContent()
+      setBackfillMsg(
+        r.processed > 0
+          ? `✓ 已重提取 ${r.ok} 个${r.failed > 0 ? `，${r.failed} 个失败` : ''}`
+          : '✓ 无缺失内容'
+      )
+    } catch (e) {
+      setBackfillMsg(String(e))
+    } finally {
+      setReextracting(false)
+    }
+  }
+
   const retryFailed = async () => {
     setRetrying(true)
     scan()
@@ -187,6 +205,15 @@ const handleRebuild = async () => {
           >
             {backfilling && <LoadingSpinner className="size-4" />}
             ✦ 补齐语义向量
+          </button>
+          <button
+            onClick={handleReextract}
+            disabled={reextracting || status?.is_scanning}
+            title="重新提取缺失内容的文件（如旧版 .doc 扫描件，批量修复）"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+          >
+            {reextracting && <LoadingSpinner className="size-4" />}
+            ↻ 重提取缺失内容
           </button>
           <button
             onClick={handleRebuild}
