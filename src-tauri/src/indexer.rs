@@ -393,6 +393,11 @@ if let Err(e) =
                         {
                             let err = format!("update_indexed: {e}");
                             log::error!("[INDEX] 更新 tracking 失败: {}: {}", data.file_name, err);
+                            // 回滚已写入的 Tantivy 文档：记录保持 pending，下轮重试时
+                            // 重新 add_document，不回滚则会产生重复文档（每次扫描 +1）。
+                            if let Err(rollback) = Indexer::delete_document(writer, &file_id) {
+                                log::error!("[INDEX] 回滚文档失败 {}: {rollback}", data.file_name);
+                            }
                             results.push(BatchResult {
                                 file_id,
                                 success: false,
