@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { smartSearch, conversationAsk, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
@@ -121,7 +122,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
             }`}>
               {m.role === 'user'
                 ? m.content
-                : <ReactMarkdown>{m.content}</ReactMarkdown>
+                : <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
               }
             </div>
           </div>
