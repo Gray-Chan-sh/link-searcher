@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
 use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
-use crate::commands::config::{get_config, migrate_data, restart_app, update_config};
+use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, trigger_scan};
@@ -49,7 +49,7 @@ pub fn run_with_data_dir(data_dir: std::path::PathBuf) {
 fn run_with_config(app_config: config::AppConfig) {
     let data_dir = app_config.data_dir.clone();
 
-    tauri::Builder::default()
+    let result = tauri::Builder::default()
         // Must precede other plugins so the second instance exits before they initialize.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -128,6 +128,12 @@ fn run_with_config(app_config: config::AppConfig) {
             install_funasr,
             get_config,
             update_config,
+            add_provider,
+            update_provider,
+            delete_provider,
+            refresh_provider_models,
+            set_active_model,
+            test_provider,
             migrate_data,
             restart_app,
         ])
@@ -506,6 +512,12 @@ fn run_with_config(app_config: config::AppConfig) {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+    match result {
+        Ok(()) => {}
+        Err(e) => {
+            log::error!("Tauri runtime error: {e}");
+            std::process::exit(1);
+        }
+    }
 }

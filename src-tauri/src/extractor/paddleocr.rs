@@ -112,7 +112,7 @@ where
         None => {
             let pool = EnginePool::new(2)?;
             let _ = POOL.set(pool); // race loser's engines are dropped
-            POOL.get().expect("just set")
+            POOL.get().expect("just set") // nosemgrep: rust-unwrap
         }
     };
     pool.with_engine(f)

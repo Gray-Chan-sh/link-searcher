@@ -32,6 +32,18 @@
 
 ---
 
+## 2026-08-11（Wave 1 — 路线图 P0/P1/P2 六项落地）
+
+- **T14 音频 STT 过期条目标记**：ROADMAP.md P3 删除已完成的音频 STT 行（`ROADMAP.md`）
+- **T1 Semgrep 微清理**：`searcher.rs:505` 静态正则与 `paddleocr.rs:115` OnceLock 各加 `// nosemgrep: rust-unwrap` 显式豁免；`lib.rs:516` `Builder.run().expect` 改为 `match` + `log::error!` + `std::process::exit(1)`（`src-tauri/src/search/searcher.rs`、`extractor/paddleocr.rs`、`lib.rs`）
+- **T2 IO 并发上限**：`indexer.rs` `batch_index` Phase-1 的 `par_iter()` 改经 `batch_io_pool(cap)` 专用 Rayon 池（`num_threads=cap`，默认 8，AtomicUsize 可配置，`OnceLock<Mutex<HashMap<>>` 池缓存）；新增 `batch_io_pool_limits_concurrency` 单测验证饱和计数器峰值 ≤ cap+1（`src-tauri/src/indexer.rs`）
+- **T4 浏览页动态分页**：`Browse.tsx` `pageSize` 硬编码 20 改为 `useState` + `ResizeObserver` 监听 `tableRef` 容器，实测首个 data row 高度计算 `pageSize=floor(height/rowHeight)`，pageSize 变化时 `setPage(1)`；回退估值 25px 附 `ponytail:` 注释（`src/pages/Browse.tsx`）
+- **T5 Tantivy reader 节流**：`search/mod.rs` `reader()` 强制 `reload()` 改为 **Mutex<Instant> 窗口节流**（默认 1s 内跳过显式 reload，依赖 OnCommitWithDelay 自动刷新；可注入时钟 + `reload_count` 测试）；新增 `reader_throttles_reloads_within_window` 与 `reader_reloads_after_window_elapses` 单测（`src-tauri/src/search/mod.rs`）
+- **T6 .doc POC 决策门**：`rwml 0.1.1`（`default-features=false`）接入 **KEEP 决策**——6 个真实中文 Word 97 .doc 全部提取成功（1142–17929 chars，与 LO 对照一致），损坏文件零 panic（typed `NotOle2` 错误 → `lo_fallback` 优雅回退）。`office/mod.rs` 加 `"doc"` 独立分支 + `doc_rs_then_lo` 三段链（`src-tauri/Cargo.toml` + `Cargo.lock` + `office/mod.rs`；集成测试 `tests/doc_rs_poc.rs` + `tests/doc_rs_poc_fallback.rs`）
+- **整体验证**：132 单元全过、`cargo check` 零 error 零 warning、`npx tsc` 零错误、`semgrep --severity ERROR` 零发现
+
+---
+
 ## 2026-08-10（文档 —— 手册补充追问动态依据与模型分类说明）
 
 - USER_MANUAL §7.5：AI 问答流程图的追问分支更新为动态依据；Provider 分类说明改为"无特征默认 LLM"；新增「聊天的动态依据」段落（首问检索/追问重检索+保留提及旧依据/切页续跑）

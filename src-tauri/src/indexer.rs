@@ -5,10 +5,12 @@
 //! lazily created on first use and shared via a mutex so multiple callers
 //! can batch documents before a single [`commit`](IndexerService::commit).
 
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -16,6 +18,7 @@ use md5::Digest;
 use r2d2::Pool;
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 use rayon::prelude::*;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use tantivy::IndexWriter;
 
 use crate::search::indexer::Indexer;
@@ -29,6 +32,7 @@ pub struct IndexerService {
     writer: Mutex<Option<IndexWriter>>,
     commit_counter: AtomicU64,
     commit_interval: AtomicU64,
+    batch_io_concurrency: AtomicUsize,
     cancel_scan: Arc<AtomicBool>,
 }
 
@@ -48,6 +52,38 @@ pub struct BatchResult {
     pub file_id: String,
     pub success: bool,
     pub error: Option<String>,
+}
+
+/// Default cap on Phase-1 concurrent file reads in [`batch_index`]
+/// (read + MD5 + extraction + per-file SQLite `mark_extracted` writes).
+const DEFAULT_BATCH_IO_CONCURRENCY: usize = 8;
+
+/// Process-wide cache of dedicated Rayon pools for Phase-1 batch reads,
+/// keyed by concurrency cap. The global Rayon pool is unbounded
+/// (num_cpus threads), which is exactly what must be avoided here.
+static BATCH_IO_POOLS: OnceLock<Mutex<HashMap<usize, Arc<ThreadPool>>>> = OnceLock::new();
+
+/// Return (creating on first use) a dedicated Rayon pool with at most `cap`
+/// worker threads for Phase-1 batch file reads.
+fn batch_io_pool(cap: usize) -> Result<Arc<ThreadPool>> {
+    let cap = cap.max(1);
+    let pools = BATCH_IO_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pools = pools
+        .lock()
+        .map_err(|_| anyhow::anyhow!("batch io pool cache lock poisoned"))?;
+    Ok(match pools.entry(cap) {
+        Entry::Occupied(e) => e.get().clone(),
+        Entry::Vacant(e) => {
+            let pool = Arc::new(
+                ThreadPoolBuilder::new()
+                    .num_threads(cap)
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to build batch io thread pool: {e}"))?,
+            );
+            e.insert(pool.clone());
+            pool
+        }
+    })
 }
 
 struct ExtractedData {
@@ -287,6 +323,7 @@ impl IndexerService {
             writer: Mutex::new(None),
             commit_counter: AtomicU64::new(0),
             commit_interval: AtomicU64::new(100),
+            batch_io_concurrency: AtomicUsize::new(DEFAULT_BATCH_IO_CONCURRENCY),
             cancel_scan,
         }
     }
@@ -328,19 +365,22 @@ impl IndexerService {
 
             // ── Chunk Phase 1: parallel extraction ─────────────────────
             let chunk_start = Instant::now();
-            let extracted: Vec<Result<ExtractedData, (String, String)>> = chunk
-                .par_iter()
-                .map(|job| {
-                    if self.cancel_scan.load(Ordering::Acquire) {
-                        return Err((job.file_id.clone(), "scan cancelled".to_string()));
-                    }
-                    let conn = match db.get() {
-                        Ok(c) => c,
-                        Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
-                    };
-                    Self::extract_and_index_single(job, &conn)
-                })
-                .collect();
+            let pool = batch_io_pool(self.batch_io_concurrency.load(Ordering::Relaxed))?;
+            let extracted: Vec<Result<ExtractedData, (String, String)>> = pool.install(|| {
+                chunk
+                    .par_iter()
+                    .map(|job| {
+                        if self.cancel_scan.load(Ordering::Acquire) {
+                            return Err((job.file_id.clone(), "scan cancelled".to_string()));
+                        }
+                        let conn = match db.get() {
+                            Ok(c) => c,
+                            Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
+                        };
+                        Self::extract_and_index_single(job, &conn)
+                    })
+                    .collect()
+            });
 
             // ── Chunk Phase 2: serial Tantivy write + DB tracking ──────
             let mut guard = self.lock_writer()?;
@@ -615,6 +655,13 @@ if let Err(e) =
         self.commit_interval.store(n as u64, Ordering::Relaxed);
     }
 
+    /// Set the concurrency cap for Phase-1 batch file reads (read + MD5 +
+    /// extraction). Lower caps reduce IO contention and parallel SQLite
+    /// writes; the default is [`DEFAULT_BATCH_IO_CONCURRENCY`].
+    pub fn set_batch_io_concurrency(&self, n: usize) {
+        self.batch_io_concurrency.store(n, Ordering::Relaxed);
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
@@ -730,6 +777,41 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn test_batch_io_pool_limits_concurrency() {
+        // Pre-fix, `par_iter` ran on Rayon's global pool (num_cpus threads),
+        // blowing past the cap. Now Phase-1 runs on a dedicated pool with at
+        // most `cap` worker threads (install joins the caller as ≤1 extra).
+        let cap = 2usize;
+        let pool = batch_io_pool(cap).unwrap();
+        assert_eq!(pool.current_num_threads(), cap);
+
+        let files: Vec<std::path::PathBuf> = (0..16)
+            .map(|i| tmp_file(&format!("cap_{i}.txt"), "fixture content for batch io"))
+            .collect();
+
+        let active = std::sync::atomic::AtomicUsize::new(0);
+        let peak = std::sync::atomic::AtomicUsize::new(0);
+        pool.install(|| {
+            files.par_iter().for_each(|f| {
+                let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                let _ = std::fs::read(f); // real IO like Phase-1 file reads
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+
+        let peak_val = peak.load(std::sync::atomic::Ordering::SeqCst);
+        for f in &files {
+            let _ = std::fs::remove_file(f);
+        }
+        assert!(
+            peak_val <= cap + 1,
+            "peak concurrent batch reads {peak_val} exceeds cap {cap} (+1 for the caller thread)"
+        );
     }
 
     #[test]

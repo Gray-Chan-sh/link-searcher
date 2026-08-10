@@ -889,6 +889,17 @@ dependencies = [
 
 [[package]]
 name = "cfb"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8a4f8e55be323b378facfcf1f06aa97f6ec17cf4ac84fb17325093aaf62da41"
+dependencies = [
+ "byteorder",
+ "fnv",
+ "uuid",
+]
+
+[[package]]
+name = "cfb"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a347dcabdae9c31b0825fd6a8bed285ec9c2acb89c47827126d52fa4f59cece3"
@@ -3427,6 +3438,7 @@ dependencies = [
  "rayon",
  "regex",
  "rusqlite",
+ "rwml",
  "serde",
  "serde_json",
  "sherpa-onnx",
@@ -4950,7 +4962,7 @@ dependencies = [
  "proc-macro-error-attr3",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -5628,6 +5640,18 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "rwml"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60622a9a0980c92b92b8b26cde3868b7f7631a25a9a76dce23c060c7130c857b"
+dependencies = [
+ "cfb 0.10.0",
+ "encoding_rs",
+ "thiserror 2.0.19",
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "ryu"

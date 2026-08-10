@@ -1,6 +1,6 @@
 # Link-Searcher 路线图
 
-> 最后更新：2026-08-06
+> 最后更新：2026-08-10
 
 ---
 
@@ -48,6 +48,7 @@
 - [x] **扫描过但不支持的扩展名可见**：扫描时记录白名单外扩展名计数，文件类型页展示（区分缺依赖/不支持）
 - [x] **批量导出流式化**：BufWriter 直接写临时文件，不攒内存
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
+- [ ] **彻底弃用 LibreOffice 兜底**：LO（soffice 子进程）在 .doc/.ppt/.xls 上慢、锁竞争、易失败（日志中的 `DeploymentException`/`source file could not be loaded`）。计划：① 分析日志中走 LO 兜底的文件类型与失败分布；② 逐格式替换为轻量可嵌入方案（`.doc`→doc-rs/antiword 类，`.ppt`→oooxml 解析或暂不支持，`.xls`→calamine 已有）；③ 移除 `office/mod.rs` 的 soffice 路径与 `lo_binary_path` 配置，实现零外部依赖
 - [x] **poppler-utils 零安装**：build.rs 拷贝二进制到 poppler-bin/，运行时查找
 - [x] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定（四分类+置信度+按页 OCR 路由）
 - [x] **损坏文件优雅降级**：classify_error_str 区分加密/损坏/格式不支持
@@ -63,11 +64,12 @@
 ## P3 — 远期规划
 
 - [x] **向量搜索 / AI 增强**：一期 AI 网关+语义搜索（BM25×向量 RRF）；二期 AI 摘要 + 跨文件 RAG 问答（`/chat/completions`）
+- [ ] **对话式文档检索（多轮 RAG）**：让 AI 聊天"专注找文档"——不是固定选中一组文件回答，而是每轮追问都重新在索引中检索：解析本轮意图 → 从全部索引（BM25 + 语义）召回相关文档 → 带上**对话历史**做指针（追问换文件）→ 汇总回答。现状 `smart_search` 是单轮（搜一次→答一次），追问答不上、也不会跨轮换检索范围。需设计：会话上下文的文档指针（当前聚焦集合 + 检索扩展策略）、追问改写查询（query rewrite）、来源去重与证据标注
+- [ ] **安全的远程 WebUI 与 API**：当前为本地桌面应用，所有功能（搜索、索引、AI）仅限本机。提供选项：① 可选的 HTTPS 守护进程（非 Tauri，独立 listen 端口），暴露 RESTful API（搜索/浏览/文件预览/索引状态）；② 带认证的可选 WebUI 供远程访问（如手机/平板/同事临时检索）；③ 安全边界：默认关闭，需用户显式启用，配置 TLS 证书 + 密钥/令牌认证，不可绕过本地文件系统权限
 - [ ] **监控目录热重载**：`dir_config` 变更后自动增量同步
 - [ ] **多语言界面**：日/韩文（jpn/kor OCR 已支持，UI 缺）
 - [ ] **CLI 增强**：`link-searcher index --dir` 等子命令，支持无 GUI 场景
 - [ ] **RAG 内容分析**：本地大模型做摘要、主题聚类、跨文件关联
-- [ ] **音频 STT**：`.mp3` `.wav` 语音识别（Fun-ASR-Nano 支持吴语/上海话）
 
 ---
 

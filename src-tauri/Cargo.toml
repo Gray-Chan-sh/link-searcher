@@ -67,6 +67,8 @@ ndarray = "0.17.2"
 pdf-inspector = "0.1.7"
 sherpa-onnx = "1.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+# POC: pure-Rust legacy .doc (Word 97-2003) extraction; docx feature unneeded
+rwml = { version = "0.1", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
