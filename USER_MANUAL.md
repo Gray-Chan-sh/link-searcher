@@ -84,6 +84,25 @@ npm run tauri dev
 
 ### 2.5 结果与预览
 
+### D. 搜索流程
+
+```mermaid
+```mermaid
+flowchart TD
+    A["搜索请求"] --> B["过滤解析<br/>目录(相对路径映射) / 扩展名 / 日期"]
+    B --> C["Tantivy BM25 检索<br/>(jieba 分词, 全小写归一)"]
+    C --> D["排序 (相关性/日期/名称/大小) + 分页"]
+    D --> E{"语义开关?"}
+    E -->|"否"| F["直接返回当前页"]
+    E -->|"是"| G["并行取全库 Top-100 BM25<br/>(与页无关, 保证融合公平)"]
+    G --> H["embedding 网关 查询向量<br/>+ 全库余弦打分 top-N"]
+    H --> I["RRF 融合重排<br/>score = Σ 1/(60+rank)"]
+    I --> J["按页码切片返回"]
+    F --> K["记入搜索历史"]
+    J --> K
+```
+```
+
 每条结果含文件名、路径、摘要（关键词高亮）、评分、时间、大小。
 
 点击结果进入预览面板：文件信息、全文内容、PDF 标识、图片缩放、文字计数。
@@ -216,6 +235,31 @@ npm run tauri dev
 
 ### 5.4 扫描操作
 
+### A. 文件扫描与索引
+
+```mermaid
+```mermaid
+flowchart TD
+    A["触发扫描<br/>(启动 / 手动 / 定时)"] --> B{"扫描类型"}
+    B -->|"全量 full_scan"| C["两阶段: 先计数(3s 超时保护)<br/>再遍历"]
+    B -->|"增量 incremental_scan"| D["对比 mtime 与上次扫描时间<br/>仅处理新增/变更"]
+    B -->|"启动 startup_scan"| E["增量 + 移位检测<br/>(文件名+大小 → MD5 校验)"]
+    C --> F["递归遍历<br/>过滤: 排除规则 + 扩展名白名单"]
+    D --> F
+    E --> F
+    F --> G{"needs_reindex?<br/>(mtime 变更 / pending / extracted)"}
+    G -->|"否"| H["记录入 on_disk 集合"]
+    G -->|"是"| I["upsert_file + 排队 BatchJob<br/>(记录保持 pending)"]
+    I --> J["batch_index: Rayon 并行提取文本"]
+    J --> K{"Tantivy add_document + <br/>update_indexed 成功?"}
+    K -->|"成功"| L["写 content_index (md5 去重)<br/>标记 indexed=1"]
+    K -->|"失败"| M["回滚 delete_document<br/>记录保持 pending 待重试"]
+    H --> N["删除检测: DB 有记录而磁盘无<br/>→ delete_file"]
+    L --> N
+    N --> O["commit 索引 → 扫描完成报告<br/>(added/modified/deleted/errors)"]
+```
+```
+
 | 操作 | 说明 |
 |------|------|
 | 增量扫描 | 仅扫新增/修改的文件 |
@@ -225,6 +269,23 @@ npm run tauri dev
 
 ### 5.5 自动扫描与监控
 
+### B. 实时文件监控
+
+```mermaid
+```mermaid
+flowchart LR
+    A["文件系统事件 (notify)"] --> B["300ms 防抖合并"]
+    B --> C{"事件类型"}
+    C -->|"Create / Modify"| D["查 upsert 前记录:<br/>已索引且 mtime/size 未变?"]
+    D -->|"是 (虚假事件)"| E["跳过, 防止 re-index 风暴"]
+    D -->|"否"| F["upsert + index_file 单文件"]
+    C -->|"Delete"| G["按相对路径查记录 → delete_file"]
+    C -->|"Failed 记录"| D
+    F --> H["写日志 + 索引即时更新"]
+    G --> H
+```
+```
+
 - **启动扫描**：应用启动时自动增量扫描
 - **实时监控**：持续监控目录，文件变更实时同步
 - **移位检测**：MD5 识别被移动文件，更新路径不重提取
@@ -232,6 +293,29 @@ npm run tauri dev
 ---
 
 ## 6. OCR 文字识别
+
+### C. 文本提取管线
+
+```mermaid
+```mermaid
+flowchart TD
+    A["文件路径"] --> B{"按扩展名路由"}
+    B -->|"文本类 txt/md/csv/json/代码…"| C["TextExtractor<br/>(10MB 上限读取 + UTF-8/GBK 检测)"]
+    B -->|"pdf"| D["lopdf 文本层 → 水印/重复检测<br/>→ 若为扫描件回退 OCR"]
+    B -->|"Office docx/xls/pptx"| E["docx/xlsx/pptx 原生解析;<br/>旧格式 doc/xls/ppt 走 LibreOffice 批量转换"]
+    B -->|"图片 png/jpg/…"| F["OCR 引擎优先链:<br/>PaddleOCR → Apple Vision →<br/>Windows OCR → Tesseract"]
+    B -->|"压缩包 zip/tar/gz/…"| G["遍历条目<br/>(解压字节上限 + 路径穿越校验)"]
+    B -->|"音频 mp3/wav/…"| H["ffmpeg 转 16kHz 单声道 (限 30min)<br/>→ FunASR 语音识别"]
+    B -->|"未知格式"| I["10MB 上限纯文本回退"]
+    C --> J
+    D --> J
+    E --> J
+    F --> J
+    G --> J
+    H --> J
+    I --> J["提取文本 → store_content<br/>(按 md5 去重, 相同文件复用)"]
+```
+```
 
 ### 6.1 内置引擎
 
@@ -276,6 +360,27 @@ npm run tauri dev
 
 ## 7.5 AI 功能（可选）
 
+### E. AI 问答（RAG）
+
+```mermaid
+```mermaid
+flowchart TD
+    A["用户提问"] --> B{"会话中已有来源文件?"}
+    B -->|"否 (首问)"| C["smart_search"]
+    B -->|"是 (追问)"| D["conversation_ask"]
+    C --> E["问题 jieba 分词 → 显式 OR 检索<br/>(避免整句 PhraseQuery 陷阱)"]
+    E --> F["BM25 命中 → 加载文档内容"]
+    F --> G{"有可读内容?"}
+    G -->|"否"| H["提示无相关内容"]
+    G -->|"是"| I["组装材料 + 问题 → 调 LLM<br/>(max_tokens 4096, 300s 超时)"]
+    D --> J["按历史来源重新加载文档 → 调 LLM<br/>(含对话历史)"]
+    I --> K["返回回答 + 来源文件列表"]
+    J --> K
+    K --> L["前端 ReactMarkdown 渲染<br/>(remark-gfm 支持表格)"]
+    L --> M["回答写入会话并持久化<br/>chat_history.json"]
+```
+```
+
 配置好「AI 服务」后可用（Embedding 与 LLM 是两组独立网关，可指向不同服务器）：
 
 - **语义搜索**：搜索页点击「✦ 语义」按钮——按"意思"而非仅按"字面"匹配。完整用法（前提、步骤、区别、注意事项）见上文 **2.8 语义搜索** 节。
@@ -289,6 +394,25 @@ npm run tauri dev
 ---
 
 ## 8. 数据迁移与备份
+
+### F. 数据生命周期（索引页操作）
+
+```mermaid
+```mermaid
+flowchart TD
+    A["索引状态页操作区"] --> B{"选择操作"}
+    B -->|"重建索引"| C["临时索引目录全新构建<br/>清空 file_tracking / content_index<br/>/ doc_embeddings / doc_summaries<br/>→ 全量重扫"]
+    B -->|"重提取缺失内容"| D["找 md5 存在但无内容的文件<br/>→ 批量重提取 (先删陈旧文档防重复)"]
+    B -->|"补齐语义向量"| E["找缺 embedding 的已索引文件<br/>→ 批量生成向量 (不重新提取)"]
+    B -->|"手动备份"| F["在线备份 data.db + 索引目录"]
+    B -->|"迁移数据"| G["复制全部数据到新目录<br/>→ 更新配置 → 重启"]
+    C --> H
+    D --> H
+    E --> H
+    F --> H
+    G --> H["完成后自检 / 提示结果"]
+```
+```
 
 ### 8.1 存储位置
 
@@ -345,110 +469,4 @@ link-searcher health             # 健康检查
 
 ---
 
-## 附录：功能模块流程图
 
-以下流程图基于当前实现绘制，帮助理解各模块的内部运转。
-
-### A. 文件扫描与索引
-
-```mermaid
-flowchart TD
-    A["触发扫描<br/>(启动 / 手动 / 定时)"] --> B{"扫描类型"}
-    B -->|"全量 full_scan"| C["两阶段: 先计数(3s 超时保护)<br/>再遍历"]
-    B -->|"增量 incremental_scan"| D["对比 mtime 与上次扫描时间<br/>仅处理新增/变更"]
-    B -->|"启动 startup_scan"| E["增量 + 移位检测<br/>(文件名+大小 → MD5 校验)"]
-    C --> F["递归遍历<br/>过滤: 排除规则 + 扩展名白名单"]
-    D --> F
-    E --> F
-    F --> G{"needs_reindex?<br/>(mtime 变更 / pending / extracted)"}
-    G -->|"否"| H["记录入 on_disk 集合"]
-    G -->|"是"| I["upsert_file + 排队 BatchJob<br/>(记录保持 pending)"]
-    I --> J["batch_index: Rayon 并行提取文本"]
-    J --> K{"Tantivy add_document + <br/>update_indexed 成功?"}
-    K -->|"成功"| L["写 content_index (md5 去重)<br/>标记 indexed=1"]
-    K -->|"失败"| M["回滚 delete_document<br/>记录保持 pending 待重试"]
-    H --> N["删除检测: DB 有记录而磁盘无<br/>→ delete_file"]
-    L --> N
-    N --> O["commit 索引 → 扫描完成报告<br/>(added/modified/deleted/errors)"]
-```
-
-### B. 实时文件监控
-
-```mermaid
-flowchart LR
-    A["文件系统事件 (notify)"] --> B["300ms 防抖合并"]
-    B --> C{"事件类型"}
-    C -->|"Create / Modify"| D["查 upsert 前记录:<br/>已索引且 mtime/size 未变?"]
-    D -->|"是 (虚假事件)"| E["跳过, 防止 re-index 风暴"]
-    D -->|"否"| F["upsert + index_file 单文件"]
-    C -->|"Delete"| G["按相对路径查记录 → delete_file"]
-    C -->|"Failed 记录"| D
-    F --> H["写日志 + 索引即时更新"]
-    G --> H
-```
-
-### C. 文本提取管线
-
-```mermaid
-flowchart TD
-    A["文件路径"] --> B{"按扩展名路由"}
-    B -->|"文本类 txt/md/csv/json/代码…"| C["TextExtractor<br/>(10MB 上限读取 + UTF-8/GBK 检测)"]
-    B -->|"pdf"| D["lopdf 文本层 → 水印/重复检测<br/>→ 若为扫描件回退 OCR"]
-    B -->|"Office docx/xls/pptx"| E["docx/xlsx/pptx 原生解析;<br/>旧格式 doc/xls/ppt 走 LibreOffice 批量转换"]
-    B -->|"图片 png/jpg/…"| F["OCR 引擎优先链:<br/>PaddleOCR → Apple Vision →<br/>Windows OCR → Tesseract"]
-    B -->|"压缩包 zip/tar/gz/…"| G["遍历条目<br/>(解压字节上限 + 路径穿越校验)"]
-    B -->|"音频 mp3/wav/…"| H["ffmpeg 转 16kHz 单声道 (限 30min)<br/>→ FunASR 语音识别"]
-    B -->|"未知格式"| I["10MB 上限纯文本回退"]
-    C & D & E & F & G & H & I --> J["提取文本 → store_content<br/>(按 md5 去重, 相同文件复用)"]
-```
-
-### D. 搜索流程
-
-```mermaid
-flowchart TD
-    A["搜索请求"] --> B["过滤解析<br/>目录(相对路径映射) / 扩展名 / 日期"]
-    B --> C["Tantivy BM25 检索<br/>(jieba 分词, 全小写归一)"]
-    C --> D["排序 (相关性/日期/名称/大小) + 分页"]
-    D --> E{"语义开关?"}
-    E -->|"否"| F["直接返回当前页"]
-    E -->|"是"| G["并行取全库 Top-100 BM25<br/>(与页无关, 保证融合公平)"]
-    G --> H["embedding 网关 查询向量<br/>+ 全库余弦打分 top-N"]
-    H --> I["RRF 融合重排<br/>score = Σ 1/(60+rank)"]
-    I --> J["按页码切片返回"]
-    F --> K["记入搜索历史"]
-    J --> K
-```
-
-### E. AI 问答（RAG）
-
-```mermaid
-flowchart TD
-    A["用户提问"] --> B{"会话中已有来源文件?"}
-    B -->|"否 (首问)"| C["smart_search"]
-    B -->|"是 (追问)"| D["conversation_ask"]
-    C --> E["问题 jieba 分词 → 显式 OR 检索<br/>(避免整句 PhraseQuery 陷阱)"]
-    E --> F["BM25 命中 → 加载文档内容"]
-    F --> G{"有可读内容?"}
-    G -->|"否"| H["提示无相关内容"]
-    G -->|"是"| I["组装材料 + 问题 → 调 LLM<br/>(max_tokens 4096, 300s 超时)"]
-    D --> J["按历史来源重新加载文档 → 调 LLM<br/>(含对话历史)"]
-    I --> K["返回回答 + 来源文件列表"]
-    J --> K
-    K --> L["前端 ReactMarkdown 渲染<br/>(remark-gfm 支持表格)"]
-    L --> M["回答写入会话并持久化<br/>chat_history.json"]
-```
-
-### F. 数据生命周期（索引页操作）
-
-```mermaid
-flowchart TD
-    A["索引状态页操作区"] --> B{"选择操作"}
-    B -->|"重建索引"| C["临时索引目录全新构建<br/>清空 file_tracking / content_index<br/>/ doc_embeddings / doc_summaries<br/>→ 全量重扫"]
-    B -->|"重提取缺失内容"| D["找 md5 存在但无内容的文件<br/>→ 批量重提取 (先删陈旧文档防重复)"]
-    B -->|"补齐语义向量"| E["找缺 embedding 的已索引文件<br/>→ 批量生成向量 (不重新提取)"]
-    B -->|"手动备份"| F["在线备份 data.db + 索引目录"]
-    B -->|"迁移数据"| G["复制全部数据到新目录<br/>→ 更新配置 → 重启"]
-    C & D & E & F & G --> H["完成后自检 / 提示结果"]
-```
-
-*© 2026 Link-Searcher. MIT License.*
