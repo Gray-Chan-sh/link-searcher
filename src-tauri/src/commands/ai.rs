@@ -2,7 +2,7 @@
 //! smart search, and multi-turn conversation.
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{Emitter, State};
 
 use crate::state::AppState;
 
@@ -142,36 +142,48 @@ pub struct SmartSearchResponse {
     pub source_files: Vec<String>,
 }
 
-/// Search + RAG: use BM25 to find the most relevant documents, extract
-/// their text, and let the LLM answer the query based on those materials.
-/// Returns a textual answer plus the list of source files used.
-#[tauri::command]
-pub async fn smart_search(
-    state: State<'_, AppState>,
-    query: String,
-) -> Result<SmartSearchResponse, String> {
+/// Streaming AI payloads emitted over Tauri events (frontend listens and
+/// renders incrementally).
+#[derive(Clone, Serialize)]
+struct AiChunk {
+    session_id: String,
+    delta: String,
+}
+
+#[derive(Clone, Serialize)]
+struct AiDone {
+    session_id: String,
+    full_text: String,
+    took_ms: u64,
+    cancelled: bool,
+    source_ids: Vec<String>,
+    source_files: Vec<String>,
+}
+
+/// BM25 retrieval + content assembly shared by one-shot and streaming
+/// smart_search. Returns the prompt pair plus the source file lists.
+struct PreparedSmart {
+    system: String,
+    user_msg: String,
+    source_ids: Vec<String>,
+    source_files: Vec<String>,
+}
+
+fn prepare_smart_prompt(
+    state: &tauri::State<'_, AppState>,
+    query: &str,
+) -> Result<PreparedSmart, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 
-    if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
-    }
-    if query.trim().is_empty() {
-        return Err("问题不能为空".into());
-    }
-    log::info!("[AI] smart_search: query={}", query);
-    crate::ai::reset_ai_cancel();
-
-    // ── BM25 + content extraction (sync, must complete before any await) ──
     let (context, source_ids, source_files) = {
         let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
         let reader = mgr.reader().map_err(|e| format!("{e}"))?;
         let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
         drop(mgr);
 
-let params = SearchParams {
-            // Natural-language questions become an exact PhraseQuery when
-            // parsed verbatim (Tantivy default), which can never match a
-            // document — re-tokenise as explicit OR so any term hits.
+        let params = SearchParams {
+            // NL questions become an exact PhraseQuery if parsed verbatim
+            // (Tantivy default) — re-tokenise as explicit OR so any term hits.
             query: crate::search::schema::split_query_terms(&query.to_lowercase()),
             dir_ids: None, file_ids: None, ext_filter: None,
             date_from: None, date_to: None,
@@ -185,17 +197,17 @@ let params = SearchParams {
         let mut sids: Vec<String> = Vec::new();
         let mut sf: Vec<String> = Vec::new();
         for hit in result.hits.iter().take(10) {
-                if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-                    if let Some(md5) = &rec.md5 {
-                        if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                            if !text.trim().is_empty() {
-                                docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
-                                sids.push(hit.file_id.clone());
-                                sf.push(rec.path.clone());
-                            }
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
+                if let Some(md5) = &rec.md5 {
+                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                        if !text.trim().is_empty() {
+                            docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                            sids.push(hit.file_id.clone());
+                            sf.push(rec.path.clone());
                         }
                     }
                 }
+            }
         }
         drop(conn);
         (docs.join("\n\n---\n\n"), sids, sf)
@@ -206,10 +218,35 @@ let params = SearchParams {
         return Err("未找到相关文档内容".into());
     }
 
-    let system = "你是严谨的文档分析助手。仅基于提供的材料回答，不臆造事实。回答简洁有条理，引用具体文件时标注来源。如果材料不足以回答，请明确说明。";
-    let user_msg = format!("基于以下材料回答问题：\n\n{}\n\n问题：{}", context, query);
+    Ok(PreparedSmart {
+        system: "你是严谨的文档分析助手。仅基于提供的材料回答，不臆造事实。回答简洁有条理，引用具体文件时标注来源。如果材料不足以回答，请明确说明。".into(),
+        user_msg: format!("基于以下材料回答问题：\n\n{}\n\n问题：{}", context, query),
+        source_ids,
+        source_files,
+    })
+}
 
-    let answer = tokio::task::spawn_blocking(move || crate::ai::chat(system, &user_msg))
+/// Search + RAG: use BM25 to find the most relevant documents, extract
+/// their text, and let the LLM answer the query based on those materials.
+/// Returns a textual answer plus the list of source files used.
+#[tauri::command]
+pub async fn smart_search(
+    state: State<'_, AppState>,
+    query: String,
+) -> Result<SmartSearchResponse, String> {
+    if !crate::ai::llm_enabled() {
+        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+    }
+    if query.trim().is_empty() {
+        return Err("问题不能为空".into());
+    }
+    log::info!("[AI] smart_search: query={}", query);
+    crate::ai::reset_ai_cancel();
+
+    let PreparedSmart { system, user_msg, source_ids, source_files } =
+        prepare_smart_prompt(&state, &query)?;
+
+    let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
         .ok_or_else(|| {
@@ -219,8 +256,6 @@ let params = SearchParams {
                 "AI 请求失败（检查网关配置或网络）".to_string()
             }
         })?;
-    // A late cancellation arrived while the LLM was still generating:
-    // discard the answer.
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
@@ -231,6 +266,88 @@ let params = SearchParams {
     );
 
     Ok(SmartSearchResponse { answer, source_ids, source_files })
+}
+
+/// Streaming variant of [`smart_search`]: emits `ai-chunk` events as the
+/// answer is generated and a final `ai-done`. Frontend renders incrementally.
+#[tauri::command]
+pub async fn smart_search_stream(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    query: String,
+    session_id: String,
+) -> Result<(), String> {
+    if !crate::ai::llm_enabled() {
+        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+    }
+    if query.trim().is_empty() {
+        return Err("问题不能为空".into());
+    }
+    log::info!("[AI] smart_search_stream: query={}", query);
+    crate::ai::reset_ai_cancel();
+
+    let PreparedSmart { system, user_msg, source_ids, source_files } =
+        prepare_smart_prompt(&state, &query)?;
+    let session_clone = session_id.clone();
+    let app_inner = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut emit = |d: &str| {
+            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string() });
+        };
+        crate::ai::chat_stream(&system, &user_msg, &mut emit)
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?;
+
+    let _ = app.emit("ai-done", AiDone {
+        session_id,
+        full_text: result.text.unwrap_or_default(),
+        took_ms: result.took_ms,
+        cancelled: result.cancelled,
+        source_ids,
+        source_files,
+    });
+    Ok(())
+}
+
+/// Shared conversation prompt assembly: reload document context from the
+/// selected source ids and build the system + user prompt strings.
+fn prepare_conversation_prompt(
+    state: &tauri::State<'_, AppState>,
+    messages: &[ChatMessage],
+    source_ids: &[String],
+) -> Result<(String, String), String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let mut docs: Vec<String> = Vec::new();
+    for fid in source_ids {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
+            if let Some(md5) = &rec.md5 {
+                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                    if !text.trim().is_empty() {
+                        docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                    }
+                }
+            }
+        }
+    }
+    drop(conn);
+
+    let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
+    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
+    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let last_n = messages.len().saturating_sub(1);
+    let user_msg = if messages.len() > 1 {
+        let mut history_str = String::from("对话历史：\n");
+        for m in messages.iter().take(last_n) {
+            history_str.push_str(&format!("[{}] {}\n",
+                if m.role == "user" { "用户" } else { "助手" },
+                truncate_text(&m.content, 500)));
+        }
+        format!("{}\n当前问题：{}", history_str, last_q)
+    } else {
+        last_q
+    };
+    Ok((system, user_msg))
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
@@ -255,53 +372,8 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    // Reload document context from the previously-identified sources.
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut docs: Vec<String> = Vec::new();
-    for fid in &source_ids {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
-                        docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
-                    }
-                }
-            }
-        }
-    }
-    drop(conn);
-
-    let context = docs.join("\n\n---\n\n");
-    let context = truncate_text(&context, 24000);
-
-    // Build the full message array: system + context note + history + current question.
-    // The last message in `messages` is the latest user query.
-    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
-    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    let last_n = messages.len().saturating_sub(1);
-
-    // The conversation LLM call sends the full history as separate user/assistant
-    // turns (mimicking OpenAI chat format).
-    let answer = tokio::task::spawn_blocking(move || {
-        // Simplified: concatenate history + current question into a single prompt.
-        // Full multi-turn chat API support requires switching to /chat/completions
-        // with messages array — which we already have in ai::chat. But chat()
-        // currently takes system+user only. For true multi-turn we'd add a
-        // messages-based variant. For now, include the last question and a short
-        // prefix of the history as user context.
-        let user_msg = if messages.len() > 1 {
-            let mut history_str = String::from("对话历史：\n");
-            for m in messages.iter().take(last_n) {
-                history_str.push_str(&format!("[{}] {}\n",
-                    if m.role == "user" { "用户" } else { "助手" },
-                    truncate_text(&m.content, 500)));
-            }
-            format!("{}\n当前问题：{}", history_str, last_q)
-        } else {
-            last_q
-        };
-        crate::ai::chat(&system, &user_msg)
-    })
+    let (system, user_msg) = prepare_conversation_prompt(&state, &messages, &source_ids)?;
+    let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
         .ok_or_else(|| {
@@ -317,6 +389,51 @@ pub async fn conversation_ask(
     log::info!("[AI] conversation_ask: done, answer_chars={}", answer.chars().count());
 
     Ok(answer)
+}
+
+/// Streaming variant of [`conversation_ask`]: emits `ai-chunk`/`ai-done`.
+#[tauri::command]
+pub async fn conversation_ask_stream(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    messages: Vec<ChatMessage>,
+    source_ids: Vec<String>,
+    session_id: String,
+) -> Result<(), String> {
+    if !crate::ai::llm_enabled() {
+        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+    }
+    if messages.is_empty() {
+        return Err("对话不能为空".into());
+    }
+    log::info!(
+        "[AI] conversation_ask_stream: messages={} source_ids={}",
+        messages.len(),
+        source_ids.len()
+    );
+    crate::ai::reset_ai_cancel();
+
+    let (system, user_msg) = prepare_conversation_prompt(&state, &messages, &source_ids)?;
+    let session_clone = session_id.clone();
+    let app_inner = app.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut emit = |d: &str| {
+            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string() });
+        };
+        crate::ai::chat_stream(&system, &user_msg, &mut emit)
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?;
+
+    let _ = app.emit("ai-done", AiDone {
+        session_id,
+        full_text: result.text.unwrap_or_default(),
+        took_ms: result.took_ms,
+        cancelled: result.cancelled,
+        source_ids: Vec::new(),
+        source_files: Vec::new(),
+    });
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]

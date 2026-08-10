@@ -13,7 +13,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
-use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, create_chat_session, delete_chat_session, export_chat_session, list_chat_sessions, load_chat_session, save_chat_session, smart_search, summarize_file, test_ai_gateway};
+use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
 use crate::commands::config::{get_config, migrate_data, restart_app, update_config};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
@@ -68,6 +68,8 @@ fn run_with_config(app_config: config::AppConfig) {
             summarize_file,
             ask_documents,
             smart_search,
+            smart_search_stream,
+            conversation_ask_stream,
             conversation_ask,
             list_chat_sessions,
             create_chat_session,

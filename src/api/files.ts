@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 
 export interface FileDetail {
   id: string
@@ -79,6 +80,39 @@ export async function smartSearch(query: string): Promise<SmartSearchResponse> {
 
 export async function conversationAsk(messages: ChatMessage[], sourceIds: string[]): Promise<string> {
   return invoke<string>('conversation_ask', { messages, sourceIds })
+}
+
+// ── Streaming AI (Tauri events) ──
+export interface AiDonePayload {
+  session_id: string
+  full_text: string
+  took_ms: number
+  cancelled: boolean
+  source_ids: string[]
+  source_files: string[]
+}
+
+export async function smartSearchStream(query: string, sessionId: string): Promise<void> {
+  return invoke<void>('smart_search_stream', { query, sessionId })
+}
+
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string): Promise<void> {
+  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId })
+}
+
+/** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
+export async function listenAiStream(
+  sessionId: string,
+  onChunk: (delta: string) => void,
+  onDone: (p: AiDonePayload) => void,
+): Promise<() => void> {
+  const unChunk = await listen<{ session_id: string; delta: string }>('ai-chunk', e => {
+    if (e.payload.session_id === sessionId) onChunk(e.payload.delta)
+  })
+  const unDone = await listen<AiDonePayload>('ai-done', e => {
+    if (e.payload.session_id === sessionId) onDone(e.payload)
+  })
+  return () => { unChunk(); unDone() }
 }
 
 export async function listChatSessions(): Promise<ChatSessionMeta[]> {

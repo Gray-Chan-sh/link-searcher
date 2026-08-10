@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, openFile, type ChatMessage, type SmartSearchResponse, type ChatSession } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -16,16 +16,25 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
   const [clockNow, setClockNow] = useState(() => Date.now())
+  // 流式输出缓冲：显示在"思考中"下方，done 后并入完整消息。
+  const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
   const latestReqIdRef = useRef(0)
+  // 事件回调需要"最新"会话值（组件卸载/会话切换后仍可能收到迟到事件）。
+  const sessionRef = useRef(session)
+  const messagesRef = useRef<ChatMessage[]>([])
+  const loadingRef = useRef(false)
 
   const messages = session?.messages ?? []
+  messagesRef.current = messages
   const sourceIds = session?.source_ids ?? []
   const sourceFiles = session?.source_files ?? []
   // loading 由会话持久字段驱动 —— 切页/切会话再切回可恢复"思考中"。
   const pendingStartedAt = session?.pending_started_at ?? null
   const loading = pendingStartedAt != null
+  loadingRef.current = loading
+  useEffect(() => { sessionRef.current = session }, [session])
 
   const patchSession = useCallback((patch: Partial<ChatSession>) => {
     if (session) onSessionChange({ ...session, ...patch })
@@ -65,8 +74,51 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     if (!confirm('确认取消当前回答？')) return
     cancelAiRequest().catch(() => {})
     latestReqIdRef.current += 1
+    setStreaming(null)
     patchSession({ pending_query: null, pending_started_at: null, messages })
   }, [loading, patchSession, messages])
+
+  // 流式事件监听：增量文本实时显示；done 事件写回完整回答 + 响应耗时。
+  useEffect(() => {
+    if (!session?.id) return
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    const sessId = session.id
+    listenAiStream(
+      sessId,
+      delta => setStreaming(s => ({ sessionId: sessId, text: (s?.sessionId === sessId ? s.text : '') + delta })),
+      p => {
+        if (disposed) return
+        // pending 已被清除（取消/新请求）→ 迟到的完成事件直接丢弃。
+        if (!loadingRef.current) { setStreaming(null); return }
+        setStreaming(null)
+        if (p.cancelled) return
+        const cur = sessionRef.current
+        if (!cur) return
+        const took = p.took_ms > 0 ? `\n\n⏱ ${fmtTook(p.took_ms)}` : ''
+        const sourcesPatch = p.source_ids.length > 0
+          ? { source_ids: p.source_ids, source_files: p.source_files }
+          : {}
+        onSessionChange({
+          ...cur,
+          messages: [...messagesRef.current, { role: 'assistant', content: p.full_text + took }],
+          ...sourcesPatch,
+          pending_query: null,
+          pending_started_at: null,
+        })
+      },
+    ).then(fn => { if (disposed) { fn(); return } unlisten = fn })
+      .catch(() => {})
+    return () => { disposed = true; unlisten?.() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id])
+
+  const fmtTook = (ms: number) => {
+    const s = Math.round(ms / 1000)
+    const m = Math.floor(s / 60)
+    const ss = s % 60
+    return m > 0 ? `${m}分${ss}秒` : `${ss}秒`
+  }
 
   const handleSend = useCallback(async () => {
     const q = input.trim()
@@ -80,29 +132,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
       pending_query: q,
       pending_started_at: startedAt,
     })
+    setStreaming({ sessionId: session.id, text: '' })
 
     try {
       if (sourceIds.length === 0) {
-        const res: SmartSearchResponse = await smartSearch(q)
-        if (latestReqIdRef.current !== reqId) return
-        patchSession({
-          messages: [...messages, userMsg, { role: 'assistant', content: res.answer }],
-          source_ids: res.source_ids,
-          source_files: res.source_files,
-          pending_query: null,
-          pending_started_at: null,
-        })
+        await smartSearchStream(q, session.id)
       } else {
-        const answer = await conversationAsk([...messages, userMsg], sourceIds)
-        if (latestReqIdRef.current !== reqId) return
-        patchSession({
-          messages: [...messages, userMsg, { role: 'assistant', content: answer }],
-          pending_query: null,
-          pending_started_at: null,
-        })
+        await conversationAskStream([...messages, userMsg], sourceIds, session.id)
       }
+      // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
       if (latestReqIdRef.current !== reqId) return
+      setStreaming(null)
       patchSession({
         messages: [...messages, userMsg, { role: 'assistant', content: `❌ ${errText(e)}` }],
         pending_query: null,
@@ -122,7 +163,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     ;(async () => {
       try {
         if (sourceIds.length === 0) {
-          const res: SmartSearchResponse = await smartSearch(q)
+          const res = await smartSearch(q)
           if (latestReqIdRef.current !== reqId) return
           patchSession({
             messages: [...base, { role: 'assistant', content: res.answer }],
@@ -221,6 +262,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
             >
               {t('cancel')}
             </button>
+          </div>
+        )}
+        {streaming && streaming.sessionId === session?.id && streaming.text && (
+          <div className="text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap border-l-2 border-gray-200 dark:border-gray-700 pl-3">
+            {streaming.text}
           </div>
         )}
       </div>

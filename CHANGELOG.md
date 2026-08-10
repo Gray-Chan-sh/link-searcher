@@ -11,6 +11,15 @@
 
 ---
 
+## 2026-08-10（AI 流式输出 + 回复耗时标注）
+
+- **流式输出**：网关支持时逐字/逐段实时显示回答，不再等完成一次性输出。新增 `chat_stream`（SSE `data:` 帧解析 + 每帧 emit `ai-chunk` 事件 + 结束 `ai-done`）与流式命令 `smart_search_stream`/`conversation_ask_stream`（`session_id` 分发，Tauri 事件通道）；前端 `listenAiStream` 增量渲染在"思考中"下方，done 写回完整消息。网关忽略 `stream` 时自动回退一次性解析（非流式网关无感兼容）（`ai/mod.rs`、`commands/ai.rs`、`lib.rs`、`src/api/files.ts`、`ChatPanel.tsx`）
+- **回复后标注响应耗时**：`ai-done` 携带 `took_ms`（含生成时间），assistant 消息末尾追加 `⏱ 1分37秒`（`ChatPanel.tsx`）
+- **兼容**：取消/恢复/计时/持久化(pending)逻辑沿用；检索/组装逻辑抽 `prepare_smart_prompt`/`prepare_conversation_prompt` 供一次性与流式共用
+- **测试**：124 单元全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（AI 等待恢复优化 —— 模块级请求注册表, 切回不重复请求）
 
 - **切页/切会话再切回曾重复调用 LLM**：恢复逻辑直接重跑 pending 问题（并发两个请求、白付一次生成）。改为**模块级活跃请求注册表**（`activeAiRequests`，不随组件卸载消失）：同进程内切回时挂接到**原请求的同一个 promise**（等待其结果，不重发）；仅当注册表无记录（app 重启后残留 pending 或已取消）才重发——这是唯一重发场景（`src/components/ChatPanel.tsx`）

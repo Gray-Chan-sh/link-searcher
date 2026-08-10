@@ -118,20 +118,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     let cfg = crate::config::load_config();
     let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
 
-    #[derive(Serialize)]
-    struct Req {
-        model: String,
-        messages: Vec<ChatMsg>,
-        temperature: f32,
-        max_tokens: u32,
-        // Force a single non-streamed JSON response. Some OpenAI-compatible
-        // gateways (e.g. router proxies) default to SSE streaming, which our
-        // JSON parser can't read (would otherwise fail with
-        // "trailing characters" and the request would look like a failure).
-        stream: bool,
-    }
-
-    let req = Req {
+    let req = ChatReq {
         model: cfg.llm_model.clone(),
         messages: vec![
             ChatMsg { role: "system".into(), content: system.into() },
@@ -180,10 +167,166 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     }
 }
 
+/// Outcome of a streaming chat call.
+pub struct ChatStreamOutcome {
+    pub text: Option<String>,
+    pub took_ms: u64,
+    pub cancelled: bool,
+}
+
+/// Send a chat-completion prompt in streaming mode (`stream: true`), invoking
+/// `on_delta` for every content fragment as it arrives. Falls back to a plain
+/// non-streamed response when the gateway ignores `stream` (first line is not
+/// `data:`). Stops early when [`cancel_ai`] fires; the partial text is then
+/// discarded by the caller.
+pub fn chat_stream(
+    system: &str,
+    user: &str,
+    on_delta: &mut dyn FnMut(&str),
+) -> ChatStreamOutcome {
+    use std::io::{BufRead, Read};
+    let started = std::time::Instant::now();
+    let failed = ChatStreamOutcome { text: None, took_ms: 0, cancelled: false };
+    if !llm_enabled() {
+        return failed;
+    }
+    let cfg = crate::config::load_config();
+    let url = format!("{}/chat/completions", cfg.llm_api_base.trim_end_matches('/'));
+
+    let req_body = match serde_json::to_string(&ChatReq {
+        model: cfg.llm_model.clone(),
+        messages: vec![
+            ChatMsg { role: "system".into(), content: system.into() },
+            ChatMsg { role: "user".into(), content: user.into() },
+        ],
+        temperature: 0.3,
+        max_tokens: 4096,
+        stream: true,
+    }) {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("[AI] chat stream build failed: {e}");
+            return failed;
+        }
+    };
+    log::info!(
+        "[AI] chat stream request: model={} user_chars={}",
+        cfg.llm_model,
+        user.chars().count()
+    );
+
+    let send_result = build_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set_auth(&cfg.llm_api_key)
+        .send_string(&req_body);
+    let mut reader = match send_result {
+        Ok(r) if (200..300).contains(&r.status()) => r.into_reader(),
+        Ok(r) => {
+            let mut err = String::new();
+            let _ = r.into_string().map(|s| err = s);
+            log::warn!("[AI] chat stream HTTP error: {}", err.trim().chars().take(200).collect::<String>());
+            return failed;
+        }
+        Err(e) => {
+            log::warn!("[AI] chat stream failed: {e}");
+            return failed;
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct StreamResp {
+        choices: Vec<StreamChoice>,
+    }
+    #[derive(serde::Deserialize)]
+    struct StreamChoice {
+        delta: StreamDelta,
+    }
+    #[derive(serde::Deserialize)]
+    struct StreamDelta {
+        #[serde(default)]
+        content: Option<String>,
+    }
+
+    let mut full = String::new();
+    let mut cancelled = false;
+    let mut first_line = true;
+    let mut line = String::new();
+    let mut buf_reader = std::io::BufReader::new(&mut reader);
+    loop {
+        line.clear();
+        match buf_reader.read_line(&mut line) {
+            Ok(0) => break,
+            Err(e) => {
+                log::warn!("[AI] chat stream read error: {e}");
+                break;
+            }
+            Ok(_) => {}
+        }
+        let l = line.trim();
+        if first_line {
+            first_line = false;
+            if !l.starts_with("data:") {
+                // Gateway ignored stream:true — read the rest as a plain body.
+                let mut rest = String::new();
+                let _ = buf_reader.read_to_string(&mut rest);
+                let mut body = line.clone();
+                body.push_str(&rest);
+                let text = parse_chat_response(&body)
+                    .ok()
+                    .and_then(|r| r.choices.into_iter().next().map(|c| c.message.content))
+                    .unwrap_or_default();
+                if !text.is_empty() {
+                    full = text.clone();
+                    on_delta(&text);
+                }
+                break;
+            }
+        }
+        if let Some(p) = l.strip_prefix("data:") {
+            let p = p.trim();
+            if p == "[DONE]" {
+                break;
+            }
+            if let Ok(sr) = serde_json::from_str::<StreamResp>(p) {
+                if let Some(d) = sr.choices.first().and_then(|c| c.delta.content.as_ref()) {
+                    if !d.is_empty() {
+                        full.push_str(d);
+                        on_delta(d);
+                    }
+                }
+            }
+        }
+        if ai_cancelled() {
+            cancelled = true;
+            break;
+        }
+    }
+
+    let took_ms = started.elapsed().as_millis() as u64;
+    if !cancelled {
+        log::info!(
+            "[AI] chat stream response: ok, content_chars={} took_ms={}",
+            full.chars().count(),
+            took_ms
+        );
+    }
+    ChatStreamOutcome { text: Some(full), took_ms, cancelled }
+}
+
 #[derive(Serialize, Deserialize)]
 struct ChatMsg {
     role: String,
     content: String,
+}
+
+#[derive(Serialize)]
+struct ChatReq {
+    model: String,
+    messages: Vec<ChatMsg>,
+    temperature: f32,
+    max_tokens: u32,
+    stream: bool,
 }
 
 #[derive(Deserialize)]
