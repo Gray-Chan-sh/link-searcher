@@ -224,6 +224,11 @@ let params = SearchParams {
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
+    log::info!(
+        "[AI] smart_search: done, answer_chars={} sources={}",
+        answer.chars().count(),
+        source_ids.len()
+    );
 
     Ok(SmartSearchResponse { answer, source_ids, source_files })
 }
@@ -309,6 +314,7 @@ pub async fn conversation_ask(
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
+    log::info!("[AI] conversation_ask: done, answer_chars={}", answer.chars().count());
 
     Ok(answer)
 }
