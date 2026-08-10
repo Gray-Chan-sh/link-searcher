@@ -545,28 +545,28 @@ impl Scanner {
                 .and_then(|candidates| candidates.iter().find(|e| e.rel_path != rec.path));
 
             if let Some(found) = candidate {
-                // P1-2: skip MD5 check for files >10MB (avoid OOM on large files)
-                if found.size > 10 * 1024 * 1024 {
-                    continue;
-                }
-                if let Some(ref expected_md5) = rec.md5 {
-                    if let Ok(raw) = std::fs::read(&found.abs_path) {
-                        let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));
-                        if actual_md5 == *expected_md5 {
-                            // 移位：walk 已为新路径建了记录 B（含 Tantivy 文档）。
-                            // 硬删 B，让原记录 A 接管新路径——A 保留 md5/内容，不重提取。
-                            // file_tracking.path 是 STORED 非 indexed，Tantivy 无需重写。
-                            if let Ok(Some(new_rec)) =
-                                tracker::get_file_by_path(&conn, &found.rel_path)
-                            {
-                                tracker::hard_delete_file(&conn, &new_rec.id)?;
-                                let _ = self.indexer.delete_document_only(&new_rec.id);
-                                tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
-                                log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
-                                moved += 1;
-                                continue;
-                            }
-                        }
+                // MD5 校验限 ≤10MB（大文件避免整体读入内存 OOM）。大文件候选
+                // 视为"已移动"处理：不比对内容，直接删旧记录——新路径的记录
+                // B 已由 walk 建立并索引，旧记录不再保留（防幽灵残留）。
+                let is_move = found.size <= 10 * 1024 * 1024
+                    && rec.md5.as_deref().is_some_and(|expected_md5| {
+                        std::fs::read(&found.abs_path)
+                            .map(|raw| format!("{:x}", md5::Md5::digest(&raw)) == expected_md5)
+                            .unwrap_or(false)
+                    });
+                if is_move {
+                    // 移位：walk 已为新路径建了记录 B（含 Tantivy 文档）。
+                    // 硬删 B，让原记录 A 接管新路径——A 保留 md5/内容，不重提取。
+                    // file_tracking.path 是 STORED 非 indexed，Tantivy 无需重写。
+                    if let Ok(Some(new_rec)) =
+                        tracker::get_file_by_path(&conn, &found.rel_path)
+                    {
+                        tracker::hard_delete_file(&conn, &new_rec.id)?;
+                        let _ = self.indexer.delete_document_only(&new_rec.id);
+                        tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
+                        log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
+                        moved += 1;
+                        continue;
                     }
                 }
             }

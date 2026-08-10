@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-10（必做项修复 · 未知扩展 OOM / PDF 挂起 / 幽灵记录 / 前端开关）
+
+- **未知扩展名整文件读入内存 OOM**：不在支持列表的 `.mp4`/`.iso`/`.db` 等被 `read_to_string` 整体读入（50GB 视频 → 分配 50GB → 崩溃）。改为有上限读取（10MB，与 text.rs 一致），超限/二进制内容直接判不支持（`extractor/mod.rs`）
+- **poppler 命令无超时挂起扫描**：`pdfinfo`/`pdftotext` 用 `.output()` 阻塞，损坏 PDF 可永久挂起 worker。新增 `run_with_timeout`（try_wait 轮询 + 超时 kill），pdfinfo 60s、pdftotext 120s，超时落 lopdf/跳过 fallback（`extractor/pdf.rs`）
+- **移位检测 >10MB 幽灵记录**：候选 >10MB 时 `continue` 不删不移，大文件移动后旧记录永久残留。改为大文件候选视为"已移动"（跳过 MD5 比对）直接删旧记录——新路径记录已由 walk 建立（`scanner/mod.rs`）
+- **输入框显示被强制小写**：`setQuery` 的 `toLowerCase()` 把用户输入 "PDF" 显示成 "pdf"。移除，查询侧由后端统一小写（`src/hooks/useSearch.ts`）
+- **语义开关不触发重搜**：点「✦ 语义」结果纹丝不动（需手动回车）。toggle 经 `toggleSemantic` 立即重搜（`src/hooks/useSearch.ts`）
+- **测试**：120 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（核心搜索正确性 · 重复文档 / 语义融合源 / 全量扫描查询 / 分页上限）
 
 - **update_indexed 失败致 Tantivy 重复文档**：`add_document` 成功后 DB 写失败，文档已入索引而记录保持 pending → 每次扫描重试再 add、重复累积。失败分支补 `delete_document` 回滚，索引与 DB 恢复原子（`indexer.rs`）
