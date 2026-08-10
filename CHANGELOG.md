@@ -25,6 +25,13 @@
 
 ---
 
+## 2026-08-10（清理 —— 全部编译警告归零）
+
+- **cargo check 0 warnings**（原 6 个）：删除从未使用的 `IMAGE_EXTRACTOR` static；`extractor/image.rs` 生产路径为测试专用（struct/impl/常量/imports 圈 `#[cfg(test)]`）；`|mut f|`（take 按值）与 `let mut keep_old`（闭包无需可变）去 `mut`；`config.rs` 对引用的无效 `drop(p)` 移除（`src-tauri/src/extractor/{mod,image}.rs`、`commands/ai.rs`、`commands/config.rs`）
+- **测试**：129 单元全过（含 image 5 个），tsc 0 错误，semgrep ERROR 0 发现
+
+---
+
 ## 2026-08-10（文档 —— 手册补充追问动态依据与模型分类说明）
 
 - USER_MANUAL §7.5：AI 问答流程图的追问分支更新为动态依据；Provider 分类说明改为"无特征默认 LLM"；新增「聊天的动态依据」段落（首问检索/追问重检索+保留提及旧依据/切页续跑）

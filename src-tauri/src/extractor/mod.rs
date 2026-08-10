@@ -67,7 +67,7 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         _ => {
             let mut buf = Vec::with_capacity(10 * 1024 * 1024);
             std::fs::File::open(path)
-                .and_then(|mut f| f.take(10 * 1024 * 1024).read_to_end(&mut buf))
+                .and_then(|f| f.take(10 * 1024 * 1024).read_to_end(&mut buf))
                 .map_err(|e| anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}"))?;
             match std::str::from_utf8(&buf) {
                 Ok(text) if !text.trim().is_empty() => Ok(text.to_string()),

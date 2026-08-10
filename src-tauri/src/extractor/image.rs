@@ -1,21 +1,25 @@
+#[cfg(test)]
 use std::path::Path;
 
+#[cfg(test)]
 use anyhow::{Context, Result};
+#[cfg(test)]
 use image::GenericImageView;
 
+#[cfg(test)]
 use super::Extractor;
 
-#[allow(dead_code)]
-const MAX_DIMENSION: u32 = 4000;
-
+#[cfg(test)]
 pub struct ImageExtractor;
 
+#[cfg(test)]
 impl ImageExtractor {
     pub fn new() -> Self {
         Self
     }
 }
 
+#[cfg(test)]
 impl Extractor for ImageExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
         let img = image::open(path).context("failed to load image")?;
@@ -24,7 +28,10 @@ impl Extractor for ImageExtractor {
 }
 
 /// Resize image if it exceeds MAX_DIMENSION on either axis, then convert to grayscale.
-#[allow(dead_code)]
+#[cfg(test)]
+const MAX_DIMENSION: u32 = 4000;
+
+#[cfg(test)]
 fn preprocess_image(img: &image::DynamicImage) -> image::DynamicImage {
     let (w, h) = img.dimensions();
     let resized = if w > MAX_DIMENSION || h > MAX_DIMENSION {

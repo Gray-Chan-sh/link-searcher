@@ -192,7 +192,6 @@ pub fn refresh_provider_models(id: String) -> Result<Vec<crate::config::ModelCon
         })
         .collect();
     let result = p.models.clone();
-    drop(p);
     save_config(&config)?;
     Ok(result)
 }

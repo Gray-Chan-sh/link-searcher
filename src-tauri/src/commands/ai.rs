@@ -387,7 +387,7 @@ fn prepare_conversation_prompt(
         let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
         (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
     };
-    let mut keep_old = |merged: &mut Vec<(String, String)>, seen: &mut std::collections::HashSet<String>, skip_mentioned: bool| {
+    let keep_old = |merged: &mut Vec<(String, String)>, seen: &mut std::collections::HashSet<String>, skip_mentioned: bool| {
         for fid in source_ids.iter().rev() {
             if merged.len() >= MAX_SOURCES {
                 break;
