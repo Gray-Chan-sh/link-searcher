@@ -230,6 +230,13 @@ impl Scanner {
         let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
+                // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
+                if include_exts.is_some()
+                    && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
+                    && std::path::Path::new(dir_root).join(&rec.path).exists()
+                {
+                    continue;
+                }
                 let _ = self.indexer.delete_file(&rec.id);
                 deleted += 1;
             }
@@ -368,6 +375,13 @@ impl Scanner {
         let mut deleted = 0u64;
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
+                // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
+                if include_exts.is_some()
+                    && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
+                    && std::path::Path::new(dir_root).join(&rec.path).exists()
+                {
+                    continue;
+                }
                 let _ = self.indexer.delete_file(&rec.id);
                 deleted += 1;
             }
@@ -522,12 +536,7 @@ impl Scanner {
 
             let candidate = by_name_size
                 .get(&(old_name, rec.size))
-                .and_then(|candidates| candidates.iter().find(|e| {
-                    e.rel_path != rec.path  // different relative path means moved
-                    && tracker::get_file_by_path(&conn, &e.rel_path)
-                        .map(|r| r.is_none())
-                        .unwrap_or(true)
-                }));
+                .and_then(|candidates| candidates.iter().find(|e| e.rel_path != rec.path));
 
             if let Some(found) = candidate {
                 // P1-2: skip MD5 check for files >10MB (avoid OOM on large files)
@@ -538,13 +547,30 @@ impl Scanner {
                     if let Ok(raw) = std::fs::read(&found.abs_path) {
                         let actual_md5 = format!("{:x}", md5::Md5::digest(&raw));
                         if actual_md5 == *expected_md5 {
-                            tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
-                            log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
-                            moved += 1;
-                            continue;
+                            // 移位：walk 已为新路径建了记录 B（含 Tantivy 文档）。
+                            // 硬删 B，让原记录 A 接管新路径——A 保留 md5/内容，不重提取。
+                            // file_tracking.path 是 STORED 非 indexed，Tantivy 无需重写。
+                            if let Ok(Some(new_rec)) =
+                                tracker::get_file_by_path(&conn, &found.rel_path)
+                            {
+                                tracker::hard_delete_file(&conn, &new_rec.id)?;
+                                let _ = self.indexer.delete_document_only(&new_rec.id);
+                                tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
+                                log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
+                                moved += 1;
+                                continue;
+                            }
                         }
                     }
                 }
+            }
+
+            // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
+            if include_exts.is_some()
+                && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
+                && std::path::Path::new(&config.path).join(&rec.path).exists()
+            {
+                continue;
             }
 
             self.indexer.delete_file(&rec.id)?;

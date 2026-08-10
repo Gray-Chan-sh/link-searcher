@@ -19,8 +19,9 @@ pub static JIEBA: LazyLock<Jieba> = LazyLock::new(|| Jieba::new());
 /// Must be called once after index creation and before any indexing or
 /// querying that uses these tokenizers.
 pub fn register_tokenizers(index: &Index) {
-    // Jieba Chinese word segmentation tokenizer.
-    let jieba_tokenizer = TextAnalyzer::builder(JiebaTokenizer).build();
+    // Jieba Chinese word segmentation tokenizer. LowerCaser keeps the indexed
+// side case-normalized, matching the lowercased query terms.
+    let jieba_tokenizer = TextAnalyzer::builder(JiebaTokenizer).filter(LowerCaser).build();
     index
         .tokenizers()
         .register(JIEBA_TOKENIZER_NAME, jieba_tokenizer);

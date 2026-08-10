@@ -45,7 +45,8 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         | "ps1" | "env" | "conf" | "properties" => TEXT_EXTRACTOR.extract(path),
         // Document formats
         "pdf" => PDF_EXTRACTOR.extract_with_lang(path, lang, engine),
-        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf"
+        "doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ppt" | "pptx"
+        | "pptm" | "ppsm" | "ppsx" | "pps" | "pot" | "odt" | "ods" | "odp" | "rtf"
         | "epub" => OFFICE_EXTRACTOR.extract(path),
         // Image formats (OCR placeholder)
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => {
@@ -74,7 +75,8 @@ pub fn classify_ext(ext: &str) -> &'static str {
     match ext.to_lowercase().as_str() {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => "image",
         "pdf" => "pdf",
-        "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "odt" | "ods" | "odp" | "rtf"
+        "doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ppt" | "pptx"
+        | "pptm" | "ppsm" | "ppsx" | "pps" | "pot" | "odt" | "ods" | "odp" | "rtf"
         | "epub" => "office",
         "txt" | "md" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini"
         | "cfg" | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql"
@@ -90,7 +92,8 @@ pub fn get_supported_extensions() -> Vec<&'static str> {
     vec![
         "txt", "md", "csv", "json", "xml", "yaml", "yml", "toml", "ini", "cfg", "log", "py",
         "rs", "ts", "js", "html", "css", "sql", "sh", "bat", "ps1", "env", "conf", "properties",
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "epub",
+        "pdf", "doc", "docx", "docm", "xls", "xlsx", "xlsm", "xlsb", "ppt", "pptx", "pptm",
+        "ppsm", "ppsx", "pps", "pot", "odt", "ods", "odp", "rtf", "epub",
         "png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff", "tif",
         "zip", "tar", "tgz", "tbz2", "txz", "gz", "bz2", "xz",
         "mp3", "wav", "m4a", "aac", "flac", "ogg", "opus", "wma",

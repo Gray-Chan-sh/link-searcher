@@ -371,11 +371,12 @@ impl SearcherWrap {
         let (filename_value, remaining_query) = parse_filename_prefix(&params.query);
         if let Some(fname) = &filename_value {
             let file_name_field = schema.get_field("file_name")?;
-            let tq: Box<dyn tantivy::query::Query> = Box::new(TermQuery::new(
-                Term::from_field_text(file_name_field, &fname.to_lowercase()),
-                IndexRecordOption::Basic,
-            ));
-            subqueries.push((Occur::Must, tq));
+            // Regex matches the filename token anywhere (README: 任意位置),
+            // case-insensitive on the lowercased indexed tokens.
+            let pattern = format!("(?i).*{}.*", regex::escape(&fname.to_lowercase()));
+            let rq: Box<dyn tantivy::query::Query> =
+                Box::new(RegexQuery::from_pattern(&pattern, file_name_field)?);
+            subqueries.push((Occur::Must, rq));
         }
 
         if !remaining_query.is_empty() {
@@ -768,5 +769,53 @@ mod tests {
             "Chinese query should find the Chinese doc"
         );
         assert_eq!(resp.hits[0].file_id, "uuid-4");
+    }
+
+    #[test]
+    fn filename_matches_any_position_case_insensitively() {
+        let (index, reader) = setup_index_with_docs();
+        let searcher = SearcherWrap::new(reader, index);
+
+        let params = SearchParams {
+            query: "filename:REPORT".to_string(), // uppercase query, lowercase index side
+            dir_ids: None,
+            file_ids: None,
+            ext_filter: None,
+            date_from: None,
+            date_to: None,
+            sort: SortField::Score,
+            sort_order: "desc".to_string(),
+            page: 1,
+            page_size: 20,
+            fuzzy: false,
+            semantic: false,
+        };
+
+        let resp = searcher.search(&params).expect("search");
+        assert!(
+            resp.hits.iter().any(|h| h.file_id == "uuid-1"),
+            "filename:REPORT should match report.pdf"
+        );
+
+        // Any-position match: a substring of the filename must hit too.
+        let params = SearchParams {
+            query: "filename:epor".to_string(), // "report" middle substring
+            dir_ids: None,
+            file_ids: None,
+            ext_filter: None,
+            date_from: None,
+            date_to: None,
+            sort: SortField::Score,
+            sort_order: "desc".to_string(),
+            page: 1,
+            page_size: 20,
+            fuzzy: false,
+            semantic: false,
+        };
+        let resp = searcher.search(&params).expect("search");
+        assert!(
+            resp.hits.iter().any(|h| h.file_id == "uuid-1"),
+            "filename:epor should match report.pdf (any position)"
+        );
     }
 }

@@ -413,6 +413,11 @@ if let Err(e) =
                     Err((file_id, err)) => {
                         error_count += 1;
                         log::error!("[INDEX] 提取失败: {}", err);
+                        if err == "scan cancelled" {
+                            // User-cancelled jobs are not real failures: leave
+                            // the record pending so the next scan retries it.
+                            continue;
+                        }
                         let etype = classify_error_str(&err, "");
                         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &file_id) {
                             let _ = crate::db::tracker::log_index_error(
@@ -566,6 +571,17 @@ if let Err(e) =
         }
 
         Ok(())
+    }
+
+    /// Remove a Tantivy document without touching file_tracking (used when a
+    /// moved file's freshly-walked record is superseded by the old one).
+    pub fn delete_document_only(&self, file_id: &str) -> Result<()> {
+        let mut guard = self.lock_writer()?;
+        let w = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
+        Indexer::delete_document(w, file_id)
+            .map_err(|e| anyhow::anyhow!("failed to delete document from index: {e}"))
     }
 
     /// Remove all Tantivy documents belonging to `dir_id` (used when a
