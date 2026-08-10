@@ -158,8 +158,11 @@ pub async fn smart_search(
         let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
         drop(mgr);
 
-        let params = SearchParams {
-            query: query.to_lowercase(),
+let params = SearchParams {
+            // Natural-language questions become an exact PhraseQuery when
+            // parsed verbatim (Tantivy default), which can never match a
+            // document — re-tokenise as explicit OR so any term hits.
+            query: crate::search::schema::split_query_terms(&query.to_lowercase()),
             dir_ids: None, file_ids: None, ext_filter: None,
             date_from: None, date_to: None,
             sort: SortField::Score, sort_order: "desc".to_string(),

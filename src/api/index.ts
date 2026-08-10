@@ -27,6 +27,16 @@ export async function backfillEmbeddings(): Promise<BackfillReport> {
   return invoke<BackfillReport>('backfill_embeddings')
 }
 
+export interface ReextractReport {
+  processed: number
+  ok: number
+  failed: number
+}
+
+export async function reextractMissingContent(limit?: number): Promise<ReextractReport> {
+  return invoke<ReextractReport>('reextract_missing_content', { limit: limit ?? 500 })
+}
+
 export async function triggerScan(dirId?: string): Promise<void> {
   return invoke('trigger_scan', { dirId: dirId ?? null })
 }

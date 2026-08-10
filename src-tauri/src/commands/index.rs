@@ -581,6 +581,91 @@ pub struct BackfillReport {
     pub failed: u64,
 }
 
+/// Summary of a [`reextract_missing_content`] run.
+#[derive(Serialize)]
+pub struct ReextractReport {
+    pub processed: u64,
+    pub ok: u64,
+    pub failed: u64,
+}
+
+/// Re-extract content for tracked files whose md5 has no `content_index`
+/// row (historical extraction failures: stale .doc, scans OCR'd later, …).
+/// Reuses `reindex_file`'s per-file path (clear dedup cache first) but
+/// removes any stale Tantivy doc before re-adding, so no duplicates.
+#[tauri::command]
+pub async fn reextract_missing_content(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<ReextractReport, String> {
+    let limit = limit.unwrap_or(500);
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ft.id, ft.dir_id, ft.path, ft.md5, ft.indexed
+                 FROM file_tracking ft
+                 WHERE ft.status = 'active' AND ft.indexed IN (1, 2) AND ft.md5 IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM content_index c WHERE c.md5 = ft.md5)
+                 LIMIT ?1",
+            )
+            .map_err(|e| format!("db prepare error: {e}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| format!("db query error: {e}"))?;
+        let targets: Vec<_> = rows
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("{e}"))?;
+
+        let (mut ok, mut failed) = (0u64, 0u64);
+        for (file_id, dir_id, rel_path, md5) in targets {
+            let conn = match db_pool.get() {
+                Ok(c) => c,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let full_path = match crate::db::dir_config::get_dir(&conn, &dir_id)
+                .map_err(|e| format!("{e}"))
+                .and_then(|d| d.ok_or_else(|| "dir config missing".to_string()))
+            {
+                Ok(d) => std::path::Path::new(&d.path).join(&rel_path),
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let _ = tracker::delete_content(&conn, &md5);
+            drop(conn);
+            // Must delete the stale Tantivy doc first — re-adding without it
+            // leaves a duplicate document for the same file.
+            if let Err(e) = indexer.delete_document_only(&file_id) {
+                log::warn!("[REEXTRACT] delete stale doc failed {file_id}: {e}");
+            }
+            match indexer.index_file(&file_id, &full_path, &dir_id) {
+                Ok(()) => ok += 1,
+                Err(e) => {
+                    log::warn!("[REEXTRACT] {rel_path}: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        Ok(ReextractReport { processed: ok + failed, ok, failed })
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?
+}
+
 #[tauri::command]
 pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<tracker::IndexError>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;

@@ -145,6 +145,29 @@ impl TokenStream for JiebaTokenStream<'_> {
     }
 }
 
+/// Tokenize a natural-language query with the jieba tokenizer and join the
+/// terms with an explicit `OR`. Tantivy's QueryParser turns unquoted multi-
+/// term CJK text into a slop-0 PhraseQuery (every term must co-occur at
+/// adjacent positions), which a natural-language question can never satisfy.
+/// An explicit OR parses to a BooleanQuery instead, so any term matches.
+pub fn split_query_terms(query: &str) -> String {
+    let mut tokenizer = JiebaTokenizer;
+    let mut stream = tokenizer.token_stream(query);
+    let mut terms: Vec<String> = Vec::new();
+    while let Some(t) = stream.next() {
+        let word = t.text.trim();
+        if word.is_empty() || word.len() < 2 {
+            continue; // skip whitespace/single-char noise like "的"
+        }
+        terms.push(word.to_string());
+    }
+    if terms.is_empty() {
+        query.to_string()
+    } else {
+        terms.join(" OR ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
