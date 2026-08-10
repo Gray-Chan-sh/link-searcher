@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod boot;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -11,23 +12,20 @@ pub mod search;
 pub mod state;
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use crate::commands::backup::{get_backup_status, restore_backup, trigger_backup};
 use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, trigger_scan};
+use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
-use crate::indexer::IndexerService;
-use crate::scanner::Scanner;
 use crate::scanner::watcher::FileWatcher;
-use crate::search::IndexManager;
 use crate::state::AppState;
 use crate::state::ScanDelta;
 use env_logger;
@@ -90,6 +88,7 @@ fn run_with_config(app_config: config::AppConfig) {
             trigger_scan,
             rebuild_index,
             reindex_file,
+            reindex_files,
             reextract_missing_content,
             cancel_scan,
             get_index_errors,
@@ -198,37 +197,17 @@ fn run_with_config(app_config: config::AppConfig) {
                 log::info!("[STARTUP] 索引目录迁移: index -> {}", config::INDEX_DIR_NAME);
             }
 
-            let index_dir = new_index;
+            // Shared core: DB pool + index manager + indexer + scanner
+            // (also used by the CLI via `boot::bootstrap_core`).
+            let boot::Bootstrap {
+                pool: db_pool,
+                index_manager,
+                indexer,
+                scanner,
+                cancel_scan,
+            } = boot::bootstrap_core(&data_dir)?;
+            let index_dir = data_dir.join(config::INDEX_DIR_NAME);
             let db_path = data_dir.join("data.db");
-
-            std::fs::create_dir_all(&index_dir).ok();
-
-            let db_pool = db::get_pool(db_path.to_string_lossy().as_ref())?;
-            let init_conn = db_pool.get()?;
-            db::init_db(&init_conn)?;
-            drop(init_conn);
-
-            // Apply LO batch size to the global batcher.
-            if let Ok(conn) = db_pool.get() {
-                match conn.query_row(
-                    "SELECT value FROM app_settings WHERE key = 'lo_batch_size'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                ) {
-                    Ok(v) => match v.parse::<usize>() {
-                        Ok(n) => {
-                            crate::extractor::office::LO_BATCH_SIZE
-                                .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
-                            log::info!("[STARTUP] LO batch size set to {}", n.max(1));
-                        }
-                        Err(e) => log::warn!(
-                            "[STARTUP] Failed to parse lo_batch_size value '{}': {}",
-                            v, e
-                        ),
-                    },
-                    Err(e) => log::warn!("[STARTUP] Failed to read lo_batch_size setting: {}", e),
-                }
-            }
 
             if let Ok(conn) = db_pool.get() {
                 let engine_name = conn
@@ -289,23 +268,6 @@ fn run_with_config(app_config: config::AppConfig) {
                 drop(conn);
             }
 
-            let index_manager = Arc::new(RwLock::new(
-                IndexManager::open_or_create(&index_dir)?,
-            ));
-
-            // Arc is shared between IndexerService and AppState so rebuild_index can swap the manager
-            let cancel_scan = Arc::new(AtomicBool::new(false));
-            let indexer = Arc::new(IndexerService::with_cancel(
-                db_pool.clone(),
-                index_manager.clone(),
-                cancel_scan.clone(),
-            ));
-
-            let scanner = Arc::new(Scanner::with_cancel(
-                db_pool.clone(),
-                indexer.clone(),
-                cancel_scan.clone(),
-            ));
             let is_scanning = Arc::new(AtomicBool::new(false));
 
             let (watcher, event_rx) = FileWatcher::new();

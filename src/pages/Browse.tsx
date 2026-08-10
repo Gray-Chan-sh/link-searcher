@@ -5,7 +5,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
-import { reindexFile } from '../api/index'
+import { reindexFiles } from '../api/index'
 import { LoadingSpinner } from '../icons'
 import { usePersistentState } from '../hooks/usePersistentState'
 
@@ -568,7 +568,7 @@ export default function Browse() {
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
             onClick={() => {
               const ids = selectedIds.size > 1 ? [...selectedIds] : [contextMenu.item.file_id]
-              ids.forEach(id => reindexFile(id).catch(() => {}))
+              reindexFiles(ids).catch(() => {})
               setContextMenu(null); setSelectedIds(new Set()); loadFiles()
             }}
           >

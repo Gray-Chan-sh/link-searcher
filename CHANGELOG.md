@@ -32,6 +32,15 @@
 
 ---
 
+## 2026-08-11（Wave 3 — 路线图 P2/P3 三项落地）
+
+- **T8 批量 reindex_files**：新增 `reindex_files(file_ids)` 命令（`spawn_blocking` 循环：清 dedup 缓存→`delete_document_only`→`index_file`，防重复文档）；前端 `reindexFiles(ids)` + Browse 从逐文件 `forEach` 改为单次批量 IPC（`commands/index.rs`、`lib.rs`、`api/index.ts`、`Browse.tsx`）
+- **T9 update_dir 热重载**：`update_dir` 在 Watch 重启后触发 `spawn_blocking(incremental_scan)`（`is_scanning` compare_exchange 守卫防并发；成功 `emit("scan-completed")`、失败恢复 `is_scanning`）——目录配置（排除/扩展名/OCR 语言/递归）变更即时生效（`commands/dirs.rs`）
+- **T11 CLI 增强**：新建 `boot.rs` 共享 bootstrap（pool+init_db+IndexManager+IndexerService+Scanner 组装，`bootstrap_core` 返回 `Result` 供 GUI/CLI 复用）；`cli.rs` 加 `index`（`visible_alias=search`）、`scan [dir]`、`watch dir` 子命令——`scan` 全量扫目录并打印摘要、`watch` 复用 FileWatcher std 线程 + `handle_event` 实时监控（`boot.rs`、`lib.rs`、`cli.rs`）
+- **整体验证**：138 单元全过、`cargo check` 零 error、`npx tsc` 零错误、`semgrep --severity ERROR` 零发现
+
+---
+
 ## 2026-08-11（Wave 2 — 路线图 P1/P2/P3 三项落地）
 
 - **T3 启动扫描异步化+进度**：`lib.rs` 启动扫描从 `|_|{}` 丢进度改为 `emit("scan-progress", ScanEventPayload)`（复用 trigger_scan 结构供前端统一监听）；新建 `logs/session.rs` 模块（`SessionLog::open/write/close`）附加会话日志契约（`src-tauri/src/logs/session.rs` + `mod.rs`、`lib.rs`、`commands/index.rs`）

@@ -1,5 +1,7 @@
+use std::sync::atomic::Ordering;
+
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::db;
 use crate::state::AppState;
@@ -226,6 +228,7 @@ pub async fn list_dirs(state: State<'_, AppState>) -> Result<Vec<DirConfigWithSt
 #[tauri::command]
 pub async fn update_dir(
     state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     alias: Option<String>,
     ocr_lang: Option<String>,
@@ -252,8 +255,40 @@ pub async fn update_dir(
         .ok_or_else(|| format!("dir not found: {id}"))?;
     drop(conn);
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StartWatch {
-        dir_id: id,
+        dir_id: id.clone(),
         path: std::path::PathBuf::from(&dir.path),
+    });
+
+    // Config changed — trigger an incremental scan so exclude/include/ocr
+    // changes take effect immediately instead of waiting for the next scan.
+    // Same is_scanning guard as add_dir to avoid concurrent scans.
+    let scanner = state.scanner.clone();
+    let is_scanning = state.is_scanning.clone();
+    let cancel_scan = state.cancel_scan.clone();
+    let app_clone = app.clone();
+    tokio::task::spawn_blocking(move || {
+        if is_scanning
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            log::warn!("[DIRS] 扫描已在运行，跳过更新目录后的自动增量扫描");
+            return;
+        }
+        cancel_scan.store(false, Ordering::Release);
+        match scanner.incremental_scan(&id, |_| {}) {
+            Ok(r) => {
+                log::info!(
+                    "[DIRS] 更新目录后增量扫描完成: {} files, {} indexed, {} errors",
+                    r.total_files, r.indexed, r.errors
+                );
+                is_scanning.store(false, Ordering::SeqCst);
+                let _ = app_clone.emit("scan-completed", serde_json::json!({}));
+            }
+            Err(e) => {
+                log::error!("[DIRS] 更新目录后增量扫描失败: {e}");
+                is_scanning.store(false, Ordering::SeqCst);
+            }
+        }
     });
 
     Ok(())
