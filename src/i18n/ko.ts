@@ -226,6 +226,8 @@ const ko: Record<string, string> = {
     // Logs
     log_activity: '애플리케이션 활동 로그',
     auto_scroll: '자동 스크롤',
+    grep_logs: '로그 필터링…',
+    task_brief_unread: '작업 완료: {task} (클릭하여 로그 보기)',
     on: 'ON',
     off: 'OFF',
     no_log_entries: '아직 로그 항목이 없습니다',

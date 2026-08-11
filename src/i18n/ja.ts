@@ -226,6 +226,8 @@ const ja: Record<string, string> = {
     // Logs
     log_activity: 'アプリケーションアクティビティログ',
     auto_scroll: '自動スクロール',
+    grep_logs: 'ログを絞り込み…',
+    task_brief_unread: 'タスク完了：{task}（クリックでログ表示）',
     on: 'ON',
     off: 'OFF',
     no_log_entries: 'ログエントリがまだありません',
