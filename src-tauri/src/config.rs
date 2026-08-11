@@ -65,8 +65,6 @@ pub struct AppConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub language: String,
-    #[serde(default)]
-    pub lo_binary_path: String,
     /// Legacy single-gateway fields (merged into embedding/llm below).
     #[serde(default)]
     pub ai_api_base: String,
@@ -104,8 +102,6 @@ impl Default for AppConfig {
         Self {
             data_dir: default_data_dir(),
             language: "zh".to_string(),
-            // Empty = auto-detect; macOS resolves brew/App install paths at runtime.
-            lo_binary_path: String::new(),
             ai_api_base: String::new(),
             ai_api_key: String::new(),
             embedding_api_base: String::new(),

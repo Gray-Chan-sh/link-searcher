@@ -48,7 +48,7 @@
 - [x] **扫描过但不支持的扩展名可见**：扫描时记录白名单外扩展名计数，文件类型页展示（区分缺依赖/不支持）
 - [x] **批量导出流式化**：BufWriter 直接写临时文件，不攒内存
 - [ ] **纯 Rust .doc 解析**：`doc-rs` 等替代 LO 处理老格式
-- [ ] **彻底弃用 LibreOffice 兜底**：LO（soffice 子进程）在 .doc/.ppt/.xls 上慢、锁竞争、易失败（日志中的 `DeploymentException`/`source file could not be loaded`）。计划：① 分析日志中走 LO 兜底的文件类型与失败分布；② 逐格式替换为轻量可嵌入方案（`.doc`→doc-rs/antiword 类，`.ppt`→oooxml 解析或暂不支持，`.xls`→calamine 已有）；③ 移除 `office/mod.rs` 的 soffice 路径与 `lo_binary_path` 配置，实现零外部依赖
+- [x] **彻底弃用 LibreOffice 兜底**：已移除全部 soffice 子进程代码与 `lo_binary_path`/`lo_batch_size` 配置，实现零外部依赖——`.doc`→rwml、`.xls/.xlsx`→calamine、`.docx/.ppt/.pptx/.odt/.ods/.odp/.rtf/.epub`→anydoc 全部纯原生（2026-08-11）
 - [x] **poppler-utils 零安装**：build.rs 拷贝二进制到 poppler-bin/，运行时查找
 - [x] **pdf-inspector 集成**：替代 `has_scan_images()` 图片尺寸启发式判定（四分类+置信度+按页 OCR 路由）
 - [x] **损坏文件优雅降级**：classify_error_str 区分加密/损坏/格式不支持

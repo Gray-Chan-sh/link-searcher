@@ -11,7 +11,6 @@ use crate::state::AppState;
 pub struct ConfigInfo {
     pub data_dir: String,
     pub language: String,
-    pub lo_binary_path: String,
     /// Legacy single-gateway fields (kept for backward compat; new UI uses
     /// embedding_*/llm_* pairs).
     pub ai_api_base: String,
@@ -36,7 +35,6 @@ pub fn get_config() -> Result<ConfigInfo, String> {
     Ok(ConfigInfo {
         data_dir: config.data_dir.to_string_lossy().to_string(),
         language: config.language,
-        lo_binary_path: config.lo_binary_path,
         ai_api_base: config.ai_api_base,
         ai_api_key: config.ai_api_key,
         embedding_api_base: config.embedding_api_base,
@@ -73,7 +71,6 @@ pub fn update_config(
     let mut config = AppConfig {
         data_dir: new_config.data_dir.into(),
         language: new_config.language,
-        lo_binary_path: new_config.lo_binary_path,
         ai_api_base: new_config.ai_api_base,
         ai_api_key: new_config.ai_api_key,
         embedding_api_base: new_config.embedding_api_base,

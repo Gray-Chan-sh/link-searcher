@@ -41,7 +41,6 @@ npm run tauri dev
 | 工具 | 用途 | macOS | Windows | Linux |
 |------|------|--------|---------|-------|
 | Tesseract | 备选 OCR | `brew install tesseract tesseract-lang` | `winget install Tesseract-OCR` | `sudo apt install tesseract-ocr` |
-| LibreOffice | 旧版 Office (.doc .ppt) | `brew install --cask libreoffice` | `winget install LibreOffice` | `sudo apt install libreoffice` |
 | poppler | PDF 扫描件渲染 | `brew install poppler` | `winget install poppler` | `sudo apt install poppler-utils` |
 
 ### 1.2 三步开始
@@ -305,7 +304,7 @@ flowchart TD
     A["文件路径"] --> B{"按扩展名路由"}
     B -->|"文本类 txt/md/csv/json/代码…"| C["TextExtractor<br/>(10MB 上限读取 + UTF-8/GBK 检测)"]
     B -->|"pdf"| D["lopdf 文本层 → 水印/重复检测<br/>→ 若为扫描件回退 OCR"]
-    B -->|"Office docx/xls/pptx"| E["docx/xlsx/pptx 原生解析;<br/>旧格式 doc/xls/ppt 走 LibreOffice 批量转换"]
+    B -->|"Office docx/xls/pptx"| E["原生解析:<br/>doc→rwml, xls→calamine,<br/>docx/pptx/odt→anydoc"]
     B -->|"图片 png/jpg/…"| F["OCR 引擎优先链:<br/>PaddleOCR → Apple Vision →<br/>Windows OCR → Tesseract"]
     B -->|"压缩包 zip/tar/gz/…"| G["遍历条目<br/>(解压字节上限 + 路径穿越校验)"]
     B -->|"音频 mp3/wav/…"| H["ffmpeg 转 16kHz 单声道 (限 30min)<br/>→ FunASR 语音识别"]
@@ -347,8 +346,6 @@ flowchart TD
 | OCR | OCR 并发数 | 同时处理数（默认 2） |
 | 排除 | 全局排除模式 | 额外 glob 规则 |
 | 备份 | 自动备份 | 启用 + 间隔天数 |
-| 高级 | LO 路径 | LibreOffice 可执行文件路径（留空自动探测：macOS 依次查 brew `/opt/homebrew/bin/soffice`、`/usr/local/bin/soffice`、`/Applications/LibreOffice.app/...`） |
-| 高级 | LO 批大小 | 每次 soffice 转换文件数（1–100，默认 32）。越小越省内存，越大越快 |
 | AI 服务 | Embedding Base URL | 语义搜索网关（Ollama / OneAPI / vLLM 等）。**留空关闭语义搜索** |
 | AI 服务 | Embedding API Key | 语义搜索网关密钥（本地 Ollama 可留空） |
 | AI 服务 | Embedding 模型 | 语义搜索用嵌入模型名（默认 text-embedding-v3-small） |
@@ -384,7 +381,7 @@ flowchart TD
 
 ### 配置 AI Provider
 
-设置页「AI 服务」：
+设置页切换到「AI」标签页（设置页已改为分组导航：通用/索引/文档解析/AI/系统）：
 
 1. **添加 Provider**：填名称 + Base URL（OpenAI 兼容网关）+ API Key（可留空）→ 保存时自动拉取模型列表，并按名字分类（embedding / LLM；无特征的名字默认视为 LLM，可在子列表手动改类型）。
 2. **选择当前使用**：在「当前使用」两个下拉框中分别选择 Embedding 模型与 LLM 模型（下拉跨所有 Provider 合并同类模型）。不选 = 功能停用。

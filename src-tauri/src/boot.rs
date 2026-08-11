@@ -48,28 +48,6 @@ pub fn bootstrap_core(data_dir: &Path) -> Result<Bootstrap> {
     db::init_db(&init_conn)?;
     drop(init_conn);
 
-    // Apply the LO batch size to the global batcher.
-    if let Ok(conn) = pool.get() {
-        match conn.query_row(
-            "SELECT value FROM app_settings WHERE key = 'lo_batch_size'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(v) => match v.parse::<usize>() {
-                Ok(n) => {
-                    crate::extractor::office::LO_BATCH_SIZE
-                        .store(n.max(1), std::sync::atomic::Ordering::Relaxed);
-                    log::info!("[STARTUP] LO batch size set to {}", n.max(1));
-                }
-                Err(e) => log::warn!(
-                    "[STARTUP] Failed to parse lo_batch_size value '{}': {}",
-                    v, e
-                ),
-            },
-            Err(e) => log::warn!("[STARTUP] Failed to read lo_batch_size setting: {}", e),
-        }
-    }
-
     let index_manager = Arc::new(RwLock::new(IndexManager::open_or_create(&index_dir)?));
 
     let cancel_scan = Arc::new(AtomicBool::new(false));

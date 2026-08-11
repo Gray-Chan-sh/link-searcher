@@ -802,6 +802,7 @@ mod watcher_skip_tests {
             error_msg: None,
             created_at: 0,
             updated_at: 0,
+            dead_content: 0,
         }
     }
 

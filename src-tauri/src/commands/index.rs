@@ -128,6 +128,7 @@ pub async fn trigger_scan(
     let cancel_scan = state.cancel_scan.clone();
     let scanner = state.scanner.clone();
     let db_pool = state.db.clone();
+    let indexer = state.indexer.clone();
     let app_clone = app.clone();
     let scan_delta = state.scan_delta.clone();
     let logs_dir = state.data_dir.join("logs");
@@ -274,6 +275,14 @@ pub async fn trigger_scan(
                 let _ = run_backfill_embeddings(&db_pool_bg);
             });
         }
+
+        // After a scan, verify content validity of the files just indexed
+        // (empty-content check, idempotent; dead files skipped automatically).
+        let db_pool_v = db_pool.clone();
+        let indexer_v = indexer.clone();
+        std::thread::spawn(move || {
+            let _ = run_verify_core(&db_pool_v, &indexer_v, false);
+        });
     });
 
     Ok(())
@@ -799,6 +808,104 @@ pub fn get_index_errors(state: State<'_, AppState>, limit: Option<usize>) -> Res
     tracker::get_index_errors(&conn, limit.unwrap_or(50)).map_err(|e| format!("{e}"))
 }
 
+#[derive(Serialize, Debug)]
+pub struct VerifyReport {
+    pub checked: u64,
+    pub recovered: u64,
+    pub dead: u64,
+    pub failed: u64,
+}
+
+/// Verify index-content validity: files marked indexed=1 but whose extracted
+/// content is empty (trimmed text length 0) are re-extracted once. Recovery
+/// updates content + Tantivy; still-empty files are flagged dead_content=1 so
+/// automatic runs skip them (manual force re-verify can retry).
+#[tauri::command]
+pub async fn verify_index_content(
+    state: State<'_, AppState>,
+    force_dead: bool,
+) -> Result<VerifyReport, String> {
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || run_verify_core(&db_pool, &indexer, force_dead))
+        .await
+        .map_err(|e| format!("task panicked: {e}"))?
+}
+
+fn run_verify_core(
+    db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    indexer: &std::sync::Arc<crate::indexer::IndexerService>,
+    force_dead: bool,
+) -> Result<VerifyReport, String> {
+    let conn = match db_pool.get() {
+        Ok(c) => c,
+        Err(e) => return Err(format!("db error: {e}")),
+    };
+        let mut candidates = match tracker::find_empty_content_files(&conn) {
+            Ok(v) => v,
+            Err(e) => return Err(format!("{e}")),
+        };
+        if force_dead {
+            if let Ok(dead) = tracker::find_dead_files(&conn) {
+                candidates.extend(dead);
+            }
+        }
+        let mut checked = 0u64;
+        let mut recovered = 0u64;
+        let mut dead = 0u64;
+        let mut failed = 0u64;
+
+        for rec in candidates {
+            let dir = match db::dir_config::get_dir(&conn, &rec.dir_id)
+                .and_then(|d| d.ok_or_else(|| anyhow::anyhow!("dir config not found")))
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("[VERIFY] {}: {e}", rec.path);
+                    failed += 1;
+                    continue;
+                }
+            };
+            if let Some(ref md5) = rec.md5 {
+                let _ = tracker::delete_content(&conn, md5);
+            }
+            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            let file_id = rec.id.clone();
+            if let Err(e) = indexer.delete_document_only(&file_id) {
+                log::warn!("[VERIFY] delete stale doc failed {file_id}: {e}");
+            }
+            match indexer.index_file(&file_id, &full_path, &rec.dir_id) {
+                Ok(()) => {
+                    checked += 1;
+                    // Re-check the stored content: recovery only counts when
+                    // non-empty text actually landed.
+                    let ok = conn
+                        .query_row(
+                            "SELECT length(trim(text_content)) FROM content_index \
+                             JOIN file_tracking ON file_tracking.md5 = content_index.md5 \
+                             WHERE file_tracking.id = ?1",
+                            rusqlite::params![file_id],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0);
+                    if ok > 0 {
+                        recovered += 1;
+                        log::info!("[VERIFY] 恢复: {} ({} chars)", rec.path, ok);
+                    } else {
+                        let _ = tracker::mark_dead_content(&conn, &file_id);
+                        dead += 1;
+                        log::warn!("[VERIFY] 仍为空, 标记 dead: {}", rec.path);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[VERIFY] 重试失败: {}: {e}", rec.path);
+                    failed += 1;
+                }
+            }
+        }
+        Ok(VerifyReport { checked, recovered, dead, failed })
+}
+
 /// Manual re-index of a single file. Looks up the DB record, resolves the
 /// full disk path from dir_config, and re-extracts + re-indexes.
 #[tauri::command]
@@ -858,6 +965,62 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, id_a);
         assert_eq!(rows[0].1, "content a");
+    }
+
+    /// End-to-end: run_verify_core re-extracts a file whose stored content is
+    /// empty. A fixable file (real text on disk) recovers; an unfixable one
+    /// (binary junk) stays empty and gets flagged dead_content.
+    #[test]
+    fn verify_core_recovers_or_marks_dead() {
+        use crate::search::IndexManager;
+        use tantivy::Index;
+        use std::sync::Arc;
+
+        let db_path = std::env::temp_dir().join(format!("verify_pool_{}.db", std::process::id()));
+        let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
+        {
+            let c = pool.get().unwrap();
+            db::init_db(&c).unwrap();
+            let tmp_root = std::env::temp_dir();
+            db::dir_config::add_dir(&c, tmp_root.to_str().unwrap(), None, None, None, None, true).unwrap();
+            let d = db::dir_config::list_dirs(&c).unwrap().remove(0);
+            let d_id = d.id.clone();
+
+            // Fixable: real .txt with content, but stored content faked empty.
+            let good = tmp_root.join(format!("verify_good_{}.txt", std::process::id()));
+            std::fs::write(&good, "real recovery text").unwrap();
+            let g_id = tracker::upsert_file(&c, good.file_name().unwrap().to_str().unwrap(), &d_id, 100, 10, None).unwrap();
+            tracker::store_content(&c, "md5-good", "   ", false, None).unwrap();
+            tracker::update_indexed(&c, &g_id, Some("md5-good")).unwrap();
+
+            // Unfixable: binary junk .txt — any extraction yields empty.
+            let bad = tmp_root.join(format!("verify_bad_{}.txt", std::process::id()));
+            std::fs::write(&bad, "\u{0}\u{0}\u{0}\u{0}no text").unwrap();
+            let b_id = tracker::upsert_file(&c, bad.file_name().unwrap().to_str().unwrap(), &d_id, 100, 10, None).unwrap();
+            tracker::store_content(&c, "md5-bad", "", false, None).unwrap();
+            tracker::update_indexed(&c, &b_id, Some("md5-bad")).unwrap();
+            drop(c);
+
+            let index = IndexManager::create_in_ram();
+            let im = Arc::new(std::sync::RwLock::new(index));
+            let indexer = Arc::new(crate::indexer::IndexerService::new(pool.clone(), im));
+
+            let rpt = run_verify_core(&pool, &indexer, false).unwrap();
+            assert_eq!(rpt.recovered, 1, "good.txt should recover: {rpt:?}");
+            assert_eq!(rpt.dead, 1, "bad.txt should be marked dead: {rpt:?}");
+
+            let c = pool.get().unwrap();
+            let gr = tracker::get_file_by_id(&c, &g_id).unwrap().unwrap();
+            assert_eq!(gr.dead_content, 0, "recovered file must not be dead");
+            let content = tracker::get_content(&c, gr.md5.as_deref().unwrap()).unwrap().unwrap();
+            assert_eq!(content.trim(), "real recovery text");
+
+            let br = tracker::get_file_by_id(&c, &b_id).unwrap().unwrap();
+            assert_eq!(br.dead_content, 1, "empty-after-retry must be flagged dead");
+            let _ = std::fs::remove_file(&good);
+            let _ = std::fs::remove_file(&bad);
+            let _ = std::fs::remove_file(&db_path);
+        }
     }
 }
 #[cfg(test)]

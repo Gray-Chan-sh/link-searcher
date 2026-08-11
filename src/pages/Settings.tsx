@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { ask, open, message } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { useSettings } from '../hooks/useSettings'
+import { usePersistentState } from '../hooks/usePersistentState'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner, PlusIcon } from '../icons'
@@ -28,6 +29,7 @@ export default function Settings() {
   const { t, lang, setLang } = useI18n()
   const { settings, loading, error, setValue } = useSettings()
   const { theme, setTheme } = useTheme()
+  const [activeTab, setActiveTab] = usePersistentState<string>('settings_tab', 'general')
   const [ocrEngines, setOcrEngines] = useState<OcrEngineStatus[]>([])
   const [ocrTesting, setOcrTesting] = useState(false)
   const [ocrResult, setOcrResult] = useState<OcrTestResult | null>(null)
@@ -36,7 +38,6 @@ export default function Settings() {
   const [migrating, setMigrating] = useState(false)
   const [migrationStage, setMigrationStage] = useState<string | null>(null)
   const [migrationProgress, setMigrationProgress] = useState(0)
-  const [loPath, setLoPath] = useState<string>('')
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
@@ -52,6 +53,8 @@ export default function Settings() {
   const [refreshMsg, setRefreshMsg] = useState<{ id: string; text: string; isError: boolean } | null>(null)
   const [adding, setAdding] = useState(false)
   const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
+  const [modelFilter, setModelFilter] = useState<Record<string, string>>({})
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -91,12 +94,6 @@ export default function Settings() {
   useEffect(() => {
     aiCapabilities().then(setCaps).catch(() => {})
   }, [])
-
-  useEffect(() => {
-    if (appConfig) {
-      setLoPath(appConfig.lo_binary_path)
-    }
-  }, [appConfig])
 
   const persistProviders = async (providers: ProviderInfo[]) => {
     if (!appConfig) return
@@ -351,7 +348,7 @@ export default function Settings() {
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('settings')}</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            Configure indexing and search preferences
+            {t('settings_desc')}
           </p>
         </div>
       </div>
@@ -362,7 +359,30 @@ export default function Settings() {
         </div>
       )}
 
-      <div className="space-y-6 max-w-xl">
+      <div className="mb-6 flex gap-1 border-b border-gray-200 dark:border-gray-800">
+        {[
+          { id: 'general', key: t('tab_general') },
+          { id: 'index', key: t('tab_index') },
+          { id: 'docs', key: t('tab_docs') },
+          { id: 'ai', key: t('tab_ai') },
+          { id: 'system', key: t('tab_system') },
+        ].map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              activeTab === tab.id
+                ? 'text-blue-600 dark:text-blue-400 border-blue-500'
+                : 'text-gray-500 dark:text-gray-400 border-transparent hover:text-gray-700 dark:hover:text-gray-300'
+            }`}
+          >
+            {tab.key}
+          </button>
+        ))}
+      </div>
+
+      <div className="space-y-6 max-w-2xl">
+        <div className={activeTab === 'general' ? 'space-y-6' : 'hidden'}>
         <Section title={t('data_directory')}>
           <div className="text-sm text-gray-700 dark:text-gray-300 font-mono break-all">
             {appConfig?.data_dir || t('loading')}
@@ -387,48 +407,18 @@ export default function Settings() {
             </div>
           )}
         </Section>
+        </div>
 
+        <div className={activeTab === 'docs' ? 'space-y-6' : 'hidden'}>
         <Section title={t('doc_engine')}>
           <p className="text-sm text-gray-600 dark:text-gray-400">
-            <span className="font-semibold text-gray-900 dark:text-gray-100">AnyDoc</span>
+            <span className="font-semibold text-gray-900 dark:text-gray-100">Native</span>
             {' '}— {t('doc_engine_desc')}
           </p>
         </Section>
+        </div>
 
-        <Section title={t('libreoffice_path')}>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={loPath}
-              onChange={e => setLoPath(e.target.value)}
-              onBlur={async () => {
-                if (appConfig) {
-                  await updateConfig({ ...appConfig, lo_binary_path: loPath })
-                    .catch(err => setLocalError(err instanceof Error ? err.message : 'Failed to save LO path'))
-                }
-              }}
-              placeholder="soffice (or full path)"
-              className="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
-            />
-          </div>
-          {loPath && loPath !== 'soffice' && (
-            <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-              自定义路径: {loPath}
-            </p>
-          )}
-        </Section>
-
-        <Section title={t('lo_batch_size')}>
-          <NumberField
-            label={t('lo_batch_desc')}
-            value={parseInt(settings['lo_batch_size'] ?? '32', 10)}
-            onChange={v => handleFieldChange('lo_batch_size', String(v))}
-            min={1}
-            max={100}
-            placeholder="Default: 32"
-          />
-        </Section>
-
+        <div className={activeTab === 'index' ? 'space-y-6' : 'hidden'}>
         <Section title={t('ocr_engine')}>
           <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
             当前: <span className="font-semibold text-gray-900 dark:text-gray-100">{selectedEngine?.name ?? '未选择'}</span>
@@ -488,15 +478,17 @@ export default function Settings() {
           </p>
         </Section>
 
-        <Section title="OCR">
+        <Section title={t('ocr_lang_section')}>
           <SelectField
-            label="Language"
+            label={t('ocr_lang')}
             value={settings['ocr_lang'] ?? 'eng'}
             onChange={v => handleFieldChange('ocr_lang', v)}
             options={OCR_LANGS}
           />
         </Section>
+        </div>
 
+        <div className={activeTab === 'general' ? 'space-y-6' : 'hidden'}>
         <Section title={t('language')}>
           <SelectField
             label={t('language')}
@@ -505,7 +497,9 @@ export default function Settings() {
             options={LANG_OPTIONS.map(o => ({ value: o.value, label: t(o.labelKey) }))}
           />
         </Section>
+        </div>
 
+        <div className={activeTab === 'ai' ? 'space-y-6' : 'hidden'}>
         <Section title={t('ai_service')}>
           <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">{t('ai_service_desc')}</p>
           {aiWarn && (
@@ -604,22 +598,60 @@ export default function Settings() {
                       </div>
                     )}
                     {p.models.length > 0 && (
-                      <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700 space-y-1">
-                        {p.models.map(m => (
-                          <div key={m.id} className="flex items-center gap-2">
-                            <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
-                            <select
-                              title={t('ai_model_type')}
-                              value={m.model_type}
-                              onChange={e => handleModelType(p, m.id, e.target.value as ModelType)}
-                              className="px-1.5 py-0.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
-                            >
-                              <option value="Embedding">{t('ai_type_embedding')}</option>
-                              <option value="Llm">{t('ai_type_llm')}</option>
-                              <option value="Unknown">{t('ai_type_unknown')}</option>
-                            </select>
-                          </div>
-                        ))}
+                      <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
+                        <input
+                          type="text"
+                          value={modelFilter[p.id] ?? ''}
+                          onChange={e => setModelFilter(f => ({ ...f, [p.id]: e.target.value }))}
+                          placeholder={t('model_filter_placeholder')}
+                          className="mb-1.5 w-full px-2 py-1 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+                        />
+                        <div className="space-y-1">
+                          {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
+                            const filter = (modelFilter[p.id] ?? '').toLowerCase()
+                            const matched = group === 'Embedding'
+                              ? p.models.filter(m => m.model_type === 'Embedding' && (!filter || m.id.toLowerCase().includes(filter)))
+                              : group === 'Llm'
+                                ? p.models.filter(m => m.model_type === 'Llm' && (!filter || m.id.toLowerCase().includes(filter)))
+                                : p.models.filter(m => m.model_type === 'Unknown' && (!filter || m.id.toLowerCase().includes(filter)))
+                            if (matched.length === 0) return null
+                            const key = `${p.id}:${group}`
+                            const expanded = filter !== '' || !collapsedGroups.has(key)
+                            const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
+                            return (
+                              <div key={group}>
+                                <button
+                                  type="button"
+                                  onClick={() => setCollapsedGroups(s => {
+                                    const n = new Set(s)
+                                    if (n.has(key)) n.delete(key)
+                                    else n.add(key)
+                                    return n
+                                  })}
+                                  className="w-full flex items-center gap-1.5 px-1 py-0.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+                                >
+                                  <span className="text-[10px]">{expanded ? '▾' : '▸'}</span>
+                                  <span className="flex-1 text-left">{t(labelKey, { n: matched.length })}</span>
+                                </button>
+                                {expanded && matched.map(m => (
+                                  <div key={m.id} className="flex items-center gap-2 pl-3">
+                                    <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
+                                    <select
+                                      title={t('ai_model_type')}
+                                      value={m.model_type}
+                                      onChange={e => handleModelType(p, m.id, e.target.value as ModelType)}
+                                      className="px-1.5 py-0.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+                                    >
+                                      <option value="Embedding">{t('ai_type_embedding')}</option>
+                                      <option value="Llm">{t('ai_type_llm')}</option>
+                                      <option value="Unknown">{t('ai_type_unknown')}</option>
+                                    </select>
+                                  </div>
+                                ))}
+                              </div>
+                            )
+                          })}
+                        </div>
                       </div>
                     )}
                     {editingId === p.id && editDraft && (
@@ -745,29 +777,31 @@ export default function Settings() {
             </div>
           )}
         </Section>
+        </div>
 
-        <Section title="System">
+        <div className={activeTab === 'system' ? 'space-y-6' : 'hidden'}>
+        <Section title={t('tab_system')}>
           <ToggleField
-            label="Launch on system startup"
+            label={t('sys_launch_on_startup')}
             checked={settings['auto_start'] === 'true'}
             onChange={v => handleFieldChange('auto_start', v ? 'true' : 'false')}
           />
         </Section>
 
-        <Section title="Scheduling">
+        <Section title={t('sys_scheduling')}>
           <TextField
-            label="Scheduled scan time"
+            label={t('sys_scheduled_scan_time')}
             value={settings['scan_time'] ?? '02:00'}
             onChange={v => handleFieldChange('scan_time', v)}
             placeholder="Default: 02:00 (2 AM)"
           />
           <ToggleField
-            label="Auto backup"
+            label={t('sys_auto_backup')}
             checked={settings['auto_backup'] === 'true'}
             onChange={v => handleFieldChange('auto_backup', v ? 'true' : 'false')}
           />
           <NumberField
-            label="Backup interval (days)"
+            label={t('sys_backup_interval')}
             value={parseInt(settings['backup_interval'] ?? '7', 10)}
             onChange={v => handleFieldChange('backup_interval', String(v))}
             min={1}
@@ -775,7 +809,7 @@ export default function Settings() {
             placeholder="Default: 7"
           />
           <NumberField
-            label="Maximum search results"
+            label={t('sys_max_results')}
             value={parseInt(settings['max_results'] ?? '1000', 10)}
             onChange={v => handleFieldChange('max_results', String(v))}
             min={100}
@@ -785,16 +819,18 @@ export default function Settings() {
           />
         </Section>
 
-        <Section title="Exclusions">
+        <Section title={t('sys_exclusions')}>
           <TextareaField
-            label="Exclude patterns"
+            label={t('sys_exclude_patterns')}
             value={settings['exclude_patterns'] ?? ''}
             onChange={v => handleFieldChange('exclude_patterns', v)}
             placeholder="*.tmp&#10;node_modules&#10;.git"
             rows={4}
           />
         </Section>
+        </div>
 
+        <div className={activeTab === 'index' ? 'space-y-6' : 'hidden'}>
         <Section title={t('dependencies')}>
           {deps.map(dep => (
             <div key={dep.command} className="flex items-start gap-3">
@@ -821,7 +857,9 @@ export default function Settings() {
             </div>
           ))}
         </Section>
+        </div>
 
+        <div className={activeTab === 'general' ? 'space-y-6' : 'hidden'}>
         <Section title={t('theme')}>
           <SelectField
             label={t('theme')}
@@ -834,6 +872,7 @@ export default function Settings() {
             ]}
           />
         </Section>
+        </div>
 
         {version && (
           <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">

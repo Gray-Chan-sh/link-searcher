@@ -59,6 +59,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Migration to schema v2: add `file_ext` (list_files_db ORDER BY + get_file_type_stats GROUP BY previously referenced a non-existent column).
     ensure_file_ext_column(&tx)?;
 
+    // Schema: add `dead_content` (content-validity marker for empty-content
+    // files that already failed verification + retry).
+    ensure_dead_content_column(&tx)?;
+
     seed_default_settings(&tx)?;
 
     tx.execute(
@@ -97,6 +101,31 @@ fn ensure_file_ext_column(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `dead_content` column to older databases. Idempotent — the
+/// verification command relies on it to stop re-testing files whose content
+/// was already confirmed empty by a previous attempt.
+fn ensure_dead_content_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(file_tracking)")
+            .context("failed to inspect file_tracking")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "dead_content")
+    };
+    if has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE file_tracking ADD COLUMN dead_content INTEGER NOT NULL DEFAULT 0")
+        .context("failed to add dead_content column")?;
+    Ok(())
+}
+
 const CREATE_TABLES_SQL: &str = "
     CREATE TABLE IF NOT EXISTS file_tracking (
         id          TEXT PRIMARY KEY,
@@ -110,7 +139,8 @@ const CREATE_TABLES_SQL: &str = "
         indexed     INTEGER NOT NULL DEFAULT 0,
         error_msg   TEXT,
         created_at  INTEGER NOT NULL,
-        updated_at  INTEGER NOT NULL
+        updated_at  INTEGER NOT NULL,
+        dead_content INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_ft_dir_id ON file_tracking(dir_id);
     CREATE INDEX IF NOT EXISTS idx_ft_status ON file_tracking(status);
@@ -217,7 +247,6 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("max_results", "1000"),
         ("auto_backup_enabled", "1"),
         ("auto_backup_interval_days", "7"),
-        ("lo_batch_size", "32"),
         ("theme", "system"),
     ];
     for (key, value) in defaults {

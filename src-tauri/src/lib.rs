@@ -19,7 +19,7 @@ use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, con
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan};
+use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
@@ -90,6 +90,7 @@ fn run_with_config(app_config: config::AppConfig) {
             reindex_file,
             reindex_files,
             reextract_missing_content,
+            verify_index_content,
             cancel_scan,
             get_index_errors,
             add_dir,
@@ -351,7 +352,7 @@ fn run_with_config(app_config: config::AppConfig) {
             }
 
             std::thread::spawn(move || {
-                use crate::extractor::{office, pdf};
+                use crate::extractor::pdf;
 
                 // Per-scan session log (optional — scan proceeds without it).
                 let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
@@ -366,7 +367,6 @@ fn run_with_config(app_config: config::AppConfig) {
                 log::info!("[STARTUP] 检查系统依赖...");
 
                 let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
-                let lo_ok = office::is_libreoffice_available();
 
                 let pdf_ok = pdf::is_pdftoppm_available();
 
@@ -374,9 +374,8 @@ fn run_with_config(app_config: config::AppConfig) {
                 let ffmpeg_ok = crate::extractor::audio::ffmpeg_available();
 
                 log::info!(
-                    "[STARTUP] PaddleOCR={} LibreOffice={} pdftoppm={} FunASR={} ffmpeg={}",
+                    "[STARTUP] PaddleOCR={} pdftoppm={} FunASR={} ffmpeg={}",
                     if ocr_ok { "OK" } else { "FAIL" },
-                    if lo_ok { "OK" } else { "N/A" },
                     if pdf_ok { "OK" } else { "N/A" },
                     if funasr_ok { "OK" } else { "MISSING" },
                     if ffmpeg_ok { "OK" } else { "MISSING" },

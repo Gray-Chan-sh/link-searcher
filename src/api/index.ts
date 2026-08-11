@@ -27,6 +27,17 @@ export async function backfillEmbeddings(): Promise<BackfillReport> {
   return invoke<BackfillReport>('backfill_embeddings')
 }
 
+export interface VerifyReport {
+  checked: number
+  recovered: number
+  dead: number
+  failed: number
+}
+
+export async function verifyIndexContent(forceDead: boolean): Promise<VerifyReport> {
+  return invoke<VerifyReport>('verify_index_content', { forceDead })
+}
+
 export interface ReextractReport {
   processed: number
   ok: number

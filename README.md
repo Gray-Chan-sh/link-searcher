@@ -42,9 +42,9 @@
 | 格式 | 扩展名 | 提取方式 |
 |------|--------|---------|
 | PDF | `.pdf` | 文本提取 + 扫描件自动 OCR（pdftoppm 渲染 → PaddleOCR 识别） |
-| Word | `.docx` `.doc` | `.doc` 经 rwml 纯 Rust 解析（失败回退 LibreOffice）；`.docx` XML 解析 |
+| Word | `.docx` `.doc` | `.doc` 经 rwml 纯 Rust 解析；`.docx` anydoc 原生解析 |
 | Excel | `.xlsx` `.xls` | calamine 原生读取所有单元格 |
-| PPT | `.pptx` `.ppt` | `.pptx` XML 解析提取；`.ppt` 通过 LibreOffice 批量转换 |
+| PPT | `.pptx` `.ppt` | anydoc 原生解析 |
 | 图片 | `.png` `.jpg` `.jpeg` `.gif` `.bmp` `.webp` `.tiff` | PaddleOCR 文字识别 |
 | Markdown | `.md` | 直接读取 |
 | 纯文本 | `.txt` `.csv` `.json` `.xml` `.yaml` `.toml` `.ini` `.log` | 直接读取 |
@@ -143,7 +143,7 @@
 - **Rust** 1.85+
 - **音频识别（可选）**：ffmpeg，首次使用时在设置页下载 FunASR-Nano 模型（~850MB）后启用 mp3/wav 等语音转写（sherpa-onnx 纯 Rust 推理，无需 Python）
 
-> PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎或 LibreOffice（旧版 `.doc` `.ppt`），请参考用户手册。
+> PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎，请参考用户手册。
 
 ### 开发运行
 
@@ -210,7 +210,7 @@ link-searcher/
 │   │   │   ├── ocr.rs         # OCR 引擎调度
 │   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型内嵌 + 引擎池并行）
 │   │   │   ├── pdf.rs         # PDF 提取 + pdftoppm OCR
-│   │   │   ├── office/        # Office 提取 + LibreOffice 集成
+│   │   │   ├── office/        # Office 提取（rwml/calamine/anydoc 原生，无外部依赖）
 │   │   │   ├── image.rs       # 图片 OCR
 │   │   │   └── text.rs        # 纯文本提取
 │   │   ├── scanner/           # 目录扫描 + 文件监控
