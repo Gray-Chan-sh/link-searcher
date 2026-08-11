@@ -1,6 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 
+export interface TaskBrief {
+  task: string
+  summary: string
+  completed_at: number
+}
+
 export interface IndexStatus {
   total_files: number
   indexed: number
@@ -11,6 +17,8 @@ export interface IndexStatus {
   last_scan: number | null
   is_scanning: boolean
   scan_delta?: { added: number; deleted: number; modified: number; errors: number }
+  running_tasks: string[]
+  briefs: TaskBrief[]
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {

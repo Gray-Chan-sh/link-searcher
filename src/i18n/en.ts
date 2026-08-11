@@ -226,6 +226,8 @@ const en: Record<string, string> = {
     // Logs
     log_activity: 'Application activity log',
     auto_scroll: 'Auto-scroll',
+    grep_logs: 'Filter logs…',
+    task_brief_unread: 'Task done: {task} (click to view logs)',
     on: 'ON',
     off: 'OFF',
     no_log_entries: 'No log entries yet',

@@ -25,10 +25,7 @@ export default function IndexStatus() {
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
   const [dupesLoading, setDupesLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
-  const [backfilling, setBackfilling] = useState(false)
-  const [verifying, setVerifying] = useState(false)
   const [forceDead, setForceDead] = useState(false)
-  const [reextracting, setReextracting] = useState(false)
   const [embedCapable, setEmbedCapable] = useState(false)
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null)
   const [scanError, setScanError] = useState<string | null>(null)
@@ -108,7 +105,6 @@ const handleRebuild = async () => {
   }
 
   const handleBackfill = async () => {
-    setBackfilling(true)
     setBackfillMsg(null)
     try {
       const r = await backfillEmbeddings()
@@ -119,13 +115,10 @@ const handleRebuild = async () => {
       )
     } catch (e) {
       setBackfillMsg(String(e))
-    } finally {
-      setBackfilling(false)
     }
   }
 
   const handleVerify = async () => {
-    setVerifying(true)
     setBackfillMsg(null)
     try {
       const r = await verifyIndexContent(forceDead)
@@ -134,13 +127,10 @@ const handleRebuild = async () => {
       )
     } catch (e) {
       setBackfillMsg(String(e))
-    } finally {
-      setVerifying(false)
     }
   }
 
   const handleReextract = async () => {
-    setReextracting(true)
     setBackfillMsg(null)
     try {
       const r = await reextractMissingContent()
@@ -151,8 +141,6 @@ const handleRebuild = async () => {
       )
     } catch (e) {
       setBackfillMsg(String(e))
-    } finally {
-      setReextracting(false)
     }
   }
 
@@ -197,7 +185,9 @@ const handleRebuild = async () => {
             {t('index_status_overview')}
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        const taskActive = (name: string) => (status?.running_tasks ?? []).includes(name)
+      const anyTaskActive = (status?.running_tasks?.length ?? 0) > 0
+      <div className="flex items-center gap-2">
           <button
             onClick={handleScan}
             disabled={status?.is_scanning}
@@ -216,20 +206,20 @@ const handleRebuild = async () => {
           )}
           <button
             onClick={handleBackfill}
-            disabled={backfilling || !embedCapable || status?.is_scanning}
+            disabled={taskActive('backfill') || !embedCapable || status?.is_scanning}
             title={embedCapable ? '补齐缺失的语义向量（不重新提取/OCR）' : 'AI Embedding 网关未配置'}
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/40 disabled:opacity-50 transition-colors"
           >
-            {backfilling && <LoadingSpinner className="size-4" />}
+            {taskActive('backfill') && <LoadingSpinner className="size-4" />}
             ✦ 补齐语义向量
           </button>
           <button
             onClick={handleReextract}
-            disabled={reextracting || status?.is_scanning}
+            disabled={taskActive('reextract') || status?.is_scanning}
             title="重新提取缺失内容的文件（如旧版 .doc 扫描件，批量修复）"
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
           >
-            {reextracting && <LoadingSpinner className="size-4" />}
+            {taskActive('reextract') && <LoadingSpinner className="size-4" />}
             ↻ 重提取缺失内容
           </button>
           <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="已确认空内容、被自动跳过验证的文件">
@@ -243,11 +233,11 @@ const handleRebuild = async () => {
           </label>
           <button
             onClick={handleVerify}
-            disabled={verifying || status?.is_scanning}
+            disabled={taskActive('verify') || status?.is_scanning}
             title="验证索引内容有效性：内容为空的已索引文件将自动重试一次"
             className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/40 disabled:opacity-50 transition-colors"
           >
-            {verifying && <LoadingSpinner className="size-4" />}
+            {taskActive('verify') && <LoadingSpinner className="size-4" />}
             ✓ 验证索引有效性
           </button>
           <button

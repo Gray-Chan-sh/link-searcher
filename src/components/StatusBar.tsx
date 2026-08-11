@@ -1,13 +1,40 @@
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { listenScanProgress, type ScanProgress } from '../api/index'
 
+const LAST_READ_KEY = 'last_read_brief_ts'
+
 export default function StatusBar() {
   const { t } = useI18n()
+  const navigate = useNavigate()
   const { status, loading, error } = useIndexStatus()
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null)
+  const [hasUnreadBrief, setHasUnreadBrief] = useState(false)
+
+  // Light the brief icon when a NEW task brief arrives (newest timestamp > the
+  // last one the user acknowledged). Survives page switches (persisted).
+  useEffect(() => {
+    const briefs = status?.briefs ?? []
+    if (briefs.length === 0) return
+    const lastRead = parseInt(localStorage.getItem(LAST_READ_KEY) ?? '0', 10)
+    if (briefs[0].completed_at > lastRead) {
+      setHasUnreadBrief(true)
+    }
+  }, [status?.briefs])
+
+  const handleBriefClick = () => {
+    const briefs = status?.briefs ?? []
+    if (briefs.length > 0) {
+      localStorage.setItem(LAST_READ_KEY, String(briefs[0].completed_at))
+    }
+    setHasUnreadBrief(false)
+    // Jump to the log viewer paused on the brief's task lines.
+    const q = briefs[0]?.task ?? ''
+    navigate(q ? `/logs?q=${encodeURIComponent(`[TASK] ${q}`)}` : '/logs')
+  }
 
   useEffect(() => {
     const unlisten = listenScanProgress(setScanProgress)
@@ -59,6 +86,16 @@ export default function StatusBar() {
                   {t('scanning')}...
                 </span>
               )
+            )}
+            {hasUnreadBrief && (
+              <button
+                onClick={handleBriefClick}
+                title={t('task_brief_unread', { task: status?.briefs?.[0]?.task ?? '' })}
+                className="relative flex items-center gap-1 px-1.5 py-0.5 rounded text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
+              >
+                <span className="animate-pulse">📋</span>
+                {status?.briefs?.[0]?.summary}
+              </button>
             )}
             {status.last_scan && (
                <span>

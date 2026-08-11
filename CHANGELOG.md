@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-11（长任务运行态保持 + 完成简报）
+
+- **按钮状态跨页面丢失**：索引页「验证有效性/补齐向量/重提取」等按钮的运行态是组件本地 `useState`——切页面组件卸载 state 重置，任务未完成时按钮恢复可用，可能二次误触。修复：新增**全局任务注册表**（`state.rs` 的 `task_registry` + `TaskGuard` RAII），长任务 start/end 自动登记/移除；`get_index_status` 返回 `running_tasks`，前端按钮从后端状态查（而非本地 state）——切页/刷新仍保持禁用（后端是唯一事实源）
+- **TaskGuard RAII**：`track_task`/`untrack_task` 封装为 guard，函数作用域结束（含 early-return/错误路径）自动注销，防任务卡死残留（`src-tauri/src/state.rs`）
+- **完成简报**：三个长任务（verify/backfill/reextract）完成时 `push_task_brief`——全局环形缓冲区（cap 50）+ 写 `[TASK]` 前缀日志行（供日志定位）；`get_index_status` 返回 `briefs`（`src-tauri/src/state.rs`、`src-tauri/src/commands/index.rs`）
+- **状态栏简报图标**：StatusBar 监听 status 轮询，新 brief 时间戳 > 已读（localStorage 持久化）→ 📋 图标点亮 + 摘要；点击 → 熄灭 + 跳转日志页（`/logs?q=[TASK] verify`）（`src/components/StatusBar.tsx`）
+- **日志定位增强**：LogViewer 支持 `?q=` 参数——进入即按关键字过滤 + **自动暂停滚动**（`autoScroll=false`），加「过滤日志」输入框（`src/pages/LogViewer.tsx`）
+- **前端按钮改造**：IndexStatus 三个按钮 disabled 从本地 state 改为 `taskActive(running_tasks)`，spinner 同步（`src/pages/IndexStatus.tsx`）
+- **测试**：`task_registry_tracks_and_untracks`、`task_guard_drops_on_scope_exit`、`briefs_ring_buffer_newest_first_capped`；145 单元 + 6 IPC 通过，手动 QA（registry 运行中/完成/简报），tsc 0，semgrep 0
+
+---
+
 ## 2026-08-11（索引有效性验证 · 空 content 检测 + 自动重试）
 
 - **背景（LO 假成功实证）**：移除 LibreOffice 兜底时发现，曾"成功"经 LO 索引的文件 `content_index.text_content` 实际为**空字符串**（char_count 虚高但无内容）——标记 indexed=1 却搜不到任何内容（真实库验证：233 个可疑文件，仅 8 个是 LO 假成功，其余为历史空索引）。新增**按内容而非状态**验证索引有效性的能力

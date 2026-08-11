@@ -43,6 +43,12 @@ pub struct IndexStatus {
     pub last_scan: Option<i64>,
     pub is_scanning: bool,
     pub scan_delta: Option<ScanDelta>,
+    /// task ids currently running (frontend uses to keep buttons disabled
+    /// across page switches; see `state::running_task_ids`).
+    pub running_tasks: Vec<String>,
+    /// finished-task briefs, newest first (frontend shows these as the
+    /// "task report" notification source).
+    pub briefs: Vec<crate::state::TaskBrief>,
 }
 
 #[derive(Clone, Serialize)]
@@ -80,6 +86,8 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         last_scan,
         is_scanning: state.is_scanning.load(Ordering::Acquire),
         scan_delta: Some({ let d = state.scan_delta.lock().unwrap_or_else(|e| e.into_inner()); d.clone() }),
+        running_tasks: crate::state::running_task_ids(),
+        briefs: crate::state::task_brief_snapshot(),
     })
 }
 
@@ -580,6 +588,7 @@ fn run_backfill_embeddings(
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    let _guard = crate::state::TaskGuard::new("backfill");
     const BATCH: usize = 64;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
@@ -610,6 +619,10 @@ fn run_backfill_embeddings(
         log::info!("[AI] 回填进度: {processed}/{total} (失败 {failed})");
     }
     log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
+    crate::state::push_task_brief(
+        "backfill",
+        format!("向量回填完成: {processed} 补齐, {failed} 失败"),
+    );
     Ok(BackfillReport {
         processed: processed as u64,
         pending: (total - processed) as u64,
@@ -669,6 +682,7 @@ pub async fn reextract_missing_content(
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
     tokio::task::spawn_blocking(move || {
+        let _guard = crate::state::TaskGuard::new("reextract");
         let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
         let mut stmt = conn
             .prepare(
@@ -727,6 +741,10 @@ pub async fn reextract_missing_content(
                 }
             }
         }
+        crate::state::push_task_brief(
+            "reextract",
+            format!("重提取缺失内容完成: {ok} 成功, {failed} 失败"),
+        );
         Ok(ReextractReport { processed: ok + failed, ok, failed })
     })
     .await
@@ -837,6 +855,7 @@ fn run_verify_core(
     indexer: &std::sync::Arc<crate::indexer::IndexerService>,
     force_dead: bool,
 ) -> Result<VerifyReport, String> {
+    let _guard = crate::state::TaskGuard::new("verify");
     let conn = match db_pool.get() {
         Ok(c) => c,
         Err(e) => return Err(format!("db error: {e}")),
@@ -903,6 +922,10 @@ fn run_verify_core(
                 }
             }
         }
+        crate::state::push_task_brief(
+            "verify",
+            format!("索引有效性验证完成: 检查 {checked}，恢复 {recovered}，空 {dead}，失败 {failed}"),
+        );
         Ok(VerifyReport { checked, recovered, dead, failed })
 }
 

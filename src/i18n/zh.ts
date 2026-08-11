@@ -226,6 +226,8 @@ const zh: Record<string, string> = {
     // Logs
     log_activity: '应用活动日志',
     auto_scroll: '自动滚动',
+    grep_logs: '过滤日志…',
+    task_brief_unread: '任务完成：{task}（点击查看日志）',
     on: '开',
     off: '关',
     no_log_entries: '暂无日志记录',

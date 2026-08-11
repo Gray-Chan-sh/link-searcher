@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { getLogs, clearLogs } from '../api/logs'
 import { useI18n } from '../i18n'
@@ -15,11 +16,15 @@ const FILTERS: { value: Filter; labelKey: string }[] = [
   { value: 'error', labelKey: 'error' },
 ]
 
-function filterLogs(logs: string[], filter: Filter): string[] {
-  if (filter === 'all') return logs
-  if (filter === 'error') return logs.filter(l => l.includes('ERROR') || l.includes('error'))
-  const tag = `[${filter.toUpperCase()}]`
-  return logs.filter(l => l.includes(tag))
+function filterLogs(logs: string[], filter: Filter, grep: string): string[] {
+  if (filter === 'error') {
+    return logs.filter(l => l.includes('ERROR') || l.includes('error'))
+  }
+  const tag = filter !== 'all' ? `[${filter.toUpperCase()}]` : ''
+  return logs.filter(l =>
+    (filter === 'all' || l.includes(tag)) &&
+    (grep === '' || l.toLowerCase().includes(grep.toLowerCase())),
+  )
 }
 
 function logKey(line: string, i: number): string {
@@ -35,11 +40,13 @@ function logLineColor(line: string): string {
 
 export default function LogViewer() {
   const { t } = useI18n()
+  const [searchParams] = useSearchParams()
   const [logs, setLogs] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Filter>('all')
-  const [autoScroll, setAutoScroll] = useState(true)
+  const [grep, setGrep] = useState<string>(searchParams.get('q') ?? '')
+  const [autoScroll, setAutoScroll] = useState<boolean>(!searchParams.get('q'))
   const [pendingNewLogs, setPendingNewLogs] = useState(false)
 
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -96,7 +103,7 @@ export default function LogViewer() {
     setPendingNewLogs(false)
   }
 
-  const filteredLogs = filterLogs(logs, filter)
+  const filteredLogs = filterLogs(logs, filter, grep)
 
   return (
     <div className="h-full flex flex-col p-6">
@@ -138,6 +145,13 @@ export default function LogViewer() {
             {t(f.labelKey)}
           </button>
         ))}
+        <input
+          type="text"
+          value={grep}
+          onChange={e => setGrep(e.target.value)}
+          placeholder={t('grep_logs')}
+          className="px-2 py-1 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+        />
         <button
           onClick={() => {
             setAutoScroll(prev => {
