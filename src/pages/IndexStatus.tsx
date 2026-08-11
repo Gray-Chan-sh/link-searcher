@@ -150,6 +150,8 @@ const handleRebuild = async () => {
     setRetrying(false)
   }
 
+  const taskActive = (name: string) => (status?.running_tasks ?? []).includes(name)
+
   const handleShowErrors = async () => {
     if (showErrors) {
       setShowErrors(false)
@@ -185,8 +187,6 @@ const handleRebuild = async () => {
             {t('index_status_overview')}
           </p>
         </div>
-        const taskActive = (name: string) => (status?.running_tasks ?? []).includes(name)
-      const anyTaskActive = (status?.running_tasks?.length ?? 0) > 0
       <div className="flex items-center gap-2">
           <button
             onClick={handleScan}
