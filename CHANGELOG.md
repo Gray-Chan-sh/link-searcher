@@ -4,6 +4,40 @@
 
 ---
 
+## 2026-08-11（索引有效性验证 · 空 content 检测 + 自动重试）
+
+- **背景（LO 假成功实证）**：移除 LibreOffice 兜底时发现，曾"成功"经 LO 索引的文件 `content_index.text_content` 实际为**空字符串**（char_count 虚高但无内容）——标记 indexed=1 却搜不到任何内容（真实库验证：233 个可疑文件，仅 8 个是 LO 假成功，其余为历史空索引）。新增**按内容而非状态**验证索引有效性的能力
+- **`dead_content` 标记**：`file_tracking` 新列——验证重试后仍为空的文件标 `dead_content=1`，自动验证永久跳过（防反复重试），手动强制可再验；任何成功索引自动清零（`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`）
+- **验证规则**：`indexed=1 ∧ trim(text_content) 为空`（含无 content 行）→ 可疑；空即无效（无长度阈值，短文档自然有效）
+- **`verify_index_content` 命令**：批量查可疑文件 → 强制跳过 dedup 重新提取（清 content → 删旧 Tantivy 文档 → index_file）→ 复查存储内容：非空 = 恢复（recovered），仍空 = 标记 dead；`force_dead` 参数可强制重验已标记文件（`src-tauri/src/commands/index.rs`）
+- **扫描后自动验证**：`trigger_scan` 完成后后台自动跑验证（幂等，dead 文件自动跳过），只处理本次新增/可疑（`src-tauri/src/commands/index.rs`）
+- **前端**：索引页「✓ 验证索引有效性」按钮 + 「含已标记文件」复选框（force_dead），展示 检查/恢复/空内容/失败 四计数（`src/pages/IndexStatus.tsx`、`src/api/index.ts`）
+- **测试**：`test_dead_content_lifecycle`（标记/排除/成功清零）、`test_find_empty_content_files_picks_truthy_empty`（真文本不触发/空文本触发/无 content 触发）、`verify_core_recovers_or_marks_dead`（端到端：可恢复文件 recovered + 不可恢复标记 dead）；142 单元 + 手动 QA（真实库副本 233 可疑 → dead 后排除正确），tsc 0，semgrep 0
+
+---
+
+## 2026-08-11（彻底弃用 LibreOffice · Office 提取零外部依赖）
+
+- **移除全部 soffice 子进程代码**：`office/mod.rs` 原保留 LoBatcher（请求合并批处理器）、`lo_binary()` 探测、`extract_many_via_libreoffice`、macOS 轮询转换、`lo_fallback` 兜底——全部删除。dispatch 改为**纯原生**：`.doc`→rwml、`.xls/.xlsx`→calamine、`.docx/.ppt/.pptx/.odt/.ods/.odp/.rtf/.epub`→anydoc，失败直接返回原生错误（`src-tauri/src/extractor/office/mod.rs`）
+- **依据（日志实证）**：LO 兜底只被垃圾/损坏文件触发（`._` AppleDouble、zip EOCD 损坏、invalid FIB magic、无法识别的 xls），对这类文件 LO 同样失败；正常文件 anydoc/rwml 已全部接管。移除后损坏文件**快速失败**而非 spawn 子进程卡顿
+- **配置剥离**：`lo_binary_path`（config.rs/commands/config.rs/ConfigInfo）、`lo_batch_size`（boot.rs 启动读取、settings.rs ALLOWED_KEYS、db seed）全部移除（`src-tauri/src/config.rs`、`src-tauri/src/boot.rs`、`src-tauri/src/commands/{config,settings}.rs`、`src-tauri/src/db/mod.rs`）
+- **依赖面板与自检**：依赖列表删除 LibreOffice 条目；文件类型页 Word/Excel/PowerPoint 标为原生支持（不再误导提示装 LO）；启动自检日志去掉 LibreOffice 探测（`src-tauri/src/commands/tesseract.rs`、`src-tauri/src/lib.rs`）
+- **前端**：设置页删除「LibreOffice 路径」与「LO 批量大小」区块；i18n 四语移除 `libreoffice_path`/`lo_batch_size`/`lo_batch_desc` 键、更新 `doc_engine_desc`（`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
+- **测试**：新增 `test_corrupt_docx/doc_fails_without_lo_fallback`（断言损坏文件返回 Err 且不再触发 soffice，RED→GREEN）；`doc_rs_poc` 移除 lo_binary 引用；156 测试全过（139 单元 + 9 集成 + 6 IPC + 2 POC），手动 QA 用真实 .doc fixture 验证提取（1142~17929 字符，0.02s，无 soffice）
+- **文档**：README/USER_MANUAL 同步（格式表、依赖表、流程图、设置表去除 LibreOffice）
+
+---
+
+## 2026-08-10（设置界面优化 · 分组导航 + 模型列表折叠）
+
+- **设置页从长滚动改为分组 tab 导航**：13 个 section 归 5 组（通用/索引/文档解析/AI/系统），顶部 tab 切换，选中 tab 持久化（`usePersistentState` 记住上次位置）；组内保留 section 标题层级（`src/pages/Settings.tsx`）
+- **模型列表过长**：Provider 下模型从全量平铺改为**按类型分组折叠**（Embedding/LLM/未知，带计数，默认收起）+ **名字过滤框**，过滤命中自动展开对应组（`src/pages/Settings.tsx`）
+- **硬编码英文全部迁 i18n 四语**：System/Scheduling/Exclusions/OCR 标题、Launch on startup/Auto backup/Exclude patterns 等 label、页面副标题——新增 `tab_*`/`sys_*`/`ocr_lang`/`model_group_*`/`model_filter_placeholder`/`settings_desc` 等 19 键补齐 zh/en/ja/ko（`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
+- **视觉优化**：tab 布局 + 内容容器放宽（max-w-xl→max-w-2xl）提升信息密度
+- **测试**：tsc 0 错误、四语键对齐 268/268、semgrep 0
+
+---
+
 ## 2026-08-10（代码审核修复 · 模型管理并发安全）
 
 - **Provider CRUD 命令阻塞主线程（UI 冻结）**：`add_provider`/`refresh_provider_models`/`test_provider` 是同步 `#[tauri::command]` 却内部同步调 `list_provider_models`（HTTP 30s 超时），与 backfill 修复前同类 bug。改为 `async fn` + `spawn_blocking`，网络 IO 移出主线程（`src-tauri/src/commands/config.rs`）

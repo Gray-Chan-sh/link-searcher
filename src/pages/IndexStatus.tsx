@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, reextractMissingContent, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, type IndexError, type IndexStatus } from '../api/index'
 import { getDuplicates, aiCapabilities, type DuplicateGroup } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -26,6 +26,8 @@ export default function IndexStatus() {
   const [dupesLoading, setDupesLoading] = useState(false)
   const [rebuilding, setRebuilding] = useState(false)
   const [backfilling, setBackfilling] = useState(false)
+  const [verifying, setVerifying] = useState(false)
+  const [forceDead, setForceDead] = useState(false)
   const [reextracting, setReextracting] = useState(false)
   const [embedCapable, setEmbedCapable] = useState(false)
   const [backfillMsg, setBackfillMsg] = useState<string | null>(null)
@@ -122,6 +124,21 @@ const handleRebuild = async () => {
     }
   }
 
+  const handleVerify = async () => {
+    setVerifying(true)
+    setBackfillMsg(null)
+    try {
+      const r = await verifyIndexContent(forceDead)
+      setBackfillMsg(
+        `✓ 验证完成: 检查 ${r.checked}，恢复 ${r.recovered}，空内容 ${r.dead}，失败 ${r.failed}`
+      )
+    } catch (e) {
+      setBackfillMsg(String(e))
+    } finally {
+      setVerifying(false)
+    }
+  }
+
   const handleReextract = async () => {
     setReextracting(true)
     setBackfillMsg(null)
@@ -214,6 +231,24 @@ const handleRebuild = async () => {
           >
             {reextracting && <LoadingSpinner className="size-4" />}
             ↻ 重提取缺失内容
+          </button>
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="已确认空内容、被自动跳过验证的文件">
+            <input
+              type="checkbox"
+              checked={forceDead}
+              onChange={e => setForceDead(e.target.checked)}
+              className="accent-blue-600"
+            />
+            含已标记文件
+          </label>
+          <button
+            onClick={handleVerify}
+            disabled={verifying || status?.is_scanning}
+            title="验证索引内容有效性：内容为空的已索引文件将自动重试一次"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/40 disabled:opacity-50 transition-colors"
+          >
+            {verifying && <LoadingSpinner className="size-4" />}
+            ✓ 验证索引有效性
           </button>
           <button
             onClick={handleRebuild}

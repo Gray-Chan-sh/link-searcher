@@ -206,7 +206,7 @@ mod tests {
         let rec = |indexed: i64| Some(crate::db::tracker::FileRecord {
             id: "id".into(), path: "p".into(), dir_id: "d".into(),
             mtime: 100, size: 1, md5: None, status: "active".into(),
-            indexed, error_msg: None, created_at: 0, updated_at: 0,
+            indexed, error_msg: None, created_at: 0, updated_at: 0, dead_content: 0,
         });
         // Same mtime: indexed=1 is up-to-date, extracted(3) is not.
         assert!(!needs_reindex(&rec(1), 100));

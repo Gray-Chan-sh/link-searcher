@@ -1,16 +1,10 @@
 use std::path::Path;
 
-use link_searcher_lib::extractor::office::{lo_binary, OfficeExtractor};
+use link_searcher_lib::extractor::office::OfficeExtractor;
 use link_searcher_lib::extractor::Extractor;
 
-fn lo_baseline_chars(path: &Path) -> Option<usize> {
-    let stem = path.file_stem()?.to_str()?;
-    let txt = Path::new("/tmp/ls-rwml-poc/lo_out").join(format!("{stem}.txt"));
-    std::fs::read_to_string(txt).ok().map(|s| s.len())
-}
-
-/// POC evidence: rwml raw extraction vs LO baseline vs the composite
-/// extract() path (rwml -> LO fallback). Skip when fixtures absent.
+/// POC evidence: rwml raw extraction vs the composite extract() path.
+/// Skip when fixtures absent.
 #[test]
 fn doc_rs_poc() -> anyhow::Result<()> {
     let dir = Path::new("/tmp/ls-rwml-poc/fixtures");
@@ -27,31 +21,24 @@ fn doc_rs_poc() -> anyhow::Result<()> {
         let path = entry.path();
         let bytes = std::fs::read(&path)?;
         let rwml_res = rwml::extract_text(&bytes);
-        let lo_chars = lo_baseline_chars(&path);
         let ext_res = OfficeExtractor::new().extract(&path).map(|s| s.len());
         match &rwml_res {
             Ok(t) => println!(
-                "[doc_rs_poc] {:?} rwml=OK chars={} lo={:?} extract()={:?} preview={:?}",
+                "[doc_rs_poc] {:?} rwml=OK chars={} extract()={:?} preview={:?}",
                 path.file_name().unwrap(),
                 t.len(),
-                lo_chars,
                 ext_res,
                 t.chars().take(30).collect::<String>(),
             ),
             Err(e) => println!(
-                "[doc_rs_poc] {:?} rwml=ERR {:?} lo={:?} extract()={:?}",
+                "[doc_rs_poc] {:?} rwml=ERR {:?} extract()={:?}",
                 path.file_name().unwrap(),
                 e,
-                lo_chars,
                 ext_res,
             ),
         }
-        if lo_binary().is_some() {
-            assert!(
-                ext_res.is_ok(),
-                "extract() should fall back to LO, got: {:?}",
-                ext_res
-            );
+        if let Err(e) = &ext_res {
+            println!("[doc_rs_poc] NOTE: extract() failed (no LO fallback): {e}");
         }
     }
     Ok(())

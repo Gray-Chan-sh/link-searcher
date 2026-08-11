@@ -55,6 +55,7 @@ pub struct FileRecord {
     pub error_msg: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub dead_content: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -181,11 +182,12 @@ fn row_to_record(row: &rusqlite::Row) -> rusqlite::Result<FileRecord> {
         error_msg: row.get("error_msg")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        dead_content: row.get("dead_content")?,
     })
 }
 
 const SEL: &str =
-    "SELECT id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at FROM file_tracking";
+    "SELECT id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at,dead_content FROM file_tracking";
 
 pub fn get_file_by_id(conn: &Connection, file_id: &str) -> Result<Option<FileRecord>> {
     let mut s = conn.prepare(&format!("{SEL} WHERE id=?1")).context("prepare get_file_by_id")?;
@@ -292,14 +294,60 @@ pub fn get_files_needing_index(conn: &Connection, limit: usize) -> Result<Vec<Fi
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect needing_index")
 }
 
+/// Files marked indexed but whose extracted content is empty (trimmed length
+/// 0) — candidates for validity re-check. `dead_content=0` keeps previously
+/// confirmed-empty files out of automatic verification.
+pub fn find_empty_content_files(conn: &Connection) -> Result<Vec<FileRecord>> {
+    let mut s = conn
+        .prepare(&format!(
+            "{SEL} WHERE indexed=1 AND dead_content=0 AND status='active' \
+             AND COALESCE(length(trim((SELECT text_content FROM content_index WHERE md5=file_tracking.md5))),0)=0"
+        ))
+        .context("prepare find_empty_content_files")?;
+    let rows = s.query_map([], row_to_record)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("collect find_empty_content_files")
+}
+
+/// Files confirmed empty-content (dead_content=1) — only reachable via
+/// manual force re-verify.
+pub fn find_dead_files(conn: &Connection) -> Result<Vec<FileRecord>> {
+    let mut s = conn
+        .prepare(&format!("{SEL} WHERE dead_content=1 AND status='active'"))
+        .context("prepare find_dead_files")?;
+    let rows = s.query_map([], row_to_record)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("collect find_dead_files")
+}
+
 pub fn update_indexed(conn: &Connection, file_id: &str, md5: Option<&str>) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, updated_at=?2 WHERE id=?3",
+            "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, updated_at=?2 WHERE id=?3",
             rusqlite::params![md5, chrono::Utc::now().timestamp(), file_id],
         )
         .context("update_indexed failed")?;
     if n == 0 { anyhow::bail!("file not found: {file_id}"); }
+    Ok(())
+}
+
+/// Mark a file as having content that verified empty even after a retry.
+/// Such files are skipped by future automatic verification (manual re-verify
+/// can still force them); any successful re-index clears the flag.
+pub fn mark_dead_content(conn: &Connection, file_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE file_tracking SET dead_content=1, updated_at=?1 WHERE id=?2",
+        rusqlite::params![chrono::Utc::now().timestamp(), file_id],
+    )
+    .context("mark_dead_content failed")?;
+    Ok(())
+}
+
+/// Clear the dead-content flag after any successful extraction.
+pub fn clear_dead_content(conn: &Connection, file_id: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE file_tracking SET dead_content=0, updated_at=?1 WHERE id=?2",
+        rusqlite::params![chrono::Utc::now().timestamp(), file_id],
+    )
+    .context("clear_dead_content failed")?;
     Ok(())
 }
 
@@ -709,6 +757,49 @@ mod tests {
         assert_eq!(r.indexed, 2);
         assert_eq!(r.error_msg, Some("timeout".into()));
         assert_eq!(get_files_needing_index(&conn, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_dead_content_lifecycle() {
+        let conn = db();
+        let id = upsert_file(&conn, "/d.doc", "d1", 1000, 1, None).unwrap();
+        update_indexed(&conn, &id, Some("m1")).unwrap();
+        assert_eq!(get_file_by_id(&conn, &id).unwrap().unwrap().dead_content, 0);
+
+        // Mark dead -> flag set, excluded from auto-verify, in dead list.
+        mark_dead_content(&conn, &id).unwrap();
+        assert_eq!(get_file_by_id(&conn, &id).unwrap().unwrap().dead_content, 1);
+        assert!(find_empty_content_files(&conn).unwrap().is_empty(), "dead file must be excluded from auto candidates");
+        assert_eq!(find_dead_files(&conn).unwrap().len(), 1);
+
+        // Successful re-index -> flag cleared (Q6-A).
+        update_indexed(&conn, &id, Some("m2")).unwrap();
+        assert_eq!(get_file_by_id(&conn, &id).unwrap().unwrap().dead_content, 0);
+        assert!(find_dead_files(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_find_empty_content_files_picks_truthy_empty() {
+        let conn = db();
+        // a: indexed with real text -> NOT a candidate
+        let a = upsert_file(&conn, "/a.txt", "d1", 1000, 1, None).unwrap();
+        update_indexed(&conn, &a, Some("m-a")).unwrap();
+        store_content(&conn, "m-a", "real text", false, None).unwrap();
+
+        // b: indexed with empty text (LO fake-success) -> candidate
+        let b = upsert_file(&conn, "/b.txt", "d1", 1000, 1, None).unwrap();
+        update_indexed(&conn, &b, Some("m-b")).unwrap();
+        store_content(&conn, "m-b", "   ", false, None).unwrap();
+
+        // c: indexed but NO content row -> candidate (missing content)
+        let c = upsert_file(&conn, "/c.txt", "d1", 1000, 1, None).unwrap();
+        update_indexed(&conn, &c, Some("m-c")).unwrap();
+
+        let candidates = find_empty_content_files(&conn).unwrap();
+        let ids: Vec<String> = candidates.iter().map(|r| r.id.clone()).collect();
+        assert!(ids.contains(&b), "empty-text file should be candidate: {ids:?}");
+        assert!(ids.contains(&c), "missing-content file should be candidate: {ids:?}");
+        assert!(!ids.contains(&a), "real-text file must NOT be candidate: {ids:?}");
     }
 
     #[test]

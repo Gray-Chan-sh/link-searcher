@@ -237,12 +237,41 @@ fn test_office_unsupported_extension() {
     assert!(result.is_err());
 }
 
+/// Corrupt Office files must fail fast with a native error — they must NOT
+/// be retried through LibreOffice (removed fallback). This asserts the
+/// extraction path never falls back to a soffice subprocess.
 #[test]
-fn test_extract_slide_number() {
-    assert_eq!(super::extract_slide_number("ppt/slides/slide1.xml"), 1);
-    assert_eq!(super::extract_slide_number("ppt/slides/slide10.xml"), 10);
-    assert_eq!(super::extract_slide_number("ppt/slides/slide0.xml"), 0);
-    assert_eq!(super::extract_slide_number("ppt/slides/notaslide.xml"), 0);
+fn test_corrupt_docx_fails_without_lo_fallback() {
+    let dir = std::env::temp_dir().join("extractor_test_corrupt_docx");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("broken.docx");
+    // Not a zip — anydoc will reject it; the old path would spawn soffice.
+    std::fs::write(&path, b"this is not a real docx file").unwrap();
+
+    let extractor = OfficeExtractor::new();
+    let result = extractor.extract(&path);
+    assert!(result.is_err(), "corrupt docx must return Err (no LO fallback), got: {result:?}");
+    assert!(
+        !format!("{result:?}").to_lowercase().contains("libreoffice"),
+        "error must not mention LibreOffice: {result:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Corrupt .doc must fail via rwml error, not fall back to soffice.
+#[test]
+fn test_corrupt_doc_fails_without_lo_fallback() {
+    let dir = std::env::temp_dir().join("extractor_test_corrupt_doc");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("broken.doc");
+    std::fs::write(&path, b"garbage bytes, not an OLE compound file").unwrap();
+
+    let extractor = OfficeExtractor::new();
+    let result = extractor.extract(&path);
+    assert!(result.is_err(), "corrupt doc must return Err (no LO fallback), got: {result:?}");
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 fn lo_baseline_chars(path: &Path) -> Option<usize> {

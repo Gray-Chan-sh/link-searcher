@@ -107,12 +107,6 @@ pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
             install_guide: "macOS: brew install poppler\nWindows: winget install poppler\nLinux: sudo apt install poppler-utils".into(),
         },
         DependencyStatus {
-            name: "LibreOffice (Office 文档提取)".into(),
-            command: crate::extractor::office::resolved_lo_binary(),
-            available: crate::extractor::office::is_libreoffice_available(),
-            install_guide: "macOS: brew install --cask libreoffice\nLinux: sudo apt install libreoffice\nWindows: winget install LibreOffice".into(),
-        },
-        DependencyStatus {
             name: "FFmpeg (音频解码)".into(),
             command: "ffmpeg".into(),
             available: crate::extractor::audio::ffmpeg_available(),
@@ -144,7 +138,6 @@ pub fn get_file_type_support(state: State<'_, AppState>) -> Result<Vec<FileTypeI
     let dirs = crate::db::dir_config::list_dirs(&conn).map_err(|e| format!("{e}"))?;
     drop(conn);
 
-    let lo_ok = crate::extractor::office::is_libreoffice_available();
     let ocr_available = !crate::extractor::ocr::detect_available_engines().is_empty();
 
     let mut result = Vec::new();
@@ -153,9 +146,9 @@ pub fn get_file_type_support(state: State<'_, AppState>) -> Result<Vec<FileTypeI
             "txt"|"md"|"csv"|"json"|"xml"|"yaml"|"yml"|"toml"|"ini"|"cfg"|"log" => ("Plain text", true, ""),
             "py"|"rs"|"ts"|"js"|"html"|"css"|"sql"|"sh"|"bat"|"ps1"|"env"|"conf"|"properties" => ("Code", true, ""),
             "pdf" => ("PDF", true, ""),
-            "docx"|"doc" => ("Word", lo_ok, if lo_ok { "" } else { "brew install --cask libreoffice" }),
-            "xlsx"|"xls" => ("Excel", lo_ok, if lo_ok { "" } else { "brew install --cask libreoffice" }),
-            "pptx"|"ppt" => ("PowerPoint", lo_ok, if lo_ok { "" } else { "brew install --cask libreoffice" }),
+            "docx"|"doc" => ("Word", true, ""),
+            "xlsx"|"xls" => ("Excel", true, ""),
+            "pptx"|"ppt" => ("PowerPoint", true, ""),
             "png"|"jpg"|"jpeg"|"gif"|"bmp"|"webp"|"tiff"|"tif" => ("Image", ocr_available, if ocr_available { "" } else { "需安装 OCR 引擎" }),
             _ => ("", true, ""),
         };
@@ -199,40 +192,24 @@ pub struct UnsupportedExtInfo {
     pub hint: String,
 }
 
-/// Common-but-unsupported office extensions that become indexable once
-/// LibreOffice is present (the text/office pipeline handles many of these).
-const RESCUABLE_OFFICE_EXTS: [&str; 10] = [
-    "wps", "et", "dps", "rtf", "odg", "odf", "sxw", "sxc", "sxi", "wpt",
-];
-
 /// Return file extensions seen on disk during scans that are NOT in the
 /// extractor whitelist, with occurrence counts. Lets users see *why* some
 /// files never appear in search results instead of silently dropping them.
 #[tauri::command]
 pub fn get_unsupported_ext_stats(state: State<'_, AppState>) -> Result<Vec<UnsupportedExtInfo>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let lo_ok = crate::extractor::office::is_libreoffice_available();
     let stats = crate::db::tracker::get_unsupported_ext_stats(&conn)
         .map_err(|e| format!("{e}"))?;
 
     Ok(stats
         .into_iter()
         .map(|s| {
-            let (rescusable, hint) = if RESCUABLE_OFFICE_EXTS.contains(&s.ext.as_str()) {
-                if lo_ok {
-                    (true, "LibreOffice 已安装，可手动索引".into())
-                } else {
-                    (true, "安装 LibreOffice 后可索引（brew install --cask libreoffice）".into())
-                }
-            } else {
-                (false, "暂无提取器支持".into())
-            };
             UnsupportedExtInfo {
                 extension: s.ext,
                 count: s.count,
                 dir_id: s.dir_id,
-                rescusable,
-                hint,
+                rescusable: false,
+                hint: "暂无提取器支持".into(),
             }
         })
         .collect())
