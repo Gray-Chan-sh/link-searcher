@@ -32,6 +32,14 @@
 
 ---
 
+## 2026-08-11（文档收尾 —— README/USER_MANUAL 同步全路线图变更）
+
+- README：分页改自适应说明、浏览页多选+批量索引、实时监控热重载、索引会话日志、多语言界面、`.doc` rwml 解析、CLI scan/watch 子命令
+- USER_MANUAL：§4.2 配置热重载说明、§5 会话日志+批量重新索引小节、§7 设置语言选项（zh/en/ja/ko）、§9 命令行新增 index/scan/watch 子命令与并发写锁提示
+- 验证：`cargo check`/`npx tsc`/`semgrep` 零污染（本次纯文档）
+
+---
+
 ## 2026-08-11（Wave 4 — 多语言界面 + RAG 内容分析决策）
 
 - **T10 多语言界面(ja/ko)**：新增 `ja.ts`/`ko.ts` 全量字典（各 258 键，diff 确认与 en/zh 键集一致）；`index.tsx` 扩 `Lang` union + 加入配置文件语言白名单；`Settings.tsx` 语言选项加日/韩；`Browse.tsx` 7 处硬编码中文抽为 `t('key')`（`src/i18n/*`、`Settings.tsx`、`Browse.tsx`）
