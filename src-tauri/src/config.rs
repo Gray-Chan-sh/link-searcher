@@ -1,8 +1,14 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
 use serde::{Serialize, Deserialize};
 
 const CONFIG_DIR: &str = ".link-searcher";
 const CONFIG_FILE: &str = "config.json";
+
+/// Serializes full-file config read-modify-write cycles. Multiple Tauri
+/// commands (provider CRUD) can run on different threads; without this,
+/// concurrent `load_config`→`save_config` pairs lose updates (last-write-wins).
+static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 /// 索引子目录名（Tantivy 数据）。用点开头避免与用户 data_dir 名为 "index" 时撞车。
 pub const INDEX_DIR_NAME: &str = ".ls-index";
@@ -131,7 +137,18 @@ fn default_data_dir() -> PathBuf {
         .join("link-searcher")
 }
 
+/// Write config without taking the lock — callers must hold [`CONFIG_LOCK`].
+fn write_config_file(config: &AppConfig) -> Result<(), String> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
+    let path = dir.join(CONFIG_FILE);
+    let content = serde_json::to_string_pretty(config).map_err(|e| format!("{e}"))?;
+    std::fs::write(&path, &content).map_err(|e| format!("{e}"))?;
+    Ok(())
+}
+
 pub fn load_config() -> AppConfig {
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_dir().join(CONFIG_FILE);
     if let Ok(content) = std::fs::read_to_string(&path) {
         if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
@@ -149,16 +166,16 @@ pub fn load_config() -> AppConfig {
                 config.embedding_api_key = config.ai_api_key.clone();
                 config.llm_api_base = config.ai_api_base.clone();
                 config.llm_api_key = config.ai_api_key.clone();
-                let _ = save_config(&config);
+                let _ = write_config_file(&config);
             }
             if config.providers.is_empty() && migrate_legacy_gateways(&mut config) {
-                let _ = save_config(&config);
+                let _ = write_config_file(&config);
             }
             return config;
         }
     }
     let config = AppConfig::default();
-    let _ = save_config(&config);
+    let _ = write_config_file(&config);
     config
 }
 
@@ -209,12 +226,8 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
-    let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
-    let path = dir.join(CONFIG_FILE);
-    let content = serde_json::to_string_pretty(config).map_err(|e| format!("{e}"))?;
-    std::fs::write(&path, &content).map_err(|e| format!("{e}"))?;
-    Ok(())
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    write_config_file(config)
 }
 
 #[cfg(test)]

@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-10（代码审核修复 · 模型管理并发安全）
+
+- **Provider CRUD 命令阻塞主线程（UI 冻结）**：`add_provider`/`refresh_provider_models`/`test_provider` 是同步 `#[tauri::command]` 却内部同步调 `list_provider_models`（HTTP 30s 超时），与 backfill 修复前同类 bug。改为 `async fn` + `spawn_blocking`，网络 IO 移出主线程（`src-tauri/src/commands/config.rs`）
+- **config.json 读写竞态（丢失更新）**：`load_config`/`save_config` 全文件读改写无互斥，多个命令并发 RMW 会 last-write-wins。新增 `CONFIG_LOCK` 进程内 Mutex 串行化；抽取 `write_config_file`（无锁版供持锁路径调用，避免 std Mutex 非重入死锁）（`src-tauri/src/config.rs`）
+- **测试**：138 单元 + 6 IPC 通过；cargo check 0 错误
+
+---
+
 ## 2026-08-10（AI 模型管理 · 多 Provider 支持）
 
 - **AI 配置从"各一个"升级为"模型管理"**：`AppConfig` 新增 `providers: Vec<ProviderConfig>` + `active_embedding_model_id`/`active_llm_model_id`（`provider_id:model_id`），可添加/编辑/删除多个 AI Provider，下拉框选择当前使用的 embedding / LLM 模型（`src-tauri/src/config.rs`）

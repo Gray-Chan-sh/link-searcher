@@ -97,17 +97,24 @@ pub fn update_config(
 /// the request succeeds; on failure the provider is still saved with empty
 /// models and the error is returned for the UI to toast.
 #[tauri::command]
-pub fn add_provider(
+pub async fn add_provider(
     name: String,
     base_url: String,
     api_key: String,
 ) -> Result<ProviderOutcome, String> {
     let mut config = load_config();
     let id = uuid::Uuid::new_v4().to_string();
+    // Pull models off the UI thread: the request can block for up to 30s.
     let (models, pull_err) = if base_url.trim().is_empty() {
         (Vec::new(), None)
     } else {
-        crate::ai::list_provider_models(&base_url, &api_key)
+        let base_url = base_url.clone();
+        let api_key = api_key.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::ai::list_provider_models(&base_url, &api_key)
+        })
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Some("拉取任务失败".into())))
     };
     config.providers.push(crate::config::ProviderConfig {
         id: id.clone(),
@@ -158,12 +165,18 @@ pub fn delete_provider(id: String) -> Result<(), String> {
 /// (including user overrides) are kept, new models are auto-classified.
 /// Returns the updated list plus any pull error for the UI.
 #[tauri::command]
-pub fn refresh_provider_models(id: String) -> Result<Vec<crate::config::ModelConfig>, String> {
+pub async fn refresh_provider_models(id: String) -> Result<Vec<crate::config::ModelConfig>, String> {
     let mut config = load_config();
     let Some(p) = config.providers.iter_mut().find(|p| p.id == id) else {
         return Err(format!("provider not found: {id}"));
     };
-    let (fresh, pull_err) = crate::ai::list_provider_models(&p.base_url, &p.api_key);
+    let base_url = p.base_url.clone();
+    let api_key = p.api_key.clone();
+    let (fresh, pull_err) = tokio::task::spawn_blocking(move || {
+        crate::ai::list_provider_models(&base_url, &api_key)
+    })
+    .await
+    .unwrap_or_else(|_| (Vec::new(), Some("拉取任务失败".into())));
     if fresh.is_empty() {
         // Pull failed or empty: keep the old list untouched.
         return if let Some(e) = pull_err {
@@ -211,11 +224,15 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
 
 /// Test a provider's connectivity (GET /models). Returns ok + detail.
 #[tauri::command]
-pub fn test_provider(base_url: String, api_key: String) -> Result<ProviderTest, String> {
+pub async fn test_provider(base_url: String, api_key: String) -> Result<ProviderTest, String> {
     if base_url.trim().is_empty() {
         return Err("base_url 不能为空".into());
     }
-    let (models, pull_err) = crate::ai::list_provider_models(&base_url, &api_key);
+    let (models, pull_err) = tokio::task::spawn_blocking(move || {
+        crate::ai::list_provider_models(&base_url, &api_key)
+    })
+    .await
+    .unwrap_or_else(|_| (Vec::new(), Some("测试任务失败".into())));
     match pull_err {
         None => Ok(ProviderTest { ok: true, detail: format!("连通成功，发现 {} 个模型", models.len()) }),
         Some(e) => Ok(ProviderTest { ok: false, detail: e }),
