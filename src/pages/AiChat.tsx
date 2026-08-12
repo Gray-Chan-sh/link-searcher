@@ -241,6 +241,7 @@ function TreeFileList({ node, basePath, onPick }: {
   basePath: string
   onPick: (relPath: string) => void
 }) {
+  const { t } = useI18n()
   const [open, setOpen] = useState(false)
   const isDir = node.children.length > 0
   const rel = node.path.startsWith(basePath)
