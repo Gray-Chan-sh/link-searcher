@@ -27,9 +27,14 @@ export async function listDirs(): Promise<DirConfig[]> {
 export interface DirTreeNode {
   name: string
   path: string
+  is_dir: boolean
   children: DirTreeNode[]
 }
 
 export async function getDirTree(dirId: string, includeFiles?: boolean): Promise<DirTreeNode> {
   return invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false })
+}
+
+export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]> {
+  return invoke<DirTreeNode[]>('get_dir_children', { parentPath })
 }

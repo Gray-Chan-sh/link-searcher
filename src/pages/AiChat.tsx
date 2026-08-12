@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, searchFilePaths, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
-import { listDirs, getDirTree, type DirTreeNode } from '../api/dirs'
+import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { useI18n } from '../i18n'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { save, ask } from '@tauri-apps/plugin-dialog'
@@ -32,7 +32,7 @@ export default function AiChat() {
 
   useEffect(() => { refreshList() }, [refreshList])
 
-  // 加载目录树
+  // 加载目录树（懒加载：只加载根层，展开时按需加载子目录）
   useEffect(() => {
     listDirs().then(dirs => {
       setDirTrees(dirs.map(d => {
@@ -40,8 +40,8 @@ export default function AiChat() {
         return { id: d.id, basePath: d.path, label, root: null }
       }))
       dirs.forEach(d => {
-        getDirTree(d.id, true).then(tree => {
-          setDirTrees(prev => prev.map(x => x.id === d.id ? { ...x, root: tree } : x))
+        getDirChildren(d.path).then(items => {
+          setDirTrees(prev => prev.map(x => x.id === d.id ? { ...x, root: items } : x))
         }).catch(() => {})
       })
     }).catch(() => {})
@@ -177,9 +177,9 @@ export default function AiChat() {
               {dirTrees.map(dt => (
                 <div key={dt.id}>
                   <div className="px-2 py-0.5 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</div>
-                  {dt.root && (
-                    <TreeFileList node={dt.root} basePath={dt.basePath} onPick={handleTreeClick} />
-                  )}
+                  {dt.root && dt.root.map(child => (
+                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} />
+                  ))}
                 </div>
               ))}
               {dirTrees.length === 0 && (
@@ -243,29 +243,49 @@ function TreeFileList({ node, basePath, onPick }: {
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
-  const isDir = node.children.length > 0
+  const [children, setChildren] = useState<DirTreeNode[] | null>(
+    node.children.length > 0 ? node.children : null,
+  )
+  const [loading, setLoading] = useState(false)
+  const isDir = node.is_dir || node.children.length > 0
   const rel = node.path.startsWith(basePath)
     ? node.path.slice(basePath.length).replace(/^\/+/, '')
     : node.path
 
+  const handleToggle = useCallback(() => {
+    if (!isDir) return
+    if (open) { setOpen(false); return }
+    // 首次展开：如果子项未加载，调 API 懒加载
+    if (children === null && !loading) {
+      setLoading(true)
+      getDirChildren(node.path).then(items => {
+        setChildren(items)
+        setOpen(true)
+        setLoading(false)
+      }).catch(() => setLoading(false))
+    } else {
+      setOpen(true)
+    }
+  }, [isDir, open, children, loading, node.path])
+
   return (
     <div>
-      <button
+<button
         type="button"
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
-        onClick={() => { if (isDir) setOpen(v => !v); else onPick(rel) }}
+        onClick={handleToggle}
         onContextMenu={e => { e.preventDefault(); onPick(rel) }}
         className="w-full flex items-center gap-1 px-2 py-0.5 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
       >
-        <span className="text-[10px] shrink-0">{isDir ? (open ? '▾' : '▸') : '📄'}</span>
+        <span className="text-[10px] shrink-0">{isDir ? (open ? '▾' : (loading ? '⋯' : '▸')) : '📄'}</span>
         <span className="truncate">{node.name}</span>
         {!isDir && <span className="ml-auto text-[9px] text-gray-400 opacity-0 group-hover:opacity-100">+</span>}
       </button>
-      {open && node.children.map(child => (
+      {open && children && children.map(child => (
         <div key={child.path} className="pl-3">
-          <TreeFileList node={child} basePath={basePath} onPick={onPick} />
+          <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} />
         </div>
       ))}
     </div>
