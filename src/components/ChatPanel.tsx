@@ -20,6 +20,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   // @mention 选择器状态
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionPos, setMentionPos] = useState<{ left: number; top: number } | null>(null)
+  // 当前输入中 @mention 的 chips 预览
+  const [mentionChips, setMentionChips] = useState<{ isFile: boolean; path: string }[]>([])
   const inputRef = useRef<HTMLInputElement>(null)
   // 流式输出缓冲：显示在"思考中"下方，done 后并入完整消息。
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null)
@@ -144,6 +146,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   // @mention 选择器：检测输入中 @ 并提取其后查询文本
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
+    // 实时解析 @mention 更新 chips 预览
+    const chips: { isFile: boolean; path: string }[] = []
+    const re = /@([^\s，。？！；:、,?:;]+)/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(value)) !== null) {
+      const path = m[1].trim()
+      if (!path) continue
+      const isFile = /\.\w{1,6}$/.test(path)
+      if (!chips.some(c => c.path === path)) chips.push({ isFile, path })
+    }
+    setMentionChips(chips)
+    // 检测 @ 触发选择器
     const lastAt = value.lastIndexOf('@')
     if (lastAt !== -1) {
       // 检查 @ 后面是否还有空格（有空格则关闭选择器）
@@ -176,17 +190,25 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     if (lastAt !== -1) {
       const before = input.slice(0, lastAt)
       const after = input.slice(lastAt + 1)
-      // 找到 @ 后第一个空格，替换 @ 与路径之间的内容
       const spaceIdx = after.indexOf(' ')
       const newInput = spaceIdx === -1
         ? `${before}@${path} `
         : `${before}@${path}${after.slice(spaceIdx)}`
       setInput(newInput)
+      // 更新 chips
+      const isFile = /\.\w{1,6}$/.test(path)
+      setMentionChips(p => p.some(c => c.path === path) ? p : [...p, { isFile, path }])
     }
     setMentionQuery('')
     setMentionPos(null)
     inputRef.current?.focus()
   }, [input])
+
+  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const handleChipRemove = useCallback((path: string) => {
+    setInput(prev => prev.replace(new RegExp(`@${escapeRegex(path)}`, 'g'), '').trim())
+    setMentionChips(prev => prev.filter(c => c.path !== path))
+  }, [])
 
   // 解析输入文本中的 @mention token，提取文件/目录路径，生成 TurnScope。
   const parseScope = useCallback((text: string): TurnScope => {
@@ -398,6 +420,27 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
           </div>
         )}
       </div>
+
+      {mentionChips.length > 0 && (
+        <div className="px-4 py-1.5 border-t border-gray-200 dark:border-gray-800 flex flex-wrap gap-1">
+          {mentionChips.map((chip, i) => (
+            <span
+              key={`${chip.path}-${i}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800"
+            >
+              <span>{chip.isFile ? '📄' : '📁'}</span>
+              <span className="truncate max-w-40">{chip.path}</span>
+              <button
+                type="button"
+                onClick={() => handleChipRemove(chip.path)}
+                className="ml-0.5 text-purple-400 hover:text-purple-600 dark:hover:text-purple-200"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       {llmEnabled ? (
         <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
