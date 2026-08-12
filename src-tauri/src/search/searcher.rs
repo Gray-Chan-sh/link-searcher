@@ -46,6 +46,9 @@ pub struct SearchParams {
     pub file_ids: Option<Vec<String>>,
     /// Optional list of file extensions to filter by (OR logic, lowercase).
     pub ext_filter: Option<Vec<String>>,
+    /// Optional path prefixes (relative), e.g. "财务/行业分析" — only files
+    /// whose path starts with one of these prefixes are returned.
+    pub path_prefixes: Option<Vec<String>>,
     /// Optional start of date range (unix micros).
     pub date_from: Option<i64>,
     /// Optional end of date range (unix micros).
@@ -436,6 +439,27 @@ impl SearcherWrap {
                     .collect();
                 let ext_filter = BooleanQuery::new(should_queries);
                 subqueries.push((Occur::Must, Box::new(ext_filter)));
+            }
+        }
+
+        // 3.5 Path prefix filter (Must + Should): path starts with any prefix.
+        if let Some(prefixes) = &params.path_prefixes {
+            if !prefixes.is_empty() {
+                let path_field = schema.get_field("path")?;
+                let should_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = prefixes
+                    .iter()
+                    .map(|p| {
+                        let escaped = regex::escape(p.trim_end_matches('/'));
+                        let pattern = format!("^{}.*", escaped);
+                        let rq: Box<dyn tantivy::query::Query> = match RegexQuery::from_pattern(&pattern, path_field) {
+                            Ok(q) => Box::new(q),
+                            Err(_) => Box::new(tantivy::query::AllQuery),
+                        };
+                        (Occur::Should, rq)
+                    })
+                    .collect();
+                let prefix_filter = BooleanQuery::new(should_queries);
+                subqueries.push((Occur::Must, Box::new(prefix_filter)));
             }
         }
 
