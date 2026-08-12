@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from 'react'
-import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
+import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, searchFilePaths, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
+import { listDirs, getDirTree, type DirTreeNode } from '../api/dirs'
 import { useI18n } from '../i18n'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { save, ask } from '@tauri-apps/plugin-dialog'
-import { PlusIcon, TrashIcon } from '../icons'
+import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import ChatPanel from '../components/ChatPanel'
 
 export default function AiChat() {
@@ -13,6 +14,10 @@ export default function AiChat() {
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
+  // 树状文件浏览器
+  const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode | null }[]>([])
+  const [treeExpanded, setTreeExpanded] = useState(false)
+  const [pendingMention, setPendingMention] = useState<string | null>(null)
 
   const refreshCapabilities = useCallback(() => {
     setCapFailed(false)
@@ -26,6 +31,25 @@ export default function AiChat() {
   }, [])
 
   useEffect(() => { refreshList() }, [refreshList])
+
+  // 加载目录树
+  useEffect(() => {
+    listDirs().then(dirs => {
+      setDirTrees(dirs.map(d => {
+        const label = d.alias || d.path.split('/').pop() || d.path
+        return { id: d.id, basePath: d.path, label, root: null }
+      }))
+      dirs.forEach(d => {
+        getDirTree(d.id).then(tree => {
+          setDirTrees(prev => prev.map(x => x.id === d.id ? { ...x, root: tree } : x))
+        }).catch(() => {})
+      })
+    }).catch(() => {})
+  }, [])
+
+  const handleTreeClick = useCallback((path: string) => {
+    setPendingMention(path)
+  }, [])
 
   // Ensure a session exists when chat is enabled (create one if none).
   useEffect(() => {
@@ -139,6 +163,31 @@ export default function AiChat() {
             </div>
           ))}
         </div>
+        {/* 文件树面板 */}
+        <div className="border-t border-gray-200 dark:border-gray-800">
+          <button
+            onClick={() => setTreeExpanded(v => !v)}
+            className="w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            <span className="flex items-center gap-1"><FolderIcon className="size-3" /> {t('file_tree')}</span>
+            <span className="text-[10px]">{treeExpanded ? '▾' : '▸'}</span>
+          </button>
+          {treeExpanded && (
+            <div className="max-h-48 overflow-y-auto p-1 space-y-1">
+              {dirTrees.map(dt => (
+                <div key={dt.id}>
+                  <div className="px-2 py-0.5 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</div>
+                  {dt.root && (
+                    <TreeFileList node={dt.root} basePath={dt.basePath} onPick={handleTreeClick} />
+                  )}
+                </div>
+              ))}
+              {dirTrees.length === 0 && (
+                <div className="px-2 py-1 text-[10px] text-gray-400">{t('no_dirs')}</div>
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Chat area */}
@@ -158,7 +207,13 @@ export default function AiChat() {
           </div>
         </div>
         {activeSession ? (
-          <ChatPanel llmEnabled={aiCap.llm} session={activeSession} onSessionChange={handleSessionChange} />
+          <ChatPanel
+            llmEnabled={aiCap.llm}
+            session={activeSession}
+            onSessionChange={handleSessionChange}
+            pendingMention={pendingMention}
+            onMentionConsumed={() => setPendingMention(null)}
+          />
         ) : capFailed ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
             <span>{t('ai_llm_unavailable')}</span>
@@ -175,6 +230,41 @@ export default function AiChat() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+/** 递归文件树：目录左键展开/折叠、右键「加入对话」；文件左键「加入对话」。
+ *  `node.path` 为绝对路径，`basePath` 为目录根，点击时转相对路径（与 file_tracking 一致）。 */
+function TreeFileList({ node, basePath, onPick }: {
+  node: DirTreeNode
+  basePath: string
+  onPick: (relPath: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const isDir = node.children.length > 0
+  const rel = node.path.startsWith(basePath)
+    ? node.path.slice(basePath.length).replace(/^\/+/, '')
+    : node.path
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => { if (isDir) setOpen(v => !v) }}
+        onContextMenu={e => { e.preventDefault(); if (isDir) onPick(rel) }}
+        className="w-full flex items-center gap-1 px-2 py-0.5 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
+        title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
+      >
+        <span className="text-[10px] shrink-0">{isDir ? (open ? '▾' : '▸') : '📄'}</span>
+        <span className="truncate">{node.name}</span>
+        {!isDir && <span className="ml-auto text-[9px] text-gray-400 opacity-0 group-hover:opacity-100">+</span>}
+      </button>
+      {open && node.children.map(child => (
+        <div key={child.path} className="pl-3">
+          <TreeFileList node={child} basePath={basePath} onPick={onPick} />
+        </div>
+      ))}
     </div>
   )
 }

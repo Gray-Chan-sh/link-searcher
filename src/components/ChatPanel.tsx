@@ -10,9 +10,12 @@ interface ChatPanelProps {
   llmEnabled: boolean
   session: ChatSession | null
   onSessionChange: (session: ChatSession | null) => void
+  /** 父组件（树状浏览器）请求插入 `@path` 到输入框；插完调 onMentionConsumed */
+  pendingMention?: string | null
+  onMentionConsumed?: () => void
 }
 
-export default function ChatPanel({ llmEnabled, session, onSessionChange }: ChatPanelProps) {
+export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed }: ChatPanelProps) {
   const { t } = useI18n()
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
@@ -45,6 +48,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   const loading = pendingStartedAt != null
   loadingRef.current = loading
   useEffect(() => { sessionRef.current = session }, [session])
+
+  // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
+  useEffect(() => {
+    if (!pendingMention) return
+    setInput(prev => `${prev}${prev ? ' ' : ''}@${pendingMention} `)
+    setMentionChips(prev => {
+      const isFile = /\.\w{1,6}$/.test(pendingMention)
+      return prev.some(c => c.path === pendingMention)
+        ? prev
+        : [...prev, { isFile, path: pendingMention }]
+    })
+    onMentionConsumed?.()
+    inputRef.current?.focus()
+  }, [pendingMention, onMentionConsumed])
 
   const patchSession = useCallback((patch: Partial<ChatSession>) => {
     if (session) onSessionChange({ ...session, ...patch })

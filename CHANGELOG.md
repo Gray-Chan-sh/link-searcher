@@ -14,6 +14,16 @@
 
 ---
 
+## 2026-08-12（AI 检索范围 — 树状文件浏览器 + 范围条 chips + @ 选择器）
+
+- **树状文件浏览器**：AI 聊天左侧栏新增可折叠文件树面板——列出所有配置目录，递归显示文件/文件夹；文件左键「加入对话」（插入 `@文件路径` 到输入框）、目录右键「加入对话」（插入 `@目录路径`）；复用 `get_dir_tree`/`listDirs` API + `DirTreeNode` 类型，绝对路径转相对路径与 file_tracking 一致（`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`）
+- **范围条 chips**：输入框上方实时显示当前 @mention 路径（文件📄/目录📁），选中/输入时同步更新，× 删除同时从输入文本移除 `@path`（`src/components/ChatPanel.tsx`）
+- **@ 选择器**：输入 `@` 时弹出文件/目录选择器（查询后端 `search_file_paths` 命令），键盘导航 + 选中插入路径 token；`MentionPicker` 组件（`src/components/MentionPicker.tsx`）
+- **i18n**：4 语言各 +4 key（`src/i18n/*.ts`）
+- **测试**：152 单元 + 9 集成 + 6 IPC + OCR 全过，tsc 0，semgrep 0
+
+---
+
 ## 2026-08-12（AI 回答溯源 + LLM 查询改写）
 
 - **AI 回答溯源（检索依据面板）**：`EvidenceItem` 增加 `bm25_score`/`semantic_score`/`rrf_score`/`rewritten`/`rewritten_query`/`from_history` 六个溯源字段（serde default，旧数据向后兼容）——前端每条助手消息下新增可折叠「🔍 检索依据」面板，展示每份来源的 BM25 分、语义相似度、RRF 融合分、改写标记/改写后查询、历史保留标记（`src-tauri/src/commands/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`）
