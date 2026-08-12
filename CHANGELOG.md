@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-12（AI 回答溯源 + LLM 查询改写）
+
+- **AI 回答溯源（检索依据面板）**：`EvidenceItem` 增加 `bm25_score`/`semantic_score`/`rrf_score`/`rewritten`/`rewritten_query`/`from_history` 六个溯源字段（serde default，旧数据向后兼容）——前端每条助手消息下新增可折叠「🔍 检索依据」面板，展示每份来源的 BM25 分、语义相似度、RRF 融合分、改写标记/改写后查询、历史保留标记（`src-tauri/src/commands/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`）
+- **分数贯通检索管线**：`bm25_relevant_hits`/`semantic_fuse` 改为返回带分数的 `ScoredHit`（BM25 原始分 + 余弦相似度 + RRF 融合分），替代原丢弃分数的 `(file_id, path)` 二元组（`src-tauri/src/commands/ai.rs`）
+- **LLM 查询改写**：`rewrite_query` 保留规则改写兜底（指代词表扩展 `刚才/上面/之前/前面`），新增 `llm_rewrite_query`——命中改写条件且有历史时调一次 LLM（5s 超时 + `valid_rewrite_output` 校验，失败/超时/空输出自动降级回规则改写，每轮 ≤1 次调用），补全"刚才提到的那份报告呢"类上下文指代（`src-tauri/src/commands/ai.rs`）
+- **PerTurnEvidence 持久化溯源**：会话每轮证据增加 `items` 字段，检索依据跨会话持久化到 chat_history.json，回放可见（`src-tauri/src/commands/ai.rs`）
+- **测试**：新增 `rewrite_query_triggers_on_referential_time_preface`、`valid_rewrite_output_rejects_garbage_and_echoes`、`evidence_item_deserializes_legacy_json_without_scores`，更新 round-trip/rewrite 断言；148 单元 + 9 集成 + 6 IPC + OCR 全通过，tsc 0，semgrep 0
+
+---
+
 ## 2026-08-11（长任务运行态保持 + 完成简报）
 
 - **按钮状态跨页面丢失**：索引页「验证有效性/补齐向量/重提取」等按钮的运行态是组件本地 `useState`——切页面组件卸载 state 重置，任务未完成时按钮恢复可用，可能二次误触。修复：新增**全局任务注册表**（`state.rs` 的 `task_registry` + `TaskGuard` RAII），长任务 start/end 自动登记/移除；`get_index_status` 返回 `running_tasks`，前端按钮从后端状态查（而非本地 state）——切页/刷新仍保持禁用（后端是唯一事实源）

@@ -45,6 +45,12 @@ export interface EvidenceItem {
   file_id: string
   path: string
   snippet: string
+  bm25_score?: number | null
+  semantic_score?: number | null
+  rrf_score?: number | null
+  rewritten?: boolean
+  rewritten_query?: string | null
+  from_history?: boolean
 }
 
 export interface SmartSearchResponse {
@@ -62,6 +68,7 @@ export interface ChatMessage {
 export interface PerTurnEvidence {
   turn_index: number
   file_ids: string[]
+  items?: EvidenceItem[]
 }
 
 export interface ChatSession {
