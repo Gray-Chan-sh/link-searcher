@@ -51,6 +51,32 @@ export default function AiChat() {
     setPendingMention(path)
   }, [])
 
+  // /范围:全库或目录路径 → 解析为 dir_id 并更新会话范围
+  const handleScopeAction = useCallback((action: string) => {
+    if (!activeSession) return
+    if (action === 'clear') {
+      handleSessionChange({ ...activeSession, scope_dir_ids: [] })
+      return
+    }
+    if (action.startsWith('dir:')) {
+      const dirName = action.slice(4)
+      // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录
+      const hit = dirTrees.find(dt => dt.label === dirName || dt.basePath.endsWith('/' + dirName))
+      if (hit) {
+        handleSessionChange({ ...activeSession, scope_dir_ids: [hit.id] })
+      }
+    }
+  }, [activeSession, dirTrees, handleSessionChange])
+
+  // 树状根目录的会话范围设置（对应的 dirTree id）
+  const handleSetSessionScope = useCallback((dirId: string) => {
+    if (activeSession) handleSessionChange({ ...activeSession, scope_dir_ids: [dirId] })
+  }, [activeSession, handleSessionChange])
+
+  const handleClearSessionScope = useCallback(() => {
+    if (activeSession) handleSessionChange({ ...activeSession, scope_dir_ids: [] })
+  }, [activeSession, handleSessionChange])
+
   // Ensure a session exists when chat is enabled (create one if none).
   useEffect(() => {
     if (!aiCap.llm || activeId) return
@@ -176,7 +202,21 @@ export default function AiChat() {
             <div className="max-h-48 overflow-y-auto p-1 space-y-1">
               {dirTrees.map(dt => (
                 <div key={dt.id}>
-                  <div className="px-2 py-0.5 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</div>
+                  <div className="px-2 py-0.5 flex items-center gap-1">
+                    <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
+                    <button
+                      type="button"
+                      onClick={() => activeSession?.scope_dir_ids?.includes(dt.id) ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
+                      title={activeSession?.scope_dir_ids?.includes(dt.id) ? t('clear_session_scope') : t('set_session_scope')}
+                      className={`text-[10px] ${
+                        activeSession?.scope_dir_ids?.includes(dt.id)
+                          ? 'text-purple-600 dark:text-purple-300 font-medium'
+                          : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
+                      } shrink-0`}
+                    >
+                      {activeSession?.scope_dir_ids?.includes(dt.id) ? '范围✓' : '范围'}
+                    </button>
+                  </div>
                   {dt.root && dt.root.map(child => (
                     <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} />
                   ))}
@@ -213,6 +253,7 @@ export default function AiChat() {
             onSessionChange={handleSessionChange}
             pendingMention={pendingMention}
             onMentionConsumed={() => setPendingMention(null)}
+            onScopeAction={handleScopeAction}
           />
         ) : capFailed ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">

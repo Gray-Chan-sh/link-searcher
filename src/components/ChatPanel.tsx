@@ -3,7 +3,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, searchFilePaths, type ChatMessage, type ChatSession, type TurnScope } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, searchFilePaths, type ChatMessage, type ChatSession } from '../api/files'
+import { parseScope, type TurnScope } from '../utils/scopeParser'
 import MentionPicker from './MentionPicker'
 
 interface ChatPanelProps {
@@ -13,9 +14,11 @@ interface ChatPanelProps {
   /** 父组件（树状浏览器）请求插入 `@path` 到输入框；插完调 onMentionConsumed */
   pendingMention?: string | null
   onMentionConsumed?: () => void
+  /** /范围:全库 或 /范围:目录路径 —— 交给持有 dirs 数据的父组件解析为 dir_id 后更新会话范围 */
+  onScopeAction?: (action: string) => void
 }
 
-export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed }: ChatPanelProps) {
+export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction }: ChatPanelProps) {
   const { t } = useI18n()
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
@@ -25,6 +28,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [mentionPos, setMentionPos] = useState<{ left: number; top: number } | null>(null)
   // 当前输入中 @mention 的 chips 预览
   const [mentionChips, setMentionChips] = useState<{ isFile: boolean; path: string }[]>([])
+  // 输入中 /命令 解析结果（/ext /date /模糊），实时显示可审计
+  const [conditionChips, setConditionChips] = useState<TurnScope['conditions']>([])
   const inputRef = useRef<HTMLInputElement>(null)
   // 流式输出缓冲：显示在"思考中"下方，done 后并入完整消息。
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null)
@@ -167,6 +172,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // @mention 选择器：检测输入中 @ 并提取其后查询文本
   const handleInputChange = useCallback((value: string) => {
     setInput(value)
+    // 实时解析 /命令 条件（/ext /date /模糊），chips 区可见
+    const { scope } = parseScope(value)
+    setConditionChips(scope.conditions)
     // 实时解析 @mention 更新 chips 预览
     const chips: { isFile: boolean; path: string }[] = []
     const re = /@([^\s，。？！；:、,?:;]+)/g
@@ -231,35 +239,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setMentionChips(prev => prev.filter(c => c.path !== path))
   }, [])
 
-  // 解析输入文本中的 @mention token，提取文件/目录路径，生成 TurnScope。
-  const parseScope = useCallback((text: string): TurnScope => {
-    const mentionFiles: string[] = []
-    const mentionDirs: string[] = []
-    // 匹配 @ 开头直至下一个空格或标点（，。？！；:、）或行尾
-    const re = /@([^\s，。？！；:、,?:;]+)/g
-    let m: RegExpExecArray | null
-    while ((m = re.exec(text)) !== null) {
-      const path = m[1].trim()
-      if (!path) continue
-      // 以 / 结尾或含子目录标记 → 目录；否则 → 文件
-      // 简单启发：路径不含扩展名且无点号 → 目录
-      const hasExt = /\.\w{1,6}$/.test(path)
-      if (hasExt) {
-        if (!mentionFiles.includes(path)) mentionFiles.push(path)
-      } else {
-        if (!mentionDirs.includes(path)) mentionDirs.push(path)
-      }
-    }
-    return { mention_files: mentionFiles, mention_dirs: mentionDirs, inherit_from: [], conditions: [] }
-  }, [])
-
+  // 解析输入文本：@mention 与 /命令（/ext /date /范围 /模糊），纯函数模块
   const handleSend = useCallback(async () => {
     const q = input.trim()
     if (!q || loading || !session) return
-    // 解析 @mention 并净化输入文本（移除 @token 供发送）
-    const scope = parseScope(q)
-    const cleanQ = q.replace(/@[^\s，。？！；:、,?:;]+/g, '').trim() || q
+    // 解析 @mention 与 /命令，得到 scope + 净化后文本 + 范围动作
+    const { scope, cleanText, scopeAction } = parseScope(q)
+    const cleanQ = cleanText || q
+    // /范围:全库 或 /范围:目录 —— 交给父组件（AiChat 持有 dirs id 映射）
+    if (scopeAction) {
+      onScopeAction?.(scopeAction)
+    }
     setInput('')
+    setMentionChips([])
+    setConditionChips([])
     const userMsg: ChatMessage = { role: 'user', content: cleanQ }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
@@ -273,9 +266,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
     try {
       if (sourceIds.length === 0) {
-        await smartSearchStream(q, session.id)
+        await smartSearchStream(cleanQ, session.id)
       } else {
-        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope)
+        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [])
       }
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
@@ -287,7 +280,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         pending_started_at: null,
       })
     }
-  }, [input, loading, session, messages, sourceIds, patchSession])
+  }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange])
 
   // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
   // 问题（若进程内原请求尚未结束，会重复消耗一次生成——可用性优先，
@@ -442,8 +435,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         )}
       </div>
 
-      {mentionChips.length > 0 && (
+      {(mentionChips.length > 0 || conditionChips.length > 0) && (
         <div className="px-4 py-1.5 border-t border-gray-200 dark:border-gray-800 flex flex-wrap gap-1">
+          {/* @mention chips */}
           {mentionChips.map((chip, i) => (
             <span
               key={`${chip.path}-${i}`}
@@ -458,6 +452,16 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               >
                 ×
               </button>
+            </span>
+          ))}
+          {/* /命令条件 chips：/ext /date /模糊 */}
+          {conditionChips.map((c, i) => (
+            <span
+              key={`${c.kind}-${i}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800"
+              title={c.kind === 'fuzzy' ? t('fuzzy_hint') : undefined}
+            >
+              <span className="font-mono">/{c.kind}:{c.value}</span>
             </span>
           ))}
         </div>

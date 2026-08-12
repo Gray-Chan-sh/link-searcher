@@ -111,8 +111,8 @@ export interface ScopeCondition {
   parsed?: string | null
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope): Promise<string> {
-  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {} })
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionScopeDirIds?: string[]): Promise<string> {
+  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [] })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -130,8 +130,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope): Promise<void> {
-  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {} })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionScopeDirIds?: string[]): Promise<void> {
+  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [] })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {

@@ -122,6 +122,7 @@ impl TestEnv {
             ext_filter,
             date_from: None,
             date_to: None,
+            path_prefixes: None,
             sort: SortField::Score,
             sort_order: "desc".to_string(),
             page: 1,
