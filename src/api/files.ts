@@ -134,6 +134,10 @@ export async function conversationAskStream(messages: ChatMessage[], sourceIds: 
   return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {} })
 }
 
+export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {
+  return invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
+}
+
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
 export async function listenAiStream(
   sessionId: string,
