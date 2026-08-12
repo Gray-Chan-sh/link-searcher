@@ -30,6 +30,6 @@ export interface DirTreeNode {
   children: DirTreeNode[]
 }
 
-export async function getDirTree(dirId: string): Promise<DirTreeNode> {
-  return invoke<DirTreeNode>('get_dir_tree', { dirId })
+export async function getDirTree(dirId: string, includeFiles?: boolean): Promise<DirTreeNode> {
+  return invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false })
 }

@@ -40,7 +40,7 @@ export default function AiChat() {
         return { id: d.id, basePath: d.path, label, root: null }
       }))
       dirs.forEach(d => {
-        getDirTree(d.id).then(tree => {
+        getDirTree(d.id, true).then(tree => {
           setDirTrees(prev => prev.map(x => x.id === d.id ? { ...x, root: tree } : x))
         }).catch(() => {})
       })
