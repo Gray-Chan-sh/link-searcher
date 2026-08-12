@@ -3,7 +3,8 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession, type TurnScope } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, searchFilePaths, type ChatMessage, type ChatSession, type TurnScope } from '../api/files'
+import MentionPicker from './MentionPicker'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -16,6 +17,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
   const [clockNow, setClockNow] = useState(() => Date.now())
+  // @mention 选择器状态
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionPos, setMentionPos] = useState<{ left: number; top: number } | null>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
   // 流式输出缓冲：显示在"思考中"下方，done 后并入完整消息。
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -135,6 +140,53 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === turn)?.items ?? []
   }
   const fmtScore = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2))
+
+  // @mention 选择器：检测输入中 @ 并提取其后查询文本
+  const handleInputChange = useCallback((value: string) => {
+    setInput(value)
+    const lastAt = value.lastIndexOf('@')
+    if (lastAt !== -1) {
+      // 检查 @ 后面是否还有空格（有空格则关闭选择器）
+      const afterAt = value.slice(lastAt + 1)
+      const hasSpace = afterAt.includes(' ')
+      if (hasSpace) {
+        setMentionQuery('')
+        setMentionPos(null)
+      } else {
+        setMentionQuery(afterAt)
+        // 计算 popup 位置：基于输入框位置
+        if (inputRef.current) {
+          const rect = inputRef.current.getBoundingClientRect()
+          // 粗略估算光标位置（按字符数比例）
+          const charPct = (value.length - afterAt.length) / Math.max(value.length, 1)
+          setMentionPos({
+            left: rect.left + charPct * rect.width,
+            top: rect.top - 10,
+          })
+        }
+      }
+    } else {
+      setMentionQuery('')
+      setMentionPos(null)
+    }
+  }, [])
+
+  const handleMentionSelect = useCallback((path: string) => {
+    const lastAt = input.lastIndexOf('@')
+    if (lastAt !== -1) {
+      const before = input.slice(0, lastAt)
+      const after = input.slice(lastAt + 1)
+      // 找到 @ 后第一个空格，替换 @ 与路径之间的内容
+      const spaceIdx = after.indexOf(' ')
+      const newInput = spaceIdx === -1
+        ? `${before}@${path} `
+        : `${before}@${path}${after.slice(spaceIdx)}`
+      setInput(newInput)
+    }
+    setMentionQuery('')
+    setMentionPos(null)
+    inputRef.current?.focus()
+  }, [input])
 
   // 解析输入文本中的 @mention token，提取文件/目录路径，生成 TurnScope。
   const parseScope = useCallback((text: string): TurnScope => {
@@ -348,11 +400,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
       </div>
 
       {llmEnabled ? (
-        <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
+        <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
+          <MentionPicker
+            query={mentionQuery}
+            position={mentionPos}
+            onSelect={handleMentionSelect}
+            onClose={() => { setMentionQuery(''); setMentionPos(null) }}
+          />
           <input
+            ref={inputRef}
             type="text"
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => handleInputChange(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
             placeholder={sourceIds.length > 0 ? t('ask_followup') : t('ask_question')}
             disabled={loading}

@@ -9,7 +9,7 @@
 - **问题**：AI 聊天默认全库检索，无法精确控制检索范围（指定文件、文件夹、条件）；追问时范围不可调
 - **方案（/grill-me 设计访谈）**：`@mention` 轮询级（默认不继承）+ 显式 `@上轮`/`@第N轮` 继承（传递闭包，循环防护）+ 会话范围只绑目录（替换式）+ 编号引用模型（`@文件` → `[N]`，路径字符串不进 LLM，分句映射精确）+ LLM 不碰范围决定权
 - **后端**：`TurnScope`/`PerTurnScope`/`ScopeCondition` 结构；`ChatSession` 新增 `per_turn_scopes`/`scope_dir_ids`/`scope_conditions`（serde default 兼容旧 JSON）；`conversation_ask`/`conversation_ask_stream` 接受 `scope` 参数；`prepare_conversation_prompt` 集成 scope——`@文件` 按路径直用编号进材料、`@目录` 解析为 dir_ids 检索过滤、条件（ext/date）传入 `SearchParams`（`src-tauri/src/commands/ai.rs`）
-- **前端**：`api/files.ts` 新增 `TurnScope`/`ScopeCondition` 类型 + `conversationAsk`/`conversationAskStream` 加 `scope` 参数；`ChatPanel` 新增 `parseScope` 函数（正则提取 `@路径` token，按扩展名启发式区分文件/目录，发送时净化文本并将 scope 传入后端）；`@` 选择器 UI + 树状文件浏览器 + 范围条为下一阶段（`src/api/files.ts`、`src/components/ChatPanel.tsx`）
+- **前端**：`api/files.ts` 新增 `TurnScope`/`ScopeCondition` 类型 + `conversationAsk`/`conversationAskStream` 加 `scope` 参数 + `searchFilePaths` API；`ChatPanel` 新增 `parseScope` 函数（正则提取 `@路径` token，按扩展名启发式区分文件/目录，发送时净化文本并将 scope 传入后端）；新建 `MentionPicker` 组件——输入 `@` 时弹出文件/目录选择器（查询后端 `search_file_paths` 命令），键盘导航 + 选中插入路径 token，配合 `handleInputChange`/`handleMentionSelect` 实现完整交互闭环（`src/api/files.ts`、`src/components/ChatPanel.tsx`、`src/components/MentionPicker.tsx`）
 - **测试**：152 单元 + 9 集成 + 6 IPC + OCR 全过，tsc 0，semgrep 0
 
 ---

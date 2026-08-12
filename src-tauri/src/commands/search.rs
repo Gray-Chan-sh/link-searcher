@@ -502,6 +502,30 @@ pub async fn suggest(state: State<'_, AppState>, prefix: String) -> Result<Vec<S
 }
 
 #[tauri::command]
+pub async fn search_file_paths(
+    state: State<'_, AppState>,
+    prefix: String,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| format!("db connection failed: {e}"))?;
+    let like = format!("%{}%", prefix.to_lowercase());
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT path FROM file_tracking WHERE lower(path) LIKE ?1 AND status='active' ORDER BY path LIMIT ?2")
+        .map_err(|e| format!("prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![like, limit as i64], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query failed: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|e| format!("row failed: {e}"))?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
 pub async fn get_search_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
     let conn = state
         .db
