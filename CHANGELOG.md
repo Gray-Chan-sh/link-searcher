@@ -4,7 +4,14 @@
 
 ---
 
-## 2026-08-12（AI 检索范围控制 · @mention 编号引用 + 会话范围数据结构）
+## 2026-08-12（检索范围控制 · 会话级范围 + /命令接线）
+
+- **背景**：通盘调研（编程 IDE→知识库→本地检索工具 Hyperlink/MangoFinder/LoFS）+ 审视波 1——砍掉与 `keep_old` 重复的 `@上轮` 继承；保留真正缺口：**会话级目录范围前端口** + **/命令前端解析从未接线**（后端起 ext/date 逻辑但前端硬编码 `conditions: []`，功能不可达）
+- **后端**：`conversation_ask`/`conversation_ask_stream` 新增 `session_scope_dir_ids` 参数并传入 `prepare_conversation_prompt`（此前写死 `&[]`）；修复 searcher 测试构造缺 `path_prefixes`（6 处）+ 集成测试 1 处（`src-tauri/src/commands/ai.rs`、`src-tauri/src/search/searcher.rs`、`src-tauri/tests/integration.rs`）
+- **前端**：新建 `scopeParser.ts` 纯函数模块——`@mention`（文件/目录/`@上轮`/`@第N轮`）+ `/ext` `/date` `/范围:全库|目录` `/模糊` 解析，返回 scope + 净化文本 + 范围动作；ChatPanel 换用模块并解析 `/ext` `/date` 进 `conditions` 传入后端；新增**条件 chips**（蓝色 `/ext:pdf` 等实时显示可审计）；`/范围` 动作经 `onScopeAction` 回传 AiChat 解析为 `dir_id` 更新会话范围；树状浏览器目录加「范围 ✓/范围」按钮（设为/清除会话级目录范围，持久化 `scope_dir_ids`）（`src/utils/scopeParser.ts`、`src/components/ChatPanel.tsx`、`src/pages/AiChat.tsx`、`src/api/files.ts`）
+- **测试**：新增 `scripts/scopeParser.test.ts` 纯函数断言（9 场景：@文件/@目录/@上轮//ext//date//范围全库//范围目录//模糊/无命令）全过；152 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0，semgrep 0
+
+---
 
 - **问题**：AI 聊天默认全库检索，无法精确控制检索范围（指定文件、文件夹、条件）；追问时范围不可调
 - **方案（/grill-me 设计访谈）**：`@mention` 轮询级（默认不继承）+ 显式 `@上轮`/`@第N轮` 继承（传递闭包，循环防护）+ 会话范围只绑目录（替换式）+ 编号引用模型（`@文件` → `[N]`，路径字符串不进 LLM，分句映射精确）+ LLM 不碰范围决定权

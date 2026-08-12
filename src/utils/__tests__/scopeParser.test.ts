@@ -1,0 +1,42 @@
+// scopeParser 纯函数断言测试（Node 原生 type-stripping 单测，不依赖框架）
+import assert from 'node:assert'
+import { parseScope } from '../scopeParser.ts'
+
+// S1: /ext + @ 文件混用
+const r1 = parseScope('根据@财务/年度财务报告.md /ext:pdf 汇总收入')
+assert.deepStrictEqual(r1.scope.mention_files, ['财务/年度财务报告.md'], 'S1: @文件提取')
+assert.deepStrictEqual(r1.scope.conditions, [{ kind: 'ext', value: 'pdf' }], 'S1: /ext 提取')
+assert.equal(r1.cleanText, '根据 汇总收入', 'S1: token 剥离')
+assert.equal(r1.scopeAction, null, 'S1: 无范围动作')
+
+// S2: 无命令时 conditions 空，行为=现状
+const r2 = parseScope('为什么营收下降')
+assert.deepStrictEqual(r2.scope.conditions, [], 'S2: conditions 空')
+assert.equal(r2.cleanText, '为什么营收下降', 'S2: 原文保留')
+
+// S3: /date
+const r3 = parseScope('/date:2025-01-01~2025-12-31 收据')
+assert.deepStrictEqual(r3.scope.conditions[0], { kind: 'date', value: '2025-01-01~2025-12-31' }, 'S3: /date')
+
+// S4: /范围:全库 → clear
+const r4 = parseScope('/范围:全库 重新回答')
+assert.equal(r4.scopeAction, 'clear', 'S4: 范围清除动作')
+
+// S5: /范围:目录
+const r5 = parseScope('/范围:财务 本季度')
+assert.equal(r5.scopeAction, 'dir:财务', 'S5: 目录范围动作')
+
+// S6: @目录 vs @文件 区分
+const r6 = parseScope('@财务 与 @年度报告.md 对比')
+assert.deepStrictEqual(r6.scope.mention_dirs, ['财务'], 'S6: 目录')
+assert.deepStrictEqual(r6.scope.mention_files, ['年度报告.md'], 'S6: 文件')
+
+// S7: @上轮 继承
+const r7 = parseScope('@上轮 那净利润呢')
+assert.deepStrictEqual(r7.scope.inherit_from, [-1], 'S7: 继承最近轮')
+
+// S8: /模糊 条件暂存原文（待 LLM 解析）
+const r8 = parseScope('/模糊:跟去年收购相关的 有哪些')
+assert.deepStrictEqual(r8.scope.conditions[0], { kind: 'fuzzy', value: '跟去年收购相关的' }, 'S8: 模糊条件暂存')
+
+console.log('ALL scopeParser assertions PASSED')

@@ -848,6 +848,7 @@ pub async fn conversation_ask(
     messages: Vec<ChatMessage>,
     source_ids: Vec<String>,
     scope: TurnScope,
+    session_scope_dir_ids: Vec<String>,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -863,7 +864,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &[]).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids).await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -891,6 +892,7 @@ pub async fn conversation_ask_stream(
     source_ids: Vec<String>,
     session_id: String,
     scope: TurnScope,
+    session_scope_dir_ids: Vec<String>,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -906,7 +908,7 @@ pub async fn conversation_ask_stream(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &[]).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids).await?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
