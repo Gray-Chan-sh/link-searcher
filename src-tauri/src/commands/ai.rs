@@ -240,7 +240,9 @@ fn prepare_smart_prompt(
         let mut sids: Vec<String> = Vec::new();
         let mut sf: Vec<String> = Vec::new();
         let mut ev: Vec<EvidenceItem> = Vec::new();
-        for hit in result.hits.iter().take(10) {
+        // 首轮来源收敛为 top3：作为会话起点守卫，避免弱相关命中
+        // （如“年度/报告”类泛词全库命中）从第一轮就把来源带偏。
+        for hit in result.hits.iter().take(3) {
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
                 if let Some(md5) = &rec.md5 {
                     if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
@@ -429,7 +431,7 @@ async fn llm_rewrite_query(
             truncate_text(&m.content, 120),
         ));
     }
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略。只输出改写后的查询本身，不要解释、不要加引号、不要写'改写为'。如果问题本身就完整无需改写，原样输出。";
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略。要求：输出最小必要关键词短语，保留主题实体（具体报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
     let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
@@ -674,34 +676,35 @@ async fn prepare_conversation_prompt(
         let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
         (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
     };
-    let keep_old = |merged: &mut Vec<ScoredHit>, seen: &mut std::collections::HashSet<String>, skip_mentioned: bool| {
-        for fid in source_ids.iter().rev() {
-            if merged.len() >= MAX_SOURCES {
-                break;
-            }
-            if seen.contains(fid) {
-                continue;
-            }
-            let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
-            if rec.status != "active" || rec.md5.is_none() {
-                continue;
-            }
-            if mentioned(&rec.path) == skip_mentioned {
-                continue;
-            }
-            seen.insert(fid.clone());
-            merged.push(ScoredHit {
-                file_id: fid.clone(),
-                path: rec.path.clone(),
-                bm25_score: None,
-                semantic_score: None,
-                rrf_score: None,
-                from_history: true,
-            });
+    // 旧来源只保留*对话中明确提到过的*（用户/助手引用过 = 实际在使用），
+    // 硬上限 3 份——防止陈旧来源把 15 槽位挤满、稀释本轮检索命中。
+    const MAX_OLD_SOURCES: usize = 3;
+    let mut old_count = 0usize;
+    for fid in source_ids.iter().rev() {
+        if merged.len() >= MAX_SOURCES || old_count >= MAX_OLD_SOURCES {
+            break;
         }
-    };
-    keep_old(&mut merged, &mut seen, false); // 第一遍: 对话中提到过的
-    keep_old(&mut merged, &mut seen, true);  // 第二遍: 其余按最近补槽
+        if seen.contains(fid) {
+            continue;
+        }
+        let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
+        if rec.status != "active" || rec.md5.is_none() {
+            continue;
+        }
+        if !mentioned(&rec.path) {
+            continue;
+        }
+        seen.insert(fid.clone());
+        merged.push(ScoredHit {
+            file_id: fid.clone(),
+            path: rec.path.clone(),
+            bm25_score: None,
+            semantic_score: None,
+            rrf_score: None,
+            from_history: true,
+        });
+        old_count += 1;
+    }
 
     let mut docs: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
@@ -1232,19 +1235,39 @@ mod rag_tests {
         let legacy = r#"{"id":"s1","title":"t","created_at":1,"updated_at":2,"messages":[],"source_ids":[],"source_files":[]}"#;
         let s: ChatSession = serde_json::from_str(legacy).unwrap();
         assert!(s.per_turn_evidence.is_empty(), "legacy records must default to empty");
-        // Round-trip: a session with per-turn evidence survives serialization.
-        let with_turn = ChatSession {
+    }
+
+    #[test]
+    fn session_json_round_trip_preserves_items() {
+        let s = ChatSession {
+            id: "s1".into(),
+            title: "t".into(),
+            created_at: 1,
+            updated_at: 2,
+            messages: vec![],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
             per_turn_evidence: vec![PerTurnEvidence {
                 turn_index: 0,
                 file_ids: vec!["f1".into()],
-                items: vec![],
+                items: vec![EvidenceItem {
+                    file_id: "f1".into(),
+                    path: "a.pdf".into(),
+                    snippet: "x".into(),
+                    bm25_score: Some(1.0),
+                    semantic_score: None,
+                    rrf_score: None,
+                    rewritten: true,
+                    rewritten_query: Some("q".into()),
+                    from_history: false,
+                }],
             }],
-            ..s
         };
-        let json = serde_json::to_string(&with_turn).unwrap();
+        let json = serde_json::to_string(&s).unwrap();
         let back: ChatSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.per_turn_evidence.len(), 1);
-        assert_eq!(back.per_turn_evidence[0].turn_index, 0);
-        assert_eq!(back.per_turn_evidence[0].file_ids, vec!["f1".to_string()]);
+        assert_eq!(back.per_turn_evidence[0].items.len(), 1);
+        assert_eq!(back.per_turn_evidence[0].items[0].rewritten_query.as_deref(), Some("q"));
     }
 }

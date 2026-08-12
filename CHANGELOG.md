@@ -14,6 +14,43 @@
 
 ---
 
+## 2026-08-12（追问"出戏"修复 · 来源去噪 + 首轮收敛）
+
+- **现象**：追问"刚才提到的那份报告呢"时回答/来源列表切换为真实索引里的无关文档（如陆家嘴年报），语料文件被稀释到 1/15
+- **根因**：① `prepare_conversation_prompt` 旧来源保留逻辑第二遍无差别补槽——把上一轮 `source_ids` 里所有文件（含 9 份弱相关命中）塞满 15 上限，稀释本轮检索命中；② BM25 OR 检索对"年度/报告/财务"类弱区分词全库贪婪召回（4133 命中），单轮 top10 里目标文档占比天然低；③ 首轮 `smart_search` 即携带 10 份来源作为会话起点守卫，污染从第一轮开始
+- **修复**：① 旧来源只保留**对话中明确提到过的**（文件名/主文件名出现于消息文本）且硬上限 3 份，删除无差别补槽；② LLM 改写 prompt 要求"最小必要关键词、保留主题实体、去掉 报告/文件/呢/的 等无区分词"；③ 首轮 `smart_search` 来源收敛为 top3（会话起点守卫更干净）（`src-tauri/src/commands/ai.rs`）
+- **测试**：149 单元 + 9 集成 + 6 IPC + OCR 全通过，tsc 0，semgrep 0
+
+---
+
+## 2026-08-12（删除操作统一确认）
+
+- **问题**：删除聊天会话、删除 AI Provider 直接执行，无确认——误触即永久丢失（会话消息/检索记录、provider 模型列表缓存）
+- **修复**：两处删除操作统一加 `ask` 确认对话框（warning 样式，与已有「清空日志」「重建索引」确认一致）：删除会话提示"消息与检索记录不可恢复"、删除 Provider 提示"模型列表缓存将一并清除"（`src/pages/AiChat.tsx`、`src/pages/Settings.tsx`、4 语言 i18n）
+- **盘点**：全项目破坏性操作已确认覆盖——清空日志/重建索引/取消回答此前已有确认，删除会话/删除 Provider 本次补齐；`clearSearchHistory` API 存在但无前端调用点（未接 UI，无遗漏）
+
+---
+
+## 2026-08-12（模型启用精选 · AI 设置页千级模型治理）
+
+- **问题**：provider 模型全量平铺在设置页（9router 单 provider 达 1284 个模型），列表/「当前使用」下拉超长；现有缓解（过滤框 + 类型折叠）在千级模型前失效
+- **方案（设计访谈收敛）**：引入**已启用（enabled）精选模型**概念——千级清单退回"折叠 + 搜索"，日常高频操作（当前使用/改类型）只在用户精选的小集合上做
+- **后端**：`ModelConfig` 新增 `enabled` 字段（serde default，旧配置兼容）；`auto_enable_first_per_type` 新 provider 自动启用每类型首个（开箱即用）；`refresh_provider_models` 合并时保留 enabled；`set_active_model` **选择即启用**（active 永不指向隐藏模型）；`load_config` reconcile——active 模型自动置 enabled（旧配置迁移）（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/ai/mod.rs`）
+- **前端**：provider 卡片三区——**已启用区**（直接显示，类型下拉 + 停用按钮，当前使用的模型禁停用）/ **全量搜索框** / **折叠的全量列表**（默认折叠、类型标签 + 行内启用按钮，搜索时自动展开）；「当前使用」两个下拉候选 = 已启用 ∩ 类型匹配（原生 select 保留）（`src/pages/Settings.tsx`、`src/api/config.ts`、4 语言 i18n）
+- **修复（GUI 实测反馈）**：① 全量列表默认折叠——原 `collapsedGroups` 初始空集导致 `!has(key)` 恒真、全部默认展开，改为 `expandedGroups` 展开集合（默认空 = 折叠）；② 切换「当前使用」模型时先重置该用途可用状态为"检查中"再按新模型重新探测，避免沿用旧模型的可用性显示（`src/pages/Settings.tsx`）
+- **测试**：新增 `auto_enable_first_per_type`、`model_config_deserializes_legacy_json_without_enabled`、`reconcile_enabled_active_keeps_active_models_visible`；152 单元 + 9 集成 + 6 IPC + OCR 全过，tsc 0，semgrep 0
+
+---
+
+## 2026-08-12（离线会话回放 · LLM 关闭可审计历史）
+
+- **问题**：LLM 网关关闭后 AI 聊天区被"AI 服务未配置"整块占住（`AiChat.tsx` 以 `aiCap.llm` 为唯一渲染 gate），历史会话无法打开查看——会话审计被迫依赖网关在线
+- **修复**：渲染 gate 从 `aiCap.llm` 改为 **`activeSession` 存在即渲染**（`ChatPanel llmEnabled={aiCap.llm}`）；ChatPanel 去掉 llm 早退，LLM 关闭时仍渲染来源栏 + 消息 + 证据面板（只读回放），仅输入区替换为"AI 服务未配置"提示（`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`）
+- **语义阈值过滤实验（未采纳）**：曾尝试对 RRF 融合候选加余弦阈值（cosine ≥ 0.2）剔除弱相关命中——真实网关实测 bge-m3 对"年度财务报告"类查询的候选余弦普遍 >0.55（含语义无关的南洋商业银行 docx 亦 0.55），**绝对余弦阈值无区分力**，已回滚（记录留档，避免重复尝试）
+- **测试**：11 AI 单测 + tsc 0 通过
+
+---
+
 ## 2026-08-11（长任务运行态保持 + 完成简报）
 
 - **按钮状态跨页面丢失**：索引页「验证有效性/补齐向量/重提取」等按钮的运行态是组件本地 `useState`——切页面组件卸载 state 重置，任务未完成时按钮恢复可用，可能二次误触。修复：新增**全局任务注册表**（`state.rs` 的 `task_registry` + `TaskGuard` RAII），长任务 start/end 自动登记/移除；`get_index_status` 返回 `running_tasks`，前端按钮从后端状态查（而非本地 state）——切页/刷新仍保持禁用（后端是唯一事实源）

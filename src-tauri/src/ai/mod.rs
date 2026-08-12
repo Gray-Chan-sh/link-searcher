@@ -50,7 +50,7 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
 pub fn classify_model_by_name(id: &str) -> ModelType {
     let lower = id.to_lowercase();
     const EMBED_HINTS: &[&str] = &[
-        "embed", "text-embedding", "bge", "m3", "minilm", "e5-", "gte-", "nomic-embed",
+        "embed", "text-embedding", "bge", "minilm", "e5-", "gte-", "nomic-embed",
         "jina-embeddings", "mxbai-embed", "all-minilm",
     ];
     const LLM_HINTS: &[&str] = &[
@@ -571,6 +571,7 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
                     crate::config::ModelConfig {
                         id: id.clone(),
                         model_type: classify_model_by_name(&id),
+                        enabled: false,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -715,6 +716,8 @@ mod tests {
     fn classify_model_by_name_heuristics() {
         use crate::config::ModelType;
         assert_eq!(classify_model_by_name("bge-m3-mlx-fp16"), ModelType::Embedding);
+        assert_eq!(classify_model_by_name("gte-m3"), ModelType::Embedding);
+        assert_eq!(classify_model_by_name("minimax-m3"), ModelType::Llm, "M3 is a multimodal LLM, not embedding");
         assert_eq!(classify_model_by_name("text-embedding-v3-small"), ModelType::Embedding);
         assert_eq!(classify_model_by_name("nomic-embed-text"), ModelType::Embedding);
         assert_eq!(classify_model_by_name("qwen2.5-7b-instruct"), ModelType::Llm);
@@ -733,7 +736,7 @@ mod tests {
                 name: "x".into(),
                 base_url: "http://x/v1".into(),
                 api_key: "k".into(),
-                models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding }],
+                models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false }],
             }],
             active_embedding_model_id: "p1:m1".into(),
             active_llm_model_id: "p1:ghost".into(),

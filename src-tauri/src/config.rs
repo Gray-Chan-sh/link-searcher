@@ -14,7 +14,7 @@ static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 pub const INDEX_DIR_NAME: &str = ".ls-index";
 
 /// Model role. Classified by name heuristics on pull; user can override.
-#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum ModelType {
     Embedding,
     Llm,
@@ -38,6 +38,10 @@ pub struct ModelConfig {
     pub id: String,
     #[serde(default)]
     pub model_type: ModelType,
+    /// User opted this model into the enabled set: it shows in the quick
+    /// list and becomes eligible for the active embedding/LLM selection.
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// An AI gateway the user manages (base_url + optional api_key). Models are
@@ -57,6 +61,24 @@ impl ProviderConfig {
     pub fn find_model(&self, model_id: &str) -> Option<&ModelConfig> {
         self.models.iter().find(|m| m.id == model_id)
     }
+}
+
+/// Out-of-the-box default: enable the first Embedding and the first Llm
+/// model of a freshly pulled list, so a new provider is usable without
+/// hunting through the model list. Order of the input list is preserved.
+pub fn auto_enable_first_per_type(models: Vec<ModelConfig>) -> Vec<ModelConfig> {
+    let mut enabled = std::collections::HashSet::new();
+    models
+        .into_iter()
+        .map(|mut m| {
+            if matches!(m.model_type, ModelType::Embedding | ModelType::Llm)
+                && enabled.insert(m.model_type)
+            {
+                m.enabled = true;
+            }
+            m
+        })
+        .collect()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -167,12 +189,28 @@ pub fn load_config() -> AppConfig {
             if config.providers.is_empty() && migrate_legacy_gateways(&mut config) {
                 let _ = write_config_file(&config);
             }
+            reconcile_enabled_active(&mut config);
             return config;
         }
     }
     let config = AppConfig::default();
     let _ = write_config_file(&config);
     config
+}
+
+/// Ensure the models referenced by the active ids are enabled. Configs
+/// saved before the `enabled` flag existed deserialize with everything
+/// disabled; the active selection must stay visible in the enabled set.
+fn reconcile_enabled_active(config: &mut AppConfig) {
+    for active in [&config.active_embedding_model_id, &config.active_llm_model_id] {
+        if let Some((pid, mid)) = active.split_once(':') {
+            if let Some(p) = config.providers.iter_mut().find(|p| p.id == pid) {
+                if let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
+                    m.enabled = true;
+                }
+            }
+        }
+    }
 }
 
 /// Seed `providers` from legacy `embedding_*/llm_*` field pairs and point the
@@ -193,6 +231,7 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
             provider.models.push(ModelConfig {
                 id: config.embedding_model.clone(),
                 model_type: ModelType::Embedding,
+                enabled: true,
             });
             config.active_embedding_model_id = format!("{provider_id}:{}", config.embedding_model);
         }
@@ -212,6 +251,7 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
             provider.models.push(ModelConfig {
                 id: config.llm_model.clone(),
                 model_type: ModelType::Llm,
+                enabled: true,
             });
             config.active_llm_model_id = format!("{provider_id}:{}", config.llm_model);
         }
@@ -243,9 +283,58 @@ mod tests {
         assert_eq!(config.providers.len(), 2);
         assert_eq!(config.providers[0].models.len(), 1);
         assert_eq!(config.providers[0].models[0].model_type, ModelType::Embedding);
+        assert!(config.providers[0].models[0].enabled, "legacy active model must be enabled");
         assert_eq!(config.providers[1].models[0].model_type, ModelType::Llm);
+        assert!(config.providers[1].models[0].enabled, "legacy active model must be enabled");
         assert!(config.active_embedding_model_id.ends_with(":bge-m3"));
         assert!(config.active_llm_model_id.ends_with(":qwen-7b-instruct"));
+    }
+
+    #[test]
+    fn auto_enable_first_per_type_enables_one_embedding_and_one_llm() {
+        let mk = |id: &str, ty: ModelType| ModelConfig { id: id.into(), model_type: ty, enabled: false };
+        let models = vec![
+            mk("llm-a", ModelType::Llm),
+            mk("emb-a", ModelType::Embedding),
+            mk("llm-b", ModelType::Llm),
+            mk("unknown-a", ModelType::Unknown),
+            mk("emb-b", ModelType::Embedding),
+        ];
+        let out = auto_enable_first_per_type(models);
+        let enabled: Vec<&str> = out.iter().filter(|m| m.enabled).map(|m| m.id.as_str()).collect();
+        assert_eq!(enabled, vec!["llm-a", "emb-a"], "first of each role only");
+    }
+
+    #[test]
+    fn model_config_deserializes_legacy_json_without_enabled() {
+        let legacy = r#"{"id":"m1","model_type":"Llm"}"#;
+        let m: ModelConfig = serde_json::from_str(legacy).unwrap();
+        assert!(!m.enabled, "legacy models default to disabled");
+    }
+
+    #[test]
+    fn reconcile_enabled_active_keeps_active_models_visible() {
+        let mut config = AppConfig {
+            providers: vec![ProviderConfig {
+                id: "p1".into(),
+                name: "x".into(),
+                base_url: "http://x/v1".into(),
+                api_key: String::new(),
+                models: vec![
+                    ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false },
+                    ModelConfig { id: "m2".into(), model_type: ModelType::Llm, enabled: false },
+                    ModelConfig { id: "m3".into(), model_type: ModelType::Llm, enabled: true },
+                ],
+            }],
+            active_embedding_model_id: "p1:m1".into(),
+            active_llm_model_id: "p1:ghost".into(),
+            ..AppConfig::default()
+        };
+        reconcile_enabled_active(&mut config);
+        let models = &config.providers[0].models;
+        assert!(models[0].enabled, "active embedding model must be enabled");
+        assert!(!models[1].enabled, "unrelated model stays disabled");
+        assert!(models[2].enabled, "already-enabled model unchanged");
     }
 
     #[test]
@@ -262,7 +351,7 @@ mod tests {
             name: "x".into(),
             base_url: "http://x/v1".into(),
             api_key: String::new(),
-            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding }],
+            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false }],
         };
         assert!(provider.find_model("m1").is_some());
         assert!(provider.find_model("ghost").is_none());

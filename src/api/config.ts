@@ -6,6 +6,7 @@ export type ModelType = 'Embedding' | 'Llm' | 'Unknown'
 export interface ModelInfo {
     id: string
     model_type: ModelType
+    enabled?: boolean
 }
 
 export interface ProviderInfo {
