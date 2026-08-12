@@ -298,6 +298,8 @@ pub async fn update_dir(
 pub struct DirTreeNode {
     pub name: String,
     pub path: String,
+    /// 目录标识（懒加载后 children 为空，无法靠长度区分文件/目录）。
+    pub is_dir: bool,
     pub children: Vec<DirTreeNode>,
 }
 
@@ -310,6 +312,29 @@ pub fn get_dir_tree(state: State<'_, AppState>, dir_id: String, include_files: O
     drop(conn);
     let mut budget = TREE_NODE_BUDGET;
     build_dir_tree(&dir.path, include_files.unwrap_or(false), &mut budget)
+}
+
+/// 懒加载：返回 `parent_path` 目录的单层子项（文件+目录，隐藏已过滤），
+/// 无预算限制（单层，不可能爆炸）。
+#[tauri::command]
+pub fn get_dir_children(parent_path: String) -> Result<Vec<DirTreeNode>, String> {
+    let mut children = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&parent_path) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') { continue; }
+                let path = entry.path().to_string_lossy().to_string();
+                children.push(DirTreeNode {
+                    name, path,
+                    is_dir: ft.is_dir(),
+                    children: vec![],
+                });
+            }
+        }
+    }
+    children.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(children)
 }
 
 /// 树节点总数预算：超限即停止收拢（防超大目录返回上万节点卡爆前端）。
@@ -332,11 +357,11 @@ fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> R
                     let sub = build_dir_tree(&path, include_files, budget)?;
                     if *budget > 0 {
                         *budget -= 1;
-                        children.push(DirTreeNode { name, path, children: sub.children });
+                        children.push(DirTreeNode { name, path, is_dir: true, children: sub.children });
                     }
                 } else if include_files && ft.is_file() {
                     *budget -= 1;
-                    children.push(DirTreeNode { name, path, children: vec![] });
+                    children.push(DirTreeNode { name, path, is_dir: false, children: vec![] });
                 }
             }
         }
@@ -346,5 +371,5 @@ fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> R
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(DirTreeNode { name, path: root_path.to_string(), children })
+    Ok(DirTreeNode { name, path: root_path.to_string(), is_dir: true, children })
 }
