@@ -104,7 +104,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
           : {}
         const userTurns = messagesRef.current.filter(m => m.role === 'user').length
         const perTurnPatch = p.source_ids.length > 0
-          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), { turn_index: userTurns - 1, file_ids: p.source_ids }] }
+          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), { turn_index: userTurns - 1, file_ids: p.source_ids, items: p.evidence ?? [] }] }
           : {}
         onSessionChange({
           ...cur,
@@ -127,6 +127,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     const ss = s % 60
     return m > 0 ? `${m}分${ss}秒` : `${ss}秒`
   }
+
+  // 每条助手消息对应的本轮检索证据（按 turn_index 匹配）。
+  const evidenceFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    const turn = userBefore - 1
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === turn)?.items ?? []
+  }
+  const fmtScore = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2))
 
   const handleSend = useCallback(async () => {
     const q = input.trim()
@@ -259,9 +267,44 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
                 ? 'bg-blue-600 text-white whitespace-pre-wrap'
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 prose prose-sm max-w-full dark:prose-invert'
             }`}>
-              {m.role === 'user'
+                            {m.role === 'user'
                 ? m.content
-                : <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                : (
+                  <>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                    {evidenceFor(i).length > 0 && (
+                      <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                        <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
+                          🔍 {t('evidence')}（{evidenceFor(i).length}）
+                        </summary>
+                        <ul className="mt-1 space-y-1">
+                          {evidenceFor(i).map((ev, j) => (
+                            <li key={`${ev.file_id}-${j}`} className="rounded bg-gray-50 dark:bg-gray-900/40 px-2 py-1">
+                              <div className="flex items-center gap-1 flex-wrap">
+                                <span className="font-medium text-gray-700 dark:text-gray-300 truncate max-w-[70%]">{ev.path}</span>
+                                {ev.from_history && (
+                                  <span className="px-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400">{t('evidence_from_history')}</span>
+                                )}
+                                {ev.rewritten && (
+                                  <span className="px-1 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300" title={ev.rewritten_query ?? ''}>
+                                    {t('evidence_rewritten')}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-gray-400 dark:text-gray-500">
+                                BM25 {fmtScore(ev.bm25_score)}
+                                {ev.semantic_score != null && <> · 语义 {fmtScore(ev.semantic_score)}</>}
+                                {ev.rrf_score != null && <> · RRF {fmtScore(ev.rrf_score)}</>}
+                                {ev.rewritten_query && <span className="ml-1">→ {ev.rewritten_query}</span>}
+                              </div>
+                              {ev.snippet && <div className="truncate mt-0.5">{ev.snippet}</div>}
+                            </li>
+                          ))}
+                        </ul>
+                      </details>
+                    )}
+                  </>
+                )
               }
             </div>
           </div>
