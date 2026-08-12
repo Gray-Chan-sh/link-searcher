@@ -54,6 +54,7 @@ pub fn run_cli() -> Result<()> {
                 ext_filter: None,
                 date_from: None,
                 date_to: None,
+                path_prefixes: None,
                 sort: SortField::Score,
                 sort_order: "desc".to_string(),
                 page: 1,

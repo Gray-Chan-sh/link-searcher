@@ -229,7 +229,7 @@ fn prepare_smart_prompt(
             // (Tantivy default) — re-tokenise as explicit OR so any term hits.
             query: crate::search::schema::split_query_terms(&query.to_lowercase()),
             dir_ids: None, file_ids: None, ext_filter: None,
-            date_from: None, date_to: None,
+            date_from: None, date_to: None, path_prefixes: None,
             sort: SortField::Score, sort_order: "desc".to_string(),
             page: 1, page_size: 15, fuzzy: false, semantic: false,
         };
@@ -580,6 +580,7 @@ fn bm25_relevant_hits(
     ext_filter: Option<Vec<String>>,
     date_from: Option<i64>,
     date_to: Option<i64>,
+    path_prefixes: Option<Vec<String>>,
 ) -> Result<Vec<ScoredHit>, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
     let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
@@ -596,7 +597,7 @@ fn bm25_relevant_hits(
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
         dir_ids, file_ids: None, ext_filter,
-        date_from, date_to,
+        date_from, date_to, path_prefixes,
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
@@ -659,15 +660,24 @@ async fn prepare_conversation_prompt(
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
     dir_ids.extend(session_scope_dir_ids.iter().cloned());
-    // 解析 @目录 为本轮新增的 dir_ids
+    // 解析 @目录：绝对监控根 → dir_ids；相对路径子目录 → path_prefixes
+    let mut path_prefixes: Vec<String> = Vec::new();
     {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         for dir_path in &scope.mention_dirs {
-            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1") {
-                if let Ok(r) = stmt.query_row(rusqlite::params![dir_path], |row| row.get::<_, String>(0)) {
+            let p = dir_path.trim_end_matches('/');
+            if p.is_empty() {
+                continue;
+            }
+            // 先试监控根精确匹配（绝对路径或别名）
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
+                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
                     dir_ids.push(r);
+                    continue;
                 }
             }
+            // 否则按相对路径前缀过滤（子目录/文件夹）
+            path_prefixes.push(p.to_string());
         }
         drop(conn);
     }
@@ -692,6 +702,7 @@ async fn prepare_conversation_prompt(
         }
     }
     let dir_ids_opt = if dir_ids.is_empty() { None } else { Some(dir_ids) };
+    let path_prefixes_opt = if path_prefixes.is_empty() { None } else { Some(path_prefixes) };
 
     // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
     // 语义开启时对追问做 BM25+embedding RRF 融合重排。
@@ -700,7 +711,7 @@ async fn prepare_conversation_prompt(
     } else {
         bm25_relevant_hits(
             state, &search_q, 10, crate::ai::embedding_enabled(),
-            dir_ids_opt, ext_filter, date_from, date_to,
+            dir_ids_opt, ext_filter, date_from, date_to, path_prefixes_opt,
         )?
     };
 
