@@ -464,11 +464,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       )}
 
       {llmEnabled ? (
-        <div
-          className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2"
-          onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
-          onDrop={e => { e.preventDefault(); const p = e.dataTransfer.getData('text/plain'); if (p) insertMention(p) }}
-        >
+        <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
           <MentionPicker
             query={mentionQuery}
             position={mentionPos}
@@ -481,6 +477,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             value={input}
             onChange={e => handleInputChange(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+            onDragOver={e => e.preventDefault()}
+            onDrop={e => { e.preventDefault(); const p = e.dataTransfer.getData('text/plain'); if (p) insertMention(p) }}
             placeholder={sourceIds.length > 0 ? t('ask_followup') : t('ask_question')}
             disabled={loading}
             className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
