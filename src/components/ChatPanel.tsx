@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession, type TurnScope } from '../api/files'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -136,11 +136,36 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
   }
   const fmtScore = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2))
 
+  // 解析输入文本中的 @mention token，提取文件/目录路径，生成 TurnScope。
+  const parseScope = useCallback((text: string): TurnScope => {
+    const mentionFiles: string[] = []
+    const mentionDirs: string[] = []
+    // 匹配 @ 开头直至下一个空格或标点（，。？！；:、）或行尾
+    const re = /@([^\s，。？！；:、,?:;]+)/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(text)) !== null) {
+      const path = m[1].trim()
+      if (!path) continue
+      // 以 / 结尾或含子目录标记 → 目录；否则 → 文件
+      // 简单启发：路径不含扩展名且无点号 → 目录
+      const hasExt = /\.\w{1,6}$/.test(path)
+      if (hasExt) {
+        if (!mentionFiles.includes(path)) mentionFiles.push(path)
+      } else {
+        if (!mentionDirs.includes(path)) mentionDirs.push(path)
+      }
+    }
+    return { mention_files: mentionFiles, mention_dirs: mentionDirs, inherit_from: [], conditions: [] }
+  }, [])
+
   const handleSend = useCallback(async () => {
     const q = input.trim()
     if (!q || loading || !session) return
+    // 解析 @mention 并净化输入文本（移除 @token 供发送）
+    const scope = parseScope(q)
+    const cleanQ = q.replace(/@[^\s，。？！；:、,?:;]+/g, '').trim() || q
     setInput('')
-    const userMsg: ChatMessage = { role: 'user', content: q }
+    const userMsg: ChatMessage = { role: 'user', content: cleanQ }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
     skipResumeRef.current = true
@@ -155,7 +180,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
       if (sourceIds.length === 0) {
         await smartSearchStream(q, session.id)
       } else {
-        await conversationAskStream([...messages, userMsg], sourceIds, session.id)
+        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope)
       }
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
