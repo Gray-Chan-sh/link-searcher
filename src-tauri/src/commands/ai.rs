@@ -576,6 +576,10 @@ fn bm25_relevant_hits(
     query: &str,
     limit: usize,
     semantic: bool,
+    dir_ids: Option<Vec<String>>,
+    ext_filter: Option<Vec<String>>,
+    date_from: Option<i64>,
+    date_to: Option<i64>,
 ) -> Result<Vec<ScoredHit>, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
     let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
@@ -591,8 +595,8 @@ fn bm25_relevant_hits(
     };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-        dir_ids: None, file_ids: None, ext_filter: None,
-        date_from: None, date_to: None,
+        dir_ids, file_ids: None, ext_filter,
+        date_from, date_to,
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
@@ -640,6 +644,8 @@ async fn prepare_conversation_prompt(
     state: &tauri::State<'_, AppState>,
     messages: &[ChatMessage],
     source_ids: &[String],
+    scope: &TurnScope,
+    session_scope_dir_ids: &[String],
 ) -> Result<PreparedConversation, String> {
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
     // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
@@ -649,12 +655,53 @@ async fn prepare_conversation_prompt(
         _ => rule.query,
     };
     let rewritten = search_q != last_q.trim();
+
+    // 从 scope 提取检索过滤参数
+    let mut dir_ids: Vec<String> = Vec::new();
+    dir_ids.extend(session_scope_dir_ids.iter().cloned());
+    // 解析 @目录 为本轮新增的 dir_ids
+    {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        for dir_path in &scope.mention_dirs {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1") {
+                if let Ok(r) = stmt.query_row(rusqlite::params![dir_path], |row| row.get::<_, String>(0)) {
+                    dir_ids.push(r);
+                }
+            }
+        }
+        drop(conn);
+    }
+
+    // 提取条件过滤
+    let mut ext_filter: Option<Vec<String>> = None;
+    let mut date_from: Option<i64> = None;
+    let mut date_to: Option<i64> = None;
+    for c in &scope.conditions {
+        match c.kind.as_str() {
+            "ext" => ext_filter = Some(c.value.split(',').map(|s| s.trim().to_lowercase()).collect()),
+            "date" => {
+                let parts: Vec<&str> = c.value.splitn(2, '~').collect();
+                if parts.len() == 2 {
+                    let _ = chrono::NaiveDate::parse_from_str(parts[0], "%Y-%m-%d").ok()
+                        .map(|d| date_from = Some(d.and_hms_opt(0, 0, 0).map(|dt| dt.and_utc().timestamp_micros()).unwrap_or(0)));
+                    let _ = chrono::NaiveDate::parse_from_str(parts[1], "%Y-%m-%d").ok()
+                        .map(|d| date_to = Some(d.and_hms_opt(23, 59, 59).map(|dt| dt.and_utc().timestamp_micros()).unwrap_or(0)));
+                }
+            }
+            _ => {}
+        }
+    }
+    let dir_ids_opt = if dir_ids.is_empty() { None } else { Some(dir_ids) };
+
     // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
     // 语义开启时对追问做 BM25+embedding RRF 融合重排。
     let new_hits = if last_q.trim().is_empty() {
         Vec::new()
     } else {
-        bm25_relevant_hits(state, &search_q, 10, crate::ai::embedding_enabled())?
+        bm25_relevant_hits(
+            state, &search_q, 10, crate::ai::embedding_enabled(),
+            dir_ids_opt, ext_filter, date_from, date_to,
+        )?
     };
 
     const MAX_SOURCES: usize = 15;
@@ -708,6 +755,31 @@ async fn prepare_conversation_prompt(
 
     let mut docs: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
+    // @mention 文件直用：按路径解析为 [N] 编号引用，优先于检索命中。
+    let mut mention_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for (i, path) in scope.mention_files.iter().enumerate() {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, path) {
+            if let Some(md5) = &rec.md5 {
+                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                    if !text.trim().is_empty() {
+                        docs.push(format!("[{}]（{path}）\n{}", i + 1, truncate_text(&text, 2000)));
+                        evidence.push(EvidenceItem {
+                            file_id: rec.id.clone(),
+                            path: path.clone(),
+                            snippet: truncate_text(&text, 200),
+                            bm25_score: None,
+                            semantic_score: None,
+                            rrf_score: None,
+                            rewritten,
+                            rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
+                            from_history: false,
+                        });
+                        mention_index.insert(path.clone(), i + 1);
+                    }
+                }
+            }
+        }
+    }
     for hit in &merged {
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
             if let Some(md5) = &rec.md5 {
@@ -738,7 +810,7 @@ async fn prepare_conversation_prompt(
     let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
     let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
     let last_n = messages.len().saturating_sub(1);
-    let user_msg = if messages.len() > 1 {
+    let mut user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");
         for m in messages.iter().take(last_n) {
             history_str.push_str(&format!("[{}] {}\n",
@@ -749,6 +821,10 @@ async fn prepare_conversation_prompt(
     } else {
         last_q
     };
+    // 将 @mention 替换为 [N] 编号引用（路径字符串不进 LLM）。
+    for (path, idx) in &mention_index {
+        user_msg = user_msg.replace(&format!("@{path}"), &format!("[{}]", idx));
+    }
     Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence })
 }
 
@@ -760,6 +836,7 @@ pub async fn conversation_ask(
     state: State<'_, AppState>,
     messages: Vec<ChatMessage>,
     source_ids: Vec<String>,
+    scope: TurnScope,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -775,7 +852,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &[]).await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -802,6 +879,7 @@ pub async fn conversation_ask_stream(
     messages: Vec<ChatMessage>,
     source_ids: Vec<String>,
     session_id: String,
+    scope: TurnScope,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -817,7 +895,7 @@ pub async fn conversation_ask_stream(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &[]).await?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -872,6 +950,42 @@ pub struct PerTurnEvidence {
     pub items: Vec<EvidenceItem>,
 }
 
+/// 每轮最终的 @mention 生效集合（含继承解析后），持久化供 `@第N轮` 引用。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct PerTurnScope {
+    pub turn_index: usize,
+    #[serde(default)]
+    pub files: Vec<String>,
+    #[serde(default)]
+    pub dirs: Vec<String>,
+}
+
+/// 本轮的 @mention 集合与继承声明，由前端解析输入文本后传入。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct TurnScope {
+    /// 本轮显式 @ 的文件路径。
+    #[serde(default)]
+    pub mention_files: Vec<String>,
+    /// 本轮显式 @ 的目录路径。
+    #[serde(default)]
+    pub mention_dirs: Vec<String>,
+    /// 显式继承的轮次索引（0‑based，`@第2轮` → `[1]`）。
+    #[serde(default)]
+    pub inherit_from: Vec<usize>,
+    /// 结构化条件（ext/date/模糊）。
+    #[serde(default)]
+    pub conditions: Vec<ScopeCondition>,
+}
+
+/// 一条范围内条件。`parsed` 仅 fuzzy 由 LLM 解析后填充，前端可展示编辑。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ScopeCondition {
+    pub kind: String, // "ext" | "date" | "fuzzy"
+    pub value: String,
+    #[serde(default)]
+    pub parsed: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatSession {
     pub id: String,
@@ -889,6 +1003,15 @@ pub struct ChatSession {
     /// 每轮问答用到的 source 文件引用（0‑based turn index）。
     #[serde(default)]
     pub per_turn_evidence: Vec<PerTurnEvidence>,
+    /// 每轮 @mention 生效集合，供 `@第N轮` 继承解析。
+    #[serde(default)]
+    pub per_turn_scopes: Vec<PerTurnScope>,
+    /// 会话级目录范围（从树状控件/右键加入，持续到替换/清空）。
+    #[serde(default)]
+    pub scope_dir_ids: Vec<String>,
+    /// 会话级结构化条件（ext/date/模糊）。
+    #[serde(default)]
+    pub scope_conditions: Vec<ScopeCondition>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -940,6 +1063,9 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     pending_query: None,
                     pending_started_at: None,
                     per_turn_evidence: vec![],
+                    per_turn_scopes: vec![],
+                    scope_dir_ids: vec![],
+                    scope_conditions: vec![],
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -996,6 +1122,9 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
         pending_query: None,
         pending_started_at: None,
         per_turn_evidence: vec![],
+        per_turn_scopes: vec![],
+        scope_dir_ids: vec![],
+        scope_conditions: vec![],
     };
     let id = session.id.clone();
     let mut h = read_history(&state.data_dir);
@@ -1249,6 +1378,9 @@ mod rag_tests {
             source_files: vec![],
             pending_query: None,
             pending_started_at: None,
+            per_turn_scopes: vec![],
+            scope_dir_ids: vec![],
+            scope_conditions: vec![],
             per_turn_evidence: vec![PerTurnEvidence {
                 turn_index: 0,
                 file_ids: vec!["f1".into()],

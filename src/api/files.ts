@@ -98,8 +98,21 @@ export async function smartSearch(query: string): Promise<SmartSearchResponse> {
   return invoke<SmartSearchResponse>('smart_search', { query })
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[]): Promise<string> {
-  return invoke<string>('conversation_ask', { messages, sourceIds })
+export interface TurnScope {
+  mention_files: string[]
+  mention_dirs: string[]
+  inherit_from: number[]
+  conditions: ScopeCondition[]
+}
+
+export interface ScopeCondition {
+  kind: string
+  value: string
+  parsed?: string | null
+}
+
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope): Promise<string> {
+  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {} })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -117,8 +130,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string): Promise<void> {
-  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope): Promise<void> {
+  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {} })
 }
 
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
