@@ -50,18 +50,22 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   useEffect(() => { sessionRef.current = session }, [session])
 
   // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
+  const insertMention = useCallback((path: string) => {
+    setInput(prev => `${prev}${prev ? ' ' : ''}@${path} `)
+    setMentionChips(prev => {
+      const isFile = /\.\w{1,6}$/.test(path)
+      return prev.some(c => c.path === path)
+        ? prev
+        : [...prev, { isFile, path }]
+    })
+    inputRef.current?.focus()
+  }, [])
+
   useEffect(() => {
     if (!pendingMention) return
-    setInput(prev => `${prev}${prev ? ' ' : ''}@${pendingMention} `)
-    setMentionChips(prev => {
-      const isFile = /\.\w{1,6}$/.test(pendingMention)
-      return prev.some(c => c.path === pendingMention)
-        ? prev
-        : [...prev, { isFile, path: pendingMention }]
-    })
+    insertMention(pendingMention)
     onMentionConsumed?.()
-    inputRef.current?.focus()
-  }, [pendingMention, onMentionConsumed])
+  }, [pendingMention, onMentionConsumed, insertMention])
 
   const patchSession = useCallback((patch: Partial<ChatSession>) => {
     if (session) onSessionChange({ ...session, ...patch })
@@ -460,7 +464,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       )}
 
       {llmEnabled ? (
-        <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
+        <div
+          className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2"
+          onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy' }}
+          onDrop={e => { e.preventDefault(); const p = e.dataTransfer.getData('text/plain'); if (p) insertMention(p) }}
+        >
           <MentionPicker
             query={mentionQuery}
             position={mentionPos}
