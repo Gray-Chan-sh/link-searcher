@@ -254,8 +254,8 @@ function TreeFileList({ node, basePath, onPick }: {
         type="button"
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
-        onClick={() => { if (isDir) setOpen(v => !v) }}
-        onContextMenu={e => { e.preventDefault(); if (isDir) onPick(rel) }}
+        onClick={() => { if (isDir) setOpen(v => !v); else onPick(rel) }}
+        onContextMenu={e => { e.preventDefault(); onPick(rel) }}
         className="w-full flex items-center gap-1 px-2 py-0.5 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
       >
