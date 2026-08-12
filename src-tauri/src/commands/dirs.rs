@@ -302,25 +302,41 @@ pub struct DirTreeNode {
 }
 
 #[tauri::command]
-pub fn get_dir_tree(state: State<'_, AppState>, dir_id: String) -> Result<DirTreeNode, String> {
+pub fn get_dir_tree(state: State<'_, AppState>, dir_id: String, include_files: Option<bool>) -> Result<DirTreeNode, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let dir = db::dir_config::get_dir(&conn, &dir_id)
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| "dir not found".to_string())?;
     drop(conn);
-    build_dir_tree(&dir.path)
+    let mut budget = TREE_NODE_BUDGET;
+    build_dir_tree(&dir.path, include_files.unwrap_or(false), &mut budget)
 }
 
-fn build_dir_tree(root_path: &str) -> Result<DirTreeNode, String> {
+/// 树节点总数预算：超限即停止收拢（防超大目录返回上万节点卡爆前端）。
+const TREE_NODE_BUDGET: usize = 2000;
+
+fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> Result<DirTreeNode, String> {
     let mut children = Vec::new();
     if let Ok(entries) = std::fs::read_dir(root_path) {
         for entry in entries.flatten() {
+            if *budget == 0 {
+                break;
+            }
             if let Ok(ft) = entry.file_type() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') {
+                    continue; // 隐藏文件/目录（.DS_Store 等）
+                }
+                let path = entry.path().to_string_lossy().to_string();
                 if ft.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let path = entry.path().to_string_lossy().to_string();
-                    let sub = build_dir_tree(&path)?;
-                    children.push(DirTreeNode { name, path, children: sub.children });
+                    let sub = build_dir_tree(&path, include_files, budget)?;
+                    if *budget > 0 {
+                        *budget -= 1;
+                        children.push(DirTreeNode { name, path, children: sub.children });
+                    }
+                } else if include_files && ft.is_file() {
+                    *budget -= 1;
+                    children.push(DirTreeNode { name, path, children: vec![] });
                 }
             }
         }
