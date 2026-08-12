@@ -215,14 +215,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.pending_query])
 
-  if (!llmEnabled) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-sm text-gray-400">
-        {t('ai_llm_unavailable')}
-      </div>
-    )
-  }
-
+  // LLM 未配置时仍渲染历史会话（只读回放：来源栏 + 消息 + 证据面板），
+  // 仅输入区替换为"AI 服务未配置"提示——会话审计不依赖网关在线。
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {sourceFiles.length > 0 && (
@@ -328,24 +322,30 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange }: Chat
         )}
       </div>
 
-      <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
-        <input
-          type="text"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
-          placeholder={sourceIds.length > 0 ? t('ask_followup') : t('ask_question')}
-          disabled={loading}
-          className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
-        />
-        <button
-          onClick={handleSend}
-          disabled={loading || !input.trim() || !session}
-          className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-        >
-          {t('send')}
-        </button>
-      </div>
+      {llmEnabled ? (
+        <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
+          <input
+            type="text"
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+            placeholder={sourceIds.length > 0 ? t('ask_followup') : t('ask_question')}
+            disabled={loading}
+            className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
+          />
+          <button
+            onClick={handleSend}
+            disabled={loading || !input.trim() || !session}
+            className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            {t('send')}
+          </button>
+        </div>
+      ) : (
+        <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 text-center text-xs text-gray-400">
+          {t('ai_llm_unavailable')}
+        </div>
+      )}
     </div>
   )
 }

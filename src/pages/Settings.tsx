@@ -54,7 +54,8 @@ export default function Settings() {
   const [adding, setAdding] = useState(false)
   const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [modelFilter, setModelFilter] = useState<Record<string, string>>({})
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+  // 展开集合：默认空 = 全量列表默认折叠（搜索时自动展开）；点击组头切换。
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -113,15 +114,32 @@ export default function Settings() {
   const modelOptions = (kind: 'embedding' | 'llm'): { value: string; label: string }[] =>
     (appConfig?.providers ?? []).flatMap(p =>
       p.models
-        .filter(m => m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
+        .filter(m => m.enabled !== false && m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
         .map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} / ${m.id}` })),
     )
+
+  const modelInUse = (p: ProviderInfo, modelId: string) =>
+    appConfig?.active_embedding_model_id === `${p.id}:${modelId}` ||
+    appConfig?.active_llm_model_id === `${p.id}:${modelId}`
+
+  const handleToggleEnabled = async (p: ProviderInfo, modelId: string, enabled: boolean) => {
+    await persistProviders(
+      (appConfig?.providers ?? []).map(x =>
+        x.id === p.id
+          ? { ...x, models: x.models.map(m => (m.id === modelId ? { ...m, enabled } : m)) }
+          : x,
+      ),
+    )
+  }
 
   const handleActiveModel = async (kind: 'embedding' | 'llm', modelId: string) => {
     if (!appConfig) return
     const key = kind === 'embedding' ? 'active_embedding_model_id' : 'active_llm_model_id'
     const prev = appConfig[key]
     setAppConfig({ ...appConfig, [key]: modelId })
+    // 重置该用途的可用状态为"检查中"，等待按新模型重新探测——避免
+    // 沿用旧模型的可用性显示。
+    setCaps(c => (c ? { ...c, [kind]: undefined } : c))
     try {
       await setActiveModel(kind, modelId)
       aiCapabilities().then(setCaps).catch(() => {})
@@ -159,6 +177,8 @@ export default function Settings() {
   }
 
   const handleDeleteProvider = async (p: ProviderInfo) => {
+    const confirmed = await ask(t('confirm_delete_provider', { name: p.name }), { title: t('delete'), kind: 'warning' })
+    if (!confirmed) return
     try {
       await deleteProvider(p.id)
       setProvidersLocal(ps => ps.filter(x => x.id !== p.id))
@@ -599,59 +619,120 @@ export default function Settings() {
                     )}
                     {p.models.length > 0 && (
                       <div className="mt-2 pt-2 border-t border-gray-200 dark:border-gray-700">
-                        <input
-                          type="text"
-                          value={modelFilter[p.id] ?? ''}
-                          onChange={e => setModelFilter(f => ({ ...f, [p.id]: e.target.value }))}
-                          placeholder={t('model_filter_placeholder')}
-                          className="mb-1.5 w-full px-2 py-1 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
-                        />
-                        <div className="space-y-1">
-                          {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
-                            const filter = (modelFilter[p.id] ?? '').toLowerCase()
-                            const matched = group === 'Embedding'
-                              ? p.models.filter(m => m.model_type === 'Embedding' && (!filter || m.id.toLowerCase().includes(filter)))
-                              : group === 'Llm'
-                                ? p.models.filter(m => m.model_type === 'Llm' && (!filter || m.id.toLowerCase().includes(filter)))
-                                : p.models.filter(m => m.model_type === 'Unknown' && (!filter || m.id.toLowerCase().includes(filter)))
-                            if (matched.length === 0) return null
-                            const key = `${p.id}:${group}`
-                            const expanded = filter !== '' || !collapsedGroups.has(key)
-                            const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
-                            return (
-                              <div key={group}>
-                                <button
-                                  type="button"
-                                  onClick={() => setCollapsedGroups(s => {
-                                    const n = new Set(s)
-                                    if (n.has(key)) n.delete(key)
-                                    else n.add(key)
-                                    return n
-                                  })}
-                                  className="w-full flex items-center gap-1.5 px-1 py-0.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
-                                >
-                                  <span className="text-[10px]">{expanded ? '▾' : '▸'}</span>
-                                  <span className="flex-1 text-left">{t(labelKey, { n: matched.length })}</span>
-                                </button>
-                                {expanded && matched.map(m => (
-                                  <div key={m.id} className="flex items-center gap-2 pl-3">
-                                    <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
-                                    <select
-                                      title={t('ai_model_type')}
-                                      value={m.model_type}
-                                      onChange={e => handleModelType(p, m.id, e.target.value as ModelType)}
-                                      className="px-1.5 py-0.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
-                                    >
-                                      <option value="Embedding">{t('ai_type_embedding')}</option>
-                                      <option value="Llm">{t('ai_type_llm')}</option>
-                                      <option value="Unknown">{t('ai_type_unknown')}</option>
-                                    </select>
+                        {(() => {
+                          const enabledModels = p.models.filter(m => m.enabled)
+                          const filter = (modelFilter[p.id] ?? '').toLowerCase()
+                          const expanded = (key: string) => filter !== '' || expandedGroups.has(key)
+                          return (
+                            <>
+                              {/* 已启用区：直接显示，供快速改类型/停用 */}
+                              {enabledModels.length > 0 && (
+                                <div className="mb-2">
+                                  <div className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
+                                    {t('ai_enabled_models', { n: enabledModels.length })}
                                   </div>
-                                ))}
+                                  {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
+                                    const matched = enabledModels.filter(m => m.model_type === group)
+                                    if (matched.length === 0) return null
+                                    const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
+                                    return (
+                                      <div key={`en-${group}`} className="mb-1">
+                                        <div className="text-[10px] text-gray-400 dark:text-gray-500 px-1">{t(labelKey)}</div>
+                                        {matched.map(m => (
+                                          <div key={m.id} className="flex items-center gap-2 pl-1">
+                                            <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
+                                            <select
+                                              title={t('ai_model_type')}
+                                              value={m.model_type}
+                                              onChange={e => handleModelType(p, m.id, e.target.value as ModelType)}
+                                              className="px-1.5 py-0.5 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+                                            >
+                                              <option value="Embedding">{t('ai_type_embedding')}</option>
+                                              <option value="Llm">{t('ai_type_llm')}</option>
+                                              <option value="Unknown">{t('ai_type_unknown')}</option>
+                                            </select>
+                                            <button
+                                              type="button"
+                                              onClick={() => handleToggleEnabled(p, m.id, false)}
+                                              disabled={modelInUse(p, m.id)}
+                                              title={modelInUse(p, m.id) ? t('ai_model_in_use') : t('ai_disable')}
+                                              className="px-1 text-xs text-red-500 hover:text-red-600 disabled:opacity-30 disabled:cursor-not-allowed shrink-0"
+                                            >
+                                              ×
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+                              {/* 全量搜索框 */}
+                              <input
+                                type="text"
+                                value={modelFilter[p.id] ?? ''}
+                                onChange={e => setModelFilter(f => ({ ...f, [p.id]: e.target.value }))}
+                                placeholder={t('model_filter_placeholder')}
+                                className="mb-1.5 w-full px-2 py-1 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
+                              />
+                              {/* 折叠的全量列表 */}
+                              <div className="space-y-1">
+                                {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
+                                  const matched = p.models.filter(m =>
+                                    m.model_type === group && (!filter || m.id.toLowerCase().includes(filter)))
+                                  if (matched.length === 0) return null
+                                  const key = `${p.id}:${group}`
+                                  const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
+                                  const isExpanded = expanded(key)
+                                  return (
+                                    <div key={group}>
+                                      <button
+                                        type="button"
+                                        onClick={() => setExpandedGroups(s => {
+                                          const n = new Set(s)
+                                          if (n.has(key)) n.delete(key)
+                                          else n.add(key)
+                                          return n
+                                        })}
+                                        className="w-full flex items-center gap-1.5 px-1 py-0.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-200 transition-colors"
+                                      >
+                                        <span className="text-[10px]">{isExpanded ? '▾' : '▸'}</span>
+                                        <span className="flex-1 text-left">{t(labelKey, { n: matched.length })}</span>
+                                      </button>
+                                      {isExpanded && matched.map(m => (
+                                        <div key={m.id} className="flex items-center gap-2 pl-3">
+                                          <span
+                                            className={`px-1 rounded text-[10px] shrink-0 ${
+                                              m.model_type === 'Embedding'
+                                                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
+                                                : m.model_type === 'Llm'
+                                                  ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
+                                                  : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                                            }`}
+                                          >
+                                            {m.model_type === 'Embedding' ? 'Embed' : m.model_type === 'Llm' ? 'LLM' : '?'}
+                                          </span>
+                                          <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
+                                          {m.enabled ? (
+                                            <span className="text-[10px] text-green-600 dark:text-green-400 shrink-0">{t('ai_enabled_tag')}</span>
+                                          ) : (
+                                            <button
+                                              type="button"
+                                              onClick={() => handleToggleEnabled(p, m.id, true)}
+                                              className="px-1 text-[10px] text-purple-600 hover:text-purple-700 dark:text-purple-400 dark:hover:text-purple-300 shrink-0"
+                                            >
+                                              ＋ {t('ai_enable')}
+                                            </button>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )
+                                })}
                               </div>
-                            )
-                          })}
-                        </div>
+                            </>
+                          )
+                        })()}
                       </div>
                     )}
                     {editingId === p.id && editDraft && (

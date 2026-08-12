@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { useI18n } from '../i18n'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
-import { save } from '@tauri-apps/plugin-dialog'
+import { save, ask } from '@tauri-apps/plugin-dialog'
 import { PlusIcon, TrashIcon } from '../icons'
 import ChatPanel from '../components/ChatPanel'
 
@@ -70,6 +70,8 @@ export default function AiChat() {
   }, [refreshList])
 
   const handleDelete = useCallback(async (id: string) => {
+    const confirmed = await ask(t('confirm_delete_session'), { title: t('delete'), kind: 'warning' })
+    if (!confirmed) return
     try {
       await deleteChatSession(id)
       if (id === activeId) {
@@ -155,8 +157,8 @@ export default function AiChat() {
             </button>
           </div>
         </div>
-        {aiCap.llm ? (
-          <ChatPanel llmEnabled session={activeSession} onSessionChange={handleSessionChange} />
+        {activeSession ? (
+          <ChatPanel llmEnabled={aiCap.llm} session={activeSession} onSessionChange={handleSessionChange} />
         ) : capFailed ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
             <span>{t('ai_llm_unavailable')}</span>

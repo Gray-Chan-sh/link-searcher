@@ -118,7 +118,7 @@ pub async fn add_provider(
         name,
         base_url: base_url.trim().to_string(),
         api_key,
-        models,
+        models: crate::config::auto_enable_first_per_type(models),
     });
     save_config(&config)?;
     Ok(ProviderOutcome { id, pull_error: pull_err })
@@ -182,11 +182,12 @@ pub async fn refresh_provider_models(id: String) -> Result<Vec<crate::config::Mo
             Ok(p.models.clone())
         };
     }
-    // Merge: keep user-overridden types for ids that already exist.
-    let old_by_id: std::collections::HashMap<&str, crate::config::ModelType> = p
+    // Merge: keep user-overridden types and enabled flags for ids that
+    // already exist.
+    let old_by_id: std::collections::HashMap<&str, (crate::config::ModelType, bool)> = p
         .models
         .iter()
-        .map(|m| (m.id.as_str(), m.model_type))
+        .map(|m| (m.id.as_str(), (m.model_type, m.enabled)))
         .collect();
     p.models = fresh
         .into_iter()
@@ -195,9 +196,13 @@ pub async fn refresh_provider_models(id: String) -> Result<Vec<crate::config::Mo
             // re-classification (e.g. classifier changes) must take effect.
             model_type: old_by_id
                 .get(m.id.as_str())
-                .copied()
+                .map(|(t, _)| *t)
                 .filter(|t| *t != crate::config::ModelType::Unknown)
                 .unwrap_or(m.model_type),
+            enabled: old_by_id
+                .get(m.id.as_str())
+                .map(|(_, e)| *e)
+                .unwrap_or(false),
             ..m
         })
         .collect();
@@ -215,6 +220,17 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
         "llm" => &mut config.active_llm_model_id,
         _ => return Err(format!("unknown kind: {kind}")),
     };
+    // Selecting a model implies enabling it — the active id must never
+    // point at a model hidden from the enabled set.
+    if !model_id.is_empty() {
+        if let Some((pid, mid)) = model_id.split_once(':') {
+            if let Some(p) = config.providers.iter_mut().find(|p| p.id == pid) {
+                if let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
+                    m.enabled = true;
+                }
+            }
+        }
+    }
     *field = model_id;
     save_config(&config)
 }
