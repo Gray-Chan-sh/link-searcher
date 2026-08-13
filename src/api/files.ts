@@ -71,6 +71,12 @@ export interface PerTurnEvidence {
   items?: EvidenceItem[]
 }
 
+export interface PerTurnScope {
+  turn_index: number
+  files: string[]
+  dirs: string[]
+}
+
 export interface ChatSession {
   id: string
   title: string

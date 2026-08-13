@@ -15,7 +15,7 @@ export default function AiChat() {
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
   // 树状文件浏览器
-  const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode | null }[]>([])
+  const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null }[]>([])
   const [treeExpanded, setTreeExpanded] = useState(false)
   const [pendingMention, setPendingMention] = useState<string | null>(null)
 
@@ -50,6 +50,13 @@ export default function AiChat() {
   const handleTreeClick = useCallback((path: string) => {
     setPendingMention(path)
   }, [])
+
+  const handleSessionChange = useCallback((session: ChatSession | null) => {
+    setActiveSession(session)
+    if (session) {
+      saveChatSession(session).then(refreshList).catch(() => {})
+    }
+  }, [refreshList])
 
   // 专注模式：会话仅分析此文件（临时屏蔽其他范围），追问持续直到退出
   const handleFocusFile = useCallback((path: string) => {
@@ -138,13 +145,6 @@ export default function AiChat() {
       }
     } catch { /* ignore */ }
   }, [activeId, refreshList])
-
-  const handleSessionChange = useCallback((session: ChatSession | null) => {
-    setActiveSession(session)
-    if (session) {
-      saveChatSession(session).then(refreshList).catch(() => {})
-    }
-  }, [refreshList])
 
   const handleExport = useCallback(async () => {
     if (!activeId) return
