@@ -214,6 +214,14 @@ pub async fn restore_backup(
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    copy_dir_depth(src, dst, 0)
+}
+
+/// 递归复制目录，`depth` 防止极端深目录导致栈溢出（上限 64 层）。
+fn copy_dir_depth(src: &std::path::Path, dst: &std::path::Path, depth: u32) -> Result<(), String> {
+    if depth > 64 {
+        return Err(format!("目录嵌套过深（>{depth} 层），已停止复制: {src:?}"));
+    }
     std::fs::create_dir_all(dst).map_err(|e| format!("failed to create {dst:?}: {e}"))?;
     let entries = std::fs::read_dir(src).map_err(|e| format!("failed to read {src:?}: {e}"))?;
     for entry in entries {
@@ -222,7 +230,7 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> 
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if ty.is_dir() {
-            copy_dir(&src_path, &dst_path)?;
+            copy_dir_depth(&src_path, &dst_path, depth + 1)?;
         } else {
             std::fs::copy(&src_path, &dst_path)
                 .map_err(|e| format!("failed to copy {src_path:?}: {e}"))?;

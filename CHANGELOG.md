@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-08-12（审计复核 + 技术债收尾）
+
+- **审计复核修正**：初版审计的 L3"363 处生产 unwrap"、L4"indexer.rs read().unwrap() 锁中毒"经精确复核（awk 切分 `#[cfg(test)]` 块）均属**误判**——真实生产代码 unwrap 接近 0，仅存几处均有 `nosemgrep` 标注或位于测试辅助函数。L2 oxlint 18 warnings 为 `only-export-components`（i18n/theme 全局 hook 刻意导出）+ `exhaustive-deps`（已加 eslint-disable 注释的刻意抑制），修复风险 > 收益，不动
+- **L5 copy_dir 深度限制**：备份目录递归复制加 64 层深度上限，防极端深目录栈溢出（`src-tauri/src/commands/backup.rs`）
+- **测试**：157 单元全过，tsc 0，semgrep 0
+
+---
+
 ## 2026-08-12（代码审计修复 · H1 私密泄漏 + M1/M2 scopeParser）
 
 - **H1 私密目录过滤漏洞**：P6 只在 `search` 命令过滤了 private 目录，AI 聊天检索路径（`bm25_relevant_hits`/`prepare_smart_prompt`）漏了——私密文件仍会出现在 AI 答案里。抽 `has_private_dirs`/`list_public_dir_ids` 公共函数到 `db/dir_config.rs`，三处检索入口（search、smart_search、conversation）统一在 dir_ids 为空时注入非 private 过滤（`src-tauri/src/db/dir_config.rs`、`src-tauri/src/commands/search.rs`、`src-tauri/src/commands/ai.rs`）
