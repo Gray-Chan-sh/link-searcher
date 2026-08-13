@@ -4,7 +4,14 @@
 
 ---
 
-## 2026-08-12（检索范围控制 · 会话级范围 + /命令接线）
+## 2026-08-12（波 2 · 混合权重可调 + 严格模式 + 专注模式）
+
+- **P1 混合权重可调（借鉴 RAGFlow 0.3/0.7）**：`AppConfig.semantic_weight`（默认 0.3 = 语义30%/关键词70%，serde default 兼容旧配置）；`semantic_fuse` 从等权 RRF 改为**分数级加权混合** `score = w×cosine + (1-w)×bm25_norm`（BM25 归一化到 0~1 与 cosine 同尺度）；抽 `weighted_mix` 纯函数 + 3 单测；设置页 AI 区新增「检索策略」滑杆（`semantic_weight` 全局设置，经 `ConfigInfo` 读写 round-trip）（`src-tauri/src/config.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/config.rs`、`src/pages/Settings.tsx`、`src/api/config.ts`）
+- **P2 严格模式（借鉴 AnythingLLM query 模式）**：`ChatSession.strict_docs` 会话级字段；`conversation_ask`/`conversation_ask_stream` 加 `strict_docs` 参数，`prepare_conversation_prompt` 空材料时返回「未在与当前范围匹配的文档中找到依据」而非 LLM 自由发挥；ChatPanel 范围控制行加「仅依据文档」toggle（绿色高亮，会话持久化）（`src-tauri/src/commands/ai.rs`、`src/components/ChatPanel.tsx`、`src/api/files.ts`）
+- **P3 专注模式（借鉴 DeepVein 📎）**：`ChatSession.focus_file` 字段；树状浏览器**文件右键「专注分析」** → 会话设 focus_file；发送时若 focus_file 存在则 scope 仅该文件（忽略其他范围）；ChatPanel 范围控制行显示「📌 专注: xxx」chips 可退出（`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`）
+- **测试**：新增 `weighted_mix_prefers_keyword_when_weight_low`/`prefers_semantic_when_weight_high`/`empty_or_zero_bm25_handled` + `semantic_weight_defaults_to_0_3_and_round_trips`；155 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0，semgrep 0
+
+---
 
 - **背景**：通盘调研（编程 IDE→知识库→本地检索工具 Hyperlink/MangoFinder/LoFS）+ 审视波 1——砍掉与 `keep_old` 重复的 `@上轮` 继承；保留真正缺口：**会话级目录范围前端口** + **/命令前端解析从未接线**（后端起 ext/date 逻辑但前端硬编码 `conditions: []`，功能不可达）
 - **后端**：`conversation_ask`/`conversation_ask_stream` 新增 `session_scope_dir_ids` 参数并传入 `prepare_conversation_prompt`（此前写死 `&[]`）；修复 searcher 测试构造缺 `path_prefixes`（6 处）+ 集成测试 1 处（`src-tauri/src/commands/ai.rs`、`src-tauri/src/search/searcher.rs`、`src-tauri/tests/integration.rs`）

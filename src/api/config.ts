@@ -42,6 +42,7 @@ export interface ConfigInfo {
     providers: ProviderInfo[]
     active_embedding_model_id: string
     active_llm_model_id: string
+    semantic_weight: number
 }
 
 export interface MigrationProgress {

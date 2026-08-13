@@ -51,6 +51,11 @@ export default function AiChat() {
     setPendingMention(path)
   }, [])
 
+  // 专注模式：会话仅分析此文件（临时屏蔽其他范围），追问持续直到退出
+  const handleFocusFile = useCallback((path: string) => {
+    if (activeSession) handleSessionChange({ ...activeSession, focus_file: path })
+  }, [activeSession, handleSessionChange])
+
   // /范围:全库或目录路径 → 解析为 dir_id 并更新会话范围
   const handleScopeAction = useCallback((action: string) => {
     if (!activeSession) return
@@ -218,7 +223,7 @@ export default function AiChat() {
                     </button>
                   </div>
                   {dt.root && dt.root.map(child => (
-                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} />
+                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onFocus={handleFocusFile} />
                   ))}
                 </div>
               ))}
@@ -275,12 +280,13 @@ export default function AiChat() {
   )
 }
 
-/** 递归文件树：目录左键展开/折叠、右键「加入对话」；文件左键「加入对话」。
+/** 递归文件树：目录左键展开/折叠、右键「加入对话」；文件左键「加入对话」、右键文件「专注分析」。
  *  `node.path` 为绝对路径，`basePath` 为目录根，点击时转相对路径（与 file_tracking 一致）。 */
-function TreeFileList({ node, basePath, onPick }: {
+function TreeFileList({ node, basePath, onPick, onFocus }: {
   node: DirTreeNode
   basePath: string
   onPick: (relPath: string) => void
+  onFocus?: (relPath: string) => void
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -316,7 +322,7 @@ function TreeFileList({ node, basePath, onPick }: {
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
         onClick={handleToggle}
-        onContextMenu={e => { e.preventDefault(); onPick(rel) }}
+        onContextMenu={e => { e.preventDefault(); if (!isDir && onFocus) { onFocus(rel) } else { onPick(rel) } }}
         className="w-full flex items-center gap-1 px-2 py-0.5 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
       >

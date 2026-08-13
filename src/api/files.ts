@@ -82,6 +82,13 @@ export interface ChatSession {
   pending_query?: string | null
   pending_started_at?: number | null
   per_turn_evidence?: PerTurnEvidence[]
+  per_turn_scopes?: PerTurnScope[]
+  scope_dir_ids?: string[]
+  scope_conditions?: ScopeCondition[]
+  /** P2：严格模式——范围内无命中时拒绝回答 */
+  strict_docs?: boolean
+  /** P3：专注模式——仅分析此文件 */
+  focus_file?: string | null
 }
 
 export async function cancelAiRequest(): Promise<void> {
@@ -111,8 +118,8 @@ export interface ScopeCondition {
   parsed?: string | null
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionScopeDirIds?: string[]): Promise<string> {
-  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [] })
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionScopeDirIds?: string[], strictDocs?: boolean): Promise<string> {
+  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], strictDocs: strictDocs ?? false })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -130,8 +137,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionScopeDirIds?: string[]): Promise<void> {
-  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [] })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionScopeDirIds?: string[], strictDocs?: boolean): Promise<void> {
+  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], strictDocs: strictDocs ?? false })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {

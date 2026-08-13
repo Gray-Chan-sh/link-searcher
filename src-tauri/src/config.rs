@@ -117,6 +117,14 @@ pub struct AppConfig {
     /// `provider_id:model_id` of the LLM model in use.
     #[serde(default)]
     pub active_llm_model_id: String,
+    /// 语义 vs 关键词检索权重（0~1，默认 0.3 = 语义30%/关键词70%）。
+    /// 语义搜索融合时：score = w×cosine + (1-w)×bm25_norm。
+    #[serde(default = "default_semantic_weight")]
+    pub semantic_weight: f64,
+}
+
+fn default_semantic_weight() -> f64 {
+    0.3
 }
 
 impl Default for AppConfig {
@@ -135,6 +143,7 @@ impl Default for AppConfig {
             providers: Vec::new(),
             active_embedding_model_id: String::new(),
             active_llm_model_id: String::new(),
+            semantic_weight: 0.3,
         }
     }
 }
@@ -310,6 +319,20 @@ mod tests {
         let legacy = r#"{"id":"m1","model_type":"Llm"}"#;
         let m: ModelConfig = serde_json::from_str(legacy).unwrap();
         assert!(!m.enabled, "legacy models default to disabled");
+    }
+
+    #[test]
+    fn semantic_weight_defaults_to_0_3_and_round_trips() {
+        let mut c = AppConfig::default();
+        assert_eq!(c.semantic_weight, 0.3, "default must be 0.3");
+        c.semantic_weight = 0.7;
+        let json = serde_json::to_string(&c).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.semantic_weight, 0.7, "round-trip must preserve");
+        // 旧配置无该字段 → 默认 0.3
+        let legacy = r#"{"data_dir":"/tmp/x"}"#;
+        let old: AppConfig = serde_json::from_str(legacy).unwrap();
+        assert_eq!(old.semantic_weight, 0.3, "legacy config defaults to 0.3");
     }
 
     #[test]
