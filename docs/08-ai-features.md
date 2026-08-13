@@ -113,7 +113,7 @@ AI 聊天支持精确控制检索范围：
 
 以下流程图展示了 AI 问答从提问到回答的完整过程：
 
-![AI 问答流程](screenshots/diagram-ai-flow.png)
+![AI 问答流程](screenshots/excalidraw-ai-flow.png)
 
 ## 隐私提示
 
