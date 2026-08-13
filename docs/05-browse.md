@@ -8,7 +8,7 @@
 
 点击左侧导航栏的「浏览」图标，进入文件浏览页面。
 
-![浏览页](screenshots/03-browse-page.png)
+![浏览页](screenshots/annotated/browse-page-annotated.png)
 
 浏览页分为三个区域：
 - **左侧**：目录树（按资料库目录结构浏览）

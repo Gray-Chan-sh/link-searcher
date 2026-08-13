@@ -8,7 +8,7 @@
 
 添加资料库后，应用会自动开始扫描和索引文件。点击左侧导航栏的「索引状态」查看进度。
 
-![索引状态](screenshots/05-index-page.png)
+![索引状态](screenshots/annotated/index-page-annotated.png)
 
 页面顶部显示四个统计卡片：
 

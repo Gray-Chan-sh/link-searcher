@@ -6,7 +6,7 @@
 
 设置页分为五个标签页，所有选项**即时自动保存**，无需手动点击保存按钮。
 
-![设置页](screenshots/08-settings-page.png)
+![设置页](screenshots/annotated/settings-page-annotated.png)
 
 ---
 
