@@ -484,7 +484,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           {/* 严格模式 toggle（仅依据文档） */}
           <button
             type="button"
-            onClick={() => onSessionChange({ ...session, strict_docs: !session?.strict_docs })}
+            onClick={() => session && onSessionChange({ ...session, strict_docs: !session.strict_docs })}
             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
               session?.strict_docs
                 ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700'

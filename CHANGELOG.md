@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-08-13（用户手册重写 · 图文并茂新手向）
+
+- **重写 USER_MANUAL.md**：从技术文档转为新手向图文手册，每节配截图；新增 13 张操作截图（8 页全景 + 设置页 5 tab），全部截取自真实运行环境与演示数据（`docs/screenshots/`）
+- **造演示样本数据**：Python 脚本生成 19 个涵盖 12 种格式的文件（md/txt/csv/docx/xlsx/pptx/PDF/扫描件PDF/图片OCR/bin），统一存放于 `~/Documents/Link-Searcher-Demo/`，用于手册截图与功能演示（`gen_demo_data.py` 临时脚本已清理）
+- **手册结构**：11 章，含新手引导、搜索入门、AI 增强、资料库、索引管理、设置详解、FAQs 等，保留全部 mermaid 流程图
+
+## 2026-08-13（修复 AI 聊天页打开即崩溃 · 前端 TDZ）
+
+- **点击「AI 聊天」显示"应用出错了"**：`AiChat` 中 `handleSessionChange`（useCallback）声明在其调用者 `handleFocusFile`/`handleScopeAction`/`handleSetSessionScope`/`handleClearSessionScope` 之后，依赖数组在渲染时访问尚未初始化的 `const` 触发 TDZ `ReferenceError`，被错误边界兜底成通用提示。将 `handleSessionChange` 上移至所有调用者之前（`src/pages/AiChat.tsx`）
+- **错误边界吞错误**：`ErrorBoundary` 只显示通用文案不显示错误详情，导致无法定位。改为显示 `error.message` + stack + 重试按钮，并 `componentDidCatch` 写 console（`src/components/ErrorBoundary.tsx`）
+- **`PerTurnScope` 前端类型未定义**：`ChatSession.per_turn_scopes` 引用未定义的 `PerTurnScope`，`tsc -b` 报 TS2552。补定义接口（turn_index/files/dirs，对齐后端 `commands/ai.rs`）（`src/api/files.ts`）
+- **strict_docs toggle 空会话**：`{...session, strict_docs}` 在 session 为 null 时展开为 `{}` 且缺 id，加 `session &&` 守卫（`src/components/ChatPanel.tsx`）
+- **dirTrees root 类型错误**：state 声明 `root: DirTreeNode | null` 与 `getDirChildren` 返回 `DirTreeNode[]` 不符，改为 `DirTreeNode[] | null`（`src/pages/AiChat.tsx`）
+- **tsc -b 被绕过**：根 tsconfig `"files": []` + project references 导致裸 `tsc --noEmit` 零文件空过；正确检查为 `tsc -b`。`tsconfig.app.json` 排除 `__tests__`（Node 原生 type-stripping 单测，含 `node:assert`）
+- **测试**：tsc -b 0，vite build 通过，semgrep ERROR 0，scopeParser 单测 11 断言全过
+
+---
+
 ## 2026-08-12（审计复核 + 技术债收尾）
 
 - **审计复核修正**：初版审计的 L3"363 处生产 unwrap"、L4"indexer.rs read().unwrap() 锁中毒"经精确复核（awk 切分 `#[cfg(test)]` 块）均属**误判**——真实生产代码 unwrap 接近 0，仅存几处均有 `nosemgrep` 标注或位于测试辅助函数。L2 oxlint 18 warnings 为 `only-export-components`（i18n/theme 全局 hook 刻意导出）+ `exhaustive-deps`（已加 eslint-disable 注释的刻意抑制），修复风险 > 收益，不动
