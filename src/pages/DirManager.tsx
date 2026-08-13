@@ -1,5 +1,5 @@
 import { useDirs } from '../hooks/useDirs'
-import { addDir } from '../api/dirs'
+import { addDir, updateDir } from '../api/dirs'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
@@ -9,6 +9,13 @@ import { ask } from '@tauri-apps/plugin-dialog'
 export default function DirManager() {
   const { t } = useI18n()
   const { dirs, loading, error, addDirectory, removeDirectory, refresh } = useDirs()
+
+  const handleTogglePrivate = async (dirId: string, current: boolean) => {
+    try {
+      await updateDir(dirId, undefined, undefined, undefined, undefined, undefined, !current)
+      await refresh()
+    } catch { /* ignore */ }
+  }
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
@@ -84,6 +91,18 @@ export default function DirManager() {
                   {dir.recursive && (
                     <span className="text-xs text-gray-400 dark:text-gray-500">{t('recursive')}</span>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => handleTogglePrivate(dir.id, !!dir.private)}
+                    className={`ml-auto text-xs px-2 py-0.5 rounded transition-colors ${
+                      dir.private
+                        ? 'bg-red-100 dark:bg-red-900/30 text-red-700 dark:text-red-300'
+                        : 'text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                    }`}
+                    title={dir.private ? t('private_dir_on') : t('private_dir_off')}
+                  >
+                    {dir.private ? t('private_dir') : t('public_dir')}
+                  </button>
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5 font-mono">{dir.path}</p>
                 <div className="flex items-center gap-3 mt-2 text-xs text-gray-400 dark:text-gray-500">

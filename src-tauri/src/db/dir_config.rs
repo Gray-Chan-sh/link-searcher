@@ -19,10 +19,11 @@ pub struct DirConfig {
     pub recursive: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// 私密目录标记：不索引、不搜索（P6，敏感数据保护）。
+    pub private: bool,
 }
 
 /// Fields that can be updated on an existing directory config.
-///
 /// Only `Some` fields are written; `None` fields are left unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct DirUpdate {
@@ -31,6 +32,7 @@ pub struct DirUpdate {
     pub exclude_patterns: Option<String>,
     pub include_exts: Option<String>,
     pub recursive: Option<bool>,
+    pub private: Option<bool>,
 }
 
 /// Add a new directory configuration. Returns the created config.
@@ -51,13 +53,13 @@ pub fn add_dir(
     let rec_i64: i64 = if recursive { 1 } else { 0 };
 
     conn.execute(
-        "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+        "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0)",
         rusqlite::params![id, path, alias, lang, exclude_patterns, include_exts, rec_i64, now],
     )
     .context("failed to add directory config")?;
 
-    Ok(DirConfig {
+Ok(DirConfig {
         id,
         path: path.to_string(),
         alias: alias.map(String::from),
@@ -67,6 +69,7 @@ pub fn add_dir(
         recursive,
         created_at: now,
         updated_at: now,
+        private: false,
     })
 }
 
@@ -84,7 +87,7 @@ pub fn remove_dir(conn: &Connection, dir_id: &str) -> Result<()> {
 /// List all directory configurations, ordered by path.
 pub fn list_dirs(conn: &Connection) -> Result<Vec<DirConfig>> {
     let mut stmt = conn
-        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at \
+        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private \
                    FROM dir_config ORDER BY path")
         .context("failed to prepare list_dirs")?;
     let rows = stmt
@@ -97,7 +100,7 @@ pub fn list_dirs(conn: &Connection) -> Result<Vec<DirConfig>> {
 /// Get a single directory configuration by id.
 pub fn get_dir(conn: &Connection, dir_id: &str) -> Result<Option<DirConfig>> {
     let mut stmt = conn
-        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at \
+        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private \
                    FROM dir_config WHERE id = ?1")
         .context("failed to prepare get_dir")?;
     let mut rows = stmt
@@ -130,6 +133,10 @@ pub fn update_dir(conn: &Connection, dir_id: &str, updates: DirUpdate) -> Result
     }
     if let Some(v) = updates.recursive {
         sets.push("recursive = ?");
+        params.push(Box::new(v as i64));
+    }
+    if let Some(v) = updates.private {
+        sets.push("private = ?");
         params.push(Box::new(v as i64));
     }
 
@@ -167,6 +174,7 @@ fn row_to_dir_config(row: &rusqlite::Row) -> rusqlite::Result<DirConfig> {
         recursive: row.get::<_, i64>("recursive")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        private: row.get::<_, i64>("private")? != 0,
     })
 }
 
@@ -232,6 +240,7 @@ mod tests {
                 alias: Some("New".into()),
                 ocr_lang: Some("fra".into()),
                 recursive: Some(false),
+                private: None,
                 ..Default::default()
             },
         )
