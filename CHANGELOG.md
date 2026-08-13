@@ -17,7 +17,7 @@
 - **重写 USER_MANUAL.md**：从技术文档转为新手向图文手册，每节配截图；新增 13 张操作截图（8 页全景 + 设置页 5 tab），全部截取自真实运行环境与演示数据（`docs/screenshots/`）
 - **造演示样本数据**：Python 脚本生成 19 个涵盖 12 种格式的文件（md/txt/csv/docx/xlsx/pptx/PDF/扫描件PDF/图片OCR/bin），统一存放于 `~/Documents/Link-Searcher-Demo/`，用于手册截图与功能演示（`gen_demo_data.py` 临时脚本已清理）
 - **手册结构**：11 章，含新手引导、搜索入门、AI 增强、资料库、索引管理、设置详解、FAQs 等
-- **流程图绘风格化**：5 个 mermaid 流程图全部替换为 draw.io 绘制的 300dpi 高清 PNG 图（`docs/screenshots/diagram-*.png`），使用 tech-blue / nature 主题，正交路由，统一视觉风格
+- **流程图绘风格化**：5 个 mermaid 流程图先替换为 draw.io 图，后替换为 excalidraw 手绘风格图（`docs/screenshots/excalidraw-*.png`），使用 Excalidraw 8 色语义调色板，Kroki API + rsvg-convert 导出
 
 ## 2026-08-13（修复 AI 聊天页打开即崩溃 · 前端 TDZ）
 

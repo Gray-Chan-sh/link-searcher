@@ -92,7 +92,7 @@
 
 应用启动后会自动监控所有资料库目录的文件变更：
 
-![实时文件监控](screenshots/diagram-watcher.png)
+![实时文件监控](screenshots/excalidraw-watcher.png)
 
 - 文件新增/修改后，300ms 防抖合并，自动索引
 - 文件删除后，自动从索引中移除

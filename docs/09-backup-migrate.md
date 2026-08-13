@@ -67,7 +67,7 @@ Link-Searcher 的所有数据存储在本地：
 
 以下流程图展示了索引状态页各种操作对应的数据生命周期：
 
-![数据生命周期](screenshots/diagram-data-lifecycle.png)
+![数据生命周期](screenshots/excalidraw-data-lifecycle.png)
 
 ## ✅ 本章验证清单
 
