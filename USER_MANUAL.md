@@ -195,20 +195,9 @@ npm run tauri dev
 
 ### 3.6 搜索流程（技术示意）
 
-```mermaid
-flowchart TD
-    A["搜索请求"] --> B["过滤解析<br/>目录(相对路径映射) / 扩展名 / 日期"]
-    B --> C["Tantivy BM25 检索<br/>(jieba 分词, 全小写归一)"]
-    C --> D["排序 (相关性/日期/名称/大小) + 分页"]
-    D --> E{"语义开关?"}
-    E -->|"否"| F["直接返回当前页"]
-    E -->|"是"| G["并行取全库 Top-100 BM25<br/>(与页无关, 保证融合公平)"]
-    G --> H["embedding 网关 查询向量<br/>+ 全库余弦打分 top-N"]
-    H --> I["RRF 融合重排<br/>score = Σ 1/(60+rank)"]
-    I --> J["按页码切片返回"]
-    F --> K["记入搜索历史"]
-    J --> K
-```
+![搜索流程](docs/screenshots/diagram-search-flow.png)
+
+> **图 6：搜索流程**——搜索请求经 BM25 检索、语义融合后返回结果，全程记入历史。
 
 ### 3.7 键盘操作
 
@@ -293,22 +282,9 @@ AI 聊天页提供**多轮对话**式文档检索，首问自动检索文档，�
 
 ### 4.6 AI 问答流程（技术示意）
 
-```mermaid
-flowchart TD
-    A["用户提问"] --> B{"会话中已有来源文件?"}
-    B -->|"否 (首问)"| C["smart_search"]
-    B -->|"是 (追问)"| D["conversation_ask"]
-    C --> E["问题 jieba 分词 → 显式 OR 检索<br/>(避免整句 PhraseQuery 陷阱)"]
-    E --> F["BM25 命中 → 加载文档内容"]
-    F --> G{"有可读内容?"}
-    G -->|"否"| H["提示无相关内容"]
-    G -->|"是"| I["组装材料 + 问题 → 调 LLM<br/>(max_tokens 4096, 300s 超时)"]
-    D --> J["按追问问题重新 BM25 检索<br/>+ 保留对话提及过的旧依据 → 调 LLM"]
-    I --> K["返回回答 + 来源文件列表"]
-    J --> K
-    K --> L["前端 ReactMarkdown 渲染<br/>(remark-gfm 支持表格)"]
-    L --> M["回答写入会话并持久化<br/>chat_history.json"]
-```
+![AI 问答流程](docs/screenshots/diagram-ai-flow.png)
+
+> **图 8：AI 问答流程**——首问经 smart_search 检索，追问经 conversation_ask 重检索，合并后调 LLM 回答。
 
 ---
 
@@ -456,41 +432,15 @@ flowchart TD
 
 ### 7.7 文件扫描与索引（技术示意）
 
-```mermaid
-flowchart TD
-    A["触发扫描<br/>(启动 / 手动 / 定时)"] --> B{"扫描类型"}
-    B -->|"全量 full_scan"| C["两阶段: 先计数(3s 超时保护)<br/>再遍历"]
-    B -->|"增量 incremental_scan"| D["对比 mtime 与上次扫描时间<br/>仅处理新增/变更"]
-    B -->|"启动 startup_scan"| E["增量 + 移位检测<br/>(文件名+大小 → MD5 校验)"]
-    C --> F["递归遍历<br/>过滤: 排除规则 + 扩展名白名单"]
-    D --> F
-    E --> F
-    F --> G{"needs_reindex?<br/>(mtime 变更 / pending / extracted)"}
-    G -->|"否"| H["记录入 on_disk 集合"]
-    G -->|"是"| I["upsert_file + 排队 BatchJob<br/>(记录保持 pending)"]
-    I --> J["batch_index: Rayon 并行提取文本"]
-    J --> K{"Tantivy add_document + <br/>update_indexed 成功?"}
-    K -->|"成功"| L["写 content_index (md5 去重)<br/>标记 indexed=1"]
-    K -->|"失败"| M["回滚 delete_document<br/>记录保持 pending 待重试"]
-    H --> N["删除检测: DB 有记录而磁盘无<br/>→ delete_file"]
-    L --> N
-    N --> O["commit 索引 → 扫描完成报告<br/>(added/modified/deleted/errors)"]
-```
+![文件扫描与索引](docs/screenshots/diagram-scan-index.png)
+
+> **图：文件扫描与索引流程**——三种扫描类型→递归遍历→按需索引→Tantivy 写入→删除检测→完成报告。
 
 ### 7.8 实时文件监控（技术示意）
 
-```mermaid
-flowchart LR
-    A["文件系统事件 (notify)"] --> B["300ms 防抖合并"]
-    B --> C{"事件类型"}
-    C -->|"Create / Modify"| D["查 upsert 前记录:<br/>已索引且 mtime/size 未变?"]
-    D -->|"是 (虚假事件)"| E["跳过, 防止 re-index 风暴"]
-    D -->|"否"| F["upsert + index_file 单文件"]
-    C -->|"Delete"| G["按相对路径查记录 → delete_file"]
-    C -->|"Failed 记录"| D
-    F --> H["写日志 + 索引即时更新"]
-    G --> H
-```
+![实时文件监控](docs/screenshots/diagram-watcher.png)
+
+> **图：实时文件监控**——文件系统事件经 300ms 防抖、按类型分发处理，即时更新索引。
 
 ---
 
@@ -600,20 +550,9 @@ flowchart LR
 
 ### 9.5 数据生命周期（技术示意）
 
-```mermaid
-flowchart TD
-    A["索引状态页操作区"] --> B{"选择操作"}
-    B -->|"重建索引"| C["临时索引目录全新构建<br/>清空 file_tracking / content_index<br/>/ doc_embeddings / doc_summaries<br/>→ 全量重扫"]
-    B -->|"重提取缺失内容"| D["找 md5 存在但无内容的文件<br/>→ 批量重提取 (先删陈旧文档防重复)"]
-    B -->|"补齐语义向量"| E["找缺 embedding 的已索引文件<br/>→ 批量生成向量 (不重新提取)"]
-    B -->|"手动备份"| F["在线备份 data.db + 索引目录"]
-    B -->|"迁移数据"| G["复制全部数据到新目录<br/>→ 更新配置 → 重启"]
-    C --> H
-    D --> H
-    E --> H
-    F --> H
-    G --> H["完成后自检 / 提示结果"]
-```
+![数据生命周期](docs/screenshots/diagram-data-lifecycle.png)
+
+> **图：数据生命周期**——索引状态页的五种操作及其对应的数据处理流程。
 
 ---
 
