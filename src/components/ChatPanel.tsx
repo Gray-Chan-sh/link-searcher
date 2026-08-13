@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, searchFilePaths, type ChatMessage, type ChatSession } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import MentionPicker from './MentionPicker'
 
