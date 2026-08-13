@@ -10,6 +10,7 @@ export interface DirConfig {
   recursive: boolean
   total_files?: number
   indexed_files?: number
+  private?: boolean
 }
 
 export async function addDir(path: string, alias?: string, recursive?: boolean): Promise<DirConfig> {
@@ -37,4 +38,8 @@ export async function getDirTree(dirId: string, includeFiles?: boolean): Promise
 
 export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]> {
   return invoke<DirTreeNode[]>('get_dir_children', { parentPath })
+}
+
+export async function updateDir(id: string, alias?: string, ocrLang?: string, excludePatterns?: string, includeExts?: string, recursive?: boolean, private_?: boolean): Promise<void> {
+  return invoke<void>('update_dir', { id, alias, ocrLang, excludePatterns, includeExts, recursive, private: private_ })
 }

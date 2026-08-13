@@ -63,6 +63,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // files that already failed verification + retry).
     ensure_dead_content_column(&tx)?;
 
+    // 私密目录标记：P6 —— 标记的目录不索引、不搜索（敏感数据保护）。
+    ensure_dir_config_private_column(&tx)?;
+
     seed_default_settings(&tx)?;
 
     tx.execute(
@@ -126,6 +129,29 @@ fn ensure_dead_content_column(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `private` column to `dir_config` (P6：私密目录不索引不搜索)。
+fn ensure_dir_config_private_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(dir_config)")
+            .context("failed to inspect dir_config")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "private")
+    };
+    if has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE dir_config ADD COLUMN private INTEGER NOT NULL DEFAULT 0")
+        .context("failed to add private column")?;
+    Ok(())
+}
+
 const CREATE_TABLES_SQL: &str = "
     CREATE TABLE IF NOT EXISTS file_tracking (
         id          TEXT PRIMARY KEY,
@@ -165,7 +191,8 @@ const CREATE_TABLES_SQL: &str = "
         include_exts    TEXT,
         recursive       INTEGER NOT NULL DEFAULT 1,
         created_at      INTEGER NOT NULL,
-        updated_at      INTEGER NOT NULL
+        updated_at      INTEGER NOT NULL,
+        private         INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS search_history (

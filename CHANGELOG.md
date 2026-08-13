@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-08-12（P6 私密目录标记 · 不索引不搜索）
+
+- **P6 私密目录标记（借鉴 Hyperlink 选择性索引）**：`dir_config` 表加 `private` 列（migration + CREATE_TABLES 同步）；`DirConfig`/`DirConfigWithStats` 加 `private` 字段；`DirUpdate` 加 `private` 选项；`update_dir` 命令加 `private` 参数；**搜索过滤**——全库搜索时自动排除 private 目录的文件（`commands/search.rs`）；**前端 DirManager** 每行加「私密/公开」toggle 按钮，点击即保存（`DirManager.tsx`、`api/dirs.ts`）
+- **测试**：156 单元 + 9 集成 + 6 IPC + 2 OCR 全过，tsc 0，semgrep 0
+
+---
+
 ## 2026-08-12（波 2 · 混合权重可调 + 严格模式 + 专注模式）
 
 - **P1 混合权重可调（借鉴 RAGFlow 0.3/0.7）**：`AppConfig.semantic_weight`（默认 0.3 = 语义30%/关键词70%，serde default 兼容旧配置）；`semantic_fuse` 从等权 RRF 改为**分数级加权混合** `score = w×cosine + (1-w)×bm25_norm`（BM25 归一化到 0~1 与 cosine 同尺度）；抽 `weighted_mix` 纯函数 + 3 单测；设置页 AI 区新增「检索策略」滑杆（`semantic_weight` 全局设置，经 `ConfigInfo` 读写 round-trip）（`src-tauri/src/config.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/config.rs`、`src/pages/Settings.tsx`、`src/api/config.ts`）
