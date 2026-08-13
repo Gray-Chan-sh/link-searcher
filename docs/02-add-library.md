@@ -8,7 +8,7 @@
 
 在左侧导航栏中，点击「资料库」图标，进入资料库管理页面。
 
-![资料库管理](screenshots/04-dirs-page.png)
+![资料库管理](screenshots/annotated/dirs-page-annotated.png)
 
 > 页面顶部显示「资料库」标题，右侧有「+ 添加目录」按钮。下方列出已添加的目录。
 

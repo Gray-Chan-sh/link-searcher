@@ -46,7 +46,7 @@ npm run tauri dev
 
 启动应用后，你将看到以下界面：
 
-![搜索页](screenshots/01-search-page-overview.png)
+![搜索页](screenshots/annotated/search-page-annotated.png)
 
 **界面布局**：
 - **左侧导航栏**：8 个页面入口（搜索、AI 聊天、浏览、资料库、索引状态、日志、文件类型、设置）

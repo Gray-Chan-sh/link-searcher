@@ -8,7 +8,7 @@
 
 点击左侧导航栏的「搜索」图标，进入搜索页面。
 
-![搜索页](screenshots/01-search-page-overview.png)
+![搜索页](screenshots/annotated/search-page-annotated.png)
 
 搜索页分为三个区域：
 - **左侧**：筛选面板（目录树 + 文件类型）
