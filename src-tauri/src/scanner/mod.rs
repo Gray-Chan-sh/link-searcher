@@ -86,6 +86,10 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
+        if config.private {
+            log::info!("[SCAN] 私密目录跳过: {}", config.path);
+            return Ok(ScanResult { total_files: 0, indexed: 0, added: 0, deleted: 0, modified: 0, errors: 0, duration_ms: 0 });
+        }
         let dir_root = &config.path;
         log::info!("[SCAN] 开始扫描: {}", config.path);
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
@@ -274,6 +278,10 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
+        if config.private {
+            log::info!("[SCAN] 私密目录跳过(增量): {}", config.path);
+            return Ok(ScanResult { total_files: 0, indexed: 0, added: 0, deleted: 0, modified: 0, errors: 0, duration_ms: 0 });
+        }
         let dir_root = &config.path;
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
         let include_exts = parse_include_exts(&config.include_exts);
@@ -411,6 +419,10 @@ impl Scanner {
 
         let config = dir_config::get_dir(&conn, dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir_config not found: {dir_id}"))?;
+        if config.private {
+            log::info!("[STARTUP] 私密目录跳过: {}", config.path);
+            return Ok(ScanResult { total_files: 0, indexed: 0, added: 0, deleted: 0, modified: 0, errors: 0, duration_ms: 0 });
+        }
         let dir_root = &config.path;
         log::info!("[STARTUP] 启动扫描: {}", config.path);
         let exclude = parse_exclude_patterns(&config.exclude_patterns);
@@ -610,6 +622,9 @@ impl Scanner {
         // Get directory root for this dir_id
         let dir_config = dir_config::get_dir(&conn, &event.dir_id)?
             .ok_or_else(|| anyhow::anyhow!("dir config not found: {}", event.dir_id))?;
+        if dir_config.private {
+            return Ok(());
+        }
         let dir_root = &dir_config.path;
 
         // Compute relative path
