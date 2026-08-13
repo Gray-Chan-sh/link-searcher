@@ -250,6 +250,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     if (scopeAction) {
       onScopeAction?.(scopeAction)
     }
+    // 专注模式：仅分析 focus_file，忽略其他范围（会话级，直到退出）
+    if (session.focus_file) {
+      scope.mention_files = [session.focus_file]
+      scope.mention_dirs = []
+    }
     setInput('')
     setMentionChips([])
     setConditionChips([])
@@ -268,7 +273,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       if (sourceIds.length === 0) {
         await smartSearchStream(cleanQ, session.id)
       } else {
-        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [])
+        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [], session.strict_docs ?? false)
       }
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
@@ -308,7 +313,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             pending_started_at: null,
           })
         } else {
-          const answer = await conversationAsk(base, sourceIds)
+          const answer = await conversationAsk(base, sourceIds, undefined, undefined, session.strict_docs ?? false)
           if (latestReqIdRef.current !== reqId) return
           patchSession({
             messages: [...base, { role: 'assistant', content: answer }],
@@ -464,6 +469,31 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               <span className="font-mono">/{c.kind}:{c.value}</span>
             </span>
           ))}
+        </div>
+      )}
+
+      {llmEnabled && (
+        <div className="px-4 py-1 border-t border-gray-200 dark:border-gray-800 flex items-center gap-3 text-[10px]">
+          {/* 专注模式状态 */}
+          {session?.focus_file && (
+            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
+              📌 {t('focus_mode')}: {session.focus_file}
+              <button type="button" onClick={() => onSessionChange({ ...session, focus_file: null })} className="hover:text-amber-600">×</button>
+            </span>
+          )}
+          {/* 严格模式 toggle（仅依据文档） */}
+          <button
+            type="button"
+            onClick={() => onSessionChange({ ...session, strict_docs: !session?.strict_docs })}
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+              session?.strict_docs
+                ? 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 border border-green-300 dark:border-green-700'
+                : 'text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+            }`}
+          >
+            <span className={`size-1.5 rounded-full ${session?.strict_docs ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`} />
+            {t('strict_docs')}
+          </button>
         </div>
       )}
 

@@ -103,6 +103,16 @@ export default function Settings() {
     setAppConfig(updated)
   }
 
+  // 保存语义检索权重（P1 全局设置）
+  const handleSaveSemanticWeight = async () => {
+    if (!appConfig) return
+    try {
+      await updateConfig(appConfig)
+    } catch (e) {
+      setAiWarn(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const setProvidersLocal = (updater: (ps: ProviderInfo[]) => ProviderInfo[]) => {
     setAppConfig(c => (c ? { ...c, providers: updater(c.providers) } : c))
   }
@@ -529,6 +539,32 @@ export default function Settings() {
           )}
 
           <div className="text-xs font-semibold text-gray-700 dark:text-gray-300">{t('ai_current_usage')}</div>
+          {/* P1 检索策略：语义 vs 关键词权重滑杆 */}
+          <div className="p-3 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
+            <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
+              {t('retrieval_strategy')} — {t('semantic_weight_label')}
+            </label>
+            <input
+              type="range"
+              min="0" max="1" step="0.05"
+              value={appConfig?.semantic_weight ?? 0.3}
+              onChange={e => { const v = Number(e.target.value); setAppConfig(c => c ? { ...c, semantic_weight: v } : c) }}
+              className="w-full accent-purple-600"
+            />
+            <div className="flex justify-between text-[10px] text-gray-400 mt-0.5">
+              <span>{t('keyword_label')}</span>
+              <span>{(appConfig?.semantic_weight ?? 0.3) >= 0.5 ? t('semantic_label') : (appConfig?.semantic_weight ?? 0.3)}</span>
+              <span>{t('semantic_label')}</span>
+            </div>
+            <p className="text-[10px] text-gray-400 mt-1">{t('semantic_weight_hint')}</p>
+            <button
+              type="button"
+              onClick={handleSaveSemanticWeight}
+              className="mt-2 px-2 py-0.5 text-[10px] font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
+            >
+              {t('save')}
+            </button>
+          </div>
           <div className="space-y-3">
             <UsageSelect
               label={t('embedding_model')}

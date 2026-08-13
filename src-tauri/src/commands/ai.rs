@@ -469,6 +469,8 @@ fn parent_keywords(text: &str, max: usize) -> Vec<String> {
 /// Reciprocal Rank Fusion: score = Σ 1/(k + rank) summed over two
 /// pre-sorted lists (best-first). Lists must be ordered by score descending;
 /// fusion uses position as rank (0‑based → 1/(k+0), 1/(k+1), …).
+/// 生产路径已被 weighted mixing 替代；保留供测试验证 RRF 行为。
+#[cfg(test)]
 fn rrf_fuse(
     bm25_ranked: &[(String, f64)],
     semantic_ranked: &[(String, f32)],
@@ -489,14 +491,32 @@ fn rrf_fuse(
     ordered
 }
 
+/// 加权混合排序：score = w×cosine + (1-w)×(bm25/max_bm25)。
+/// BM25 归一化到 0~1 与 cosine 同尺度；返回按混合分降序的 (文件, 归一bm25, cosine, mix)。
+pub fn weighted_mix(
+    hits: Vec<(String, f64, f64)>,
+    w: f64,
+) -> Vec<(String, f64, f64, f64)> {
+    let max_bm25 = hits.iter().map(|(_, b, _)| *b).fold(0.0_f64, f64::max);
+    let norm = |raw: f64| if max_bm25 > 0.0 { raw / max_bm25 } else { 0.0 };
+    let mut fused: Vec<(String, f64, f64, f64)> = hits
+        .into_iter()
+        .map(|(fid, b, c)| (fid.clone(), norm(b), c, w * c + (1.0 - w) * norm(b)))
+        .collect();
+    fused.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+    fused
+}
+
 /// Semantic rerank of BM25 hits: embed the query, score the stored
-/// embeddings of the BM25 candidates by cosine, fuse both orders via RRF,
-/// and return the fused hits with their scores. `None` when any step fails
-/// (embedding gateway down, no stored vectors) — caller falls back to BM25.
+/// embeddings of the BM25 candidates by cosine, fuse both orders via
+/// weighted mixing (score = w×cosine + (1-w)×bm25_norm), and return the
+/// fused hits with their scores. `None` when any step fails (embedding
+/// gateway down, no stored vectors) — caller falls back to BM25.
 fn semantic_fuse(
     conn: &rusqlite::Connection,
     query: &str,
     bm25_hits: &[ScoredHit],
+    semantic_weight: f64,
 ) -> Option<Vec<ScoredHit>> {
     let q_vec = {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -519,46 +539,37 @@ fn semantic_fuse(
     if emb_map.is_empty() {
         return None;
     }
-    let semantic_ranked: Vec<(&ScoredHit, f32)> = bm25_hits
+    // 每份候选：原始 BM25 分 + cosine 相似度。
+    let scored: Vec<(&ScoredHit, f64, f64)> = bm25_hits
         .iter()
         .filter_map(|h| {
             emb_map
                 .get(h.file_id.as_str())
-                .map(|v| (h, crate::ai::cosine(&q_vec, v)))
+                .map(|v| (h, h.bm25_score.unwrap_or(0.0), crate::ai::cosine(&q_vec, v) as f64))
         })
         .collect();
-    let mut semantic_sorted = semantic_ranked.clone();
-    semantic_sorted.sort_by(|a, b| {
-        b.1.partial_cmp(&a.1)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let bm25_ranked: Vec<(String, f64)> = bm25_hits
+    if scored.is_empty() {
+        return None;
+    }
+    // BM25 分数归一化到 0~1（max 归一到 1）——与 cosine 同尺度才能加权。
+    let pairs: Vec<(String, f64, f64)> = scored
         .iter()
-        .map(|h| (h.file_id.clone(), h.bm25_score.unwrap_or(0.0)))
+        .map(|(h, b, c)| (h.file_id.clone(), *b, *c))
         .collect();
-    let semantic_for_rrf: Vec<(String, f32)> = semantic_sorted
-        .iter()
-        .map(|(h, score)| (h.file_id.clone(), *score))
-        .collect();
-    let fused = rrf_fuse(&bm25_ranked, &semantic_for_rrf, 60.0);
-    let score_of = |fid: &str| -> Option<f64> {
-        semantic_sorted.iter().find(|(h, _)| h.file_id == fid).map(|(_, s)| *s as f64)
-    };
-    let rrf_map: std::collections::HashMap<String, f64> =
-        fused.iter().map(|(f, s)| (f.clone(), *s)).collect();
+    let fused = weighted_mix(pairs, semantic_weight.clamp(0.0, 1.0));
     Some(
         fused
-            .into_iter()
-            .filter_map(|(fid, _)| {
-                bm25_hits
+            .iter()
+            .filter_map(|(fid, _, c, mix)| {
+                scored
                     .iter()
-                    .find(|h| h.file_id == fid)
-                    .map(|h| ScoredHit {
-                        file_id: fid.clone(),
+                    .find(|(h, _, _)| h.file_id == *fid)
+                    .map(|(h, b, _)| ScoredHit {
+                        file_id: h.file_id.clone(),
                         path: h.path.clone(),
-                        bm25_score: h.bm25_score,
-                        semantic_score: score_of(&fid),
-                        rrf_score: rrf_map.get(&fid).copied(),
+                        bm25_score: Some(*b),
+                        semantic_score: Some(*c),
+                        rrf_score: Some(*mix),
                         from_history: false,
                     })
             })
@@ -621,7 +632,8 @@ fn bm25_relevant_hits(
     }
 
     if semantic && crate::ai::embedding_enabled() && !bm25_hits.is_empty() {
-        if let Some(fused) = semantic_fuse(&conn, query, &bm25_hits) {
+        let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
+        if let Some(fused) = semantic_fuse(&conn, query, &bm25_hits, weight) {
             drop(conn);
             return Ok(fused.into_iter().take(limit).collect());
         }
@@ -647,6 +659,7 @@ async fn prepare_conversation_prompt(
     source_ids: &[String],
     scope: &TurnScope,
     session_scope_dir_ids: &[String],
+    strict_docs: bool,
 ) -> Result<PreparedConversation, String> {
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
     // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
@@ -819,6 +832,10 @@ async fn prepare_conversation_prompt(
     let source_files_final = merged.iter().map(|h| h.path.clone()).collect();
 
     let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
+    // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
+    if strict_docs && context.trim().is_empty() {
+        return Err("未在与当前范围匹配的文档中找到依据".into());
+    }
     let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
@@ -849,6 +866,7 @@ pub async fn conversation_ask(
     source_ids: Vec<String>,
     scope: TurnScope,
     session_scope_dir_ids: Vec<String>,
+    strict_docs: bool,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -864,7 +882,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids, strict_docs).await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -893,6 +911,7 @@ pub async fn conversation_ask_stream(
     session_id: String,
     scope: TurnScope,
     session_scope_dir_ids: Vec<String>,
+    strict_docs: bool,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
@@ -908,7 +927,7 @@ pub async fn conversation_ask_stream(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids, strict_docs).await?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -1025,6 +1044,12 @@ pub struct ChatSession {
     /// 会话级结构化条件（ext/date/模糊）。
     #[serde(default)]
     pub scope_conditions: Vec<ScopeCondition>,
+    /// P2 严格模式：范围内无命中时拒绝回答（会话级，可切换）。
+    #[serde(default)]
+    pub strict_docs: bool,
+    /// P3 专注模式：仅分析此文件（会话级，临时屏蔽其他范围）。
+    #[serde(default)]
+    pub focus_file: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1079,6 +1104,8 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     per_turn_scopes: vec![],
                     scope_dir_ids: vec![],
                     scope_conditions: vec![],
+                    strict_docs: false,
+                    focus_file: None,
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -1138,6 +1165,8 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
         per_turn_scopes: vec![],
         scope_dir_ids: vec![],
         scope_conditions: vec![],
+        strict_docs: false,
+        focus_file: None,
     };
     let id = session.id.clone();
     let mut h = read_history(&state.data_dir);
@@ -1335,6 +1364,40 @@ mod rag_tests {
     }
 
     #[test]
+    fn weighted_mix_prefers_keyword_when_weight_low() {
+        // 权重 0.1（偏关键词）：BM25 高的文档排前，即使 cosine 低。
+        let hits = vec![
+            ("kw".to_string(), 10.0, 0.1), // BM25 高、语义低
+            ("sem".to_string(), 2.0, 0.9), // BM25 低、语义高
+        ];
+        let r = weighted_mix(hits, 0.1);
+        assert_eq!(r[0].0, "kw", "低权重应偏向关键词命中");
+        // normalize: kw bm25=10→1.0, sem bm25=2→0.2
+        // kw mix = 0.1×0.1 + 0.9×1.0 = 0.91；sem mix = 0.1×0.9 + 0.9×0.2 = 0.27
+        assert!((r[0].3 - 0.91).abs() < 1e-9, "kw mix must be 0.91, got {}", r[0].3);
+    }
+
+    #[test]
+    fn weighted_mix_prefers_semantic_when_weight_high() {
+        let hits = vec![
+            ("kw".to_string(), 10.0, 0.1),
+            ("sem".to_string(), 2.0, 0.9),
+        ];
+        let r = weighted_mix(hits, 0.9);
+        assert_eq!(r[0].0, "sem", "高权重应偏向语义命中");
+    }
+
+    #[test]
+    fn weighted_mix_empty_or_zero_bm25_handled() {
+        // 空输入
+        assert!(weighted_mix(vec![], 0.3).is_empty());
+        // BM25 全 0 → 归一化 0，仅 cosine 主导
+        let r = weighted_mix(vec![("a".to_string(), 0.0, 0.8), ("b".to_string(), 0.0, 0.2)], 0.5);
+        assert_eq!(r[0].0, "a");
+        assert_eq!(r[0].1, 0.0, "zero BM25 normalizes to 0");
+    }
+
+    #[test]
     fn evidence_item_json_round_trip_preserves_all_fields() {
         let e = EvidenceItem {
             file_id: "f1".into(),
@@ -1394,6 +1457,8 @@ mod rag_tests {
             per_turn_scopes: vec![],
             scope_dir_ids: vec![],
             scope_conditions: vec![],
+            strict_docs: false,
+            focus_file: None,
             per_turn_evidence: vec![PerTurnEvidence {
                 turn_index: 0,
                 file_ids: vec!["f1".into()],
