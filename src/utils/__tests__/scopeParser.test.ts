@@ -39,4 +39,20 @@ assert.deepStrictEqual(r7.scope.inherit_from, [-1], 'S7: 继承最近轮')
 const r8 = parseScope('/模糊:跟去年收购相关的 有哪些')
 assert.deepStrictEqual(r8.scope.conditions[0], { kind: 'fuzzy', value: '跟去年收购相关的' }, 'S8: 模糊条件暂存')
 
+// S9: URL 不破坏（M1 回归）
+const r9 = parseScope('帮我总结 https://example.com/report.pdf 的内容')
+assert.equal(r9.cleanText, '帮我总结 https://example.com/report.pdf 的内容', 'S9: URL 完整保留')
+assert.deepStrictEqual(r9.scope.conditions, [], 'S9: URL 不产生条件')
+
+// S10: @@ 双符号前缀污染（M2 回归）
+const r10 = parseScope('对比 @@财务 和 健康')
+assert.deepStrictEqual(r10.scope.mention_dirs, ['财务'], 'S10: @@ 不应带入 @ 前缀')
+assert.equal(r10.cleanText, '对比 和 健康', 'S10: @@ 残留清理干净')
+
+// S11: 句尾孤立 @ 不报错、不产生 mention
+const r11 = parseScope('问题 @')
+assert.deepStrictEqual(r11.scope.mention_files, [], 'S11: 句尾 @ 无 mention_files')
+assert.deepStrictEqual(r11.scope.mention_dirs, [], 'S11: 句尾 @ 无 mention_dirs')
+assert.equal(r11.cleanText, '问题', 'S11: 孤立 @ 清理')
+
 console.log('ALL scopeParser assertions PASSED')

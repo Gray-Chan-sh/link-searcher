@@ -109,6 +109,25 @@ pub fn get_dir(conn: &Connection, dir_id: &str) -> Result<Option<DirConfig>> {
     Ok(rows.next().transpose().context("failed to read dir config row")?)
 }
 
+/// 是否有标记为私密的目录（P6）。
+pub fn has_private_dirs(conn: &Connection) -> Result<bool> {
+    conn.query_row("SELECT COUNT(*) FROM dir_config WHERE private = 1", [], |row| row.get::<_, i64>(0))
+        .map(|n| n > 0)
+        .context("failed to count private dirs")
+}
+
+/// 所有非私密目录的 id 列表——全库检索时用于排除私密目录的文件（P6）。
+pub fn list_public_dir_ids(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare("SELECT id FROM dir_config WHERE private = 0 OR private IS NULL")
+        .context("failed to prepare list_public_dir_ids")?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .context("failed to query public dir ids")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect public dir ids")
+}
+
 /// Update selected fields of a directory configuration.
 pub fn update_dir(conn: &Connection, dir_id: &str, updates: DirUpdate) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
@@ -198,6 +217,23 @@ mod tests {
         assert_eq!(dirs[0].alias.as_deref(), Some("Docs"));
         assert_eq!(dirs[0].ocr_lang, "eng");
         assert!(dirs[0].recursive);
+    }
+
+    #[test]
+    fn test_private_dir_filtering() {
+        let conn = setup_conn();
+        add_dir(&conn, "/home/public1", None, None, None, None, true).unwrap();
+        add_dir(&conn, "/home/secret", None, None, None, None, true).unwrap();
+        add_dir(&conn, "/home/public2", None, None, None, None, true).unwrap();
+        // 标记 /home/secret 为私密
+        let secret_id = list_dirs(&conn).unwrap()
+            .into_iter().find(|d| d.path == "/home/secret").unwrap().id;
+        update_dir(&conn, &secret_id, DirUpdate { private: Some(true), ..Default::default() }).unwrap();
+
+        assert!(has_private_dirs(&conn).unwrap(), "标记后应检测到私密目录");
+        let public_ids = list_public_dir_ids(&conn).unwrap();
+        assert_eq!(public_ids.len(), 2, "两个公开目录");
+        assert!(!public_ids.contains(&secret_id), "私密目录不应在公开列表");
     }
 
     #[test]

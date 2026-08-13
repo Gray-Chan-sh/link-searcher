@@ -224,11 +224,21 @@ fn prepare_smart_prompt(
         let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
         drop(mgr);
 
+        // P6 私密目录过滤：全库检索时排除 private 目录的文件。
+        let public_dir_ids = {
+            let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            if crate::db::dir_config::has_private_dirs(&conn).unwrap_or(false) {
+                Some(crate::db::dir_config::list_public_dir_ids(&conn).map_err(|e| format!("{e}"))?)
+            } else {
+                None
+            }
+        };
+
         let params = SearchParams {
             // NL questions become an exact PhraseQuery if parsed verbatim
             // (Tantivy default) — re-tokenise as explicit OR so any term hits.
             query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-            dir_ids: None, file_ids: None, ext_filter: None,
+            dir_ids: public_dir_ids, file_ids: None, ext_filter: None,
             date_from: None, date_to: None, path_prefixes: None,
             sort: SortField::Score, sort_order: "desc".to_string(),
             page: 1, page_size: 15, fuzzy: false, semantic: false,
@@ -604,6 +614,17 @@ fn bm25_relevant_hits(
         limit.max(100)
     } else {
         limit
+    };
+    // P6 私密目录过滤：全库检索（dir_ids 为空）时排除 private 目录的文件。
+    let dir_ids = if dir_ids.as_ref().is_none_or(|v| v.is_empty()) {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        if crate::db::dir_config::has_private_dirs(&conn).unwrap_or(false) {
+            Some(crate::db::dir_config::list_public_dir_ids(&conn).map_err(|e| format!("{e}"))?)
+        } else {
+            None
+        }
+    } else {
+        dir_ids
     };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),

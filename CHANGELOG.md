@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-12（代码审计修复 · H1 私密泄漏 + M1/M2 scopeParser）
+
+- **H1 私密目录过滤漏洞**：P6 只在 `search` 命令过滤了 private 目录，AI 聊天检索路径（`bm25_relevant_hits`/`prepare_smart_prompt`）漏了——私密文件仍会出现在 AI 答案里。抽 `has_private_dirs`/`list_public_dir_ids` 公共函数到 `db/dir_config.rs`，三处检索入口（search、smart_search、conversation）统一在 dir_ids 为空时注入非 private 过滤（`src-tauri/src/db/dir_config.rs`、`src-tauri/src/commands/search.rs`、`src-tauri/src/commands/ai.rs`）
+- **M1 URL 破坏**：scopeParser 的 `CMD_TOKEN_RE` 泛化清理把 `https://example.com` 的 `//example.com` 当命令剥离——删除该泛化清理（带冒号的命令已由精确正则剥离，无冒号的 `/xxx` 非合法命令不再误伤）
+- **M2 `@@` 前缀污染**：`MENTION_RE` 排除 `@` 字符 + `replaceAll` + 清理孤立 `@`——`@@财务` 不再带入 `@` 前缀
+- **L1 unused imports**：清理 IndexStatus、searchFilePaths（`src/pages/IndexStatus.tsx`、`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`）
+- **测试**：新增 `test_private_dir_filtering` + scopeParser S9(URL)/S10(@@)/S11(句尾@)；157 单元全过，tsc 0，semgrep 0
+
+---
+
 ## 2026-08-12（P6 私密目录标记 · 不索引不搜索）
 
 - **P6 私密目录标记（借鉴 Hyperlink 选择性索引）**：`dir_config` 表加 `private` 列（migration + CREATE_TABLES 同步）；`DirConfig`/`DirConfigWithStats` 加 `private` 字段；`DirUpdate` 加 `private` 选项；`update_dir` 命令加 `private` 参数；**搜索过滤**——全库搜索时自动排除 private 目录的文件（`commands/search.rs`）；**前端 DirManager** 每行加「私密/公开」toggle 按钮，点击即保存（`DirManager.tsx`、`api/dirs.ts`）

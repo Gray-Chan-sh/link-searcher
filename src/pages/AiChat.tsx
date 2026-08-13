@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, searchFilePaths, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
+import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { useI18n } from '../i18n'
 import { writeTextFile } from '@tauri-apps/plugin-fs'

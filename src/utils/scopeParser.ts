@@ -14,12 +14,11 @@ export interface TurnScope {
   conditions: ScopeCondition[]
 }
 
-const MENTION_RE = /@([^\s，。？！；:、,?:;]+)/g
+const MENTION_RE = /@([^\s@，。？！；:、,?:;]+)/g
 const CMD_EXT_RE = /\/ext:([^\s，。？！；:、,?:;]+)/g
 const CMD_DATE_RE = /\/date:([^\s，。？！；:、,?:;]+)/g
 const CMD_SCOPE_RE = /\/范围[:：]([^\s，。？！；:、,?:;]+)/g
 const CMD_FUZZY_RE = /\/模糊[:：]([^\s，。？！；:、,?:;]+)/g
-const CMD_TOKEN_RE = /\/[^\s，。？！；:、,?:;]+/g
 
 export function isFileLike(path: string): boolean {
   return /\.\w{1,6}$/.test(path)
@@ -58,7 +57,7 @@ export function parseScope(text: string): ParsedScope {
     } else {
       if (!scope.mention_dirs.includes(raw)) scope.mention_dirs.push(raw)
     }
-    clean = clean.replace(`@${raw}`, '')
+    clean = clean.replaceAll(`@${raw}`, '')
   }
 
   // /ext:pdf
@@ -95,7 +94,7 @@ export function parseScope(text: string): ParsedScope {
     clean = clean.replace(m[0], '')
   }
 
-  // 清理残留的任意 /token
-  clean = clean.replace(CMD_TOKEN_RE, '').replace(/\s+/g, ' ').trim()
+  // 清理多余空白与残留的孤立 @（合法 mention 已在上面剥离，剩下的 @ 是误输入）
+  clean = clean.replace(/@+/g, ' ').replace(/\s+/g, ' ').trim()
   return { scope, cleanText: clean, scopeAction }
 }
