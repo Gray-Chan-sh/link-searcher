@@ -201,6 +201,16 @@ pub fn get_file_by_path(conn: &Connection, path: &str) -> Result<Option<FileReco
     Ok(rows.next().transpose()?)
 }
 
+/// Search files by path fragment (LIKE %path%). Returns at most `limit` file IDs.
+pub fn search_file_ids_by_path_fragment(conn: &Connection, fragment: &str, limit: usize) -> Result<Vec<String>> {
+    let like = format!("%{}%", fragment);
+    let mut s = conn.prepare(
+        "SELECT id FROM file_tracking WHERE lower(path) LIKE ?1 AND status='active' ORDER BY path LIMIT ?2"
+    ).context("prepare search_file_ids_by_path_fragment")?;
+    let rows = s.query_map(rusqlite::params![like, limit as i64], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("collect search_file_ids_by_path_fragment")
+}
+
 pub fn get_files_by_dir(conn: &Connection, dir_id: &str) -> Result<Vec<FileRecord>> {
     let mut s = conn
         .prepare(&format!("{SEL} WHERE dir_id=?1 ORDER BY path"))
