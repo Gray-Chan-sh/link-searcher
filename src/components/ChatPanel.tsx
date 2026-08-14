@@ -36,6 +36,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const scrollRef = useRef<HTMLDivElement>(null)
   // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
   const latestReqIdRef = useRef(0)
+  // 发送中防护：阻止 Enter + 按钮点击双重触发
+  const sendingRef = useRef(false)
   // 自发起防护：handleSend 设置 pending 后，恢复 effect 不应把自己刚发起
   // 的请求当作"残留 pending"再重跑一次（否则每轮追问都会并发两个请求）。
   const skipResumeRef = useRef(false)
@@ -217,8 +219,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
   // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
   const handleSend = useCallback(async () => {
+    if (sendingRef.current) return
     const q = input.trim()
     if (!q || loading || !session) return
+sendingRef.current = true
     // 解析 /命令（/ext /date /范围 /模糊），得到 scope + 净化后文本 + 范围动作
     const { scope, cleanText, scopeAction } = parseScope(q)
     // 将 chips 合并到 scope（chips 是真实数据源）
@@ -235,7 +239,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       onScopeAction?.(scopeAction)
     }
     // 专注模式：仅分析 focus_file，忽略其他范围（会话级，直到退出）
-    if (session.focus_file) {
+    // 仅在用户未通过 @mention 显式引用文件/目录时生效
+    if (session.focus_file && mentionChips.length === 0) {
       scope.mention_files = [session.focus_file]
       scope.mention_dirs = []
     }
@@ -280,6 +285,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         pending_started_at: null,
       })
     }
+    sendingRef.current = false
   }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips])
 
   // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
