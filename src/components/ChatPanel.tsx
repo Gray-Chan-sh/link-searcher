@@ -251,6 +251,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       userContent += `\n\n---\n引用:\n${refs}`
     }
     const userMsg: ChatMessage = { role: 'user', content: userContent }
+    // 搜索用纯文本版本（不含引用标注，避免 BM25 解析 emoji 报错）
+    const searchMsg: ChatMessage = { role: 'user', content: cleanQ }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
     skipResumeRef.current = true
@@ -266,7 +268,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       if (sourceIds.length === 0 && !hasScope) {
         await smartSearchStream(cleanQ, session.id)
       } else {
-        await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [], session.strict_docs ?? false)
+        await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [], session.strict_docs ?? false)
       }
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
