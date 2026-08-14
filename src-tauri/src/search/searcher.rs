@@ -453,7 +453,10 @@ impl SearcherWrap {
                         let pattern = format!("^{}.*", escaped);
                         let rq: Box<dyn tantivy::query::Query> = match RegexQuery::from_pattern(&pattern, path_field) {
                             Ok(q) => Box::new(q),
-                            Err(_) => Box::new(tantivy::query::AllQuery),
+                            Err(e) => {
+                                log::warn!("[SEARCH] path_prefix regex failed: pattern={pattern} error={e} — falling back to AllQuery, filter disabled");
+                                Box::new(tantivy::query::AllQuery)
+                            }
                         };
                         (Occur::Should, rq)
                     })
