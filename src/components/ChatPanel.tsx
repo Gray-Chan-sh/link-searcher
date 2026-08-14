@@ -504,6 +504,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                   handleChipRemove(mentionChips[mentionChips.length - 1].path)
                 }
               }}
+              onDragOver={e => e.preventDefault()}
+              onDrop={e => { e.preventDefault(); const p = e.dataTransfer.getData('text/plain'); if (p) insertMention(p) }}
               placeholder={mentionChips.length > 0 ? '' : (sourceIds.length > 0 ? t('ask_followup') : t('ask_question'))}
               disabled={loading}
               className="flex-1 min-w-[60px] border-none bg-transparent text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none p-0 disabled:opacity-40"
