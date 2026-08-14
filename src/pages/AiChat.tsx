@@ -222,7 +222,7 @@ export default function AiChat() {
                       {activeSession?.scope_dir_ids?.includes(dt.id) ? '范围✓' : '范围'}
                     </button>
                   </div>
-                  {dt.root && dt.root.map(child => (
+                  {dt.root && sortTreeNodes(dt.root).map(child => (
                     <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onFocus={handleFocusFile} />
                   ))}
                 </div>
