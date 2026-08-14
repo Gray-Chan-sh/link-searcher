@@ -602,6 +602,7 @@ fn bm25_relevant_hits(
     date_from: Option<i64>,
     date_to: Option<i64>,
     path_prefixes: Option<Vec<String>>,
+    file_ids: Option<Vec<String>>,
 ) -> Result<Vec<ScoredHit>, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
     let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
@@ -628,12 +629,12 @@ fn bm25_relevant_hits(
     };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-        dir_ids: dir_ids.clone(), file_ids: None, ext_filter,
+        dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter,
         date_from, date_to, path_prefixes: path_prefixes.clone(),
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
-    log::info!("[AI] bm25_relevant_hits: q={query} dir_ids={:?} path_prefixes={:?}", dir_ids, path_prefixes);
+    log::info!("[AI] bm25_relevant_hits: q={query} dir_ids={:?} path_prefixes={:?} file_ids={:?}", dir_ids, path_prefixes, file_ids);
     let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -739,6 +740,21 @@ async fn prepare_conversation_prompt(
     let dir_ids_opt = if dir_ids.is_empty() { None } else { Some(dir_ids) };
     let path_prefixes_opt = if path_prefixes.is_empty() { None } else { Some(path_prefixes) };
 
+    // 解析 @mention 文件路径 → file_ids，传给搜索限定范围
+    let mention_file_ids: Option<Vec<String>> = if scope.mention_files.is_empty() {
+        None
+    } else {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let ids: Vec<String> = scope.mention_files.iter().filter_map(|path| {
+            crate::db::tracker::get_file_by_path(&conn, path)
+                .ok()
+                .flatten()
+                .map(|rec| rec.id)
+        }).collect();
+        drop(conn);
+        if ids.is_empty() { None } else { Some(ids) }
+    };
+
     // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
     // 语义开启时对追问做 BM25+embedding RRF 融合重排。
     let new_hits = if last_q.trim().is_empty() {
@@ -746,7 +762,7 @@ async fn prepare_conversation_prompt(
     } else {
         bm25_relevant_hits(
             state, &search_q, 10, crate::ai::embedding_enabled(),
-            dir_ids_opt, ext_filter, date_from, date_to, path_prefixes_opt,
+            dir_ids_opt, ext_filter, date_from, date_to, path_prefixes_opt, mention_file_ids,
         )?
     };
 
