@@ -242,7 +242,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setInput('')
     setMentionChips([])
     setConditionChips([])
-    const userMsg: ChatMessage = { role: 'user', content: cleanQ }
+    // 构造用户消息：问题文本 + 引用标注（让用户看清引用了什么）
+    let userContent = cleanQ
+    if (mentionChips.length > 0) {
+      const refs = mentionChips.map(c =>
+        `${c.isFile ? '📄' : '📁'} ${c.path}`
+      ).join('\n')
+      userContent += `\n\n---\n引用:\n${refs}`
+    }
+    const userMsg: ChatMessage = { role: 'user', content: userContent }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
     skipResumeRef.current = true
@@ -254,7 +262,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setStreaming({ sessionId: session.id, text: '' })
 
     try {
-      if (sourceIds.length === 0) {
+      const hasScope = mentionChips.length > 0 || scope.conditions.length > 0
+      if (sourceIds.length === 0 && !hasScope) {
         await smartSearchStream(cleanQ, session.id)
       } else {
         await conversationAskStream([...messages, userMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [], session.strict_docs ?? false)
