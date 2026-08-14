@@ -6087,6 +6087,36 @@
           "markdownDescription": "This enables all file write related commands without any pre-configured accessible paths."
         },
         {
+          "description": "Allows the webview to forward console.* logs and observed IPC activity to the plugin's ring buffers.\n#### This default permission set includes:\n\n- `allow-push-log`\n- `allow-push-ipc`",
+          "type": "string",
+          "const": "mcp:default",
+          "markdownDescription": "Allows the webview to forward console.* logs and observed IPC activity to the plugin's ring buffers.\n#### This default permission set includes:\n\n- `allow-push-log`\n- `allow-push-ipc`"
+        },
+        {
+          "description": "Enables the push_ipc command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:allow-push-ipc",
+          "markdownDescription": "Enables the push_ipc command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the push_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:allow-push-log",
+          "markdownDescription": "Enables the push_log command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the push_ipc command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:deny-push-ipc",
+          "markdownDescription": "Denies the push_ipc command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the push_log command without any pre-configured scope.",
+          "type": "string",
+          "const": "mcp:deny-push-log",
+          "markdownDescription": "Denies the push_log command without any pre-configured scope."
+        },
+        {
           "description": "This permission set configures which\nshell functionality is exposed by default.\n\n#### Granted Permissions\n\nIt allows to use the `open` functionality with a reasonable\nscope pre-configured. It will allow opening `http(s)://`,\n`tel:` and `mailto:` links.\n\n#### This default permission set includes:\n\n- `allow-open`",
           "type": "string",
           "const": "shell:default",

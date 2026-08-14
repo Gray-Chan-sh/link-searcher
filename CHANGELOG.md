@@ -1360,3 +1360,14 @@
 | 📖 文档 | 5 |
 | **总计 commits** | **35** |
 | **变更文件数** | **70+** |
+
+## 2026-08-14（E2E 自动化测试 + 用户手册更新 + 截图）
+
+- **集成 tauri-plugin-mcp**：git 依赖，`#[cfg(debug_assertions)]` 条件编译，生产构建自动排除；`src/App.tsx` 挂载时调用 `setupPluginListeners()`（`src-tauri/Cargo.toml`、`src-tauri/src/lib.rs`、`src/App.tsx`）
+- **创建 .opencode/agents 自定义 Agent**：`tauri-auto-ui-gen.yaml`，用于 MCP 连接 App 自动生成 E2E 测试
+- **Mock IPC 测试 `auto_ui_e2e.rs`**：15 个用例，覆盖搜索/浏览/目录/索引/设置/日志/文件类型/AI 聊天会话 CRUD/版本，全部通过（`src-tauri/tests/auto_ui_e2e.rs`）
+- **MCP E2E 测试 `e2e_mcp.sh`**：22 个用例，覆盖 8 个页面路由加载 + AI 流式对话全链路（打字/发送/等待响应/验证回答/证据面板），全部通过（`src-tauri/tests/e2e_mcp.sh`）
+- **更新用户手册**：各章节验证清单改为 E2E 覆盖表格；搜索页补充空态文字和筛选面板文件列表；索引状态页补充操作按钮和统计卡片详情；AI 聊天页补充会话列表/文件树/输入框交互细节（`docs/01-install.md`、`docs/04-search.md`、`docs/05-browse.md`、`docs/06-settings.md`、`docs/07-index-manage.md`、`docs/08-ai-features.md`、`docs/USER_MANUAL.md`、`USER_MANUAL.md`）
+- **新增测试文档**：`docs/12-testing.md`，详述 37 个 E2E 用例覆盖范围、运行方式、常见问题
+- **更新截图**：全部 8 页 + 5 个设置标签 + 5 张标注截图，截取自运行中 App 实时画面（`docs/screenshots/`）
+- **修复模型路由**：`9Router` vs `9router` 大小写导致子代理 ProviderModelNotFoundError，统一 provider 名（`~/.config/opencode/opencode.json`）
