@@ -70,6 +70,9 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] 
 # POC: pure-Rust legacy .doc (Word 97-2003) extraction; docx feature unneeded
 rwml = { version = "0.1", default-features = false }
 
+# MCP (Model Context Protocol) — debug-only AI agent integration
+tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
     "Foundation",

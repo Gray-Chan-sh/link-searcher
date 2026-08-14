@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { setupPluginListeners } from 'tauri-plugin-mcp'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { ask } from '@tauri-apps/plugin-dialog'
 import { useTheme } from './theme'
@@ -48,6 +49,13 @@ export default function App() {
       if (localStorage.getItem('onboarding_completed') !== 'true') {
         setShowOnboarding(true)
       }
+    })
+  }, [])
+
+  // MCP plugin — bridge DOM events for AI agent interaction
+  useEffect(() => {
+    setupPluginListeners().catch(() => {
+      // MCP plugin may not be available in production builds — safe to ignore
     })
   }, [])
 

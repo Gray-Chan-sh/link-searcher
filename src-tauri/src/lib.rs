@@ -48,7 +48,7 @@ pub fn run_with_data_dir(data_dir: std::path::PathBuf) {
 fn run_with_config(app_config: config::AppConfig) {
     let data_dir = app_config.data_dir.clone();
 
-    let result = tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         // Must precede other plugins so the second instance exits before they initialize.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -60,8 +60,15 @@ fn run_with_config(app_config: config::AppConfig) {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
-        .manage(app_config)
-        .invoke_handler(tauri::generate_handler![
+        .manage(app_config);
+
+    // MCP plugin — debug-only AI agent integration
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp::init());
+    }
+
+    let result = builder.invoke_handler(tauri::generate_handler![
             search,
             search_file_paths,
             suggest,
