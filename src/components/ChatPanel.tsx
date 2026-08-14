@@ -223,11 +223,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const q = input.trim()
     if (!q || loading || !session) return
     sendingRef.current = true
-    // 处理挂起的文件树引用（useEffect 可能还没跑完）
-    if (pendingMention) {
-      insertMention(pendingMention)
-      onMentionConsumed?.()
-    }
     // 解析 /命令（/ext /date /范围 /模糊），得到 scope + 净化后文本 + 范围动作
     const { scope, cleanText, scopeAction } = parseScope(q)
     // 将 chips 合并到 scope（chips 是真实数据源）
@@ -237,6 +232,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       } else {
         if (!scope.mention_dirs.includes(chip.path)) scope.mention_dirs.push(chip.path)
       }
+    }
+    // 处理挂起的文件树引用（直接加入 scope，不依赖 React 状态更新）
+    if (pendingMention) {
+      const isFile = /\.\w{1,6}$/.test(pendingMention)
+      if (isFile) {
+        if (!scope.mention_files.includes(pendingMention)) scope.mention_files.push(pendingMention)
+      } else {
+        if (!scope.mention_dirs.includes(pendingMention)) scope.mention_dirs.push(pendingMention)
+      }
+      insertMention(pendingMention)
+      onMentionConsumed?.()
     }
     const cleanQ = cleanText || q
     // /范围:全库 或 /范围:目录 —— 交给父组件（AiChat 持有 dirs id 映射）
@@ -254,10 +260,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setConditionChips([])
     // 构造用户消息：问题文本 + 引用标注（让用户看清引用了什么）
     let userContent = cleanQ
-    if (mentionChips.length > 0) {
-      const refs = mentionChips.map(c =>
-        `${c.isFile ? '📄' : '📁'} ${c.path}`
-      ).join('\n')
+    const allRefs = [
+      ...mentionChips.map(c => ({ isFile: c.isFile, path: c.path })),
+      ...(pendingMention ? [{ isFile: /\.\w{1,6}$/.test(pendingMention), path: pendingMention }] : []),
+    ]
+    // 去重
+    const seen = new Set<string>()
+    const uniqueRefs = allRefs.filter(r => { const k = r.path; if (seen.has(k)) return false; seen.add(k); return true })
+    if (uniqueRefs.length > 0) {
+      const refs = uniqueRefs.map(r => `${r.isFile ? '📄' : '📁'} ${r.path}`).join('\n')
       userContent += `\n\n---\n引用:\n${refs}`
     }
     const userMsg: ChatMessage = { role: 'user', content: userContent }
@@ -274,7 +285,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setStreaming({ sessionId: session.id, text: '' })
 
     try {
-      const hasScope = mentionChips.length > 0 || scope.conditions.length > 0
+      const hasScope = mentionChips.length > 0 || scope.conditions.length > 0 || !!pendingMention
       if (sourceIds.length === 0 && !hasScope) {
         await smartSearchStream(cleanQ, session.id)
       } else {
