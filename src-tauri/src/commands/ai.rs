@@ -628,11 +628,12 @@ fn bm25_relevant_hits(
     };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-        dir_ids, file_ids: None, ext_filter,
-        date_from, date_to, path_prefixes,
+        dir_ids: dir_ids.clone(), file_ids: None, ext_filter,
+        date_from, date_to, path_prefixes: path_prefixes.clone(),
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
+    log::info!("[AI] bm25_relevant_hits: q={query} dir_ids={:?} path_prefixes={:?}", dir_ids, path_prefixes);
     let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -946,6 +947,8 @@ pub async fn conversation_ask_stream(
         source_ids.len()
     );
     crate::ai::reset_ai_cancel();
+
+    log::info!("[AI] conversation_ask_stream: scope={:?} session_scope_dir_ids={:?}", scope, session_scope_dir_ids);
 
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids, strict_docs).await?;
