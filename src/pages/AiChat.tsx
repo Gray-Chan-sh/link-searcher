@@ -332,7 +332,7 @@ function TreeFileList({ node, basePath, onPick, onFocus }: {
         type="button"
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
-        onClick={handleToggle}
+        onClick={isDir ? handleToggle : () => onPick(rel)}
         onContextMenu={e => { e.preventDefault(); if (!isDir && onFocus) { onFocus(rel) } else { onPick(rel) } }}
         className="w-full flex items-center gap-1.5 px-2 py-1 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
