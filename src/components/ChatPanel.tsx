@@ -217,12 +217,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setMentionChips(prev => prev.filter(c => c.path !== path))
   }, [])
 
-  // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
+// 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
   const handleSend = useCallback(async () => {
     if (sendingRef.current) return
     const q = input.trim()
     if (!q || loading || !session) return
-sendingRef.current = true
+    sendingRef.current = true
+    // 处理挂起的文件树引用（useEffect 可能还没跑完）
+    if (pendingMention) {
+      insertMention(pendingMention)
+      onMentionConsumed?.()
+    }
     // 解析 /命令（/ext /date /范围 /模糊），得到 scope + 净化后文本 + 范围动作
     const { scope, cleanText, scopeAction } = parseScope(q)
     // 将 chips 合并到 scope（chips 是真实数据源）
@@ -286,7 +291,7 @@ sendingRef.current = true
       })
     }
     sendingRef.current = false
-  }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips])
+  }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips, pendingMention, onMentionConsumed, insertMention])
 
   // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
   // 问题（若进程内原请求尚未结束，会重复消耗一次生成——可用性优先，

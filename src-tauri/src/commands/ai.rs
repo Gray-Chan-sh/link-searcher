@@ -746,10 +746,15 @@ async fn prepare_conversation_prompt(
     } else {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         let ids: Vec<String> = scope.mention_files.iter().filter_map(|path| {
-            crate::db::tracker::get_file_by_path(&conn, path)
-                .ok()
-                .flatten()
-                .map(|rec| rec.id)
+            // 先精确匹配
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, path) {
+                return Some(rec.id);
+            }
+            // 回退：LIKE 匹配（用户可能只输入了文件名，不含目录前缀）
+            if let Ok(mut ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, path, 1) {
+                return ids.pop();
+            }
+            None
         }).collect();
         drop(conn);
         if ids.is_empty() { None } else { Some(ids) }
