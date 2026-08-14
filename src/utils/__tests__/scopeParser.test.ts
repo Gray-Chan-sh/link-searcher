@@ -55,4 +55,14 @@ assert.deepStrictEqual(r11.scope.mention_files, [], 'S11: 句尾 @ 无 mention_f
 assert.deepStrictEqual(r11.scope.mention_dirs, [], 'S11: 句尾 @ 无 mention_dirs')
 assert.equal(r11.cleanText, '问题', 'S11: 孤立 @ 清理')
 
+// S12: 路径含空格，以文件扩展名结尾（M3 回归 — macOS 路径含空格）
+const r12 = parseScope('@案件/WC 万城/诉讼案件/音字转换文字记录（20260326）.pdf ，第三人庄建军是否说过不参与公司的经营管理。')
+assert.deepStrictEqual(r12.scope.mention_files, ['案件/WC 万城/诉讼案件/音字转换文字记录（20260326）.pdf'], 'S12: 含空格路径完整提取')
+assert.equal(r12.cleanText, '，第三人庄建军是否说过不参与公司的经营管理。', 'S12: token 剥离干净')
+
+// S13: 目录路径不含空格保持原有行为
+const r13 = parseScope('@财务 本季度收入')
+assert.deepStrictEqual(r13.scope.mention_dirs, ['财务'], 'S13: 目录无空格保持')
+assert.equal(r13.cleanText, '本季度收入', 'S13: 目录 token 剥离')
+
 console.log('ALL scopeParser assertions PASSED')
