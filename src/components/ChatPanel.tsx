@@ -250,10 +250,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       onScopeAction?.(scopeAction)
     }
     // 专注模式：仅分析 focus_file，忽略其他范围（会话级，直到退出）
-    // 仅在用户未通过 @mention 显式引用文件/目录时生效
-    if (session.focus_file && mentionChips.length === 0) {
+    // 仅在用户未通过 @mention 或 chips 显式引用文件/目录时生效
+    if (session.focus_file && scope.mention_files.length === 0 && scope.mention_dirs.length === 0 && mentionChips.length === 0) {
       scope.mention_files = [session.focus_file]
-      scope.mention_dirs = []
     }
     setInput('')
     setMentionChips([])
