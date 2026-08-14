@@ -56,13 +56,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
   // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
   const insertMention = useCallback((path: string) => {
-    setInput(prev => `${prev}${prev ? ' ' : ''}@${path} `)
-    setMentionChips(prev => {
-      const isFile = /\.\w{1,6}$/.test(path)
-      return prev.some(c => c.path === path)
-        ? prev
-        : [...prev, { isFile, path }]
-    })
+    const isFile = /\.\w{1,6}$/.test(path)
+    setMentionChips(prev => prev.some(c => c.path === path) ? prev : [...prev, { isFile, path }])
     inputRef.current?.focus()
   }, [])
 
@@ -175,21 +170,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     // 实时解析 /命令 条件（/ext /date /模糊），chips 区可见
     const { scope } = parseScope(value)
     setConditionChips(scope.conditions)
-    // 实时解析 @mention 更新 chips 预览
-    const chips: { isFile: boolean; path: string }[] = []
-    const re = /@([^\s，。？！；:、,?:;]+)/g
-    let m: RegExpExecArray | null
-    while ((m = re.exec(value)) !== null) {
-      const path = m[1].trim()
-      if (!path) continue
-      const isFile = /\.\w{1,6}$/.test(path)
-      if (!chips.some(c => c.path === path)) chips.push({ isFile, path })
-    }
-    setMentionChips(chips)
+    // @mention 不再从文本解析 — chips 是真实数据源
     // 检测 @ 触发选择器
     const lastAt = value.lastIndexOf('@')
     if (lastAt !== -1) {
-      // 检查 @ 后面是否还有空格（有空格则关闭选择器）
       const afterAt = value.slice(lastAt + 1)
       const hasSpace = afterAt.includes(' ')
       if (hasSpace) {
@@ -197,10 +181,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         setMentionPos(null)
       } else {
         setMentionQuery(afterAt)
-        // 计算 popup 位置：基于输入框位置
         if (inputRef.current) {
           const rect = inputRef.current.getBoundingClientRect()
-          // 粗略估算光标位置（按字符数比例）
           const charPct = (value.length - afterAt.length) / Math.max(value.length, 1)
           setMentionPos({
             left: rect.left + charPct * rect.width,
@@ -217,34 +199,36 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const handleMentionSelect = useCallback((path: string) => {
     const lastAt = input.lastIndexOf('@')
     if (lastAt !== -1) {
+      // 移除 @ 及后续查询文本，仅保留前面的文字
       const before = input.slice(0, lastAt)
-      const after = input.slice(lastAt + 1)
-      const spaceIdx = after.indexOf(' ')
-      const newInput = spaceIdx === -1
-        ? `${before}@${path} `
-        : `${before}@${path}${after.slice(spaceIdx)}`
-      setInput(newInput)
-      // 更新 chips
-      const isFile = /\.\w{1,6}$/.test(path)
-      setMentionChips(p => p.some(c => c.path === path) ? p : [...p, { isFile, path }])
+      setInput(before + ' ')
     }
+    // 增加 chip（不写入输入文本）
+    const isFile = /\.\w{1,6}$/.test(path)
+    setMentionChips(p => p.some(c => c.path === path) ? p : [...p, { isFile, path }])
     setMentionQuery('')
     setMentionPos(null)
     inputRef.current?.focus()
   }, [input])
 
-  const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const handleChipRemove = useCallback((path: string) => {
-    setInput(prev => prev.replace(new RegExp(`@${escapeRegex(path)}`, 'g'), '').trim())
     setMentionChips(prev => prev.filter(c => c.path !== path))
   }, [])
 
-  // 解析输入文本：@mention 与 /命令（/ext /date /范围 /模糊），纯函数模块
+  // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
   const handleSend = useCallback(async () => {
     const q = input.trim()
     if (!q || loading || !session) return
-    // 解析 @mention 与 /命令，得到 scope + 净化后文本 + 范围动作
+    // 解析 /命令（/ext /date /范围 /模糊），得到 scope + 净化后文本 + 范围动作
     const { scope, cleanText, scopeAction } = parseScope(q)
+    // 将 chips 合并到 scope（chips 是真实数据源）
+    for (const chip of mentionChips) {
+      if (chip.isFile) {
+        if (!scope.mention_files.includes(chip.path)) scope.mention_files.push(chip.path)
+      } else {
+        if (!scope.mention_dirs.includes(chip.path)) scope.mention_dirs.push(chip.path)
+      }
+    }
     const cleanQ = cleanText || q
     // /范围:全库 或 /范围:目录 —— 交给父组件（AiChat 持有 dirs id 映射）
     if (scopeAction) {
@@ -285,7 +269,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         pending_started_at: null,
       })
     }
-  }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange])
+  }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips])
 
   // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
   // 问题（若进程内原请求尚未结束，会重复消耗一次生成——可用性优先，
@@ -440,25 +424,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         )}
       </div>
 
-      {(mentionChips.length > 0 || conditionChips.length > 0) && (
+      {conditionChips.length > 0 && (
         <div className="px-4 py-1.5 border-t border-gray-200 dark:border-gray-800 flex flex-wrap gap-1">
-          {/* @mention chips */}
-          {mentionChips.map((chip, i) => (
-            <span
-              key={`${chip.path}-${i}`}
-              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800"
-            >
-              <span>{chip.isFile ? '📄' : '📁'}</span>
-              <span className="truncate max-w-40">{chip.path}</span>
-              <button
-                type="button"
-                onClick={() => handleChipRemove(chip.path)}
-                className="ml-0.5 text-purple-400 hover:text-purple-600 dark:hover:text-purple-200"
-              >
-                ×
-              </button>
-            </span>
-          ))}
           {/* /命令条件 chips：/ext /date /模糊 */}
           {conditionChips.map((c, i) => (
             <span
@@ -498,25 +465,50 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       )}
 
       {llmEnabled ? (
-        <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2">
+        <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2 items-start">
           <MentionPicker
             query={mentionQuery}
             position={mentionPos}
             onSelect={handleMentionSelect}
             onClose={() => { setMentionQuery(''); setMentionPos(null) }}
           />
-          <input
-            ref={inputRef}
-            type="text"
-            value={input}
-            onChange={e => handleInputChange(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }}
+          <div
+            className="flex-1 flex flex-wrap items-center gap-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 min-h-[32px] focus-within:ring-1 focus-within:ring-purple-500"
             onDragOver={e => e.preventDefault()}
             onDrop={e => { e.preventDefault(); const p = e.dataTransfer.getData('text/plain'); if (p) insertMention(p) }}
-            placeholder={sourceIds.length > 0 ? t('ask_followup') : t('ask_question')}
-            disabled={loading}
-            className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
-          />
+          >
+            {mentionChips.map((chip, i) => (
+              <span
+                key={`${chip.path}-${i}`}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] rounded-full bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 max-w-[180px] shrink-0"
+              >
+                <span>{chip.isFile ? '📄' : '📁'}</span>
+                <span className="truncate">{chip.path}</span>
+                <button
+                  type="button"
+                  onClick={() => handleChipRemove(chip.path)}
+                  className="ml-0.5 text-purple-400 hover:text-purple-600 dark:hover:text-purple-200 shrink-0 leading-none"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={e => handleInputChange(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+                if (e.key === 'Backspace' && !input && mentionChips.length > 0) {
+                  handleChipRemove(mentionChips[mentionChips.length - 1].path)
+                }
+              }}
+              placeholder={mentionChips.length > 0 ? '' : (sourceIds.length > 0 ? t('ask_followup') : t('ask_question'))}
+              disabled={loading}
+              className="flex-1 min-w-[60px] border-none bg-transparent text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none p-0 disabled:opacity-40"
+            />
+          </div>
           <button
             onClick={handleSend}
             disabled={loading || !input.trim() || !session}

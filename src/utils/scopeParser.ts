@@ -14,7 +14,11 @@ export interface TurnScope {
   conditions: ScopeCondition[]
 }
 
-const MENTION_RE = /@([^\s@，。？！；:、,?:;]+)/g
+// 匹配 @mention：
+//   - 优先匹配带空格的文件路径（以文件扩展名结尾）
+//   - 回退匹配无空格路径（目录/简短文件）
+// 空格在路径中合法（macOS 文件名），但中文标点 、。？！ 是路径与自然语言的分界
+const MENTION_RE = /@((?:[^\s@，。？！；:、,?:;]+(?:\s[^\s@，。？！；:、,?:;]+)*\.\w{1,6})|(?:[^\s@，。？！；:、,?:;]+))/g
 const CMD_EXT_RE = /\/ext:([^\s，。？！；:、,?:;]+)/g
 const CMD_DATE_RE = /\/date:([^\s，。？！；:、,?:;]+)/g
 const CMD_SCOPE_RE = /\/范围[:：]([^\s，。？！；:、,?:;]+)/g

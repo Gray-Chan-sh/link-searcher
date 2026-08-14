@@ -200,11 +200,11 @@ export default function AiChat() {
             onClick={() => setTreeExpanded(v => !v)}
             className="w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
           >
-            <span className="flex items-center gap-1"><FolderIcon className="size-3" /> {t('file_tree')}</span>
+            <span className="flex items-center gap-1.5"><FolderIcon className="size-4" /> <span className="text-sm">{t('file_tree')}</span></span>
             <span className="text-[10px]">{treeExpanded ? '▾' : '▸'}</span>
           </button>
           {treeExpanded && (
-            <div className="max-h-48 overflow-y-auto p-1 space-y-1">
+            <div className="max-h-72 overflow-y-auto p-2 space-y-1">
               {dirTrees.map(dt => (
                 <div key={dt.id}>
                   <div className="px-2 py-0.5 flex items-center gap-1">
@@ -280,6 +280,16 @@ export default function AiChat() {
   )
 }
 
+/** 目录优先、按名称排序 */
+function sortTreeNodes(nodes: DirTreeNode[]): DirTreeNode[] {
+  return [...nodes].sort((a, b) => {
+    const aDir = a.is_dir || a.children.length > 0
+    const bDir = b.is_dir || b.children.length > 0
+    if (aDir !== bDir) return aDir ? -1 : 1 // 目录在前
+    return a.name.localeCompare(b.name)
+  })
+}
+
 /** 递归文件树：目录左键展开/折叠、右键「加入对话」；文件左键「加入对话」、右键文件「专注分析」。
  *  `node.path` 为绝对路径，`basePath` 为目录根，点击时转相对路径（与 file_tracking 一致）。 */
 function TreeFileList({ node, basePath, onPick, onFocus }: {
@@ -299,10 +309,11 @@ function TreeFileList({ node, basePath, onPick, onFocus }: {
     ? node.path.slice(basePath.length).replace(/^\/+/, '')
     : node.path
 
+  const sortedChildren = children ? sortTreeNodes(children) : null
+
   const handleToggle = useCallback(() => {
     if (!isDir) return
     if (open) { setOpen(false); return }
-    // 首次展开：如果子项未加载，调 API 懒加载
     if (children === null && !loading) {
       setLoading(true)
       getDirChildren(node.path).then(items => {
@@ -317,20 +328,20 @@ function TreeFileList({ node, basePath, onPick, onFocus }: {
 
   return (
     <div>
-<button
+      <button
         type="button"
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
         onClick={handleToggle}
         onContextMenu={e => { e.preventDefault(); if (!isDir && onFocus) { onFocus(rel) } else { onPick(rel) } }}
-        className="w-full flex items-center gap-1 px-2 py-0.5 text-xs text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
+        className="w-full flex items-center gap-1.5 px-2 py-1 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
       >
-        <span className="text-[10px] shrink-0">{isDir ? (open ? '▾' : (loading ? '⋯' : '▸')) : '📄'}</span>
-        <span className="truncate">{node.name}</span>
-        {!isDir && <span className="ml-auto text-[9px] text-gray-400 opacity-0 group-hover:opacity-100">+</span>}
+        <span className="text-sm shrink-0">{isDir ? (open ? '📂' : (loading ? '⋯' : '📁')) : '📄'}</span>
+        <span className="truncate text-xs">{node.name}</span>
+        {!isDir && <span className="ml-auto text-[10px] text-gray-400 opacity-0 group-hover:opacity-100">+</span>}
       </button>
-      {open && children && children.map(child => (
+      {open && sortedChildren && sortedChildren.map(child => (
         <div key={child.path} className="pl-3">
           <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} />
         </div>
