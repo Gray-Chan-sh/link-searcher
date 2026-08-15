@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-08-15（检索依据文件可点击 → 跳转浏览页预览）
+
+- **AI 聊天「检索依据」文件可点击**：证据面板（`<details>` 内 `<li>` 项）整行可点击，`navigate('/browse?path=<相对路径>')`，带 hover 样式；不触发系统打开（顶部来源栏已有 `openFile` 入口，不重复）（`src/components/ChatPanel.tsx`）
+- **Browse 支持 `?path=` 深链**：挂载时读一次 `path` 参数 → `selectFile(path)` 自动打开右侧预览；给表格行加 `data-relpath`，若目标行在当前列表中则 `CSS.escape` 后按属性选择器 `scrollIntoView` 定位高亮。参数经 sync effect 覆盖 URL 后天然一次性消费，不残留（`src/pages/Browse.tsx`）
+- **深链列表定位修复（forcedSearch）**：初版只开预览、列表仍显示 localStorage 持久搜索词的结果（列表查 `path LIKE %旧词%`、预览按精确路径查，两通道割裂）。改为 `forcedSearch` state 与持久化 search 分离：挂载时若带 `?path=` 则列表按该路径查询，目标行必现并高亮；用户手动输入搜索词时清空 forcedSearch 让位，持久词不污染（`src/pages/Browse.tsx`）
+- **验证**：`tsc -b` 0、scopeParser 全过、semgrep ERROR 0；MCP 实测点击证据项「金昆芳/审计报告.pdf」→ 跳转 Browse → 右侧预览自动打开该文件（187550 字符），未破坏既有过滤状态
+
+---
+
+## 2026-08-15（AI 聊天全面测试 · 修复跨会话泄漏等 4 项 + 新增 13 个自动化测试）
+
+对 AI 聊天功能做全面摸底（真实 API + MCP 驱动六维度：功能/流式/异常/并发/配置/前端体验），修复 4 项问题，补齐 13 个自动化测试。
+
+- **跨会话 @mention chips 泄漏（D-3）**：`ChatPanel` 中 `mentionChips`/`conditionChips`/输入文本为组件本地 state，切换/新建会话时不重置，导致新会话问题错误携带上一会话的 `@文件` 引用、检索范围被污染（实测新会话问"克虏伯项目"回答却只引用旧会话的 JPG 材料）。新增 `useEffect` 在 `session.id` 变化时清空三者（`src/components/ChatPanel.tsx`）
+- **设置页 `{n}` 占位符未插值（E-3）**：已启用模型分组标签 `t(labelKey)` 漏传 `{ n }` 参数，页面直接显示 `Embedding ({n})`/`LLM ({n})`。补插值参数（`src/pages/Settings.tsx:676`）
+- **模型不可用报错误导（E-2）**：active LLM 指向被删 provider/不存在模型时，`llm_enabled()` 返回 false 且统一报「AI 服务未配置」，掩盖真实原因。新增 `llm_unavailable_reason()` 区分"未配置/网关被删/模型不可用"三种情形，6 处报错点复用（`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/ai.rs`）
+- **MCP E2E 脚本选择器失效（F-1）**：`ai_chat_e2e_mcp.sh` 用 `input[placeholder*="追问"]` 只匹配追问态，新会话首问 placeholder 是"输入问题…"，选择器无匹配致测试失效。改为兼容两种 placeholder（`src-tauri/tests/ai_chat_e2e_mcp.sh`）
+- **`chat_stream` wire 层缺测试**：新增 `src-tauri/tests/ai_chat_stream_wire.rs` —— 本地 Mock SSE 网关（std TcpListener）覆盖 8 条路径：正常流聚合、`[DONE]` 终止、网关忽略 stream 回退纯 JSON、畸形帧静默跳过、断流保留部分文本、HTTP 500 降级、空配置降级、连接拒绝降级、请求体校验（model/stream/messages）。`config_dir()` 增加 `LS_CONFIG_DIR` 环境变量覆盖作为测试后门，避免 wire 测试读写真实用户配置（`src-tauri/src/config.rs`）
+- **会话持久化缺测试**：`history_tests` 新增 3 个：50 会话上限驱逐（create 时按 updated_at 淘汰最旧）、`save_chat_session` 同 id 原地更新不重复且标题推导幂等、`export_chat_session` Markdown 完整性（标题/轮次/引用/检索依据/改写标记/严格/专注模式）。`save/export/create` 命令体抽出可注入 data_dir 的内部函数（`src-tauri/src/commands/ai.rs`）
+- **测试**：全量 `cargo test` 16x 套件全绿（含 8 新增 wire + 3 新增持久化 + 原有 161 单元/集成）、`tsc -b` 0、scopeParser 断言全过
+- **冒烟验证**：真实 API 六项全过——首问流式（⏱+检索依据）、多轮追问上下文、中途取消（无残留块）、`@文件` 专注模式、导出 Markdown 结构、语义搜索开关；另发现记录未修：取消对话框用原生 `confirm()` 阻塞自动化且取消不清除 LLM 在途消耗、同秒批量建会话驱逐顺序未定义（秒级时间戳）
+
+---
+
 ## 2026-08-13（手册拆分多文件 · step-by-step 重写）
 
 - **手册从单文件拆分为多文件**：`USER_MANUAL.md` 变为索引页，11 章拆分为 `docs/01-install.md` ~ `docs/11-faq.md`，每章独立文件

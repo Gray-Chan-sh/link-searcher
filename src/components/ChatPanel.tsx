@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
@@ -20,6 +21,7 @@ interface ChatPanelProps {
 
 export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction }: ChatPanelProps) {
   const { t } = useI18n()
+  const navigate = useNavigate()
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
   const [clockNow, setClockNow] = useState(() => Date.now())
@@ -55,6 +57,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const loading = pendingStartedAt != null
   loadingRef.current = loading
   useEffect(() => { sessionRef.current = session }, [session])
+
+  // 会话切换/新建后，上一会话的 @mention chips、/命令 condition chips 与输入文本
+  // 不得泄漏到新会话（否则新问题会错误引用旧会话材料）。仅在 id 变化时重置。
+  useEffect(() => {
+    setMentionChips([])
+    setConditionChips([])
+    setInput('')
+  }, [session?.id])
 
   // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
   const insertMention = useCallback((path: string) => {
@@ -413,7 +423,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                         </summary>
                         <ul className="mt-1 space-y-1">
                           {evidenceFor(i).map((ev, j) => (
-                            <li key={`${ev.file_id}-${j}`} className="rounded bg-gray-50 dark:bg-gray-900/40 px-2 py-1">
+                            <li key={`${ev.file_id}-${j}`} onClick={() => navigate('/browse?path=' + encodeURIComponent(ev.path))} className="cursor-pointer rounded bg-gray-50 dark:bg-gray-900/40 px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800">
                               <div className="flex items-center gap-1 flex-wrap">
                                 <span className="font-medium text-gray-700 dark:text-gray-300 truncate max-w-[70%]">{ev.path}</span>
                                 {ev.from_history && (

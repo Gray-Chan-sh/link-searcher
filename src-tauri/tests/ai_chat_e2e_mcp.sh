@@ -79,7 +79,9 @@ check_text_contains "URL 包含 /#/chat" "/#/chat"
 
 # ---- Test 3: 输入问题 ----
 echo "[Test 3] 输入问题"
-mcp_call 3 "tools/call" '{"name":"type_text","arguments":{"text":"2025年营收增长了多少","selector_type":"css","selector_value":"input[placeholder*=\"追问\"]"}}' 3
+# 新会话输入框 placeholder 是"输入问题…"，追问是"继续追问…"，
+# 用 [placeholder*="问题"] 或 [placeholder*="追问"] 均可命中。
+mcp_call 3 "tools/call" '{"name":"type_text","arguments":{"text":"2025年营收增长了多少","selector_type":"css","selector_value":"input[placeholder*=\"问题\"], input[placeholder*=\"追问\"]"}}' 3
 check_ok "输入框打字成功"
 
 # ---- Test 4: 点击发送 ----

@@ -86,6 +86,33 @@ pub fn llm_enabled() -> bool {
     resolve_active_endpoint(&crate::config::load_config(), ModelType::Llm).is_some()
 }
 
+/// 区分"未配置"与"已配置但当前模型不可用"（active 指向被删 provider /
+/// 不存在的模型）。返回 None 表示可用。
+pub fn llm_unavailable_reason() -> Option<&'static str> {
+    llm_unavailable_reason_for(&crate::config::load_config())
+}
+
+fn llm_unavailable_reason_for(cfg: &crate::config::AppConfig) -> Option<&'static str> {
+    let active_id = cfg.active_llm_model_id.as_str();
+    if active_id.is_empty() {
+        return Some("AI 服务未配置，请在设置页配置 API Base URL");
+    }
+    let Some((provider_id, model_id)) = active_id.split_once(':') else {
+        return Some("AI 服务未配置，请在设置页配置 API Base URL");
+    };
+    let Some(_provider) = cfg.providers.iter().find(|p| p.id == provider_id) else {
+        return Some("当前使用的 LLM 网关已被删除，请在设置页重新选择");
+    };
+    let model_exists = cfg.providers.iter()
+        .filter(|p| p.id == provider_id)
+        .flat_map(|p| p.models.iter())
+        .any(|m| m.id == model_id);
+    if !model_exists {
+        return Some("当前使用的 LLM 模型不可用，请在设置页重新选择");
+    }
+    None
+}
+
 /// Embedding models usually cap input at 512 tokens; over-length text rejects
 /// the whole gateway batch, so inputs are truncated to a safe char budget.
 const EMBED_MAX_CHARS: usize = 2000;
@@ -755,6 +782,36 @@ mod tests {
         // Environment-independent: chat must complete (None when not
         // configured; Some/None against a real gateway within timeout).
         let _ = chat("sys", "user");
+    }
+
+    #[test]
+    fn llm_unavailable_reason_distinguishes_absent_and_dangling() {
+        // 未配置（active_llm_model_id 为空）→ 提示"未配置"。
+        // 指向不存在的 provider 或模型 → 提示"不可用/被删"。
+        // 指向有效模型 → None（可用）。
+        use crate::config::{AppConfig, ModelConfig, ProviderConfig};
+        let provider = ProviderConfig {
+            id: "p1".into(),
+            name: "x".into(),
+            base_url: "http://x/v1".into(),
+            api_key: "k".into(),
+            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Llm, enabled: true }],
+        };
+        let with_active = |active: &str, providers: Vec<ProviderConfig>| AppConfig {
+            active_llm_model_id: active.into(),
+            providers,
+            ..AppConfig::default()
+        };
+        assert!(llm_unavailable_reason_for(&with_active("", vec![])).is_some());
+        assert_eq!(
+            llm_unavailable_reason_for(&with_active("p1:ghost", vec![provider.clone()])),
+            Some("当前使用的 LLM 模型不可用，请在设置页重新选择")
+        );
+        assert_eq!(
+            llm_unavailable_reason_for(&with_active("pX:m1", vec![provider.clone()])),
+            Some("当前使用的 LLM 网关已被删除，请在设置页重新选择")
+        );
+        assert_eq!(llm_unavailable_reason_for(&with_active("p1:m1", vec![provider])), None);
     }
 
     #[test]
