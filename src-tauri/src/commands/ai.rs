@@ -52,7 +52,9 @@ pub async fn summarize_file(
     file_id: String,
 ) -> Result<SummaryResult, String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页填写 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页填写 API Base URL")
+            .into());
     }
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
@@ -97,7 +99,9 @@ pub async fn ask_documents(
     question: String,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
     }
     if question.trim().is_empty() {
         return Err("问题不能为空".into());
@@ -303,7 +307,9 @@ pub async fn smart_search(
     query: String,
 ) -> Result<SmartSearchResponse, String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
     }
     if query.trim().is_empty() {
         return Err("问题不能为空".into());
@@ -346,7 +352,9 @@ pub async fn smart_search_stream(
     session_id: String,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
     }
     if query.trim().is_empty() {
         return Err("问题不能为空".into());
@@ -923,7 +931,9 @@ pub async fn conversation_ask(
     strict_docs: bool,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
     }
     if messages.is_empty() {
         return Err("对话不能为空".into());
@@ -968,7 +978,9 @@ pub async fn conversation_ask_stream(
     strict_docs: bool,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
-        return Err("AI 服务未配置，请在设置页配置 API Base URL".into());
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
     }
     if messages.is_empty() {
         return Err("对话不能为空".into());
@@ -1206,6 +1218,10 @@ pub fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionM
 /// Create a new empty session. Returns its id.
 #[tauri::command]
 pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
+    create_chat_session_impl(&state.data_dir)
+}
+
+fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, String> {
     let now = now_ts();
     let session = ChatSession {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1225,13 +1241,13 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
         focus_file: None,
     };
     let id = session.id.clone();
-    let mut h = read_history(&state.data_dir);
+    let mut h = read_history(data_dir);
     if h.sessions.len() >= 50 {
         h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         h.sessions.pop();
     }
     h.sessions.push(session);
-    write_history(&state.data_dir, &h)?;
+    write_history(data_dir, &h)?;
     Ok(id)
 }
 
@@ -1257,7 +1273,11 @@ pub fn save_chat_session(
     state: State<'_, AppState>,
     session: ChatSession,
 ) -> Result<(), String> {
-    let mut h = read_history(&state.data_dir);
+    save_chat_session_impl(&state.data_dir, session)
+}
+
+fn save_chat_session_impl(data_dir: &std::path::Path, session: ChatSession) -> Result<(), String> {
+    let mut h = read_history(data_dir);
     let now = now_ts();
     let mut session = session;
     session.updated_at = now;
@@ -1269,7 +1289,7 @@ pub fn save_chat_session(
         Some(existing) => *existing = session,
         None => h.sessions.push(session),
     }
-    write_history(&state.data_dir, &h)
+    write_history(data_dir, &h)
 }
 
 /// Format a single evidence item as Markdown.
@@ -1299,7 +1319,11 @@ fn fmt_evidence_item(e: &EvidenceItem, index: usize) -> String {
 /// per-turn references, retrieval evidence, strict/focus mode, timestamps).
 #[tauri::command]
 pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    let h = read_history(&state.data_dir);
+    export_chat_session_impl(&state.data_dir, &id)
+}
+
+fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+    let h = read_history(data_dir);
     let session = h
         .sessions
         .into_iter()
@@ -1392,10 +1416,124 @@ mod history_tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
 
-#[cfg(test)]
-mod rag_tests {
+    #[test]
+    fn session_store_evicts_oldest_at_50_cap() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // create 时按 updated_at 驱逐最旧，总量锁 50。
+        let created: Vec<String> = (0..51)
+            .map(|i| create_chat_session_impl(&dir).unwrap())
+            .collect();
+        let h = read_history(&dir);
+        assert_eq!(h.sessions.len(), 50, "超过 50 应驱逐最旧");
+        // 最新创建的必须存活（同秒驱逐顺序未定义，不断言具体哪条被逐）
+        assert!(h.sessions.iter().any(|s| s.id == created[50]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_chat_session_updates_existing_not_duplicates() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut s = ChatSession {
+            id: "s1".into(),
+            title: String::new(),
+            created_at: now_ts(),
+            updated_at: now_ts(),
+            messages: vec![ChatMessage { role: "user".into(), content: "第一问".into() }],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![],
+            scope_dir_ids: vec![],
+            scope_conditions: vec![],
+            strict_docs: false,
+            focus_file: None,
+        };
+        save_chat_session_impl(&dir, s.clone()).unwrap();
+        // 无标题 → 从首条 user 消息推导
+        let h = read_history(&dir);
+        assert_eq!(h.sessions.len(), 1);
+        assert_eq!(h.sessions[0].title, "第一问");
+
+        // 再次保存（新消息）→ 原地更新，不新增
+        s.messages.push(ChatMessage { role: "assistant".into(), content: "答1".into() });
+        save_chat_session_impl(&dir, s.clone()).unwrap();
+        let h = read_history(&dir);
+        assert_eq!(h.sessions.len(), 1, "同 id 保存应原地更新");
+        assert_eq!(h.sessions[0].messages.len(), 2);
+        assert_eq!(h.sessions[0].title, "第一问", "标题不被第二存盘覆盖");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_chat_session_includes_turns_evidence_and_modes() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = ChatSession {
+            id: "s1".into(),
+            title: "克虏伯项目".into(),
+            created_at: 1000,
+            updated_at: 2000,
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "项目背景".into() },
+                ChatMessage { role: "assistant".into(), content: "2015年启动。".into() },
+                ChatMessage { role: "user".into(), content: "股权比例呢".into() },
+                ChatMessage { role: "assistant".into(), content: "最终95%。".into() },
+            ],
+            source_ids: vec!["f1".into()],
+            source_files: vec!["a.pdf".into()],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![PerTurnEvidence {
+                turn_index: 0,
+                file_ids: vec!["f1".into()],
+                items: vec![EvidenceItem {
+                    file_id: "f1".into(),
+                    path: "a.pdf".into(),
+                    snippet: "2015年初出让股权".into(),
+                    bm25_score: Some(3.5),
+                    semantic_score: None,
+                    rrf_score: None,
+                    rewritten: true,
+                    rewritten_query: Some("项目 背景".into()),
+                    from_history: false,
+                }],
+            }],
+            per_turn_scopes: vec![PerTurnScope {
+                turn_index: 0,
+                files: vec!["a.pdf".into()],
+                dirs: vec![],
+            }],
+            scope_dir_ids: vec!["dir1".into()],
+            scope_conditions: vec![],
+            strict_docs: true,
+            focus_file: Some("a.pdf".into()),
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+        let md = export_chat_session_impl(&dir, "s1").unwrap();
+        assert!(md.contains("# 克虏伯项目"));
+        assert!(md.contains("## 问 (第 1 轮)"), "第一轮问题应导出: {md}");
+        assert!(md.contains("项目背景"));
+        assert!(md.contains("## 答"));
+        assert!(md.contains("2015年启动"));
+        assert!(md.contains("第 2 轮"), "第二轮问题应导出");
+        assert!(md.contains("检索依据（1）"));
+        assert!(md.contains("a.pdf"));
+        assert!(md.contains("查询改写"));
+        assert!(md.contains("严格模式"));
+        assert!(md.contains("专注模式"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use super::*;
 
     fn msg(role: &str, content: &str) -> ChatMessage {

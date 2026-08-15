@@ -153,6 +153,10 @@ pub fn config_file_path() -> PathBuf {
 }
 
 fn config_dir() -> PathBuf {
+    // 测试后门：LS_CONFIG_DIR 覆盖配置目录，避免 wire 测试读写真实用户配置。
+    if let Ok(dir) = std::env::var("LS_CONFIG_DIR") {
+        return PathBuf::from(dir);
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(CONFIG_DIR)

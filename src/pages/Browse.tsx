@@ -25,6 +25,8 @@ function statusBadge(indexed: number, error_msg: string | null | undefined, t: (
 export default function Browse() {
   const { t } = useI18n()
   const [params, setParams] = useSearchParams()
+  // 深链路径：挂载时若包含 ?path=，作为优先搜索词（不污染持久化的 search）
+  const [forcedSearch, setForcedSearch] = useState<string | null>(() => params.get('path'))
   const [items, setItems] = useState<FileItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -164,7 +166,7 @@ export default function Browse() {
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await listFilesDb({ filter, ext: ext || undefined, search: debouncedSearch || undefined, sort, order, page, pageSize })
+      const res = await listFilesDb({ filter, ext: ext || undefined, search: (forcedSearch ?? debouncedSearch) || undefined, sort, order, page, pageSize })
       setItems(res.items)
       setTotal(res.total)
     } catch {
@@ -173,7 +175,7 @@ export default function Browse() {
     } finally {
       setLoading(false)
     }
-  }, [filter, ext, debouncedSearch, sort, order, page, pageSize])
+  }, [filter, ext, forcedSearch, debouncedSearch, sort, order, page, pageSize])
 
   // Clamp page to a valid range when the result set shrinks (e.g. after a
   // re-scan fixes failures), so the user is never left on an empty page.
@@ -256,6 +258,21 @@ export default function Browse() {
     setPreviewLoading(false)
   }, [])
 
+  useEffect(() => {
+    if (forcedSearch) {
+      selectFile(forcedSearch)
+    }
+  }, [selectFile, forcedSearch])
+
+  useEffect(() => {
+    if (forcedSearch && items.length > 0) {
+      const row = tableRef.current?.querySelector(`tr[data-relpath="${CSS.escape(forcedSearch)}"]`)
+      if (row) {
+        row.scrollIntoView({ block: 'nearest' })
+      }
+    }
+  }, [items, forcedSearch])
+
   return (
     <div className="flex h-full">
       {/* Left: Table */}
@@ -288,7 +305,7 @@ export default function Browse() {
             <input
               type="text"
               value={search}
-              onChange={e => { setSearch(e.target.value); setPage(1) }}
+              onChange={e => { setForcedSearch(null); setSearch(e.target.value); setPage(1) }}
               onKeyDown={e => e.key === 'Enter' && setPage(1)}
               placeholder={t('search_filename')}
               className="w-full text-xs bg-transparent border border-gray-200 dark:border-gray-700 rounded px-2 py-1 pr-7 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
@@ -357,6 +374,7 @@ export default function Browse() {
                 {items.map((item, idx) => (
                   <tr
                     key={item.file_id}
+                    data-relpath={item.rel_path}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey) {
                         setSelectedIds(prev => {

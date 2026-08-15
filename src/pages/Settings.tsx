@@ -673,7 +673,7 @@ export default function Settings() {
                                     const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
                                     return (
                                       <div key={`en-${group}`} className="mb-1">
-                                        <div className="text-[10px] text-gray-400 dark:text-gray-500 px-1">{t(labelKey)}</div>
+                                        <div className="text-[10px] text-gray-400 dark:text-gray-500 px-1">{t(labelKey, { n: matched.length })}</div>
                                         {matched.map(m => (
                                           <div key={m.id} className="flex items-center gap-2 pl-1">
                                             <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
