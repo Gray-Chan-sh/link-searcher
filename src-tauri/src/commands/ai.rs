@@ -685,6 +685,10 @@ async fn prepare_conversation_prompt(
     strict_docs: bool,
 ) -> Result<PreparedConversation, String> {
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    log::info!(
+        "[AI] prepare_conversation_prompt: q={} mention_files={:?} mention_dirs={:?} conditions={:?} session_scope_dir_ids={:?} strict_docs={}",
+        last_q, scope.mention_files, scope.mention_dirs, scope.conditions, session_scope_dir_ids, strict_docs
+    );
     // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
     let rule = rewrite_query(&last_q, messages);
     let search_q = match llm_rewrite_query(&last_q, messages).await {
@@ -692,6 +696,7 @@ async fn prepare_conversation_prompt(
         _ => rule.query,
     };
     let rewritten = search_q != last_q.trim();
+    log::info!("[AI] rewrite: original={last_q} search_q={search_q} rewritten={rewritten}");
 
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
@@ -760,6 +765,11 @@ async fn prepare_conversation_prompt(
         if ids.is_empty() { None } else { Some(ids) }
     };
 
+    log::info!(
+        "[AI] scope resolved: dir_ids={:?} path_prefixes={:?} file_ids={:?} ext={:?} date={:?}~{:?}",
+        dir_ids_opt, path_prefixes_opt, mention_file_ids, ext_filter, date_from, date_to
+    );
+
     // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
     // 语义开启时对追问做 BM25+embedding RRF 融合重排。
     let new_hits = if last_q.trim().is_empty() {
@@ -770,6 +780,7 @@ async fn prepare_conversation_prompt(
             dir_ids_opt, ext_filter, date_from, date_to, path_prefixes_opt, mention_file_ids,
         )?
     };
+    log::info!("[AI] retrieved hits: {} new_hits (from limited scope)", new_hits.len());
 
     const MAX_SOURCES: usize = 15;
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -1261,7 +1272,31 @@ pub fn save_chat_session(
     write_history(&state.data_dir, &h)
 }
 
-/// Export a session as Markdown text (chat transcript with file refs).
+/// Format a single evidence item as Markdown.
+fn fmt_evidence_item(e: &EvidenceItem, index: usize) -> String {
+    let scores: Vec<String> = std::iter::empty()
+        .chain(e.bm25_score.map(|s| format!("BM25 {s:.2}")))
+        .chain(e.semantic_score.map(|s| format!("语义 {s:.2}")))
+        .chain(e.rrf_score.map(|s| format!("RRF {s:.2}")))
+        .collect();
+    let score_str = if scores.is_empty() { String::new() } else { format!("（{}）", scores.join(" · ")) };
+    let mut out = format!("{index}. 📄 `{}` {score_str}", e.path);
+    if e.rewritten {
+        if let Some(q) = &e.rewritten_query {
+            out.push_str(&format!("\n    ↳ 查询改写: `{q}`"));
+        }
+    }
+    if e.from_history {
+        out.push_str("\n    ↳ 来自历史来源");
+    }
+    if !e.snippet.is_empty() {
+        out.push_str(&format!("\n    ↳ 片段: {}", truncate_text(&e.snippet, 120)));
+    }
+    out
+}
+
+/// Export a session as Markdown text (chat transcript with full traceability:
+/// per-turn references, retrieval evidence, strict/focus mode, timestamps).
 #[tauri::command]
 pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<String, String> {
     let h = read_history(&state.data_dir);
@@ -1272,24 +1307,59 @@ pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<Str
         .ok_or_else(|| "会话不存在".to_string())?;
 
     let mut md = String::new();
+    let now = now_ts();
     md.push_str(&format!("# {}\n\n", session.title));
-    if let Some(first) = session.messages.first() {
-        md.push_str(&format!("> 开始于 {}\n\n", first.content.chars().take(30).collect::<String>()));
-    } else {
-        md.push_str(&format!("> 空会话\n\n"));
+    md.push_str(&format!("> 会话 ID: `{}`\n", session.id));
+    md.push_str(&format!("> 创建时间: {}\n", session.created_at));
+    md.push_str(&format!("> 导出时间: {}\n\n", now));
+
+    if session.strict_docs {
+        md.push_str("> ⚙️ 严格模式（仅依据文档）：开启\n");
     }
-    for m in &session.messages {
+    if let Some(f) = &session.focus_file {
+        md.push_str(&format!("> 📌 专注模式: `{}`\n", f));
+    }
+    if !session.scope_dir_ids.is_empty() {
+        md.push_str(&format!("> 📁 会话范围目录: `{:?}`\n", session.scope_dir_ids));
+    }
+    // 按轮索引分组：user 消息和它的 evidence/scope
+    let mut turn_idx = 0usize;
+    let mut user_msg_iter = session.messages.iter().filter(|m| m.role == "user");
+    for (i, m) in session.messages.iter().enumerate() {
         if m.role == "user" {
-            md.push_str(&format!("## 问\n\n{}\n\n", m.content));
-        } else {
-            md.push_str(&format!("## 答\n\n{}\n\n", m.content));
+            turn_idx += 1;
+            md.push_str(&format!("---\n\n## 问 (第 {turn_idx} 轮)\n\n{}\n", m.content));
+            // 本轮引用
+            let scopes = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1);
+            if let Some(sc) = scopes {
+                if !sc.files.is_empty() || !sc.dirs.is_empty() {
+                    md.push_str("\n**引用:**\n");
+                    for f in &sc.files {
+                        md.push_str(&format!("- 📄 `{}`\n", f));
+                    }
+                    for d in &sc.dirs {
+                        md.push_str(&format!("- 📁 `{}`\n", d));
+                    }
+                }
+            }
+            // 找下一条 assistant 消息
+            if let Some(assistant_msg) = session.messages.get(i + 1).filter(|m| m.role == "assistant") {
+                md.push_str(&format!("\n## 答\n\n{}\n", assistant_msg.content));
+                // 本轮检索依据
+                let evidence = session.per_turn_evidence.iter().find(|e| e.turn_index == turn_idx - 1);
+                if let Some(ev) = evidence {
+                    if !ev.items.is_empty() {
+                        md.push_str(&format!("\n**检索依据（{}）:**\n", ev.items.len()));
+                        for (j, item) in ev.items.iter().enumerate() {
+                            md.push_str(&format!("{}\n", fmt_evidence_item(item, j + 1)));
+                        }
+                    }
+                }
+            }
         }
     }
-    md.push_str("\n---\n**引用文件:**\n");
-    for f in &session.source_files {
-        md.push_str(&format!("- {}\n", f));
-    }
-    md.push_str(&format!("\n_导出时间: {}\n", now_ts()));
+    md.push_str("\n---\n");
+    md.push_str(&format!("\n_导出时间: {}\n", now));
     Ok(md)
 }
 #[cfg(test)]
