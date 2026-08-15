@@ -276,10 +276,16 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
     skipResumeRef.current = true
+    const userTurnsCount = messages.filter(m => m.role === 'user').length
     patchSession({
       messages: [...messages, userMsg],
       pending_query: q,
       pending_started_at: startedAt,
+      // 记录本轮生效的 @mention 集合，供导出追溯
+      per_turn_scopes: [
+        ...(session.per_turn_scopes ?? []),
+        { turn_index: userTurnsCount, files: scope.mention_files, dirs: scope.mention_dirs },
+      ],
     })
     setStreaming({ sessionId: session.id, text: '' })
 
