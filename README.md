@@ -128,7 +128,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| **系统托盘** | 关闭窗口最小化到托盘，后台持续运行 |
+| **关闭行为** | 关闭窗口直接退出程序（系统托盘已在 [路线图](CHANGELOG.md#路线图) 中规划） |
 | **开机自启** | 可选（macOS LaunchAgent / Windows 启动项） |
 | **命令行搜索** | `link-searcher search "keyword"`（别名 `index`） |
 | **命令行扫描/监控** | `link-searcher scan [dir]` 扫描并退出；`link-searcher watch dir` 实时监控文件变更 |
