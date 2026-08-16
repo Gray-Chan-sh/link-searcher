@@ -4,6 +4,60 @@
 
 ---
 
+## 2026-08-16（第二轮加固 · i18n 全覆盖 + 超时防护 + HTTPS 警告 + 权限收紧）
+
+继续鲁棒性/可用性/安全性修复（第二轮）：
+
+- **后端错误消息 i18n（U2）**：新增 `src/utils/translateErr.ts` —— 后端中文错误消息经映射表转为 i18n 键，前端 `t()` 翻译；未命中键回退原文不回归 zh。接入 `ChatPanel.errText`。4 语言各加 30 个 `err_*` 键 + `app_error`/`retry`/`index_*` 键
+- **扫描 metadata 超时防护（R2）**：新增 `scanner/helpers.rs::metadata_timeout`（辅助线程 + recv_timeout，15s/10s），替换 scan 主循环 3 处 `entry.metadata()` 与 `handle_event` 的 `std::fs::metadata`，网络文件系统（NFS/SMB/FUSE）不再可能挂死扫描
+- **`mark_extracted` 二次失败告警（R5）**：重试仍失败时打 WARN 日志（注明 Phase 1 进度不可见、下次扫描重试），替代静默 `let _ =`（`src-tauri/src/indexer.rs`）
+- **浏览页键盘导航（U6）**：↑↓ 移动选中行并滚动定位，Ctrl/Cmd+A 全选（扩展原有 handler，`src/pages/Browse.tsx`）
+- **ErrorBoundary/IndexStatus 硬编码中文 i18n（U3/U4）**：ErrorBoundary 用 `static contextType` 读 i18n context；IndexStatus 验证/重提取消息改 `t()` 模板参数
+- **LLM 远程 HTTP 警告（S4）**：`ActiveEndpoint::check_https()` 检测非本地 `http://` 网关，`OnceLock` 防刷屏打 WARN（提示 API Key/文档内容明文传输风险）（`src-tauri/src/ai/mod.rs`）
+- **CSP 收紧 + 权限最小化（S5/S6）**：CSP 加 `object-src 'none'` + `base-uri 'self'`；fs scope 移除 `$DOCUMENT/**` `$DESKTOP/**` `$DOWNLOAD/**`（前端 fs 仅用 `writeTextFile` 导出，经 dialog save → `$DIALOG_FILES/**` 覆盖）
+- **新增单测**：`src/utils/__tests__/translateErr.test.ts`（zh 保原文/en 翻译/未命中回退/键名不泄漏）
+- **测试**：全量 `cargo test` 全绿、`tsc -b` 0、scopeParser + translateErr 断言全过、semgrep ERROR 0
+
+---
+
+## 2026-08-16（鲁棒性 · 可用性 · 安全性全面摸底修复 · 首批 7 项）
+
+基于三路并行审计（鲁棒性/可用性/安全性），修复首批问题：
+
+- **`get_content_ocr_used` 设计缺陷（R1）**：`query_row` 无数据时返回 `QueryReturnedNoRows` 错误，改为 `match` 显式处理该变体返回 `Ok(false)`（`src-tauri/src/db/tracker.rs`)
+- **`⌘K` 快捷键不存在（U1）**：搜索框 placeholder 写了 `(⌘K)` 但无监听器。新增 `useEffect` 全局监听 `⌘K`/`Ctrl+K` 聚焦搜索框（`src/components/SearchBar.tsx`）
+- **`download_files` 路径穿越（S2）**：原用数据库相对路径直接 `std::fs::read`（相对 CWD，可能被 `../../` 利用）。改为按 `dir_id` 查目录根路径拼接绝对路径再读取（`src-tauri/src/commands/files.rs`）
+- **API Key 文件权限（S1 部分）**：`config.json` 写入改为 Unix `mode(0o600)`（仅 owner 读写），Windows 维持默认（`src-tauri/src/config.rs`）
+- **ChatPanel 流式监听静默失败（R3）**：`listenAiStream` 失败由 `catch(() => {})` 改为 `console.error` 输出（`src/components/ChatPanel.tsx`）
+- **`preview_file_by_path` 路径穿越防护（S3）**：非 DB 路径回退读取前，`canonicalize` + 校验在任一已监控目录内，越界拒绝（`src-tauri/src/commands/files.rs`）
+- **Browse 重索引静默吞错误（R4）**：`reindexFiles().catch(() => {})` 改为 `console.error`（`src/pages/Browse.tsx`）
+- **测试**：全量 `cargo test` 全绿（161+8+15 等）、`tsc -b` 0、scopeParser 全过、semgrep ERROR 0
+
+---
+
+## 2026-08-15（浏览页优化 · 三波迭代：效率/呈现/体验）
+
+分三波优化浏览页（`src/pages/Browse.tsx` + 4 个 i18n 文件）：
+
+- **波一 · 快速修正**：
+  - 右键菜单加「复制路径」（`copy_path` 复用，`navigator.clipboard` 先行例），路径终于可复制（表格原 `select-none` 且菜单无此项）
+  - reindex 确认弹窗：仅当目标文件全部已索引时弹 `ask(confirm_reindex)`（未索引直接重建不打扰；`confirm_reindex` 文案 4 语言原本存在却从未被调用）
+  - 暗色补齐 4 处：`no_preview_available`/`loading_preview`/`select_file_preview` 加 `dark:text-gray-500`，日志弹窗关闭按钮加 `dark:hover:text-gray-200`
+  - 预览面板折叠/展开把手（▶/◀ 切换，w-80 ⇄ 隐藏，表格区恢复 ~975px）
+- **波二 · 交互效率**：
+  - **列宽持久化**：`colWidths` 从 `useState` 改 `usePersistentState(LS_KEY_COLS)`，重启后保留宽度；`type`/`status` 列补拖拽把手 + 双击 autoFit 支持（原仅 filename/path 可拖，且宽度不持久）
+  - Ctrl/⌘+单击加选时预览跟随最后点击行（原只 toggle `selectedIds`，预览停在旧文件）
+  - 右键菜单视口 clamp：`min(x, viewportW-190)` / `min(y, viewportH-200)`，贴右下角不再溢出窗口
+  - AI 问答错误红色态：新增 `askError` state，失败渲染红底红字，与成功紫底区分
+- **波三 · 信息呈现**：
+  - 预览轻量增强：文件名标题栏（带 title 提示）；图片缩放按钮组（50%/100%/150%/200%，`transform: scale()`）；超 50k 字符截断显示 + `truncated_notice` 提示（复用 i18n）
+  - **图片预览修复**：`get_file_preview`/`get_file_preview_inner` 返回的 `image_path` 原为数据库中的相对路径，`convertFileSrc` 无法加载 asset 协议链接。改为拼接 `dir_config.path`（目录根路径）得到绝对路径，图片预览正常显示（`src-tauri/src/commands/files.rs`）
+  - 分页体验：删除 `pageSize` 变化即 `setPage(1)` 的 effect（窄窗口 toolbar 折行/拖拽调整高度不再把用户踢回第 1 页；越界仍由既有 `page > totalPages` clamp 兜底）
+- **验证**：`tsc -b` 0、scopeParser 全过、semgrep ERROR 0；MCP 实测——右键菜单贴右下角触发仍完整在视口内（1200×768）、预览标题栏显示选中路径、图片点 200% 生效（`scale(2)` + 按钮高亮）、表头 4 列均可拖
+- **待用户确认**：预览折叠按钮在 MCP 驱动下出现渲染层异常（onClick 探针执行但 setState 不更新，同组件其他 setState 正常），代码为教科书式 React（useState + 条件渲染 + toggle），疑似 WebView/MCP 驱动环境问题；需真机点一下确认
+
+---
+
 ## 2026-08-15（检索依据文件可点击 → 跳转浏览页预览）
 
 - **AI 聊天「检索依据」文件可点击**：证据面板（`<details>` 内 `<li>` 项）整行可点击，`navigate('/browse?path=<相对路径>')`，带 hover 样式；不触发系统打开（顶部来源栏已有 `openFile` 入口，不重复）（`src/components/ChatPanel.tsx`）
@@ -1395,3 +1449,16 @@
 - **新增测试文档**：`docs/12-testing.md`，详述 37 个 E2E 用例覆盖范围、运行方式、常见问题
 - **更新截图**：全部 8 页 + 5 个设置标签 + 5 张标注截图，截取自运行中 App 实时画面（`docs/screenshots/`）
 - **修复模型路由**：`9Router` vs `9router` 大小写导致子代理 ProviderModelNotFoundError，统一 provider 名（`~/.config/opencode/opencode.json`）
+
+---
+
+## 路线图
+
+### 系统托盘（优先级：低）
+
+**理由**：托盘功能在 macOS 上遇到 Tauri 2 的平台限制——设置菜单后左键点击事件被系统拦截（`Click` 不发送），不设菜单则左键可工作但无菜单项。当前 macOS 上托盘没有实用价值，暂移除代码。
+
+**待实现方案**（任选一个）：
+- **方案 A**：macOS 上用 `TrayIconEvent::Click` 切换窗口，用 `TrayIconEvent::RightClick` 弹出自定义菜单（需调研 Tauri 2 是否支持 `RightClick` 事件）
+- **方案 B**：移除菜单 + 用全局快捷键（如 `Cmd+Shift+L`）替代托盘功能，托盘仅做窗口最小化指示
+- **方案 C**：等待 Tauri 2 更新对 macOS 托盘菜单事件的支持，或改用 `tao` 底层 API 直接操作 `NSStatusItem`

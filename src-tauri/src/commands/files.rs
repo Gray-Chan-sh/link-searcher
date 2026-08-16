@@ -306,17 +306,21 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
             .map_err(|e| format!("query error: {e}"))?
             .ok_or_else(|| format!("file not found: {id}"))?;
 
-        let path = std::path::Path::new(&file_record.path);
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        // 解析绝对路径：目录根路径 + 相对路径，防止路径穿越
+        let dir = db::dir_config::get_dir(&conn, &file_record.dir_id)
+            .map_err(|e| format!("query error: {e}"))?
+            .ok_or_else(|| format!("dir config not found: {}", file_record.dir_id))?;
+        let abs = std::path::Path::new(&dir.path).join(&file_record.path);
+        let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
         // P1-2: reject files >500MB before reading into memory
-        let file_size = match path.metadata() {
+        let file_size = match abs.metadata() {
             Ok(m) => m.len(),
             Err(e) => return Err(format!("无法读取文件信息: {e}")),
         };
         if file_size > 500 * 1024 * 1024 {
             return Err(format!("文件过大，无法下载: {}", file_record.path));
         }
-        let data = std::fs::read(path).map_err(|e| format!("failed to read {}: {e}", file_record.path))?;
+        let data = std::fs::read(&abs).map_err(|e| format!("failed to read {}: {e}", file_record.path))?;
 
         zip_writer
             .start_file(name, options.clone())
@@ -338,6 +342,7 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
 pub struct FilePreview {
     pub content: Option<String>,
     pub image_path: Option<String>,
+    pub image_base64: Option<String>,
     pub file_type: String,
     pub char_count: usize,
     pub ocr_used: bool,
@@ -357,7 +362,20 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         .unwrap_or_default();
 
     let file_type = crate::extractor::classify_ext(&ext).to_string();
-    let image_path = if file_type == "image" { Some(file.path.clone()) } else { None };
+    let (image_path, image_base64) = if file_type == "image" {
+        let dir = db::dir_config::get_dir(&conn, &file.dir_id)
+            .unwrap_or(None)
+            .map(|d| d.path)
+            .unwrap_or_default();
+        let abs = std::path::Path::new(&dir).join(&file.path).to_string_lossy().into_owned();
+        let b64 = std::fs::read(&abs).ok().map(|bytes| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        });
+        (Some(abs), b64)
+    } else {
+        (None, None)
+    };
 
     let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
         if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
@@ -371,7 +389,7 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         (None, 0, false)
     };
 
-    Ok(FilePreview { content, image_path, file_type, char_count, ocr_used })
+    Ok(FilePreview { content, image_path, image_base64, file_type, char_count, ocr_used })
 }
 
 #[tauri::command]
@@ -516,11 +534,23 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
 
         return get_file_preview_inner(&state, &file).await;
     }
-    drop(conn);
 
+    // 防止路径穿越：校验路径在已监控目录内（conn 还在作用域内）
     let p = std::path::Path::new(&path);
     if !p.exists() {
+        drop(conn);
         return Err("file not found".to_string());
+    }
+    let dirs = db::dir_config::list_dirs(&conn).map_err(|e| format!("db error: {e}"))?;
+    let abs = p.canonicalize().map_err(|_| "invalid path".to_string())?;
+    let allowed = dirs.iter().any(|d| {
+        std::path::Path::new(&d.path).canonicalize().ok()
+            .map(|root| abs.starts_with(&root))
+            .unwrap_or(false)
+    });
+    drop(conn);
+    if !allowed {
+        return Err("file not in monitored directories".to_string());
     }
 
     let ext = p.extension()
@@ -540,6 +570,7 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
     Ok(FilePreview {
         content,
         image_path,
+        image_base64: None,
         file_type,
         char_count,
         ocr_used: false,
@@ -557,7 +588,20 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         .unwrap_or_default();
 
     let file_type = crate::extractor::classify_ext(&ext).to_string();
-    let image_path = if file_type == "image" { Some(file.path.clone()) } else { None };
+    let (image_path, image_base64) = if file_type == "image" {
+        let dir = db::dir_config::get_dir(&conn, &file.dir_id)
+            .unwrap_or(None)
+            .map(|d| d.path)
+            .unwrap_or_default();
+        let abs = std::path::Path::new(&dir).join(&file.path).to_string_lossy().into_owned();
+        let b64 = std::fs::read(&abs).ok().map(|bytes| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        });
+        (Some(abs), b64)
+    } else {
+        (None, None)
+    };
 
     let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
         if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
@@ -571,5 +615,5 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         (None, 0, false)
     };
 
-    Ok(FilePreview { content, image_path, file_type, char_count, ocr_used })
+    Ok(FilePreview { content, image_path, image_base64, file_type, char_count, ocr_used })
 }

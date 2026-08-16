@@ -456,12 +456,15 @@ pub fn delete_content(conn: &Connection, md5: &str) -> Result<()> {
 }
 
 pub fn get_content_ocr_used(conn: &Connection, md5: &str) -> Result<bool> {
-    let result = conn.query_row(
+    match conn.query_row(
         "SELECT ocr_used FROM content_index WHERE md5 = ?1",
         rusqlite::params![md5],
         |row| row.get::<_, i64>(0),
-    )?;
-    Ok(result != 0)
+    ) {
+        Ok(v) => Ok(v != 0),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn get_total_image_files(conn: &Connection) -> Result<u64> {

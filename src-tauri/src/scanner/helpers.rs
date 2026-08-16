@@ -9,6 +9,25 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, anyhow};
 use crate::db::tracker::{FileRecord, IndexedState};
 
+/// `metadata()` with a timeout guard.
+///
+/// Network filesystems (NFS/SMB/FUSE) can hang indefinitely on `metadata`.
+/// Run the call on a helper thread and give up after `timeout` — the caller
+/// treats a timeout as "metadata unavailable" and skips the entry instead
+/// of blocking the whole scan.
+pub fn metadata_timeout(path: &Path, timeout: std::time::Duration) -> Result<std::fs::Metadata> {
+    let path_owned = path.to_path_buf();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::fs::metadata(&path_owned));
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(m)) => Ok(m),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => Err(anyhow!("metadata timed out after {:?}: {}", timeout, path.display())),
+    }
+}
+
 /// A discovered disk file entry carrying both absolute and relative paths.
 #[derive(Debug, Clone)]
 pub struct DiskEntry {

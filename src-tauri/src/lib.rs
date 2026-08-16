@@ -29,8 +29,7 @@ use crate::scanner::watcher::FileWatcher;
 use crate::state::AppState;
 use crate::state::ScanDelta;
 use env_logger;
-use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::menu::{Menu, MenuItem};
+
 use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
@@ -474,48 +473,6 @@ get_dir_children,
                     let rgba = img.into_raw();
                     let _ = window.set_icon(tauri::image::Image::new(&rgba, w, h));
                 }
-            }
-
-            // System tray
-            let show_item = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
-
-            let _tray = TrayIconBuilder::new()
-                .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id.as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::DoubleClick { .. } = event {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
-
-            // Close button minimizes to tray
-            if let Some(window) = app.get_webview_window("main") {
-                let window_ = window.clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        api.prevent_close();
-                        let _ = window_.hide();
-                    }
-                });
             }
 
             Ok(())

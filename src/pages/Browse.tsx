@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { ask } from '@tauri-apps/plugin-dialog'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
@@ -14,6 +14,7 @@ const LS_KEY_EXT = 'ls_browse_ext'
 const LS_KEY_SEARCH = 'ls_browse_search'
 const LS_KEY_SORT = 'ls_browse_sort'
 const LS_KEY_ORDER = 'ls_browse_order'
+const LS_KEY_COLS = 'ls_browse_cols'
 
 function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
   if (indexed === 1) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
@@ -43,6 +44,8 @@ export default function Browse() {
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
+  const [previewCollapsed, setPreviewCollapsed] = useState(false)
+  const [previewZoom, setPreviewZoom] = useState(1)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
   const [indexLog, setIndexLog] = useState<string | null>(null)
   const [indexLogLoading, setIndexLogLoading] = useState(false)
@@ -51,10 +54,11 @@ export default function Browse() {
   const [askQuestion, setAskQuestion] = useState('')
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const [askAnswer, setAskAnswer] = useState<string | null>(null)
+  const [askError, setAskError] = useState(false)
   useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
   const [askLoading, setAskLoading] = useState(false)
-  const [colWidths, setColWidths] = useState({ filename: 192, path: 200, type: 64, status: 112 })
-  type ColKey = keyof typeof colWidths
+  type ColKey = 'filename' | 'path' | 'type' | 'status'
+  const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, status: 112 })
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const rowHeightRef = useRef<number | null>(null)
@@ -76,7 +80,7 @@ export default function Browse() {
     measure()
     const ro = new ResizeObserver(measure)
     ro.observe(el)
-    return () => ro.disconnect()
+return () => ro.disconnect()
   }, [])
 
   // Rows render only after data loads, so the real height can't be read on mount.
@@ -91,13 +95,9 @@ export default function Browse() {
   }, [items])
 
   useEffect(() => {
-    setPage(1)
-  }, [pageSize])
-
-  useEffect(() => {
     const close = () => setContextMenu(null)
     document.addEventListener('click', close)
-    return () => document.removeEventListener('click', close)
+return () => document.removeEventListener('click', close)
   }, [])
 
   const handleResizeStart = useCallback((e: React.MouseEvent, col: ColKey) => {
@@ -120,7 +120,7 @@ export default function Browse() {
   }, [colWidths])
 
   const handleAutoFit = useCallback((col: ColKey) => {
-    const colIdx = col === 'filename' ? 0 : 1
+    const colIdx = ({ filename: 0, path: 1, type: 2, status: 3 } as const)[col]
     const cells = tableRef.current?.querySelectorAll<HTMLTableCellElement>(
       `tbody td:nth-child(${colIdx + 1})`
     )
@@ -202,11 +202,13 @@ export default function Browse() {
     if (selectedIds.size === 0) return
     setAskLoading(true)
     setAskAnswer(null)
+    setAskError(false)
     try {
       const answer = await askDocuments([...selectedIds], askQuestion.trim())
       setAskAnswer(answer)
     } catch (e) {
       setAskAnswer(e instanceof Error ? e.message : t('ai_ask_failed'))
+      setAskError(true)
     } finally {
       setAskLoading(false)
     }
@@ -214,20 +216,9 @@ export default function Browse() {
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(search), 300)
-    return () => clearTimeout(t)
+return () => clearTimeout(t)
   }, [search])
 
-  // Cmd/Ctrl+A: select all
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'a' && items.length > 0) {
-        e.preventDefault()
-        setSelectedIds(new Set(items.map(i => i.file_id)))
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [items])
 
   useEffect(() => {
     loadFiles()
@@ -258,6 +249,42 @@ export default function Browse() {
     setPreviewLoading(false)
   }, [])
 
+  // 键盘导航：↑↓ 移动选中行，Enter 打开预览；Ctrl/Cmd+A 全选当前页
+  // 键盘导航：↑↓ 移动选中行；Ctrl/Cmd+A 全选当前页
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const isSearch = document.activeElement?.closest('[data-search-input]') || document.activeElement?.tagName === 'INPUT'
+      if (isSearch) return
+      if (items.length === 0) return
+      if ((e.metaKey || e.ctrlKey) && e.key === 'a') {
+        e.preventDefault()
+        setSelectedIds(new Set(items.map(i => i.file_id)))
+        return
+      }
+      // 定位当前焦点行（lastClickedIdx 优先，否则用 selectedIds 首个）
+      let idx = lastClickedIdx ?? items.findIndex(i => selectedIds.has(i.file_id))
+      if (idx < 0) idx = 0
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        const next = Math.min(idx + 1, items.length - 1)
+        const item = items[next]
+        selectFile(item.rel_path)
+        setSelectedIds(new Set([item.file_id]))
+        setLastClickedIdx(next)
+        tableRef.current?.querySelector(`tr[data-relpath="${CSS.escape(item.rel_path)}"]`)?.scrollIntoView({ block: 'nearest' })
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        const prev = Math.max(idx - 1, 0)
+        const item = items[prev]
+        selectFile(item.rel_path)
+        setSelectedIds(new Set([item.file_id]))
+        setLastClickedIdx(prev)
+        tableRef.current?.querySelector(`tr[data-relpath="${CSS.escape(item.rel_path)}"]`)?.scrollIntoView({ block: 'nearest' })
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [items, selectedIds, lastClickedIdx, selectFile])
   useEffect(() => {
     if (forcedSearch) {
       selectFile(forcedSearch)
@@ -273,7 +300,7 @@ export default function Browse() {
     }
   }, [items, forcedSearch])
 
-  return (
+return (
     <div className="flex h-full">
       {/* Left: Table */}
       <div className="flex-1 flex flex-col min-w-0 border-r border-gray-200 dark:border-gray-800">
@@ -366,8 +393,14 @@ export default function Browse() {
                     {t('path')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'path')} onDoubleClick={() => handleAutoFit('path')} />
                   </th>
-                  <th className="px-2 py-1 font-medium">{t('type')}</th>
-                  <th className="px-2 py-1 font-medium">{t('status')}</th>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.type }}>
+                    {t('type')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'type')} onDoubleClick={() => handleAutoFit('type')} />
+                  </th>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.status }}>
+                    {t('status')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'status')} onDoubleClick={() => handleAutoFit('status')} />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -377,6 +410,7 @@ export default function Browse() {
                     data-relpath={item.rel_path}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey) {
+                        selectFile(item.rel_path)
                         setSelectedIds(prev => {
                           const next = new Set(prev)
                           if (next.has(item.file_id)) next.delete(item.file_id)
@@ -463,7 +497,11 @@ export default function Browse() {
             </button>
           </div>
           {askAnswer && (
-            <div className="mt-2 text-xs text-gray-700 dark:text-gray-300 bg-purple-50 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-800/30 rounded p-2.5">
+            <div className={`mt-2 text-xs rounded p-2.5 ${
+              askError
+                ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-800/30'
+                : 'text-gray-700 dark:text-gray-300 bg-purple-50 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-800/30'
+            }`}>
               {askAnswer}
             </div>
           )}
@@ -514,6 +552,7 @@ export default function Browse() {
       </div>
 
       {/* Right: Preview */}
+      {!previewCollapsed && (
       <div className="w-80 shrink-0 overflow-y-auto bg-white dark:bg-gray-900">
         {previewLoading && (
           <div className="flex items-center justify-center py-16">
@@ -527,22 +566,54 @@ export default function Browse() {
         )}
         {preview && !previewLoading && (
            <div className="p-4 min-h-full">
+            {selectedFile && (
+              <div className="mb-3 flex items-center justify-between gap-2">
+                <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={selectedFile}>{selectedFile}</span>
+                {preview.file_type === 'image' && (
+                  <span className="flex items-center gap-1 shrink-0">
+                    {[0.5, 1, 1.5, 2].map(z => (
+                      <button
+                        key={z}
+                        onClick={() => setPreviewZoom(z)}
+                        className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
+                          previewZoom === z
+                            ? 'bg-blue-500 text-white border-blue-500'
+                            : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                        }`}
+                      >
+                        {z * 100}%
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </div>
+            )}
             {preview.file_type === 'image' && preview.image_path && (
-              <div className="mb-3 flex justify-center">
+              <div className="mb-3 flex justify-center overflow-hidden">
                 <img
-                  src={convertFileSrc(preview.image_path)}
+                  src={preview.image_base64 ? (() => {
+            const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
+            const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
+            return "data:image/" + mime + ";base64," + preview.image_base64
+          })() : ""}
                   alt=""
-                  className="max-w-full max-h-64 object-contain rounded-lg border border-gray-200 dark:border-gray-700"
+                  style={{ transform: `scale(${previewZoom})`, transformOrigin: 'top left' }}
+                  className={`max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 transition-transform ${previewZoom > 1 ? 'max-h-none' : 'max-h-64'}`}
                 />
               </div>
             )}
             {preview.content && (
-              <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed max-h-96 overflow-y-auto">
-                {preview.content}
+              <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed overflow-y-auto max-h-[calc(100vh-16rem)]">
+                {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
               </pre>
             )}
+            {preview.content && preview.content.length > 50000 && (
+              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                {t('truncated_notice')}
+              </p>
+            )}
             {!preview.content && preview.file_type !== 'image' && (
-              <p className="text-sm text-gray-400">{t('no_preview_available')}</p>
+              <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
             )}
             {preview.char_count > 0 && (
               <p className="mt-3 text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
@@ -552,22 +623,40 @@ export default function Browse() {
           </div>
         )}
         {!preview && !previewLoading && !previewError && selectedFile && (
-          <p className="p-4 text-sm text-gray-400">{t('loading_preview')}</p>
+          <p className="p-4 text-sm text-gray-400 dark:text-gray-500">{t('loading_preview')}</p>
         )}
         {!selectedFile && !previewLoading && (
-          <div className="flex items-center justify-center h-full text-sm text-gray-400">
+          <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
             {t('select_file_preview')}
           </div>
         )}
       </div>
+      )}
+      {/* Preview toggle handle */}
+      <button
+        onClick={() => setPreviewCollapsed(v => !v)}
+        title={previewCollapsed ? t('show_preview') : t('hide_preview')}
+        className="w-5 shrink-0 self-stretch flex items-center justify-center text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 dark:hover:text-gray-300 transition-colors border-l border-gray-200 dark:border-gray-800"
+      >
+        {previewCollapsed ? '◀' : '▶'}
+      </button>
 
       {contextMenu && (
         <div
           className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[160px]"
-          style={{ left: contextMenu.x, top: contextMenu.y }}
+          style={{
+            left: Math.min(contextMenu.x, Math.max(0, window.innerWidth - 190)),
+            top: Math.min(contextMenu.y, Math.max(0, window.innerHeight - 200)),
+          }}
         >
           {selectedIds.size <= 1 ? (
             <>
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { navigator.clipboard.writeText(contextMenu.item.rel_path).catch(e => console.warn('复制失败:', e)); setContextMenu(null) }}
+              >
+                {t('copy_path')}
+              </button>
               <button
                 className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
                 onClick={() => { openFile(contextMenu.item.file_id); setContextMenu(null) }}
@@ -584,9 +673,15 @@ export default function Browse() {
           ) : null}
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => {
+            onClick={async () => {
               const ids = selectedIds.size > 1 ? [...selectedIds] : [contextMenu.item.file_id]
-              reindexFiles(ids).catch(() => {})
+              // 重索引会覆盖已索引文件的现有数据：全部已索引时才需确认；未索引的直接重建。
+              const targets = items.filter(i => ids.includes(i.file_id))
+              if (targets.length === ids.length && targets.every(i => i.indexed === 1)) {
+                const ok = await ask(t('confirm_reindex'), { title: t('reindex'), kind: 'warning' })
+                if (!ok) { setContextMenu(null); return }
+              }
+              reindexFiles(ids).catch(e => console.error('[Browse] reindex failed:', e))
               setContextMenu(null); setSelectedIds(new Set()); loadFiles()
             }}
           >
@@ -608,7 +703,7 @@ export default function Browse() {
           <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[70vh] overflow-auto" onClick={e => e.stopPropagation()}>
             <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
               <span className="text-sm font-medium">{t('index_log_title')}</span>
-              <button onClick={() => setIndexLog(null)} className="text-gray-400 hover:text-gray-600">×</button>
+              <button onClick={() => setIndexLog(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">×</button>
             </div>
             <pre className="p-4 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
               {indexLogLoading ? t('loading') : indexLog}

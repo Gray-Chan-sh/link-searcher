@@ -25,6 +25,33 @@ impl ActiveEndpoint {
             model_id: model_id.to_string(),
         }
     }
+
+    /// 返回 Self 当 base_url 是"远程 http://"（非 localhost/127.0.0.1/0.0.0.0 等本地地址）。
+    fn check_https(&self) -> Option<&Self> {
+        let url = self.base_url.trim_end_matches('/');
+        let host = url
+            .strip_prefix("http://")
+            .and_then(|rest| rest.split(['/', ':']).next())
+            .unwrap_or("");
+        let is_local = ["localhost", "127.0.0.1", "0.0.0.0", "::1"]
+            .iter().any(|l| host.eq_ignore_ascii_case(l));
+        if url.starts_with("http://") && !is_local {
+            Some(self)
+        } else {
+            None
+        }
+    }
+
+    fn warn_insecure(&self) {
+        use std::sync::OnceLock;
+        static WARNED: OnceLock<()> = OnceLock::new();
+        if WARNED.set(()).is_ok() {
+            log::warn!(
+                "[AI] 检测到远程 http:// AI 网关: {}（API Key 与文档内容将明文传输，建议改用 https:// 或本地 http://）",
+                self.base_url
+            );
+        }
+    }
 }
 
 /// Resolve the endpoint for a model role from the active selection
@@ -42,6 +69,10 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
     let provider = cfg.providers.iter().find(|p| p.id == provider_id)?;
     if !provider.models.iter().any(|m| m.id == model_id) {
         return None;
+    }
+    // 安全：远程 http:// 网关会明文传输 API Key 与文档内容，仅提示不阻断
+    if let Some(ep) = ActiveEndpoint::new(provider, model_id).check_https() {
+        ep.warn_insecure()
     }
     Some(ActiveEndpoint::new(provider, model_id))
 }

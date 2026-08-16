@@ -123,7 +123,7 @@ const handleRebuild = async () => {
     try {
       const r = await verifyIndexContent(forceDead)
       setBackfillMsg(
-        `✓ 验证完成: 检查 ${r.checked}，恢复 ${r.recovered}，空内容 ${r.dead}，失败 ${r.failed}`
+        t('index_verify_done', { checked: r.checked, recovered: r.recovered, dead: r.dead, failed: r.failed })
       )
     } catch (e) {
       setBackfillMsg(String(e))
@@ -136,8 +136,8 @@ const handleRebuild = async () => {
       const r = await reextractMissingContent()
       setBackfillMsg(
         r.processed > 0
-          ? `✓ 已重提取 ${r.ok} 个${r.failed > 0 ? `，${r.failed} 个失败` : ''}`
-          : '✓ 无缺失内容'
+          ? t('index_reextract_done', { ok: r.ok, failedSuffix: r.failed > 0 ? `，${r.failed} 个失败` : '' })
+          : t('index_no_missing')
       )
     } catch (e) {
       setBackfillMsg(String(e))

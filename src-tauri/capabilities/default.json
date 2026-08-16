@@ -22,10 +22,9 @@
     "core:window:allow-minimize",
     "core:window:allow-show",
     "core:window:allow-hide",
-    "core:tray:default",
     "autostart:default"
   ],
   "fs": {
-    "scope": ["$APPDATA/**", "$APPLOCALDATA/**", "$DOCUMENT/**", "$DESKTOP/**", "$DOWNLOAD/**", "$DIALOG_FILES/**"]
+    "scope": ["$APPDATA/**", "$APPLOCALDATA/**", "$DIALOG_FILES/**"]
   }
 }

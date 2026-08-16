@@ -1,4 +1,5 @@
 import { Component, type ReactNode } from 'react'
+import { I18nContext } from '../i18n'
 
 interface ErrorBoundaryProps {
   children: ReactNode
@@ -11,6 +12,8 @@ interface ErrorBoundaryState {
 
 export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   state: ErrorBoundaryState = { hasError: false, error: null }
+  static contextType = I18nContext
+  declare context: React.ContextType<typeof I18nContext>
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
     return { hasError: true, error }
@@ -22,9 +25,10 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   render() {
     if (this.state.hasError) {
+      const t = this.context.t
       return (
         <div className="p-6 text-sm">
-          <div className="text-red-600 dark:text-red-400 font-medium mb-2">应用出错了</div>
+          <div className="text-red-600 dark:text-red-400 font-medium mb-2">{t('app_error')}</div>
           <div className="text-gray-700 dark:text-gray-300 font-mono text-xs whitespace-pre-wrap max-h-40 overflow-auto mb-2">
             {this.state.error?.message || String(this.state.error)}
           </div>
@@ -35,7 +39,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
             onClick={() => this.setState({ hasError: false, error: null })}
             className="mt-3 px-3 py-1 text-xs text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
           >
-            重试
+            {t('retry')}
           </button>
         </div>
       )
