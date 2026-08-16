@@ -19,6 +19,7 @@ const I18nContext = createContext<I18nContextType>({
     lang: 'zh',
     setLang: () => {},
 })
+export { I18nContext }
 
 export function I18nProvider({ children }: { children: ReactNode }) {
     const [lang, setLangState] = useState<Lang>('zh')

@@ -174,7 +174,18 @@ fn write_config_file(config: &AppConfig) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     let path = dir.join(CONFIG_FILE);
     let content = serde_json::to_string_pretty(config).map_err(|e| format!("{e}"))?;
-    std::fs::write(&path, &content).map_err(|e| format!("{e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let mut file = opts.open(&path).map_err(|e| format!("{e}"))?;
+        std::io::Write::write_all(&mut file, content.as_bytes()).map_err(|e| format!("{e}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, &content).map_err(|e| format!("{e}"))?;
+    }
     Ok(())
 }
 

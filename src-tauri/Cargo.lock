@@ -3721,6 +3721,7 @@ dependencies = [
  "ab_glyph",
  "anydoc",
  "anyhow",
+ "base64 0.22.1",
  "bzip2 0.6.1",
  "calamine 0.26.1",
  "chrono",

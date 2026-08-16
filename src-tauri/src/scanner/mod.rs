@@ -182,7 +182,7 @@ impl Scanner {
             processed += 1;
             let name = entry.file_name().to_string_lossy().to_string();
 
-            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
+            let meta = match crate::scanner::helpers::metadata_timeout(entry.path(), std::time::Duration::from_secs(15)) { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let mtime = mtime_micros(&meta).unwrap_or(0);
             let size = meta.len();
             let existing = records.get(&rel_path).cloned();
@@ -329,7 +329,7 @@ impl Scanner {
                 log::info!("[SCAN] 扫描已取消, 停止遍历");
                 break;
             }
-            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
+            let meta = match crate::scanner::helpers::metadata_timeout(entry.path(), std::time::Duration::from_secs(15)) { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
@@ -463,7 +463,7 @@ impl Scanner {
                 log::info!("[SCAN] 启动扫描已取消, 停止遍历");
                 break;
             }
-            let meta = match entry.metadata() { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
+            let meta = match crate::scanner::helpers::metadata_timeout(entry.path(), std::time::Duration::from_secs(15)) { Ok(m) => m, Err(e) => { log::warn!("[SCAN] metadata error: {e}"); errors += 1; continue; } };
             let path = entry.path().to_path_buf();
             let path_str = path.to_string_lossy().to_string();
             let rel_path = to_relative(dir_root, &path)?;
@@ -637,7 +637,7 @@ impl Scanner {
                 if is_excluded(file_path, &exclude) {
                     return Ok(());
                 }
-                let meta = std::fs::metadata(file_path)
+                let meta = crate::scanner::helpers::metadata_timeout(file_path, std::time::Duration::from_secs(10))
                     .with_context(|| format!("failed to stat {path_str}"))?;
                 let mtime = mtime_micros(&meta).unwrap_or(0);
                 let size = meta.len();

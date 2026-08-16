@@ -205,6 +205,7 @@ export async function previewFile(id: string): Promise<string> {
 export interface FilePreview {
   content: string | null
   image_path: string | null
+  image_base64: string | null
   file_type: string  // 'image' | 'text' | 'pdf' | 'office' | 'unknown'
   char_count: number
   ocr_used: boolean

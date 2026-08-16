@@ -286,7 +286,9 @@ impl IndexerService {
         // If SQLite is busy (parallel writes), retry once.
         if let Err(e) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
             log::warn!("[INDEX] mark_extracted retry for {}: {e}", job.file_id);
-            let _ = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash));
+            if let Err(e2) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
+                log::warn!("[INDEX] mark_extracted retry FAILED for {}: {e2} (Phase 1 进度将不可见，下次扫描会重试)", job.file_id);
+            }
         }
 
         Ok(ExtractedData {

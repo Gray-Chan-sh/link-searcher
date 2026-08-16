@@ -6,6 +6,7 @@ import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
+import { translateErr } from '../utils/translateErr'
 import MentionPicker from './MentionPicker'
 
 interface ChatPanelProps {
@@ -103,14 +104,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     return `${mm}:${ss}`
   }, [pendingStartedAt, clockNow])
 
-  const errText = (e: unknown) =>
-    e instanceof Error && e.message
-      ? e.message
-      : typeof e === 'string'
-        ? e
-        : typeof e === 'object' && e !== null && 'message' in e
-          ? String((e as { message: unknown }).message)
-          : String(e)
+  const errText = (e: unknown) => {
+    const raw =
+      e instanceof Error && e.message
+        ? e.message
+        : typeof e === 'string'
+          ? e
+          : typeof e === 'object' && e !== null && 'message' in e
+            ? String((e as { message: unknown }).message)
+            : String(e)
+    return translateErr(raw, t)
+  }
 
   const handleCancel = useCallback(async () => {
     if (!loading) return
@@ -156,7 +160,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         })
       },
     ).then(fn => { if (disposed) { fn(); return } unlisten = fn })
-      .catch(() => {})
+      .catch(e => console.error('[ChatPanel] listenAiStream failed:', e))
     return () => { disposed = true; unlisten?.() }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id])
