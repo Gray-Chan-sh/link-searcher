@@ -6,8 +6,12 @@ import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFiles } from '../api/index'
-import { LoadingSpinner } from '../icons'
+import { LoadingSpinner, SearchIcon } from '../icons'
 import { usePersistentState } from '../hooks/usePersistentState'
+import { useSearch as useFtsSearch } from '../hooks/useSearch'
+import SearchBar from '../components/SearchBar'
+import ResultList from '../components/ResultList'
+import type { SearchHit } from '../api/search'
 
 const LS_KEY_FILTER = 'ls_browse_filter'
 const LS_KEY_EXT = 'ls_browse_ext'
@@ -57,6 +61,9 @@ export default function Browse() {
   const [askError, setAskError] = useState(false)
   useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
   const [askLoading, setAskLoading] = useState(false)
+  // 全文搜索模式（与 SearchPage 共享 useSearch hook）
+  const fts = useFtsSearch()
+  const [selectedSearchHit, setSelectedSearchHit] = useState<SearchHit | null>(null)
   type ColKey = 'filename' | 'path' | 'type' | 'status'
   const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, status: 112 })
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
@@ -248,6 +255,11 @@ return () => clearTimeout(t)
     if (previewVersionRef.current !== localVersion) return
     setPreviewLoading(false)
   }, [])
+  // 搜索结果选中时同步到预览面板
+  const handleSearchSelect = useCallback((hit: SearchHit) => {
+    setSelectedSearchHit(hit)
+    selectFile(hit.path)
+  }, [selectFile])
 
   // 键盘导航：↑↓ 移动选中行，Enter 打开预览；Ctrl/Cmd+A 全选当前页
   // 键盘导航：↑↓ 移动选中行；Ctrl/Cmd+A 全选当前页
@@ -302,10 +314,28 @@ return () => clearTimeout(t)
 
 return (
     <div className="flex h-full">
-      {/* Left: Table */}
+      {/* Left: Table / Search Results */}
       <div className="flex-1 flex flex-col min-w-0 border-r border-gray-200 dark:border-gray-800">
-        {/* Toolbar */}
+        {/* Toolbar: browse mode + search bar */}
         <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center gap-3 flex-wrap">
+          <div className="flex-1 flex items-center gap-3">
+            <SearchBar
+              query={fts.query}
+              loading={fts.status === 'loading'}
+              onQueryChange={fts.setQuery}
+              onSubmit={fts.submitSearch}
+            />
+            {fts.query && (
+              <button
+                onClick={() => { fts.setQuery(''); fts.submitSearch() }}
+                className="text-xs px-2 py-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 shrink-0"
+                title={t('clear_search')}
+              >
+                ×
+              </button>
+            )}
+          </div>
+          {!fts.query && (<>
           <select
             value={filter}
             onChange={e => { setFilter(e.target.value as FilterType); setPage(1) }}
@@ -373,10 +403,60 @@ return (
           </button>
 
           <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{total.toLocaleString()} {t('files')}</span>
+          </>)}
         </div>
 
-        {/* Table */}
-        <div className="flex-1 overflow-auto" ref={tableRef}>
+        {fts.query ? (
+          /* 搜索模式：全文搜索结果 */
+          <>
+            <div className="flex-1 overflow-y-auto">
+              {fts.status === 'loading' && (
+                <div className="flex items-center justify-center py-16">
+                  <LoadingSpinner className="size-5" />
+                </div>
+              )}
+              {fts.status === 'error' && (
+                <div className="flex flex-col items-center justify-center py-16 px-4">
+                  <p className="text-sm text-red-600 dark:text-red-400 mb-3">{fts.error}</p>
+                  <button onClick={fts.retry} className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors">{t('retry')}</button>
+                </div>
+              )}
+              {fts.status === 'success' && (
+                <ResultList hits={fts.hits} selectedId={selectedSearchHit?.file_id ?? null} onSelect={handleSearchSelect} />
+              )}
+              {fts.status === 'success' && fts.hits.length === 0 && (
+                <div className="flex flex-col items-center justify-center py-16 px-4 text-center space-y-3">
+                  <p className="text-lg font-medium text-gray-900 dark:text-gray-100">{t('no_results_found')}</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">{t('no_results_hint')}</p>
+                </div>
+              )}
+              {fts.status === 'idle' && (
+                <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
+                  <span className="flex items-center gap-2"><SearchIcon className="size-5" /> {t('search_your_documents')}</span>
+                </div>
+              )}
+            </div>
+            {fts.status === 'success' && (() => {
+              const totalPages = Math.max(1, Math.ceil(fts.total / fts.pageSize))
+              return totalPages > 1 ? (
+                <div className="flex items-center justify-center gap-2 px-4 py-3 border-t border-gray-100 dark:border-gray-800">
+                  <button onClick={() => fts.setPage(fts.page - 1)} disabled={fts.page <= 1}
+                    className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                    {t('prev_page')}
+                  </button>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">{t('results_count', { total: fts.total })}</span>
+                  <button onClick={() => fts.setPage(fts.page + 1)} disabled={fts.page >= totalPages}
+                    className="px-3 py-1 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors">
+                    {t('next_page')}
+                  </button>
+                </div>
+              ) : null
+            })()}
+          </>
+        ) : (
+          /* 浏览模式：文件表格 */
+          <>
+            <div className="flex-1 overflow-auto" ref={tableRef}>
           {loading ? (
             <div className="flex items-center justify-center py-16">
               <LoadingSpinner className="size-5" />
@@ -549,6 +629,8 @@ return (
             {t('next_page')} →
           </button>
         </div>
+          </>)}
+
       </div>
 
       {/* Right: Preview */}
