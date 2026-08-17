@@ -9,7 +9,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "2";
+const SCHEMA_VERSION: &str = "3";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -62,6 +62,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Schema: add `dead_content` (content-validity marker for empty-content
     // files that already failed verification + retry).
     ensure_dead_content_column(&tx)?;
+
+    // P6 removal: migrate existing databases that still carry the legacy
+    // `private` column on dir_config.
+    drop_dir_config_private_column(&tx)?;
 
 
     seed_default_settings(&tx)?;
@@ -124,6 +128,31 @@ fn ensure_dead_content_column(tx: &Connection) -> Result<()> {
     }
     tx.execute_batch("ALTER TABLE file_tracking ADD COLUMN dead_content INTEGER NOT NULL DEFAULT 0")
         .context("failed to add dead_content column")?;
+    Ok(())
+}
+
+/// Drop the legacy P6 `private` column from dir_config. Idempotent — safe to
+/// call on every startup; no-op when the column was never created.
+fn drop_dir_config_private_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(dir_config)")
+            .context("failed to inspect dir_config")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "private")
+    };
+    if !has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE dir_config DROP COLUMN private")
+        .context("failed to drop private column")?;
+    log::info!("[DB] dropped legacy dir_config.private column (P6 removed)");
     Ok(())
 }
 
@@ -290,6 +319,28 @@ mod tests {
     fn test_migrations_are_idempotent() {
         let conn = setup_conn();
         run_migrations(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_legacy_private_column_dropped() {
+        // Simulate a pre-P6-removal database: dir_config still carries `private`.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dir_config (
+                id       TEXT PRIMARY KEY,
+                path     TEXT NOT NULL UNIQUE,
+                private  INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(dir_config)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!names.contains(&"private".to_string()), "private still present: {names:?}");
     }
 
     #[test]

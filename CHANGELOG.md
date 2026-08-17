@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-08-18（前端检索范围统一 + P6 残留收尾）
+
+**动机**：后端已收敛为单一 `retrieval_scope`（跨轮累计路径条目），但前端仍残留旧概念：专注（focus_file）、会话目录范围（scope_dir_ids）、ScopeEntry 条目、P6 私密按钮/提示——4 个入口并存，与"一个入口（右键）+ 一个范围"的设计相悖。
+
+**前端统一入口**
+- `AiChat.tsx` 文件树右键统一为「加入检索范围」：文件/目录右击都写入 `retrieval_scope`（原：文件右击=专注分析、目录右击=加入对话）；删除专注模式（`handleFocusFile`/`focus_file`）与 `handleScopeAction` 的 dir_id 解析（改存路径）
+- 树根目录「范围」按钮改为切换 `dt.basePath` 进范围（原 scope_dir_ids → 绝对路径）
+- `ChatPanel.tsx` 范围条统一为 `retrieval_scope` 条目 chips（📁/📄 按扩展名判别），逐条 × 删除；删除专注 chip/范围目录 chips/私密过滤提示三个旧区块
+- `chat ask` 参数改为 `sessionRetrievalScope`：`conversationAsk`/`conversationAskStream` 签名对齐后端 `session_retrieval_scope`
+- 每轮发送：chips 引用并入 `retrieval_scope`（前端 `mergeScopePrefixes` 父吞子去冗余，与后端语义一致），per-turn 快照写 `{turn_index, scope}`（align 后端 `PerTurnScope.scope`）
+- 恢复挂起请求路径同步传 `retrieval_scope`
+
+**类型清理**
+- `files.ts`：删除 `ScopeEntry` 接口与 `ChatSession.scope_dir_ids/scope_entries/scope_conditions/focus_file` 字段；`PerTurnScope` 改 `scope: string[]`
+- `DirManager.tsx`：删除私密标记按钮（`handleTogglePrivate` + 私有按钮 UI，P6 移除收尾）
+- i18n 4 语言：删除 `private_dir`/`private_dir_on`/`private_dir_off`/`public_dir`/`scope_private_filtered`/`focus_mode`/`scope_dir`/`focus_overridden` 残留键
+
+**后端 & DB**
+- `prepare_conversation_prompt`：`retrieval_scope` 解析对齐 `@目录`——监控根绝对路径→`dir_ids`，相对子路径→`path_prefixes`（原先全塞 prefix 导致绝对路径匹配失效）
+- `db/mod.rs`：新增 `drop_dir_config_private_column` 迁移（旧库 `dir_config.private` 列幂等 DROP），SCHEMA_VERSION → 3，含模拟旧库测试
+
+**验证**：cargo test 全绿（lib 161 + 集成全过）、tsc 0、semgrep ERROR 0、旧字段引用全库 0 残留
+
+---
+
 ## 2026-08-18（修复 P6 私密目录移除后的测试连锁崩溃）
 
 **根因**：删除私密目录功能时两处 SQL 残留未清理，导致所有 DB 依赖测试建表/插入即失败（44 个测试挂）：

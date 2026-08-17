@@ -737,12 +737,25 @@ async fn prepare_conversation_prompt(
     let mut dir_ids: Vec<String> = Vec::new();
     let mut path_prefixes: Vec<String> = Vec::new();
     // 会话级统一范围（retrieval_scope）：目录/文件统一为路径前缀（跨轮累计）。
-    for v in session_retrieval_scope {
-        let v = v.trim();
-        if v.is_empty() {
-            continue;
+    // 监控根绝对路径→dir_ids；相对子路径→path_prefixes（与 @目录 解析一致）。
+    {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        for dir_path in session_retrieval_scope {
+            let p = dir_path.trim().trim_end_matches('/');
+            if p.is_empty() {
+                continue;
+            }
+            // 先试监控根精确匹配（绝对路径或别名）
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
+                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
+                    dir_ids.push(r);
+                    continue;
+                }
+            }
+            // 否则按相对路径前缀过滤（子目录/文件夹/文件）
+            path_prefixes.push(p.to_string());
         }
-        path_prefixes.push(v.trim_end_matches('/').to_string());
+        drop(conn);
     }
     // 解析 @目录：绝对监控根 → dir_ids；相对路径子目录 → path_prefixes
     let dir_roots: Vec<(String, String)> = {
