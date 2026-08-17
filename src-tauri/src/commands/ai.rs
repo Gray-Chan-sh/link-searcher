@@ -228,21 +228,11 @@ fn prepare_smart_prompt(
         let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
         drop(mgr);
 
-        // P6 私密目录过滤：全库检索时排除 private 目录的文件。
-        let public_dir_ids = {
-            let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            if crate::db::dir_config::has_private_dirs(&conn).unwrap_or(false) {
-                Some(crate::db::dir_config::list_public_dir_ids(&conn).map_err(|e| format!("{e}"))?)
-            } else {
-                None
-            }
-        };
-
         let params = SearchParams {
             // NL questions become an exact PhraseQuery if parsed verbatim
             // (Tantivy default) — re-tokenise as explicit OR so any term hits.
             query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-            dir_ids: public_dir_ids, file_ids: None, ext_filter: None,
+            dir_ids: None, file_ids: None, ext_filter: None,
             date_from: None, date_to: None, path_prefixes: None,
             sort: SortField::Score, sort_order: "desc".to_string(),
             page: 1, page_size: 15, fuzzy: false, semantic: false,
@@ -419,6 +409,54 @@ fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
         return RewriteOutcome { query: q.to_string() };
     }
     RewriteOutcome { query: format!("{} {}", kws.join(" "), q) }
+}
+
+/// Merge retrieval-scope entries into a non-overlapping (union) set of
+/// path prefixes. dir 过滤（监控根, dir_ids）与子目录 prefix 过滤当前是两个
+/// 独立 Must 条件——同设父目录+子目录会被 AND 错误收窄。此处按"父吞子"
+/// 去冗余：已选根目录之下的子前缀全部删掉（根已覆盖），prefix 内部保留最短。
+///
+/// `dir_roots`: (dir_id, 根绝对路径)，用于判断 prefix 是否落在某已选根下。
+pub fn merge_scope_prefixes(
+    dir_roots: &[(String, String)],
+    dir_ids: &[String],
+    prefixes: &[String],
+) -> (Vec<String>, Vec<String>) {
+    // prefix 是相对监控根的路径（如 "Docs/B"）；根绝对路径如 "/Volumes/Docs"。
+    // 判断 prefix 归属：根 basename 与 prefix 首段相同 → 属于该根；若该根在
+    // dir_ids 中，这个 prefix 被根覆盖（根已含其全部内容）→ 去掉。
+    let kept: Vec<String> = prefixes
+        .iter()
+        .filter(|p| {
+            let first_seg = p.split('/').next().unwrap_or("");
+            let covered_by_selected_root = dir_roots
+                .iter()
+                .any(|(id, root)| {
+                    dir_ids.contains(id)
+                        && std::path::Path::new(root)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| n == first_seg)
+                            .unwrap_or(false)
+                });
+            !covered_by_selected_root
+        })
+        .cloned()
+        .collect();
+    // prefix 内部父吞子：保留最短——若某 prefix 是另一 prefix 的严格父路径，
+    // 删掉后者（前者的检索范围已覆盖它）。
+    let mut result: Vec<String> = Vec::new();
+    for p in &kept {
+        if kept.iter().any(|q| {
+            q != p
+                && p.starts_with(q.as_str())
+                && p.as_bytes().get(q.len()) == Some(&b'/')
+        }) {
+            continue; // p 有严格父 prefix，被覆盖
+        }
+        result.push(p.clone());
+    }
+    (dir_ids.to_vec(), result)
 }
 
 /// Validate an LLM rewrite response: non-empty, not longer than the input
@@ -624,17 +662,6 @@ fn bm25_relevant_hits(
     } else {
         limit
     };
-    // P6 私密目录过滤：全库检索（dir_ids 为空）时排除 private 目录的文件。
-    let dir_ids = if dir_ids.as_ref().is_none_or(|v| v.is_empty()) {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        if crate::db::dir_config::has_private_dirs(&conn).unwrap_or(false) {
-            Some(crate::db::dir_config::list_public_dir_ids(&conn).map_err(|e| format!("{e}"))?)
-        } else {
-            None
-        }
-    } else {
-        dir_ids
-    };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
         dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter,
@@ -689,13 +716,13 @@ async fn prepare_conversation_prompt(
     messages: &[ChatMessage],
     source_ids: &[String],
     scope: &TurnScope,
-    session_scope_dir_ids: &[String],
+    session_retrieval_scope: &[String],
     strict_docs: bool,
 ) -> Result<PreparedConversation, String> {
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
     log::info!(
-        "[AI] prepare_conversation_prompt: q={} mention_files={:?} mention_dirs={:?} conditions={:?} session_scope_dir_ids={:?} strict_docs={}",
-        last_q, scope.mention_files, scope.mention_dirs, scope.conditions, session_scope_dir_ids, strict_docs
+        "[AI] prepare_conversation_prompt: q={} mention_files={:?} mention_dirs={:?} conditions={:?} session_retrieval_scope={:?} strict_docs={}",
+        last_q, scope.mention_files, scope.mention_dirs, scope.conditions, session_retrieval_scope, strict_docs
     );
     // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
     let rule = rewrite_query(&last_q, messages);
@@ -708,9 +735,21 @@ async fn prepare_conversation_prompt(
 
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
-    dir_ids.extend(session_scope_dir_ids.iter().cloned());
-    // 解析 @目录：绝对监控根 → dir_ids；相对路径子目录 → path_prefixes
     let mut path_prefixes: Vec<String> = Vec::new();
+    // 会话级统一范围（retrieval_scope）：目录/文件统一为路径前缀（跨轮累计）。
+    for v in session_retrieval_scope {
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        path_prefixes.push(v.trim_end_matches('/').to_string());
+    }
+    // 解析 @目录：绝对监控根 → dir_ids；相对路径子目录 → path_prefixes
+    let dir_roots: Vec<(String, String)> = {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let dirs = crate::db::dir_config::list_dirs(&conn).map_err(|e| format!("db error: {e}"))?;
+        dirs.into_iter().map(|d| (d.id, d.path)).collect()
+    };
     {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         for dir_path in &scope.mention_dirs {
@@ -729,6 +768,13 @@ async fn prepare_conversation_prompt(
             path_prefixes.push(p.to_string());
         }
         drop(conn);
+    }
+    // 并集合并：父目录吞噬其下的子前缀，消除 AND 交叉（A∪A/B=A）
+    let dir_roots_ref: Vec<(String, String)> = dir_roots;
+    {
+        let (d, p) = merge_scope_prefixes(&dir_roots_ref, &dir_ids, &path_prefixes);
+        dir_ids = d;
+        path_prefixes = p;
     }
 
     // 提取条件过滤
@@ -754,9 +800,8 @@ async fn prepare_conversation_prompt(
     let path_prefixes_opt = if path_prefixes.is_empty() { None } else { Some(path_prefixes) };
 
     // 解析 @mention 文件路径 → file_ids，传给搜索限定范围
-    let mention_file_ids: Option<Vec<String>> = if scope.mention_files.is_empty() {
-        None
-    } else {
+    let mut all_file_ids: Vec<String> = Vec::new();
+    if !scope.mention_files.is_empty() {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         let ids: Vec<String> = scope.mention_files.iter().filter_map(|path| {
             // 先精确匹配
@@ -770,8 +815,11 @@ async fn prepare_conversation_prompt(
             None
         }).collect();
         drop(conn);
-        if ids.is_empty() { None } else { Some(ids) }
-    };
+        all_file_ids.extend(ids);
+    }
+    all_file_ids.sort();
+    all_file_ids.dedup();
+    let mention_file_ids: Option<Vec<String>> = if all_file_ids.is_empty() { None } else { Some(all_file_ids) };
 
     log::info!(
         "[AI] scope resolved: dir_ids={:?} path_prefixes={:?} file_ids={:?} ext={:?} date={:?}~{:?}",
@@ -927,7 +975,7 @@ pub async fn conversation_ask(
     messages: Vec<ChatMessage>,
     source_ids: Vec<String>,
     scope: TurnScope,
-    session_scope_dir_ids: Vec<String>,
+    session_retrieval_scope: Vec<String>,
     strict_docs: bool,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
@@ -946,7 +994,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids, strict_docs).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -974,7 +1022,7 @@ pub async fn conversation_ask_stream(
     source_ids: Vec<String>,
     session_id: String,
     scope: TurnScope,
-    session_scope_dir_ids: Vec<String>,
+    session_retrieval_scope: Vec<String>,
     strict_docs: bool,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
@@ -992,10 +1040,10 @@ pub async fn conversation_ask_stream(
     );
     crate::ai::reset_ai_cancel();
 
-    log::info!("[AI] conversation_ask_stream: scope={:?} session_scope_dir_ids={:?}", scope, session_scope_dir_ids);
+    log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope_dir_ids, strict_docs).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -1054,10 +1102,9 @@ pub struct PerTurnEvidence {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PerTurnScope {
     pub turn_index: usize,
+    /// 该轮发送时的完整检索范围快照（跨轮累计合并后），用于导出追溯。
     #[serde(default)]
-    pub files: Vec<String>,
-    #[serde(default)]
-    pub dirs: Vec<String>,
+    pub scope: Vec<String>,
 }
 
 /// 本轮的 @mention 集合与继承声明，由前端解析输入文本后传入。
@@ -1103,22 +1150,18 @@ pub struct ChatSession {
     /// 每轮问答用到的 source 文件引用（0‑based turn index）。
     #[serde(default)]
     pub per_turn_evidence: Vec<PerTurnEvidence>,
-    /// 每轮 @mention 生效集合，供 `@第N轮` 继承解析。
+    /// 每轮检索范围快照（0‑based turn index → 该轮发送时的完整范围）。
     #[serde(default)]
     pub per_turn_scopes: Vec<PerTurnScope>,
-    /// 会话级目录范围（从树状控件/右键加入，持续到替换/清空）。
+    /// 会话级统一检索范围：跨轮累计的路径条目（目录/文件统一），直到手动删除。
+    /// 每轮发送时以其为基准；父路径自动吞并子路径（合并去冗余）。
     #[serde(default)]
-    pub scope_dir_ids: Vec<String>,
-    /// 会话级结构化条件（ext/date/模糊）。
-    #[serde(default)]
-    pub scope_conditions: Vec<ScopeCondition>,
+    pub retrieval_scope: Vec<String>,
     /// P2 严格模式：范围内无命中时拒绝回答（会话级，可切换）。
     #[serde(default)]
     pub strict_docs: bool,
-    /// P3 专注模式：仅分析此文件（会话级，临时屏蔽其他范围）。
-    #[serde(default)]
-    pub focus_file: Option<String>,
 }
+
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChatSessionMeta {
@@ -1170,10 +1213,8 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     pending_started_at: None,
                     per_turn_evidence: vec![],
                     per_turn_scopes: vec![],
-                    scope_dir_ids: vec![],
-                    scope_conditions: vec![],
+                    retrieval_scope: vec![],
                     strict_docs: false,
-                    focus_file: None,
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -1235,10 +1276,8 @@ fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, String
         pending_started_at: None,
         per_turn_evidence: vec![],
         per_turn_scopes: vec![],
-        scope_dir_ids: vec![],
-        scope_conditions: vec![],
+        retrieval_scope: vec![],
         strict_docs: false,
-        focus_file: None,
     };
     let id = session.id.clone();
     let mut h = read_history(data_dir);
@@ -1340,29 +1379,25 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
     if session.strict_docs {
         md.push_str("> ⚙️ 严格模式（仅依据文档）：开启\n");
     }
-    if let Some(f) = &session.focus_file {
-        md.push_str(&format!("> 📌 专注模式: `{}`\n", f));
-    }
-    if !session.scope_dir_ids.is_empty() {
-        md.push_str(&format!("> 📁 会话范围目录: `{:?}`\n", session.scope_dir_ids));
+    if !session.retrieval_scope.is_empty() {
+        md.push_str("> 📁 检索范围: ");
+        for p in &session.retrieval_scope {
+            md.push_str(&format!("`{}` ", p));
+        }
+        md.push('\n');
     }
     // 按轮索引分组：user 消息和它的 evidence/scope
     let mut turn_idx = 0usize;
-    let mut user_msg_iter = session.messages.iter().filter(|m| m.role == "user");
     for (i, m) in session.messages.iter().enumerate() {
         if m.role == "user" {
             turn_idx += 1;
             md.push_str(&format!("---\n\n## 问 (第 {turn_idx} 轮)\n\n{}\n", m.content));
-            // 本轮引用
-            let scopes = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1);
-            if let Some(sc) = scopes {
-                if !sc.files.is_empty() || !sc.dirs.is_empty() {
-                    md.push_str("\n**引用:**\n");
-                    for f in &sc.files {
-                        md.push_str(&format!("- 📄 `{}`\n", f));
-                    }
-                    for d in &sc.dirs {
-                        md.push_str(&format!("- 📁 `{}`\n", d));
+            // 本轮范围快照（跨轮累计合并后）
+            if let Some(sc) = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1) {
+                if !sc.scope.is_empty() {
+                    md.push_str("**检索范围:**\n");
+                    for p in &sc.scope {
+                        md.push_str(&format!("- `{}`\n", p));
                     }
                 }
             }
@@ -1451,10 +1486,8 @@ mod history_tests {
             pending_started_at: None,
             per_turn_evidence: vec![],
             per_turn_scopes: vec![],
-            scope_dir_ids: vec![],
-            scope_conditions: vec![],
+            retrieval_scope: vec![],
             strict_docs: false,
-            focus_file: None,
         };
         save_chat_session_impl(&dir, s.clone()).unwrap();
         // 无标题 → 从首条 user 消息推导
@@ -1483,6 +1516,7 @@ mod history_tests {
             title: "克虏伯项目".into(),
             created_at: 1000,
             updated_at: 2000,
+            retrieval_scope: vec!["a.pdf".into()],
             messages: vec![
                 ChatMessage { role: "user".into(), content: "项目背景".into() },
                 ChatMessage { role: "assistant".into(), content: "2015年启动。".into() },
@@ -1510,13 +1544,9 @@ mod history_tests {
             }],
             per_turn_scopes: vec![PerTurnScope {
                 turn_index: 0,
-                files: vec!["a.pdf".into()],
-                dirs: vec![],
+                scope: vec!["a.pdf".into()],
             }],
-            scope_dir_ids: vec!["dir1".into()],
-            scope_conditions: vec![],
             strict_docs: true,
-            focus_file: Some("a.pdf".into()),
         };
         save_chat_session_impl(&dir, session).unwrap();
         let md = export_chat_session_impl(&dir, "s1").unwrap();
@@ -1530,7 +1560,8 @@ mod history_tests {
         assert!(md.contains("a.pdf"));
         assert!(md.contains("查询改写"));
         assert!(md.contains("严格模式"));
-        assert!(md.contains("专注模式"));
+        assert!(md.contains("📁 检索范围: `a.pdf`"), "导出应含统一检索范围: {md}");
+        assert!(md.contains("**检索范围:**"), "每轮应有范围快照: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1708,10 +1739,8 @@ mod history_tests {
             pending_query: None,
             pending_started_at: None,
             per_turn_scopes: vec![],
-            scope_dir_ids: vec![],
-            scope_conditions: vec![],
+            retrieval_scope: vec![],
             strict_docs: false,
-            focus_file: None,
             per_turn_evidence: vec![PerTurnEvidence {
                 turn_index: 0,
                 file_ids: vec!["f1".into()],

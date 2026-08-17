@@ -116,6 +116,11 @@ const zh: Record<string, string> = {
     fuzzy_hint: '模糊条件（LLM 解析，可编辑）',
     strict_docs: '仅依据文档',
     focus_mode: '专注',
+    scope_range: '检索范围',
+    scope_dir: '范围目录',
+    scope_private_filtered: '已排除 {n} 个私密目录',
+    clear_scope: '清除范围',
+    no_scope: '未限制（全库）',
     retrieval_strategy: '检索策略',
     semantic_weight_label: '语义 vs 关键词',
     semantic_weight_hint: '语义 30% / 关键词 70% —— 拖向关键词找精确匹配，拖向语义找意思相近',
@@ -365,5 +370,32 @@ const zh: Record<string, string> = {
     index_verify_done: '✓ 验证完成: 检查 {checked}，恢复 {recovered}，空内容 {dead}，失败 {failed}',
     index_reextract_done: '✓ 已重提取 {ok} 个{failedSuffix}',
     index_no_missing: '✓ 无缺失内容',
+
+    err_empty_response: 'AI 未返回任何内容，请重试',
+
+    search_sessions: '搜索会话',
+    session_range_all: '全部',
+    session_range_today: '今日',
+    session_range_week: '7天',
+    session_range_older: '更早',
+    no_sessions: '暂无会话',
+    no_sessions_match: '无匹配会话',
+
+    resize_sidebar: '拖拽调整宽度',
+
+    batch_manage: '批量管理',
+    exit_select_mode: '退出批量模式',
+    done: '完成',
+    selected_count: '已选 {n} 项',
+    select_all: '全选',
+    confirm_delete_sessions: '确认删除选中的 {n} 个会话？',
+
+    scope_preview: '范围预览',
+    scope_preview_all: '切换为全库检索',
+    scope_preview_dir: '切换范围至目录',
+
+    focus_overridden: '已被引用覆盖，本轮不生效',
+
+    effective_scope: '本轮检索范围',
 }
 export default zh

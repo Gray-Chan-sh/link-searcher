@@ -116,6 +116,11 @@ const ja: Record<string, string> = {
     fuzzy_hint: '曖昧条件（LLM 解析、編集可能）',
     strict_docs: 'ドキュメントのみ',
     focus_mode: 'フォーカス',
+    scope_range: '検索範囲',
+    scope_dir: '対象ディレクトリ',
+    scope_private_filtered: 'プライベート ディレクトリ {n} 件を除外',
+    clear_scope: '範囲をクリア',
+    no_scope: '制限なし（全ライブラリ）',
     retrieval_strategy: '検索戦略',
     semantic_weight_label: 'セマンティック vs キーワード',
     semantic_weight_hint: 'セマンティック 30% / キーワード 70% — キーワード側で完全一致、セマンティック側で意味検索',
@@ -365,5 +370,32 @@ const ja: Record<string, string> = {
     index_verify_done: '✓ 検証完了: 確認 {checked}、復元 {recovered}、空 {dead}、失敗 {failed}',
     index_reextract_done: '✓ 再抽出 {ok} 件{failedSuffix}',
     index_no_missing: '✓ 欠落コンテンツなし',
+
+    err_empty_response: 'AI が応答を返しませんでした。再試行してください',
+
+    search_sessions: 'セッションを検索',
+    session_range_all: 'すべて',
+    session_range_today: '今日',
+    session_range_week: '7日',
+    session_range_older: 'それ以前',
+    no_sessions: 'セッションなし',
+    no_sessions_match: '一致するセッションなし',
+
+    resize_sidebar: 'ドラッグで幅を調整',
+
+    batch_manage: '一括管理',
+    exit_select_mode: '一括モードを終了',
+    done: '完了',
+    selected_count: '{n} 件選択',
+    select_all: 'すべて選択',
+    confirm_delete_sessions: '選択した {n} 件のセッションを削除しますか？',
+
+    scope_preview: '範囲プレビュー',
+    scope_preview_all: '全ライブラリ検索に切り替え',
+    scope_preview_dir: 'ディレクトリに範囲切替',
+
+    focus_overridden: '参照により上書きされ、このターンは無効',
+
+    effective_scope: 'このターンの検索範囲',
 }
 export default ja

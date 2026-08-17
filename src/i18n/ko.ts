@@ -116,6 +116,11 @@ const ko: Record<string, string> = {
     fuzzy_hint: '모호 조건 (LLM 파싱, 편집 가능)',
     strict_docs: '문서만',
     focus_mode: '집중',
+    scope_range: '검색 범위',
+    scope_dir: '범위 디렉터리',
+    scope_private_filtered: '비공개 디렉터리 {n}개 제외됨',
+    clear_scope: '범위 지우기',
+    no_scope: '제한 없음 (전체 라이브러리)',
     retrieval_strategy: '검색 전략',
     semantic_weight_label: '시맨틱 vs 키워드',
     semantic_weight_hint: '시맨틱 30% / 키워드 70% — 키워드 쪽은 정확 일치, 시맨틱 쪽은 의미 검색',
@@ -365,5 +370,32 @@ const ko: Record<string, string> = {
     index_verify_done: '✓ 검증 완료: 확인 {checked}, 복원 {recovered}, 빈 {dead}, 실패 {failed}',
     index_reextract_done: '✓ 재추출 {ok}개{failedSuffix}',
     index_no_missing: '✓ 누락된 콘텐츠 없음',
+
+    err_empty_response: 'AI가 응답을 반환하지 않았습니다. 다시 시도하세요',
+
+    search_sessions: '세션 검색',
+    session_range_all: '전체',
+    session_range_today: '오늘',
+    session_range_week: '7일',
+    session_range_older: '이전',
+    no_sessions: '세션 없음',
+    no_sessions_match: '일치하는 세션 없음',
+
+    resize_sidebar: '드래그하여 너비 조정',
+
+    batch_manage: '일괄 관리',
+    exit_select_mode: '일괄 모드 종료',
+    done: '완료',
+    selected_count: '{n}개 선택됨',
+    select_all: '전체 선택',
+    confirm_delete_sessions: '선택한 {n}개 세션을 삭제하시겠습니까?',
+
+    scope_preview: '범위 미리보기',
+    scope_preview_all: '전체 라이브러리 검색으로 전환',
+    scope_preview_dir: '디렉토리로 범위 전환',
+
+    focus_overridden: '참조로 덮여 이번 턴에 비활성',
+
+    effective_scope: '이번 턴 검색 범위',
 }
 export default ko

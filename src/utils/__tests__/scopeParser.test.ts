@@ -31,9 +31,11 @@ const r6 = parseScope('@财务 与 @年度报告.md 对比')
 assert.deepStrictEqual(r6.scope.mention_dirs, ['财务'], 'S6: 目录')
 assert.deepStrictEqual(r6.scope.mention_files, ['年度报告.md'], 'S6: 文件')
 
-// S7: @上轮 继承
+// S7: @上轮/@第N轮 已移除解析（死代码），作为普通文本保留
 const r7 = parseScope('@上轮 那净利润呢')
-assert.deepStrictEqual(r7.scope.inherit_from, [-1], 'S7: 继承最近轮')
+assert.deepStrictEqual(r7.scope.mention_files, [], 'S7: @上轮 不再解析为引用')
+assert.deepStrictEqual(r7.scope.mention_dirs, [], 'S7: @上轮 不再解析为引用')
+assert.equal(r7.cleanText, '上轮 那净利润呢', 'S7: @上轮 失去引用语义，@ 被清理为普通文本')
 
 // S8: /模糊 条件暂存原文（待 LLM 解析）
 const r8 = parseScope('/模糊:跟去年收购相关的 有哪些')
@@ -64,5 +66,13 @@ assert.equal(r12.cleanText, '，第三人庄建军是否说过不参与公司的
 const r13 = parseScope('@财务 本季度收入')
 assert.deepStrictEqual(r13.scope.mention_dirs, ['财务'], 'S13: 目录无空格保持')
 assert.equal(r13.cleanText, '本季度收入', 'S13: 目录 token 剥离')
+
+// S14: /范围 命令 → scopeAction（打字预览依赖）
+const r14 = parseScope('/范围:案件 总结')
+assert.equal(r14.scopeAction, 'dir:案件', 'S14: 目录范围 → dir:前缀')
+assert.equal(r14.cleanText, '总结', 'S14: 命令剥离')
+const r15 = parseScope('/范围:全库 看看')
+assert.equal(r15.scopeAction, 'clear', 'S15: 全库 → clear')
+assert.equal(r15.cleanText, '看看', 'S15: 命令剥离')
 
 console.log('ALL scopeParser assertions PASSED')

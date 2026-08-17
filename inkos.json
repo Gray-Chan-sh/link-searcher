@@ -1,0 +1,35 @@
+{
+  "name": "Link-Searcher",
+  "version": "0.1.0",
+  "language": "zh",
+  "llm": {
+    "provider": "openai",
+    "configSource": "studio",
+    "baseUrl": "http://127.0.0.1:8000/v1",
+    "model": "Qwen3.8-27B-4bit",
+    "apiFormat": "chat",
+    "stream": true,
+    "services": [
+      {
+        "service": "custom",
+        "name": "omlx",
+        "baseUrl": "http://127.0.0.1:8000/v1",
+        "temperature": 0.7,
+        "apiFormat": "chat",
+        "stream": true
+      }
+    ],
+    "defaultModel": "Qwen3.8-27B-4bit",
+    "service": "custom:omlx",
+    "temperature": 0.7
+  },
+  "notify": [],
+  "inputGovernanceMode": "v2",
+  "daemon": {
+    "schedule": {
+      "radarCron": "0 */6 * * *",
+      "writeCron": "*/15 * * * *"
+    },
+    "maxConcurrentBooks": 3
+  }
+}

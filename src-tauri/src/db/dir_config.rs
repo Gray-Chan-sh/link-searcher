@@ -19,8 +19,6 @@ pub struct DirConfig {
     pub recursive: bool,
     pub created_at: i64,
     pub updated_at: i64,
-    /// 私密目录标记：不索引、不搜索（P6，敏感数据保护）。
-    pub private: bool,
 }
 
 /// Fields that can be updated on an existing directory config.
@@ -32,7 +30,6 @@ pub struct DirUpdate {
     pub exclude_patterns: Option<String>,
     pub include_exts: Option<String>,
     pub recursive: Option<bool>,
-    pub private: Option<bool>,
 }
 
 /// Add a new directory configuration. Returns the created config.
@@ -53,8 +50,8 @@ pub fn add_dir(
     let rec_i64: i64 = if recursive { 1 } else { 0 };
 
     conn.execute(
-        "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, 0)",
+        "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
         rusqlite::params![id, path, alias, lang, exclude_patterns, include_exts, rec_i64, now],
     )
     .context("failed to add directory config")?;
@@ -69,7 +66,6 @@ Ok(DirConfig {
         recursive,
         created_at: now,
         updated_at: now,
-        private: false,
     })
 }
 
@@ -87,7 +83,7 @@ pub fn remove_dir(conn: &Connection, dir_id: &str) -> Result<()> {
 /// List all directory configurations, ordered by path.
 pub fn list_dirs(conn: &Connection) -> Result<Vec<DirConfig>> {
     let mut stmt = conn
-        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private \
+        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at \
                    FROM dir_config ORDER BY path")
         .context("failed to prepare list_dirs")?;
     let rows = stmt
@@ -100,32 +96,13 @@ pub fn list_dirs(conn: &Connection) -> Result<Vec<DirConfig>> {
 /// Get a single directory configuration by id.
 pub fn get_dir(conn: &Connection, dir_id: &str) -> Result<Option<DirConfig>> {
     let mut stmt = conn
-        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at, private \
+        .prepare("SELECT id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at \
                    FROM dir_config WHERE id = ?1")
         .context("failed to prepare get_dir")?;
     let mut rows = stmt
         .query_map(rusqlite::params![dir_id], row_to_dir_config)
         .context("failed to query dir config")?;
     Ok(rows.next().transpose().context("failed to read dir config row")?)
-}
-
-/// 是否有标记为私密的目录（P6）。
-pub fn has_private_dirs(conn: &Connection) -> Result<bool> {
-    conn.query_row("SELECT COUNT(*) FROM dir_config WHERE private = 1", [], |row| row.get::<_, i64>(0))
-        .map(|n| n > 0)
-        .context("failed to count private dirs")
-}
-
-/// 所有非私密目录的 id 列表——全库检索时用于排除私密目录的文件（P6）。
-pub fn list_public_dir_ids(conn: &Connection) -> Result<Vec<String>> {
-    let mut stmt = conn
-        .prepare("SELECT id FROM dir_config WHERE private = 0 OR private IS NULL")
-        .context("failed to prepare list_public_dir_ids")?;
-    let rows = stmt
-        .query_map([], |r| r.get::<_, String>(0))
-        .context("failed to query public dir ids")?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .context("failed to collect public dir ids")
 }
 
 /// Update selected fields of a directory configuration.
@@ -152,10 +129,6 @@ pub fn update_dir(conn: &Connection, dir_id: &str, updates: DirUpdate) -> Result
     }
     if let Some(v) = updates.recursive {
         sets.push("recursive = ?");
-        params.push(Box::new(v as i64));
-    }
-    if let Some(v) = updates.private {
-        sets.push("private = ?");
         params.push(Box::new(v as i64));
     }
 
@@ -193,7 +166,6 @@ fn row_to_dir_config(row: &rusqlite::Row) -> rusqlite::Result<DirConfig> {
         recursive: row.get::<_, i64>("recursive")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
-        private: row.get::<_, i64>("private")? != 0,
     })
 }
 
@@ -219,22 +191,6 @@ mod tests {
         assert!(dirs[0].recursive);
     }
 
-    #[test]
-    fn test_private_dir_filtering() {
-        let conn = setup_conn();
-        add_dir(&conn, "/home/public1", None, None, None, None, true).unwrap();
-        add_dir(&conn, "/home/secret", None, None, None, None, true).unwrap();
-        add_dir(&conn, "/home/public2", None, None, None, None, true).unwrap();
-        // 标记 /home/secret 为私密
-        let secret_id = list_dirs(&conn).unwrap()
-            .into_iter().find(|d| d.path == "/home/secret").unwrap().id;
-        update_dir(&conn, &secret_id, DirUpdate { private: Some(true), ..Default::default() }).unwrap();
-
-        assert!(has_private_dirs(&conn).unwrap(), "标记后应检测到私密目录");
-        let public_ids = list_public_dir_ids(&conn).unwrap();
-        assert_eq!(public_ids.len(), 2, "两个公开目录");
-        assert!(!public_ids.contains(&secret_id), "私密目录不应在公开列表");
-    }
 
     #[test]
     fn test_add_custom_ocr() {
@@ -276,7 +232,6 @@ mod tests {
                 alias: Some("New".into()),
                 ocr_lang: Some("fra".into()),
                 recursive: Some(false),
-                private: None,
                 ..Default::default()
             },
         )

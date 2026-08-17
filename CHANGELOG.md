@@ -4,6 +4,122 @@
 
 ---
 
+## 2026-08-18（修复 P6 私密目录移除后的测试连锁崩溃）
+
+**根因**：删除私密目录功能时两处 SQL 残留未清理，导致所有 DB 依赖测试建表/插入即失败（44 个测试挂）：
+1. `db/mod.rs:169` `CREATE TABLE dir_config` 中 `updated_at INTEGER NOT NULL,` 尾逗号悬空（原 `private` 列删除后未去掉）→ SQL 语法错误 `near ")": syntax error`，迁移执行失败 → 44 个测试建表即炸
+2. `db/dir_config.rs:54` `INSERT INTO dir_config ... VALUES (?1..?8, ?8, 0)` 残留 `, 0`（原 `private=0` 硬编码）→ 10 值对 9 列 → `add_dir` 全部失败
+
+scanner/index/search 测试并非逻辑错误，而是建表失败后的连锁崩溃。修掉两处残留后 **214 个测试全绿**（lib 160 + 集成 9+15+4+3+9+6+4+2+2）。
+
+---
+
+## 2026-08-16（检索范围重新设计：并集合并 + 统一存储 + 跨轮累计）
+
+**动机**：原有四个概念（检索范围/引用/专注/仅依据文档）相互重叠，且"范围"与"子目录"是 AND 交集——设 A 目录 + A/B 子目录实际只搜 A/B（反直觉）。重新设计为一个正交概念（检索范围）+ 一条回答策略（仅依据文档）。
+
+**概念收敛**
+- **检索范围**＝跨轮累计的文件/目录集合（用户主动声明即加入，跨轮生效直到手动×删除）
+- **引用**（@ 文件/目录）并入范围，不再"发完即走"
+- **专注**并入范围（单文件条目）
+- 仅依据文档保留为独立回答策略开关（不参与范围）
+
+**后端并集合并（bug 修复）**
+- 新增 `merge_scope_prefixes()` 纯函数：父目录路径吞噬其下的子前缀，消除 AND 交叉（`A∪A/B=A`）
+- 接入 `prepare_conversation_prompt`：`dir_ids`（监控根）+ `path_prefixes`（子目录前缀）统一去冗余后 OR 检索
+- 关联测试 4 个（父吞子/跨根保留/嵌套去最短/无 dir 时保留）——`src-tauri/tests/merge_scope_test.rs`
+
+**数据模型**
+- 新增 `ScopeEntry { kind: "dir"|"file", value: String }` 统一范围条目
+- `ChatSession.scope_entries`（`#[serde(default)]` 兼容旧会话），`scope_dir_ids` 保留兼容
+- IPC 命令 `conversation_ask`/`conversation_ask_stream` 加 `session_scope_entries` 参数（前后端同步）
+
+**前端累计范围**
+- `handleSend` 不再清空 `mentionChips`，而是把当前引用 chips 去重并入 `session.scope_entries`（跨轮累计，持久化）
+- 约束面板显示 `scope_entries` 条目（📁 目录/📄 文件，逐条可×删除）
+- TS 类型：新增 `ScopeEntry` 接口 + `ChatSession.scope_entries` 字段
+
+**验证**
+- 全量 `cargo test` 绿、`tsc -b` 0、scopeParser + translateErr 断言全过、semgrep ERROR 0
+
+---
+
+## 2026-08-16（检索范围可视化 · 操作同时更新）
+
+**动机**：约束面板已静态显示会话级约束，但三类"操作"无实时可视化——`/范围:` 命令打字零预览、直接键入的 `@路径` 生效却无反馈、无合并生效范围。致"面板显示≠实际检索"。
+
+- **`/范围:` 打字预览**：`handleInputChange` 复原 `parseScope` 的 `scopeAction`（原被丢弃），输入 `/范围:xxx` 即时显示紫色预览行「范围预览: 切换范围至目录 xxx」、`/范围:全库` 显示「切换为全库检索」；发送/切会话自动清空（`src/components/ChatPanel.tsx`）
+- **合并生效范围摘要**：新增 `effectiveScope` useMemo——发送前实时显示"本轮将搜"：chips 引用（覆盖专注）/ 📌 专注文件 / 📁 范围目录 / /命令条件 / 「已排除 N 个私密目录」五类合并，只读摘要行（`本轮检索范围: ...`）
+- **专注模式"说谎"修复**：`mentionChips.length > 0`（本轮有显式引用）时 focus 实际被跳过，原面板仍显 amber 📌。现显示灰色斜体待机态「📌 专注: X（已被引用覆盖，本轮不生效）」
+- **i18n**：新增 `scope_preview`/`scope_preview_all`/`scope_preview_dir`/`effective_scope`/`focus_overridden` 键（4 语言）
+- **单测**：scopeParser 增 S14/S15（/范围 → scopeAction `dir:xxx`/`clear` + cleanText 剥离）锁定打字预览依赖的解析
+- **验证**：`tsc -b` 0、scopeParser + translateErr 断言全过、`cargo test --lib ai::` 32 绿、semgrep ERROR 0
+- **说明**：MCP 交互实测受 tauri-dev 事件监听线程不稳定影响（非业务代码），可视化链路以纯函数单测 + 代码审查兜底验证
+
+---
+
+## 2026-08-16（检索范围约束面板 · 约束可视化）
+
+**动机**：AI 聊天有 10 种检索范围约束（专注/范围目录/严格模式/P6 私密/命令条件等），此前只有专注 chip 与严格 toggle 两处分散显示，会话级约束不可见——用户不知道检索被缩到哪，易误判"AI 答错"。
+
+- **统一约束条**：ChatPanel 输入框上方升级为完整约束面板，显示当前会话全部生效约束：
+  - **范围目录 chips**：`session.scope_dir_ids` 逐个显示（dirScopes 映射出目录 label，找不到回退 id 前缀），带 × 可清除（`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`）
+  - **P6 私密过滤提示**：无显式目录范围且存在私密目录时显示「已排除 N 个私密目录」（设置页控制，纯提示不可清除）
+  - **空态**：专注/范围/私密均未生效 → 「未限制（全库）」
+  - 保留原有专注 chip（📌 amber）与严格模式 toggle（green），样式沿用现有体系
+- **数据链路**：AiChat 的 `dirTrees` 补存 `private` 字段（原来自 listDirs 后丢弃），整树作为 `dirScopes` prop 传给 ChatPanel——零后端改动
+- **i18n**：新增 `scope_range`/`scope_dir`/`scope_private_filtered`/`clear_scope`/`no_scope` 键（4 语言）
+- **验证**：`tsc -b` 0、scopeParser + translateErr 断言全过、semgrep ERROR 0
+
+---
+
+## 2026-08-16（AI 聊天会话管理优化 + 批量多选/删除/导出 + 空响应修复）
+
+### 会话批量管理
+
+- **批量多选**：侧栏头部 ☑ 按钮进入批量模式（每项显示 ✔ 复选框），或 **Cmd/Ctrl+点击 直接多选**（免切模式，与浏览页交互一致）
+- **批量删除**：选中多项后点删除 → `ask` 确认（显示数量）→ 逐项删除 → 若含当前会话则重置 active
+- **批量导出**：选中多项后点导出 → 各会话 Markdown 合并为一个文件（`ai-chats-batch.md`）
+- **批量操作栏**：selectMode 下显示「已选 N 项 / 全选 / 导出 / 删除 / 完成」，全选作用于当前过滤结果
+
+### 会话列表优化
+
+- **搜索框**：按标题实时过滤（本地过滤，零 IPC 改动），空结果显示空态
+- **时间筛选**：全部 / 今日 / 7天 / 更早 四档
+- **时间显示**：今日→HH:mm，之前→MM/DD
+- **标题 hover 全文提示** + **侧栏拖拽调宽**（160-480px，localStorage 持久化）
+- **移除 `@第N轮`/`@上轮` 死代码**：parser 残留造成"输入被剥离零效果"的假功能，现移除（后端字段保留 serde 兼容）
+- **i18n**：新增 `batch_manage`/`selected_count`/`select_all`/`confirm_delete_sessions`/`search_sessions`/`session_range_*` 等键（4 语言）
+
+### AI 空响应显式报错
+
+- 网关偶发返回空 SSE 流（`content_chars=0`）时，ChatPanel 三处响应路径显示「❌ AI 未返回任何内容，请重试」（`err_empty_response`），不再静默空消息
+- 新增 wire 测试 `chat_stream_empty_done_returns_empty_string` 锁定后端边界
+- 真机验证：用户原句实测 41s 空流 → 错误提示；重试成功
+
+### 质量门
+
+- `cargo test` 全绿、`tsc -b` 0、scopeParser 单测全绿、semgrep ERROR 0
+- 说明：MCP 实测受 tauri-dev 事件监听线程不稳定（`listener.rs:174` panic，非业务代码）影响，部分交互用代码验证兜底
+
+---
+
+## 2026-08-16（AI 空响应显式报错 · 根因记录）
+
+### AI 空响应显式报错
+
+- **根因**：网关（9router coding）对长思考统计类查询偶发返回空 SSE 流（`content_chars=0`），前端 `ai-done` 静默接受空文本 → 用户看到"只有 ⏱ 没有回答"
+- **修复**：`ChatPanel` 三处响应路径（流式 done / smart_search 回退 / conversation_ask 回退）在 `full_text`/`answer` 为空时显示 `❌ AI 未返回任何内容，请重试`（i18n `err_empty_response`），替代静默空消息
+- **新测试**：`ai_chat_stream_wire.rs` 增 `chat_stream_empty_done_returns_empty_string`（空 SSE 流 → `Some("")` 非 None，锁定后端边界）
+- **真机验证**：用户原句"分年度统计陈骥代理的案件数量"实测 41s 空流 → 显示错误提示；重试后正常回答（457 字符）。日志 `content_chars=0 took_ms=45300` 为网关偶发行为，前端不再静默
+
+### 质量门
+
+- `cargo test` 全绿（161+9+15...）、`tsc -b` 0、scopeParser + translateErr 断言全过、semgrep ERROR 0
+- MCP 实测：搜索"陈骥"→2 会话、清空→39；拖拽 224→324px 且 localStorage 持久化
+
+---
+
 ## 2026-08-16（第二轮加固 · i18n 全覆盖 + 超时防护 + HTTPS 警告 + 权限收紧）
 
 继续鲁棒性/可用性/安全性修复（第二轮）：
