@@ -10,7 +10,6 @@ export interface ScopeCondition {
 export interface TurnScope {
   mention_files: string[]
   mention_dirs: string[]
-  inherit_from: number[]
   conditions: ScopeCondition[]
 }
 
@@ -39,7 +38,6 @@ export function parseScope(text: string): ParsedScope {
   const scope: TurnScope = {
     mention_files: [],
     mention_dirs: [],
-    inherit_from: [],
     conditions: [],
   }
   let clean = text
@@ -47,16 +45,12 @@ export function parseScope(text: string): ParsedScope {
 
   let m: RegExpExecArray | null
 
-  // @mention：文件/目录/轮次继承
+  // @mention：文件/目录（@上轮/@第N轮 已移除解析，作为普通文本保留）
   while ((m = MENTION_RE.exec(text)) !== null) {
     const raw = m[1].trim()
     if (!raw) continue
-    if (raw === '上轮') {
-      scope.inherit_from.push(-1) // -1 = 最近一轮
-    } else if (/^第\d+轮$/.test(raw)) {
-      const n = parseInt(raw.slice(1, -1), 10)
-      if (n >= 1) scope.inherit_from.push(n - 1)
-    } else if (isFileLike(raw)) {
+    if (raw === '上轮' || /^第\d+轮$/.test(raw)) continue // 死代码移除后：非引用，保留原文
+    if (isFileLike(raw)) {
       if (!scope.mention_files.includes(raw)) scope.mention_files.push(raw)
     } else {
       if (!scope.mention_dirs.includes(raw)) scope.mention_dirs.push(raw)

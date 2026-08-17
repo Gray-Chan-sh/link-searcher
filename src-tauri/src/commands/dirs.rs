@@ -32,7 +32,6 @@ pub struct DirConfigWithStats {
     pub updated_at: i64,
     pub total_files: u64,
     pub indexed_files: u64,
-    pub private: bool,
 }
 
 #[tauri::command]
@@ -221,7 +220,6 @@ pub async fn list_dirs(state: State<'_, AppState>) -> Result<Vec<DirConfigWithSt
             updated_at: dir.updated_at,
             total_files: stats.total,
             indexed_files: stats.indexed,
-            private: dir.private,
         });
     }
     Ok(result)
@@ -237,7 +235,6 @@ pub async fn update_dir(
     exclude_patterns: Option<String>,
     include_exts: Option<String>,
     recursive: Option<bool>,
-    private: Option<bool>,
 ) -> Result<(), String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let updates = db::dir_config::DirUpdate {
@@ -246,7 +243,6 @@ pub async fn update_dir(
         exclude_patterns,
         include_exts,
         recursive,
-        private,
     };
     db::dir_config::update_dir(&conn, &id, updates)
         .map_err(|e| format!("failed to update directory: {e}"))?;

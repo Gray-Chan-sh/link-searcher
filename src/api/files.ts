@@ -90,11 +90,18 @@ export interface ChatSession {
   per_turn_evidence?: PerTurnEvidence[]
   per_turn_scopes?: PerTurnScope[]
   scope_dir_ids?: string[]
+  /** 统一检索范围条目（跨轮累计，直到手动删除） */
+  scope_entries?: ScopeEntry[]
   scope_conditions?: ScopeCondition[]
   /** P2：严格模式——范围内无命中时拒绝回答 */
   strict_docs?: boolean
   /** P3：专注模式——仅分析此文件 */
   focus_file?: string | null
+}
+
+export interface ScopeEntry {
+  kind: 'dir' | 'file'
+  value: string
 }
 
 export async function cancelAiRequest(): Promise<void> {
@@ -114,7 +121,6 @@ export async function smartSearch(query: string): Promise<SmartSearchResponse> {
 export interface TurnScope {
   mention_files: string[]
   mention_dirs: string[]
-  inherit_from: number[]
   conditions: ScopeCondition[]
 }
 
@@ -124,8 +130,8 @@ export interface ScopeCondition {
   parsed?: string | null
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionScopeDirIds?: string[], strictDocs?: boolean): Promise<string> {
-  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], strictDocs: strictDocs ?? false })
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionScopeDirIds?: string[], sessionScopeEntries?: ScopeEntry[], strictDocs?: boolean): Promise<string> {
+  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], sessionScopeEntries: sessionScopeEntries ?? [], strictDocs: strictDocs ?? false })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -143,8 +149,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionScopeDirIds?: string[], strictDocs?: boolean): Promise<void> {
-  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], strictDocs: strictDocs ?? false })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionScopeDirIds?: string[], sessionScopeEntries?: ScopeEntry[], strictDocs?: boolean): Promise<void> {
+  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionScopeDirIds: sessionScopeDirIds ?? [], sessionScopeEntries: sessionScopeEntries ?? [], strictDocs: strictDocs ?? false })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {

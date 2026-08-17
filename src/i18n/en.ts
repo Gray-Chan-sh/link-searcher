@@ -116,6 +116,11 @@ const en: Record<string, string> = {
     fuzzy_hint: 'Fuzzy condition (LLM-parsed, editable)',
     strict_docs: 'Docs only',
     focus_mode: 'Focus',
+    scope_range: 'Search scope',
+    scope_dir: 'Scope dir',
+    scope_private_filtered: 'Excluded {n} private dirs',
+    clear_scope: 'Clear scope',
+    no_scope: 'No scope (full library)',
     retrieval_strategy: 'Retrieval strategy',
     semantic_weight_label: 'Semantic vs keyword',
     semantic_weight_hint: 'Semantic 30% / Keyword 70% — drag toward keyword for exact matches, toward semantic for meaning',
@@ -365,5 +370,32 @@ const en: Record<string, string> = {
     index_verify_done: '✓ Verification done: checked {checked}, recovered {recovered}, empty {dead}, failed {failed}',
     index_reextract_done: '✓ Re-extracted {ok}{failedSuffix}',
     index_no_missing: '✓ No missing content',
+
+    err_empty_response: 'AI returned no content, please retry',
+
+    search_sessions: 'Search sessions',
+    session_range_all: 'All',
+    session_range_today: 'Today',
+    session_range_week: '7d',
+    session_range_older: 'Older',
+    no_sessions: 'No sessions',
+    no_sessions_match: 'No matching sessions',
+
+    resize_sidebar: 'Drag to resize',
+
+    batch_manage: 'Batch manage',
+    exit_select_mode: 'Exit batch mode',
+    done: 'Done',
+    selected_count: '{n} selected',
+    select_all: 'Select all',
+    confirm_delete_sessions: 'Delete {n} selected sessions?',
+
+    scope_preview: 'Scope preview',
+    scope_preview_all: 'Will switch to full-library search',
+    scope_preview_dir: 'Will scope to directory',
+
+    focus_overridden: 'overridden by references this turn',
+
+    effective_scope: 'This turn searches',
 }
 export default en

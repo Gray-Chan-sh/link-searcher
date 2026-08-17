@@ -37,3 +37,8 @@ opencode.json
 
 # Python venv for FunASR
 src-tauri/models/funasr/.venv/
+.env
+node_modules/
+
+# Inkos tool local state
+.inkos/

@@ -150,18 +150,6 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
         .unwrap_or(1000)
     };
 
-    // P6 私密目录过滤：全库搜索时排除 private 目录的文件。
-    let dir_ids = if dir_ids.is_none() && dir_paths.is_none() {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        if crate::db::dir_config::has_private_dirs(&conn).unwrap_or(false) {
-            Some(crate::db::dir_config::list_public_dir_ids(&conn).map_err(|e| format!("{e}"))?)
-        } else {
-            None
-        }
-    } else {
-        dir_ids
-    };
-
     let params = SearchParams {
         query: query.to_lowercase(),
         dir_ids,

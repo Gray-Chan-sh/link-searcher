@@ -306,3 +306,25 @@ fn chat_stream_conn_refused_degrades_gracefully() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// ---------------------------------------------------------------------------
+// 空 SSE 流（无 content delta 直接 [DONE]）→ Some("") 而非 None。
+// 前端据此显式提示"未返回内容"，不应静默。见 ChatPanel ai-done handler。
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_empty_done_returns_empty_string() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|_| sse_response(&["data: [DONE]"]));
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let mut deltas = Vec::new();
+    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    assert_eq!(out.text.as_deref(), Some(""), "空流应返回空字符串（非 None）");
+    assert!(deltas.is_empty(), "空流不应触发任何 delta");
+    assert!(!out.cancelled);
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
