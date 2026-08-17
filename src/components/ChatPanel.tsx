@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession, type ScopeEntry } from '../api/files'
+import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
 import MentionPicker from './MentionPicker'
@@ -16,13 +16,11 @@ interface ChatPanelProps {
   /** 父组件（树状浏览器）请求插入 `@path` 到输入框；插完调 onMentionConsumed */
   pendingMention?: string | null
   onMentionConsumed?: () => void
-  /** /范围:全库 或 /范围:目录路径 —— 交给持有 dirs 数据的父组件解析为 dir_id 后更新会话范围 */
+  /** /范围:全库 或 /范围:目录路径 —— 交给持有 dirs 数据的父组件解析为路径后更新会话范围 */
   onScopeAction?: (action: string) => void
-  /** 目录 id → label/private 映射（来自父组件文件树），用于范围目录 chips 与私密过滤提示 */
-  dirScopes?: { id: string; label: string; private: boolean }[]
 }
 
-export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction, dirScopes }: ChatPanelProps) {
+export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction }: ChatPanelProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const [input, setInput] = useState('')
@@ -245,29 +243,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // 合并"本轮将生效"的检索范围（只读摘要，发送前实时反映）
   const effectiveScope = useMemo(() => {
     const parts: string[] = []
-    // 文件/目录引用：chips 是本轮真实来源，存在时覆盖专注
+    // 文件/目录引用：chips 是本轮真实来源
     if (mentionChips.length > 0) {
       parts.push(mentionChips.map(c => c.path).join(', '))
-    } else if (session?.focus_file) {
-      parts.push(`📌 ${session.focus_file}`)
     }
-    // 会话级目录范围
-    if (session?.scope_dir_ids?.length) {
-      const labels = session.scope_dir_ids
-        .map(id => dirScopes?.find(d => d.id === id)?.label ?? id.slice(0, 16))
-        .join(', ')
-      parts.push(`📁 ${labels}`)
+    // 会话级统一范围（跨轮累计的路径条目）
+    if ((session?.retrieval_scope?.length ?? 0) > 0) {
+      parts.push(session!.retrieval_scope!.join(', '))
     }
     // 条件
     if (conditionChips.length > 0) {
       parts.push(conditionChips.map(c => `/${c.kind}:${c.value}`).join(' '))
     }
-    // 私密排除（无显式目录时）
-    if ((session?.scope_dir_ids?.length ?? 0) === 0 && dirScopes?.some(d => d.private)) {
-      parts.push(t('scope_private_filtered', { n: dirScopes.filter(d => d.private).length }))
-    }
     return parts
-  }, [mentionChips, session, dirScopes, conditionChips])
+  }, [mentionChips, session, conditionChips])
 
 // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
   const handleSend = useCallback(async () => {
@@ -301,11 +290,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     if (scopeAction) {
       onScopeAction?.(scopeAction)
     }
-    // 专注模式：仅分析 focus_file，忽略其他范围（会话级，直到退出）
-    // 仅在用户未通过 @mention 或 chips 显式引用文件/目录时生效
-    if (session.focus_file && scope.mention_files.length === 0 && scope.mention_dirs.length === 0 && mentionChips.length === 0) {
-      scope.mention_files = [session.focus_file]
-    }
     setInput('')
     setMentionChips([])
     setConditionChips([])
@@ -330,21 +314,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const startedAt = Date.now()
     skipResumeRef.current = true
     const userTurnsCount = messages.filter(m => m.role === 'user').length
-    // 跨轮累计：本轮 @引用 chips 并入会话持久范围（直到手动删除）
-    const entryFromChip = (c: { isFile: boolean; path: string }): ScopeEntry => ({ kind: c.isFile ? 'file' : 'dir', value: c.path })
-    const mergedEntries = [
-      ...(session.scope_entries ?? []),
-      ...allRefs.map(entryFromChip),
-    ].filter((en, i, arr) => arr.findIndex(x => x.kind === en.kind && x.value === en.value) === i)
+    // 跨轮累计：本轮 @引用路径并入会话持久范围（父吞子去冗余，直到手动删除）
+    const mergedScope = mergeScopePrefixes([
+      ...(session.retrieval_scope ?? []),
+      ...uniqueRefs.map(r => r.path),
+    ])
     patchSession({
       messages: [...messages, userMsg],
       pending_query: q,
       pending_started_at: startedAt,
-      scope_entries: mergedEntries,
-      // 记录本轮生效的 @mention 集合，供导出追溯
+      retrieval_scope: mergedScope,
+      // 记录本轮生效的范围快照（跨轮累计合并后），供导出追溯
       per_turn_scopes: [
         ...(session.per_turn_scopes ?? []),
-        { turn_index: userTurnsCount, files: scope.mention_files, dirs: scope.mention_dirs },
+        { turn_index: userTurnsCount, scope: mergedScope },
       ],
     })
     setStreaming({ sessionId: session.id, text: '' })
@@ -354,7 +337,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       if (sourceIds.length === 0 && !hasScope) {
         await smartSearchStream(cleanQ, session.id)
       } else {
-        await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, session.scope_dir_ids ?? [], session.scope_entries ?? [], session.strict_docs ?? false)
+        await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false)
       }
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
@@ -395,7 +378,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             pending_started_at: null,
           })
         } else {
-          const answer = await conversationAsk(base, sourceIds, undefined, undefined, session.scope_entries ?? [], session.strict_docs ?? false)
+          const answer = await conversationAsk(base, sourceIds, undefined, session?.retrieval_scope ?? [], session?.strict_docs ?? false)
           if (latestReqIdRef.current !== reqId) return
           patchSession({
             messages: [...base, { role: 'assistant', content: answer.trim() ? answer : `❌ ${t('err_empty_response')}` }],
@@ -552,44 +535,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       {llmEnabled && (
         <div className="px-4 py-1 border-t border-gray-200 dark:border-gray-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
           <span className="text-gray-400 dark:text-gray-500">{t('scope_range')}:</span>
-          {/* 专注模式状态：有 chips 时本轮被显式引用覆盖，显示待机态而非谎称生效 */}
-          {session?.focus_file && (
-            mentionChips.length > 0 ? (
-              <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 italic">
-                📌 {t('focus_mode')}: {session.focus_file} <span className="not-italic">({t('focus_overridden')})</span>
-              </span>
-            ) : (
-              <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                📌 {t('focus_mode')}: {session.focus_file}
-                <button type="button" title={t('clear_scope')} onClick={() => onSessionChange({ ...session, focus_file: null })} className="hover:text-amber-600">×</button>
-              </span>
-            )
-          )}
-          {/* 范围目录 chips：会话级 scope_dir_ids 逐个显示 */}
-          {session?.scope_dir_ids?.map(id => {
-            const dir = dirScopes?.find(d => d.id === id)
-            return (
-              <span key={id} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 max-w-[200px]">
-                📁 {t('scope_dir')}: <span className="truncate">{dir?.label ?? id.slice(0, 16)}</span>
-                <button type="button" title={t('clear_scope')} onClick={() => session && onSessionChange({ ...session, scope_dir_ids: (session.scope_dir_ids ?? []).filter(v => v !== id) })} className="hover:text-blue-600 shrink-0 leading-none">×</button>
-              </span>
-            )
-          })}
-          {/* 统一范围条目 chips：跨轮累计（目录/文件），逐条可删 */}
-          {session?.scope_entries?.map((en, i) => (
-            <span key={`${en.kind}-${en.value}-${i}`} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border border-purple-200 dark:border-purple-800 max-w-[220px]">
-              {en.kind === 'file' ? '📄' : '📁'} <span className="truncate">{en.value}</span>
-              <button type="button" title={t('clear_scope')} onClick={() => session && onSessionChange({ ...session, scope_entries: (session.scope_entries ?? []).filter((_, j) => j !== i) })} className="hover:text-purple-600 shrink-0 leading-none">×</button>
+          {/* 会话级统一范围 chips：跨轮累计的路径条目（目录/文件），逐条可删 */}
+          {session?.retrieval_scope?.map((p, i) => (
+            <span key={`${p}-${i}`} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 max-w-[220px]">
+              {/\.\w{1,6}$/.test(p) ? '📄' : '📁'} <span className="truncate">{p}</span>
+              <button type="button" title={t('clear_scope')} onClick={() => session && onSessionChange({ ...session, retrieval_scope: (session.retrieval_scope ?? []).filter((_, j) => j !== i) })} className="hover:text-blue-600 shrink-0 leading-none">×</button>
             </span>
           ))}
-          {/* 私密过滤提示：无显式范围时私密目录自动排除（设置页控制，不可清除） */}
-          {session && (session.scope_dir_ids?.length ?? 0) === 0 && (dirScopes?.some(d => d.private) ?? false) && (
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700">
-              {t('scope_private_filtered', { n: dirScopes?.filter(d => d.private).length ?? 0 })}
-            </span>
-          )}
-          {/* 空态：专注/范围/私密全部未生效 → 全库检索 */}
-          {session && !session.focus_file && (session.scope_dir_ids?.length ?? 0) === 0 && !(dirScopes?.some(d => d.private) ?? false) && (
+          {/* 空态：范围未生效 → 全库检索 */}
+          {session && (session.retrieval_scope?.length ?? 0) === 0 && (
             <span className="text-gray-400 dark:text-gray-500">{t('no_scope')}</span>
           )}
           {/* 严格模式 toggle（仅依据文档） */}
@@ -681,5 +635,13 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         </div>
       )}
     </div>
+  )
+}
+
+/** 父路径吞并子路径：A 与 A/B 并存时保留 A（与后端 merge_scope_prefixes 语义一致） */
+function mergeScopePrefixes(paths: string[]): string[] {
+  const kept = paths.map(p => p.trim().replace(/\/+$/, '')).filter(Boolean)
+  return kept.filter((p, i) =>
+    !kept.some((q, j) => j !== i && p.startsWith(q + '/'))
   )
 }

@@ -100,16 +100,20 @@ export default function AiChat() {
     }
   }, [refreshList])
 
-  // 专注模式：会话仅分析此文件（临时屏蔽其他范围），追问持续直到退出
-  const handleFocusFile = useCallback((path: string) => {
-    if (activeSession) handleSessionChange({ ...activeSession, focus_file: path })
+  // 统一范围入口：把路径加入会话级检索范围（目录/文件统一；父路径吞并子路径在后端做）
+  const handleAddToScope = useCallback((path: string) => {
+    if (!activeSession) return
+    const cur = activeSession.retrieval_scope ?? []
+    if (!cur.includes(path)) {
+      handleSessionChange({ ...activeSession, retrieval_scope: [...cur, path] })
+    }
   }, [activeSession, handleSessionChange])
 
-  // /范围:全库或目录路径 → 解析为 dir_id 并更新会话范围
+  // /范围:全库或目录路径 → 解析为路径并更新会话范围
   const handleScopeAction = useCallback((action: string) => {
     if (!activeSession) return
     if (action === 'clear') {
-      handleSessionChange({ ...activeSession, scope_dir_ids: [] })
+      handleSessionChange({ ...activeSession, retrieval_scope: [] })
       return
     }
     if (action.startsWith('dir:')) {
@@ -117,18 +121,19 @@ export default function AiChat() {
       // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录
       const hit = dirTrees.find(dt => dt.label === dirName || dt.basePath.endsWith('/' + dirName))
       if (hit) {
-        handleSessionChange({ ...activeSession, scope_dir_ids: [hit.id] })
+        handleAddToScope(hit.basePath)
       }
     }
-  }, [activeSession, dirTrees, handleSessionChange])
+  }, [activeSession, dirTrees, handleSessionChange, handleAddToScope])
 
-  // 树状根目录的会话范围设置（对应的 dirTree id）
+  // 树状根目录的会话范围设置：加入该监控根绝对路径
   const handleSetSessionScope = useCallback((dirId: string) => {
-    if (activeSession) handleSessionChange({ ...activeSession, scope_dir_ids: [dirId] })
-  }, [activeSession, handleSessionChange])
+    const dt = dirTrees.find(d => d.id === dirId)
+    if (activeSession && dt) handleAddToScope(dt.basePath)
+  }, [activeSession, dirTrees, handleAddToScope])
 
   const handleClearSessionScope = useCallback(() => {
-    if (activeSession) handleSessionChange({ ...activeSession, scope_dir_ids: [] })
+    if (activeSession) handleSessionChange({ ...activeSession, retrieval_scope: [] })
   }, [activeSession, handleSessionChange])
 
   // Ensure a session exists when chat is enabled (create one if none).
@@ -442,19 +447,19 @@ export default function AiChat() {
                     <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
                     <button
                       type="button"
-                      onClick={() => activeSession?.scope_dir_ids?.includes(dt.id) ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
-                      title={activeSession?.scope_dir_ids?.includes(dt.id) ? t('clear_session_scope') : t('set_session_scope')}
+                      onClick={() => activeSession?.retrieval_scope?.includes(dt.basePath) ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
+                      title={activeSession?.retrieval_scope?.includes(dt.basePath) ? t('clear_session_scope') : t('set_session_scope')}
                       className={`text-[10px] ${
-                        activeSession?.scope_dir_ids?.includes(dt.id)
+                        activeSession?.retrieval_scope?.includes(dt.basePath)
                           ? 'text-purple-600 dark:text-purple-300 font-medium'
                           : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
                       } shrink-0`}
                     >
-                      {activeSession?.scope_dir_ids?.includes(dt.id) ? '范围✓' : '范围'}
+                      {activeSession?.retrieval_scope?.includes(dt.basePath) ? '范围✓' : '范围'}
                     </button>
                   </div>
                   {dt.root && sortTreeNodes(dt.root).map(child => (
-                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onFocus={handleFocusFile} />
+                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onScope={handleAddToScope} />
                   ))}
                 </div>
               ))}
@@ -497,7 +502,6 @@ export default function AiChat() {
             pendingMention={pendingMention}
             onMentionConsumed={() => setPendingMention(null)}
             onScopeAction={handleScopeAction}
-            dirScopes={dirTrees}
           />
         ) : capFailed ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
@@ -529,13 +533,13 @@ function sortTreeNodes(nodes: DirTreeNode[]): DirTreeNode[] {
   })
 }
 
-/** 递归文件树：目录左键展开/折叠、右键「加入对话」；文件左键「加入对话」、右键文件「专注分析」。
+/** 递归文件树：左键展开/加入对话；右键文件/目录统一「加入检索范围」。
  *  `node.path` 为绝对路径，`basePath` 为目录根，点击时转相对路径（与 file_tracking 一致）。 */
-function TreeFileList({ node, basePath, onPick, onFocus }: {
+function TreeFileList({ node, basePath, onPick, onScope }: {
   node: DirTreeNode
   basePath: string
   onPick: (relPath: string) => void
-  onFocus?: (relPath: string) => void
+  onScope?: (relPath: string) => void
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -572,7 +576,12 @@ function TreeFileList({ node, basePath, onPick, onFocus }: {
         draggable
         onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
         onClick={isDir ? handleToggle : () => onPick(rel)}
-        onContextMenu={e => { e.preventDefault(); if (!isDir && onFocus) { onFocus(rel) } else { onPick(rel) } }}
+        onContextMenu={e => {
+          e.preventDefault()
+          // 右键统一入口：文件/目录都加入检索范围
+          if (onScope) onScope(rel)
+          else onPick(rel)
+        }}
         className="w-full flex items-center gap-1.5 px-2 py-1 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
         title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
       >
@@ -582,7 +591,7 @@ function TreeFileList({ node, basePath, onPick, onFocus }: {
       </button>
       {open && sortedChildren && sortedChildren.map(child => (
         <div key={child.path} className="pl-3">
-          <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} />
+          <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} onScope={onScope} />
         </div>
       ))}
     </div>
