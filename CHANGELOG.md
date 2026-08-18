@@ -69,6 +69,32 @@ scanner/index/search 测试并非逻辑错误，而是建表失败后的连锁�
 
 ---
 
+## 2026-08-18（检索范围验收清单 + 前端父吞子修复 + 后端 strict/mention 修复）
+
+**动机**：折腾几天没达标，根因是"要求"从未写成可验证清单。先固化验收标准，再修实现，最后逐项对照验收。
+
+**验收清单**
+- 新增 `.omo/acceptance/retrieval-scope.md`：10 项 Given/When/Then 验收标准（A1-A10），每项含验证方式（cargo/vitest/手动）
+
+**前端父目录吞并子路径修复（Bug A）**
+- 新建 `src/utils/scopeMerge.ts`：`mergeScopePrefixes` 纯函数，加入即合并（父吞子 + 空串吸收）
+- `AiChat.tsx`：`handleAddToScope` 使用合并逻辑；`/范围:` 命令统一路径格式（全库→`""`、子目录→相对路径）
+- `ChatPanel.tsx`：范围条渲染合并后结果；`effectiveScope` 用合并后结果；`""` 条目渲染为"全库"；`×` 全库条目→清空
+- 激活 vitest 运行器 + 13 个 scopeMerge 单测全部通过
+
+**后端严格模式与引用文件依据修复（Bug B）**
+- 新增 `resolve_mention_file_ids` 辅助函数：精确匹配→LIKE 回退→歧义检测（0/≥2 候选→missing）
+- 搜索限制路径与证据直接使用路径统一使用同一解析器
+- `[N]` 编号仅覆盖解析成功的 mention，missing 项排除
+- strict_docs 强化：缺失/歧义/未索引→对应错误文案
+- 严格模式下旧来源循环不执行（from_history 排除）
+- 导出：空串条目显示为"全库"
+- 新增 7 个集成测试全绿（含 zero-overlap、missing、ambiguous、history-exclusion、dir-no-false-error、empty-scope、unset-scope）
+
+**验证**：cargo test 168 绿、npm test 13/13 绿、tsc 0
+
+---
+
 ## 2026-08-16（检索范围重新设计：并集合并 + 统一存储 + 跨轮累计）
 
 **动机**：原有四个概念（检索范围/引用/专注/仅依据文档）相互重叠，且"范围"与"子目录"是 AND 交集——设 A 目录 + A/B 子目录实际只搜 A/B（反直觉）。重新设计为一个正交概念（检索范围）+ 一条回答策略（仅依据文档）。
