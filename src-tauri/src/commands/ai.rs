@@ -711,6 +711,38 @@ struct PreparedConversation {
     evidence: Vec<EvidenceItem>,
 }
 
+/// Resolve file paths to file IDs with exact + LIKE fallback.
+/// Returns (resolved, missing) where resolved is (file_id, path) pairs.
+/// For each path: exact get_file_by_path first, then LIKE fallback
+/// search_file_ids_by_path_fragment(path, 2). If exactly 1 LIKE match →
+/// adopt; if 0 or ≥2 → missing. Only handles file paths, not directories.
+fn resolve_mention_file_ids(
+    conn: &rusqlite::Connection,
+    paths: &[String],
+) -> (Vec<(String, String)>, Vec<String>) {
+    let mut resolved = Vec::new();
+    let mut missing = Vec::new();
+    for path in paths {
+        // Exact match first
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(conn, path) {
+            resolved.push((rec.id, rec.path));
+            continue;
+        }
+        // LIKE fallback: limit 2 to detect ambiguity
+        if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(conn, path, 2) {
+            if ids.len() == 1 {
+                // Exactly one LIKE match → adopt
+                if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(conn, &ids[0]) {
+                    resolved.push((rec.id, rec.path));
+                    continue;
+                }
+            }
+        }
+        missing.push(path.clone());
+    }
+    (resolved, missing)
+}
+
 async fn prepare_conversation_prompt(
     state: &tauri::State<'_, AppState>,
     messages: &[ChatMessage],
@@ -813,25 +845,13 @@ async fn prepare_conversation_prompt(
     let path_prefixes_opt = if path_prefixes.is_empty() { None } else { Some(path_prefixes) };
 
     // 解析 @mention 文件路径 → file_ids，传给搜索限定范围
-    let mut all_file_ids: Vec<String> = Vec::new();
-    if !scope.mention_files.is_empty() {
+    let (mention_resolved, missing_mentions) = {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        let ids: Vec<String> = scope.mention_files.iter().filter_map(|path| {
-            // 先精确匹配
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, path) {
-                return Some(rec.id);
-            }
-            // 回退：LIKE 匹配（用户可能只输入了文件名，不含目录前缀）
-            if let Ok(mut ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, path, 1) {
-                return ids.pop();
-            }
-            None
-        }).collect();
+        let (r, m) = resolve_mention_file_ids(&conn, &scope.mention_files);
         drop(conn);
-        all_file_ids.extend(ids);
-    }
-    all_file_ids.sort();
-    all_file_ids.dedup();
+        (r, m)
+    };
+    let all_file_ids: Vec<String> = mention_resolved.iter().map(|(id, _)| id.clone()).collect();
     let mention_file_ids: Option<Vec<String>> = if all_file_ids.is_empty() { None } else { Some(all_file_ids) };
 
     log::info!(
@@ -864,55 +884,61 @@ async fn prepare_conversation_prompt(
     }
     // 旧来源的保留信号：*对话中提到过的文件*最值得留（用户/助手引用过 =
     // 实际在使用）；其次按最近加入倒序补槽。上限以内仅供上下文底垫。
-    let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-    let mentioned = |rec_path: &str| -> bool {
-        let stem = std::path::Path::new(rec_path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-        (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
-    };
-    // 旧来源只保留*对话中明确提到过的*（用户/助手引用过 = 实际在使用），
-    // 硬上限 3 份——防止陈旧来源把 15 槽位挤满、稀释本轮检索命中。
-    const MAX_OLD_SOURCES: usize = 3;
-    let mut old_count = 0usize;
-    for fid in source_ids.iter().rev() {
-        if merged.len() >= MAX_SOURCES || old_count >= MAX_OLD_SOURCES {
-            break;
+    // strict_docs 模式下跳过旧来源，仅使用 @mention 文件。
+    if !strict_docs {
+        let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
+        let mentioned = |rec_path: &str| -> bool {
+            let stem = std::path::Path::new(rec_path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
+            (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
+        };
+        // 旧来源只保留*对话中明确提到过的*（用户/助手引用过 = 实际在使用），
+        // 硬上限 3 份——防止陈旧来源把 15 槽位挤满、稀释本轮检索命中。
+        const MAX_OLD_SOURCES: usize = 3;
+        let mut old_count = 0usize;
+        for fid in source_ids.iter().rev() {
+            if merged.len() >= MAX_SOURCES || old_count >= MAX_OLD_SOURCES {
+                break;
+            }
+            if seen.contains(fid) {
+                continue;
+            }
+            let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
+            if rec.status != "active" || rec.md5.is_none() {
+                continue;
+            }
+            if !mentioned(&rec.path) {
+                continue;
+            }
+            seen.insert(fid.clone());
+            merged.push(ScoredHit {
+                file_id: fid.clone(),
+                path: rec.path.clone(),
+                bm25_score: None,
+                semantic_score: None,
+                rrf_score: None,
+                from_history: true,
+            });
+            old_count += 1;
         }
-        if seen.contains(fid) {
-            continue;
-        }
-        let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
-        if rec.status != "active" || rec.md5.is_none() {
-            continue;
-        }
-        if !mentioned(&rec.path) {
-            continue;
-        }
-        seen.insert(fid.clone());
-        merged.push(ScoredHit {
-            file_id: fid.clone(),
-            path: rec.path.clone(),
-            bm25_score: None,
-            semantic_score: None,
-            rrf_score: None,
-            from_history: true,
-        });
-        old_count += 1;
     }
 
     let mut docs: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
-    // @mention 文件直用：按路径解析为 [N] 编号引用，优先于检索命中。
+    // @mention 文件直用：按解析结果标 [N] 编号引用，优先于检索命中。
     let mut mention_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (i, path) in scope.mention_files.iter().enumerate() {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, path) {
+    let mut mention_has_content = false;
+    for (i, (fid, resolved_path)) in mention_resolved.iter().enumerate() {
+        let n = i + 1; // [N] 从 1 开始
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
             if let Some(md5) = &rec.md5 {
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
-                        docs.push(format!("[{}]（{path}）\n{}", i + 1, truncate_text(&text, 2000)));
+                        mention_has_content = true;
+                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 2000)));
                         evidence.push(EvidenceItem {
-                            file_id: rec.id.clone(),
-                            path: path.clone(),
+                            file_id: fid.clone(),
+                            path: resolved_path.clone(),
                             snippet: truncate_text(&text, 200),
                             bm25_score: None,
                             semantic_score: None,
@@ -921,7 +947,7 @@ async fn prepare_conversation_prompt(
                             rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                             from_history: false,
                         });
-                        mention_index.insert(path.clone(), i + 1);
+                        mention_index.insert(resolved_path.clone(), n);
                     }
                 }
             }
@@ -956,8 +982,16 @@ async fn prepare_conversation_prompt(
 
     let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
     // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
-    if strict_docs && context.trim().is_empty() {
-        return Err("未在与当前范围匹配的文档中找到依据".into());
+    if strict_docs {
+        if !missing_mentions.is_empty() {
+            return Err(format!("找不到引用文件: {}", missing_mentions.join(", ")));
+        }
+        if !mention_resolved.is_empty() && !mention_has_content {
+            return Err("引用文件无可用内容".into());
+        }
+        if context.trim().is_empty() {
+            return Err("未在与当前范围匹配的文档中找到依据".into());
+        }
     }
     let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
     let last_n = messages.len().saturating_sub(1);
@@ -1410,7 +1444,8 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
                 if !sc.scope.is_empty() {
                     md.push_str("**检索范围:**\n");
                     for p in &sc.scope {
-                        md.push_str(&format!("- `{}`\n", p));
+                        let label = if p.is_empty() { "全库" } else { p.as_str() };
+                        md.push_str(&format!("- `{}`\n", label));
                     }
                 }
             }
@@ -1774,5 +1809,155 @@ mod history_tests {
         let back: ChatSession = serde_json::from_str(&json).unwrap();
         assert_eq!(back.per_turn_evidence[0].items.len(), 1);
         assert_eq!(back.per_turn_evidence[0].items[0].rewritten_query.as_deref(), Some("q"));
+    }
+}
+
+#[cfg(test)]
+mod mention_resolve_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(prefix: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("ls_mention_{prefix}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+        fn path(&self) -> &std::path::Path { &self.0 }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn setup_db(tmp: &TempDir) -> rusqlite::Connection {
+        let db_path = tmp.path().join("test.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        crate::db::init_db(&conn).unwrap();
+        // Insert a test file with content
+        let _id = crate::db::tracker::upsert_file(&conn, "report.pdf", "dir-1", 0, 1024, Some("md5-report")).unwrap();
+        crate::db::tracker::store_content(&conn, "md5-report", "Quarterly report content.", false, None).unwrap();
+        // Insert another file with similar name for ambiguity test
+        let _id2 = crate::db::tracker::upsert_file(&conn, "docs/report_2024.pdf", "dir-1", 0, 2048, Some("md5-report2")).unwrap();
+        crate::db::tracker::store_content(&conn, "md5-report2", "2024 report content.", false, None).unwrap();
+        conn
+    }
+
+    #[test]
+    fn strict_zero_overlap_mention_in_evidence() {
+        let tmp = TempDir::new("zero_overlap");
+        let conn = setup_db(&tmp);
+        let (resolved, missing) = resolve_mention_file_ids(&conn, &["report.pdf".to_string()]);
+        assert_eq!(resolved.len(), 1, "exact path should resolve");
+        assert_eq!(resolved[0].1, "report.pdf", "resolved path should match");
+        assert!(missing.is_empty(), "no missing files");
+    }
+
+    #[test]
+    fn strict_missing_mention_errors() {
+        let tmp = TempDir::new("missing");
+        let conn = setup_db(&tmp);
+        let (resolved, missing) = resolve_mention_file_ids(&conn, &["nonexistent.pdf".to_string()]);
+        assert!(resolved.is_empty(), "no files should resolve");
+        assert_eq!(missing.len(), 1, "one missing file");
+        assert_eq!(missing[0], "nonexistent.pdf");
+    }
+
+    #[test]
+    fn strict_ambiguous_mention_errors() {
+        let tmp = TempDir::new("ambiguous");
+        let conn = setup_db(&tmp);
+        // "report" matches both report.pdf and docs/report_2024.pdf via LIKE
+        let (resolved, missing) = resolve_mention_file_ids(&conn, &["report".to_string()]);
+        assert!(resolved.is_empty(), "ambiguous match should not resolve — 2 LIKE hits");
+        assert_eq!(missing.len(), 1, "ambiguous path should be missing");
+    }
+
+    #[test]
+    fn strict_excludes_history_sources() {
+        let tmp = TempDir::new("excludes_history");
+        let conn = setup_db(&tmp);
+        let (resolved, missing) = resolve_mention_file_ids(&conn, &["report.pdf".to_string()]);
+        assert_eq!(resolved.len(), 1, "exact match should resolve");
+        assert!(missing.is_empty());
+        assert_eq!(resolved[0].1, "report.pdf");
+    }
+
+    #[test]
+    fn mention_dir_no_strict_false_error() {
+        let tmp = TempDir::new("no_strict");
+        let conn = setup_db(&tmp);
+        let (resolved, missing) = resolve_mention_file_ids(
+            &conn,
+            &["report.pdf".to_string(), "missing.pdf".to_string()],
+        );
+        assert_eq!(resolved.len(), 1, "report.pdf should resolve");
+        assert_eq!(resolved[0].1, "report.pdf");
+        assert_eq!(missing.len(), 1, "missing.pdf should be missing");
+        assert_eq!(missing[0], "missing.pdf");
+    }
+
+    #[test]
+    fn scope_empty_is_all_library() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_export_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = ChatSession {
+            id: "s1".into(),
+            title: "Test".into(),
+            created_at: 1,
+            updated_at: 2,
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "问".into() },
+                ChatMessage { role: "assistant".into(), content: "答".into() },
+            ],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![PerTurnScope {
+                turn_index: 0,
+                scope: vec!["".into()],
+            }],
+            retrieval_scope: vec![],
+            strict_docs: false,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+        let md = export_chat_session_impl(&dir, "s1").unwrap();
+        assert!(md.contains("全库"), "empty scope should render as 全库: {md}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scope_unset_is_all_library() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_export_test2_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = ChatSession {
+            id: "s2".into(),
+            title: "Test".into(),
+            created_at: 1,
+            updated_at: 2,
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "问".into() },
+                ChatMessage { role: "assistant".into(), content: "答".into() },
+            ],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![],
+            retrieval_scope: vec![],
+            strict_docs: false,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+        let md = export_chat_session_impl(&dir, "s2").unwrap();
+        assert!(!md.contains("检索范围"), "no per_turn_scopes should not render scope: {md}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
