@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { useI18n } from '../i18n'
+import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { save, ask } from '@tauri-apps/plugin-dialog'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
@@ -100,16 +101,14 @@ export default function AiChat() {
     }
   }, [refreshList])
 
-  // 统一范围入口：把路径加入会话级检索范围（目录/文件统一；父路径吞并子路径在后端做）
+  // 统一范围入口：把路径加入会话级检索范围，自动合并父路径吞并子路径
   const handleAddToScope = useCallback((path: string) => {
     if (!activeSession) return
     const cur = activeSession.retrieval_scope ?? []
-    if (!cur.includes(path)) {
-      handleSessionChange({ ...activeSession, retrieval_scope: [...cur, path] })
-    }
+    handleSessionChange({ ...activeSession, retrieval_scope: mergeScopePrefixes([...cur, path]) })
   }, [activeSession, handleSessionChange])
 
-  // /范围:全库或目录路径 → 解析为路径并更新会话范围
+  // /范围:全库或目录路径 → 解析为路径并更新会话范围（全库→""，根目录→""，子目录→相对路径）
   const handleScopeAction = useCallback((action: string) => {
     if (!activeSession) return
     if (action === 'clear') {
@@ -118,18 +117,24 @@ export default function AiChat() {
     }
     if (action.startsWith('dir:')) {
       const dirName = action.slice(4)
-      // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录
+      // 全库关键字 → 空字符串（全库检索）
+      if (dirName === '全库') {
+        handleAddToScope('')
+        return
+      }
+      // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录（根目录→空字符串）
       const hit = dirTrees.find(dt => dt.label === dirName || dt.basePath.endsWith('/' + dirName))
       if (hit) {
-        handleAddToScope(hit.basePath)
+        handleAddToScope('')
       }
+      // TODO: 非根子目录匹配 → 相对路径
     }
   }, [activeSession, dirTrees, handleSessionChange, handleAddToScope])
 
-  // 树状根目录的会话范围设置：加入该监控根绝对路径
+  // 树状根目录的会话范围设置：空字符串 = 全库（该监控根即为全库）
   const handleSetSessionScope = useCallback((dirId: string) => {
     const dt = dirTrees.find(d => d.id === dirId)
-    if (activeSession && dt) handleAddToScope(dt.basePath)
+    if (activeSession && dt) handleAddToScope('')
   }, [activeSession, dirTrees, handleAddToScope])
 
   const handleClearSessionScope = useCallback(() => {
@@ -447,15 +452,15 @@ export default function AiChat() {
                     <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
                     <button
                       type="button"
-                      onClick={() => activeSession?.retrieval_scope?.includes(dt.basePath) ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
-                      title={activeSession?.retrieval_scope?.includes(dt.basePath) ? t('clear_session_scope') : t('set_session_scope')}
+                      onClick={() => activeSession?.retrieval_scope?.includes('') ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
+                      title={activeSession?.retrieval_scope?.includes('') ? t('clear_session_scope') : t('set_session_scope')}
                       className={`text-[10px] ${
-                        activeSession?.retrieval_scope?.includes(dt.basePath)
+                        activeSession?.retrieval_scope?.includes('')
                           ? 'text-purple-600 dark:text-purple-300 font-medium'
                           : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
                       } shrink-0`}
                     >
-                      {activeSession?.retrieval_scope?.includes(dt.basePath) ? '范围✓' : '范围'}
+                      {activeSession?.retrieval_scope?.includes('') ? '范围✓' : '范围'}
                     </button>
                   </div>
                   {dt.root && sortTreeNodes(dt.root).map(child => (

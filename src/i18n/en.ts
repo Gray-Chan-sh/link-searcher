@@ -388,5 +388,6 @@ const en: Record<string, string> = {
     scope_preview_dir: 'Will scope to directory',
 
     effective_scope: 'This turn searches',
+    scope_all: 'All library',
 }
 export default en
