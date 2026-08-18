@@ -388,5 +388,6 @@ const ja: Record<string, string> = {
     scope_preview_dir: 'ディレクトリに範囲切替',
 
     effective_scope: 'このターンの検索範囲',
+    scope_all: '全ライブラリ',
 }
 export default ja

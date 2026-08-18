@@ -388,5 +388,6 @@ const ko: Record<string, string> = {
     scope_preview_dir: '디렉토리로 범위 전환',
 
     effective_scope: '이번 턴 검색 범위',
+    scope_all: '전체 라이브러리',
 }
 export default ko

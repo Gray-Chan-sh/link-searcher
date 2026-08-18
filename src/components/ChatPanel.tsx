@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
+import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
 import MentionPicker from './MentionPicker'
@@ -247,9 +248,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     if (mentionChips.length > 0) {
       parts.push(mentionChips.map(c => c.path).join(', '))
     }
-    // 会话级统一范围（跨轮累计的路径条目）
-    if ((session?.retrieval_scope?.length ?? 0) > 0) {
-      parts.push(session!.retrieval_scope!.join(', '))
+    // 会话级统一范围（跨轮累计的路径条目，合并后）
+    const mergedScope = session?.retrieval_scope ? mergeScopePrefixes(session.retrieval_scope) : []
+    if (mergedScope.length > 0) {
+      parts.push(mergedScope.join(', '))
     }
     // 条件
     if (conditionChips.length > 0) {
@@ -535,11 +537,28 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       {llmEnabled && (
         <div className="px-4 py-1 border-t border-gray-200 dark:border-gray-800 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
           <span className="text-gray-400 dark:text-gray-500">{t('scope_range')}:</span>
-          {/* 会话级统一范围 chips：跨轮累计的路径条目（目录/文件），逐条可删 */}
-          {session?.retrieval_scope?.map((p, i) => (
+          {/* 会话级统一范围（合并后）：空串=全库，目录/文件逐条可删 */}
+          {mergeScopePrefixes(session?.retrieval_scope ?? []).map((p, i) => (
             <span key={`${p}-${i}`} className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border border-blue-200 dark:border-blue-800 max-w-[220px]">
-              {/\.\w{1,6}$/.test(p) ? '📄' : '📁'} <span className="truncate">{p}</span>
-              <button type="button" title={t('clear_scope')} onClick={() => session && onSessionChange({ ...session, retrieval_scope: (session.retrieval_scope ?? []).filter((_, j) => j !== i) })} className="hover:text-blue-600 shrink-0 leading-none">×</button>
+              {p === '' ? (
+                <span className="font-medium">{t('scope_all')}</span>
+              ) : (
+                <>{/\.\w{1,6}$/.test(p) ? '📄' : '📁'} <span className="truncate">{p}</span></>
+              )}
+              <button type="button" title={t('clear_scope')} onClick={() => {
+                if (!session) return
+                if (p === '') {
+                  // 空串=全库 → 清除整个范围
+                  onSessionChange({ ...session, retrieval_scope: [] })
+                } else {
+                  // 删掉原始数组中对应路径
+                  const orig = session.retrieval_scope ?? []
+                  const idx = orig.lastIndexOf(p)
+                  if (idx !== -1) {
+                    onSessionChange({ ...session, retrieval_scope: orig.filter((_, j) => j !== idx) })
+                  }
+                }
+              }} className="hover:text-blue-600 shrink-0 leading-none">×</button>
             </span>
           ))}
           {/* 空态：范围未生效 → 全库检索 */}
@@ -638,10 +657,4 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   )
 }
 
-/** 父路径吞并子路径：A 与 A/B 并存时保留 A（与后端 merge_scope_prefixes 语义一致） */
-function mergeScopePrefixes(paths: string[]): string[] {
-  const kept = paths.map(p => p.trim().replace(/\/+$/, '')).filter(Boolean)
-  return kept.filter((p, i) =>
-    !kept.some((q, j) => j !== i && p.startsWith(q + '/'))
-  )
-}
+

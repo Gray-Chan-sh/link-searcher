@@ -388,5 +388,6 @@ const zh: Record<string, string> = {
     scope_preview_dir: '切换范围至目录',
 
     effective_scope: '本轮检索范围',
+    scope_all: '全库',
 }
 export default zh
