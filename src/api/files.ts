@@ -187,6 +187,10 @@ export async function exportChatSession(id: string): Promise<string> {
   return invoke<string>('export_chat_session', { id })
 }
 
+export async function exportChatSessionJson(id: string): Promise<string> {
+  return invoke<string>('export_chat_session_json', { id })
+}
+
 export async function getFile(id: string): Promise<FileDetail> {
   return invoke<FileDetail>('get_file', { id })
 }
