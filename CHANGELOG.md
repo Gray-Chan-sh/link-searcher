@@ -69,6 +69,19 @@ scanner/index/search 测试并非逻辑错误，而是建表失败后的连锁�
 
 ---
 
+## 2026-08-18（会话导出：新增 JSON 格式 + Markdown 空范围标注）
+
+**动机**：用户用导出文件分析 AI 问答行为，但 Markdown 缺少结构化字段（分数/旧来源标记），且空检索范围轮次被静默省略——"第一轮没指定范围"在导出中不可见。
+
+- **新增 `export_chat_session_json` command**：分析友好 JSON——每轮含 `scope`（空数组=未指定全库）、`question`、`answer`（null=无回答）、完整 `evidence` 原始字段（file_id/path/snippet/bm25_score/semantic_score/rrf_score/rewritten/rewritten_query/from_history），会话级含 `retrieval_scope`/`strict_docs`（`src-tauri/src/commands/ai.rs`，lib.rs 注册）
+- **Markdown 空范围标注**：每轮快照 scope 为空时渲染「未指定（全库）」，不再省略；无快照数据的旧会话保持不渲染（不臆断）
+- **前端**：导出按钮保存对话框提供 JSON/Markdown 两种过滤器，按所选后缀调用对应导出（`src/api/files.ts`、`src/pages/AiChat.tsx`）
+- **测试**：`export_json_marks_unset_scope_and_full_evidence`（空 scope 轮次 `[]`/answer null/依据字段）、`export_markdown_shows_unset_scope`（每轮空范围标注 + 顶部空会话不显示）
+
+**验证**：cargo test 170 绿（lib 170 + 集成 9 + 4）、tsc 0
+
+---
+
 ## 2026-08-18（检索范围验收清单 + 前端父吞子修复 + 后端 strict/mention 修复）
 
 **动机**：折腾几天没达标，根因是"要求"从未写成可验证清单。先固化验收标准，再修实现，最后逐项对照验收。

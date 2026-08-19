@@ -1441,8 +1441,10 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
             md.push_str(&format!("---\n\n## 问 (第 {turn_idx} 轮)\n\n{}\n", m.content));
             // 本轮范围快照（跨轮累计合并后）
             if let Some(sc) = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1) {
-                if !sc.scope.is_empty() {
-                    md.push_str("**检索范围:**\n");
+                md.push_str("**检索范围:**\n");
+                if sc.scope.is_empty() {
+                    md.push_str("- 未指定（全库）\n");
+                } else {
                     for p in &sc.scope {
                         let label = if p.is_empty() { "全库" } else { p.as_str() };
                         md.push_str(&format!("- `{}`\n", label));
@@ -1468,6 +1470,94 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
     md.push_str("\n---\n");
     md.push_str(&format!("\n_导出时间: {}\n", now));
     Ok(md)
+}
+
+/// JSON 导出结构：每轮含完整范围快照（空=未指定）与依据原始字段，供程序化分析。
+#[derive(serde::Serialize)]
+struct ChatExportJson {
+    schema_version: u32,
+    exported_at: i64,
+    session: SessionExportMeta,
+    turns: Vec<TurnExport>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionExportMeta {
+    id: String,
+    title: String,
+    created_at: i64,
+    strict_docs: bool,
+    retrieval_scope: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct TurnExport {
+    turn_index: usize,
+    scope: Vec<String>,
+    question: String,
+    answer: Option<String>,
+    evidence: Vec<EvidenceItem>,
+}
+
+/// 导出会话为 JSON（分析友好）：空范围轮次 scope=[] ，无回答轮次 answer=null。
+#[tauri::command]
+pub fn export_chat_session_json(state: State<'_, AppState>, id: String) -> Result<String, String> {
+    export_chat_session_json_impl(&state.data_dir, &id)
+}
+
+fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+    let h = read_history(data_dir);
+    let session = h
+        .sessions
+        .into_iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "会话不存在".to_string())?;
+
+    let mut turns = Vec::new();
+    let mut turn_idx = 0usize;
+    for (i, m) in session.messages.iter().enumerate() {
+        if m.role == "user" {
+            turn_idx += 1;
+            let scope = session
+                .per_turn_scopes
+                .iter()
+                .find(|s| s.turn_index == turn_idx - 1)
+                .map(|s| s.scope.clone())
+                .unwrap_or_default();
+            let answer = session
+                .messages
+                .get(i + 1)
+                .filter(|m| m.role == "assistant")
+                .map(|m| m.content.clone());
+            let evidence = session
+                .per_turn_evidence
+                .iter()
+                .find(|e| e.turn_index == turn_idx - 1)
+                .map(|e| e.items.clone())
+                .unwrap_or_default();
+            turns.push(TurnExport {
+                turn_index: turn_idx,
+                scope,
+                question: m.content.clone(),
+                answer,
+                evidence,
+            });
+        }
+    }
+
+    let export = ChatExportJson {
+        schema_version: 1,
+        exported_at: now_ts(),
+        session: SessionExportMeta {
+            id: session.id,
+            title: session.title,
+            created_at: session.created_at,
+            strict_docs: session.strict_docs,
+            retrieval_scope: session.retrieval_scope,
+        },
+        turns,
+    };
+    serde_json::to_string_pretty(&export).map_err(|e| format!("JSON 序列化失败: {e}"))
 }
 #[cfg(test)]
 mod history_tests {
@@ -1610,6 +1700,101 @@ mod history_tests {
         assert!(md.contains("严格模式"));
         assert!(md.contains("📁 检索范围: `a.pdf`"), "导出应含统一检索范围: {md}");
         assert!(md.contains("**检索范围:**"), "每轮应有范围快照: {md}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_markdown_shows_unset_scope() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = ChatSession {
+            id: "s3".into(),
+            title: "无范围会话".into(),
+            created_at: 0,
+            updated_at: 0,
+            retrieval_scope: vec![],
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "外联发股权".into() },
+                ChatMessage { role: "assistant".into(), content: "无法回答".into() },
+            ],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![PerTurnScope { turn_index: 0, scope: vec![] }],
+            strict_docs: false,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+        let md = export_chat_session_impl(&dir, "s3").unwrap();
+        assert!(!md.contains("> 📁 检索范围"), "顶部空会话范围不显示: {md}");
+        assert!(md.contains("**检索范围:**\n- 未指定（全库）"), "每轮空范围应标注: {md}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn export_json_marks_unset_scope_and_full_evidence() {
+        let dir = std::env::temp_dir().join(format!("ls_ai_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let scope = "案件/CH 常宏案/05 工商内档/上海万联发实业发展有限公司".to_string();
+        let session = ChatSession {
+            id: "s2".into(),
+            title: "外联发股权".into(),
+            created_at: 0,
+            updated_at: 0,
+            retrieval_scope: vec![scope.clone()],
+            messages: vec![
+                ChatMessage { role: "user".into(), content: "关于外联发的股权是怎么转让的".into() },
+                ChatMessage { role: "user".into(), content: "再找一下".into() },
+                ChatMessage { role: "assistant".into(), content: "2010年转让给圣金".into() },
+            ],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![PerTurnEvidence {
+                turn_index: 1,
+                file_ids: vec!["f1".into()],
+                items: vec![EvidenceItem {
+                    file_id: "f1".into(),
+                    path: "内档变更.pdf".into(),
+                    snippet: "外高桥转让给和兆".into(),
+                    bm25_score: Some(20.83),
+                    semantic_score: None,
+                    rrf_score: Some(0.86),
+                    rewritten: true,
+                    rewritten_query: Some("万联发股权转让".into()),
+                    from_history: false,
+                }],
+            }],
+            per_turn_scopes: vec![
+                PerTurnScope { turn_index: 0, scope: vec![] },
+                PerTurnScope { turn_index: 1, scope: vec![scope.clone()] },
+            ],
+            strict_docs: false,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s2").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        let t0 = &v["turns"][0];
+        assert_eq!(t0["scope"], serde_json::json!([]), "未指定范围轮次 scope 应为空数组");
+        assert_eq!(t0["answer"], serde_json::Value::Null, "无回答轮次 answer 应为 null");
+        assert_eq!(t0["evidence"].as_array().map(Vec::len), Some(0), "无依据轮次 evidence 应为空数组");
+
+        let t1 = &v["turns"][1];
+        assert_eq!(t1["scope"][0], serde_json::json!(scope));
+        assert_eq!(t1["answer"], serde_json::json!("2010年转让给圣金"));
+        let ev = &t1["evidence"][0];
+        assert_eq!(ev["bm25_score"], serde_json::json!(20.83));
+        assert_eq!(ev["rrf_score"], serde_json::json!(0.86));
+        assert_eq!(ev["rewritten_query"], serde_json::json!("万联发股权转让"));
+        assert_eq!(ev["from_history"], serde_json::json!(false));
+        assert_eq!(v["session"]["retrieval_scope"][0], serde_json::json!(scope));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

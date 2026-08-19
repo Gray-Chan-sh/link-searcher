@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
+import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
@@ -201,9 +201,20 @@ export default function AiChat() {
   const handleExport = useCallback(async () => {
     if (!activeId) return
     try {
-      const md = await exportChatSession(activeId)
-      const path = await save({ defaultPath: 'ai-chat.md', filters: [{ name: 'Markdown', extensions: ['md'] }] })
-      if (path) await writeTextFile(path, md)
+      // 用户通过保存对话框选择格式：.json → 分析友好 JSON，.md → 可读 Markdown
+      const path = await save({
+        defaultPath: 'ai-chat.json',
+        filters: [
+          { name: 'JSON', extensions: ['json'] },
+          { name: 'Markdown', extensions: ['md'] },
+        ],
+      })
+      if (!path) return
+      const isJson = path.toLowerCase().endsWith('.json')
+      const content = isJson
+        ? await exportChatSessionJson(activeId)
+        : await exportChatSession(activeId)
+      await writeTextFile(path, content)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
