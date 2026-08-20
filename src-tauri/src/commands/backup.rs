@@ -18,7 +18,7 @@ pub struct BackupInfo {
 }
 
 /// 快照中的单个文件：相对名（索引内用 `/` 分隔）+ 大小 + sha256。
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct SnapshotFile {
     pub name: String,
     pub size: u64,
@@ -30,6 +30,53 @@ pub struct SnapshotFile {
 pub struct SnapshotManifest {
     pub files: Vec<SnapshotFile>,
     pub size: u64,
+}
+
+/// 链中的一次快照记录（增量链的持久化状态，跟随 `.chain.json`）。
+#[derive(Serialize, Deserialize)]
+pub struct ChainSnapshot {
+    pub id: String,
+    pub ts: i64,
+    /// "baseline" 或 "incremental"
+    pub kind: String,
+    pub files: Vec<SnapshotFile>,
+}
+
+/// 增量备份链：`{data_dir}/backups/.chain.json`，记录全部快照 + 已存储的
+/// 不可变 segment 文件集合（segment_store，链内去重，硬链接共享一份物理副本）。
+#[derive(Serialize, Deserialize, Default)]
+pub struct ChainHead {
+    /// 首个全量快照 id；被裁剪后可为空串（下次全量快照恢复）
+    pub baseline_id: String,
+    pub snapshots: Vec<ChainSnapshot>,
+    pub segment_store: Vec<String>,
+}
+
+fn chain_path(backup_dir: &std::path::Path) -> std::path::PathBuf {
+    backup_dir.join(".chain.json")
+}
+
+/// 读取链文件；缺失或损坏 → 返回空链。
+fn load_chain(backup_dir: &std::path::Path) -> Result<ChainHead, String> {
+    match std::fs::read_to_string(chain_path(backup_dir)) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(chain) => Ok(chain),
+            Err(e) => {
+                log::warn!("链文件损坏，已重置为全新备份链: {e}");
+                Ok(ChainHead::default())
+            }
+        },
+        Err(_) => Ok(ChainHead::default()),
+    }
+}
+
+/// 原子写链文件：先写 `.chain.json.tmp` 再 rename 覆盖，避免写一半损坏。
+fn save_chain(backup_dir: &std::path::Path, chain: &ChainHead) -> Result<(), String> {
+    let path = chain_path(backup_dir);
+    let tmp = backup_dir.join(".chain.json.tmp");
+    let json = serde_json::to_string_pretty(chain).map_err(|e| format!("failed to serialize chain: {e}"))?;
+    std::fs::write(&tmp, json).map_err(|e| format!("failed to write chain tmp: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("failed to write chain file: {e}"))
 }
 
 /// 把 `.ls-index` / `data.db` / `config.json` / `chat_history.json` 写入 `dest`，
@@ -112,9 +159,115 @@ fn snapshot_core(state: &AppState, dest: &std::path::Path) -> Result<SnapshotMan
     Ok(SnapshotManifest { files, size: total_size })
 }
 
+/// 增量快照：直接读 live 索引目录，不可变 segment 硬链接到链中已存副本
+/// （无则复制并登记 segment_store）；meta.json/.managed.json 原子替换、每次复制；
+/// 再走与 snapshot_core 相同的在线备份 API 复制 data.db + config.json + chat_history.json。
+fn snapshot_incremental(
+    state: &AppState,
+    dest: &std::path::Path,
+    chain: &mut ChainHead,
+) -> Result<SnapshotManifest, String> {
+    let mut files: Vec<SnapshotFile> = Vec::new();
+    let mut total_size: u64 = 0;
+
+    // 遍历 LIVE 索引目录（不复制整棵树——硬链接必须指向 live 的不可变 segment）
+    for f in collect_files(&state.index_dir)? {
+        let rel = f
+            .strip_prefix(&state.index_dir)
+            .map_err(|e| format!("path strip error: {e}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+        if rel.ends_with("-wal")
+            || rel.ends_with("-shm")
+            || name == ".tantivy-writer.lock"
+            || name == ".tantivy-meta.lock"
+        {
+            continue;
+        }
+        let dest_path = dest.join(INDEX_DIR_NAME).join(&rel);
+        if let Some(parent) = dest_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {parent:?}: {e}"))?;
+        }
+        if name == "meta.json" || name == ".managed.json" {
+            // 原子 tmp+rename 写入的元数据：不能硬链接，每次复制新副本
+            std::fs::copy(&f, &dest_path).map_err(|e| format!("failed to copy {f:?}: {e}"))?;
+        } else if chain.segment_store.iter().any(|s| s == &rel) {
+            // 链中已有该 segment：硬链接（跨设备等失败时回退复制）
+            if std::fs::hard_link(&f, &dest_path).is_err() {
+                std::fs::copy(&f, &dest_path).map_err(|e| format!("failed to copy {f:?}: {e}"))?;
+            }
+        } else {
+            std::fs::copy(&f, &dest_path).map_err(|e| format!("failed to copy {f:?}: {e}"))?;
+            chain.segment_store.push(rel.clone());
+        }
+        let meta = std::fs::metadata(&dest_path).map_err(|e| format!("failed to stat {dest_path:?}: {e}"))?;
+        total_size += meta.len();
+        files.push(SnapshotFile {
+            name: rel,
+            size: meta.len(),
+            sha256: file_sha256(&dest_path)?,
+        });
+    }
+
+    // SQLite 在线备份 API（WAL 安全），Busy/Locked 重试 3 次——与 snapshot_core 相同
+    let db_dest = dest.join("data.db");
+    let src_conn = Connection::open(&state.db_path)
+        .map_err(|e| format!("failed to open source db: {e}"))?;
+    let mut dst_conn = Connection::open(&db_dest)
+        .map_err(|e| format!("failed to open backup db: {e}"))?;
+    let backup = Backup::new(&src_conn, &mut dst_conn)
+        .map_err(|e| format!("failed to init backup: {e}"))?;
+    let mut r = backup.step(-1).map_err(|e| format!("backup failed: {e}"))?;
+    let mut busy = 0;
+    while r == StepResult::Busy || r == StepResult::Locked {
+        busy += 1;
+        if busy >= 3 {
+            return Err("数据库繁忙，备份未完成，请重试".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        r = backup.step(-1).map_err(|e| format!("backup failed: {e}"))?;
+    }
+    if r != StepResult::Done {
+        return Err("数据库繁忙，备份未完成，请重试".to_string());
+    }
+    drop(backup);
+    drop(src_conn);
+    drop(dst_conn);
+    let db_meta = std::fs::metadata(&db_dest).map_err(|e| format!("failed to stat {db_dest:?}: {e}"))?;
+    total_size += db_meta.len();
+    files.push(SnapshotFile {
+        name: "data.db".to_string(),
+        size: db_meta.len(),
+        sha256: file_sha256(&db_dest)?,
+    });
+
+    // config.json 位于 config_dir（LS_CONFIG_DIR / ~/.config/.link-searcher），非 data_dir
+    copy_file_if_exists(
+        &config_file_path(),
+        &dest.join("config.json"),
+        "config.json",
+        &mut files,
+        &mut total_size,
+    )?;
+
+    // chat_history.json 位于 data_dir
+    copy_file_if_exists(
+        &state.data_dir.join("chat_history.json"),
+        &dest.join("chat_history.json"),
+        "chat_history.json",
+        &mut files,
+        &mut total_size,
+    )?;
+
+    Ok(SnapshotManifest { files, size: total_size })
+}
+
 #[tauri::command]
 pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
     let backup_dir = state.data_dir.join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("failed to create backup dir: {e}"))?;
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| format!("time error: {e}"))?
@@ -124,7 +277,28 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
 
     std::fs::create_dir_all(&dest).map_err(|e| format!("failed to create backup dir: {e}"))?;
 
-    let manifest = snapshot_core(&state, &dest)?;
+    let mut chain = load_chain(&backup_dir)?;
+    let is_baseline = chain.snapshots.is_empty();
+    let manifest = snapshot_incremental(&state, &dest, &mut chain)?;
+    if is_baseline {
+        chain.baseline_id = backup_name.clone();
+    }
+    chain.snapshots.push(ChainSnapshot {
+        id: backup_name.clone(),
+        ts: timestamp as i64,
+        kind: if is_baseline { "baseline" } else { "incremental" }.to_string(),
+        files: manifest.files.clone(),
+    });
+
+    // 只保留最近 10 个快照；被剪掉的是 baseline 也没关系（下次全量快照会重建 baseline）
+    while chain.snapshots.len() > 10 {
+        let dropped = chain.snapshots.remove(0);
+        if dropped.id == chain.baseline_id {
+            chain.baseline_id.clear();
+        }
+    }
+    save_chain(&backup_dir, &chain)?;
+
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("failed to serialize manifest: {e}"))?;
     std::fs::write(dest.join("snapshot.json"), manifest_json)
@@ -140,7 +314,8 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 pub async fn get_backup_status(state: State<'_, AppState>) -> Result<BackupInfo, String> {
     let backup_dir = state.data_dir.join("backups");
-    if !backup_dir.is_dir() {
+    let chain = load_chain(&backup_dir)?;
+    if chain.snapshots.is_empty() {
         return Ok(BackupInfo {
             last_backup: None,
             backup_size: 0,
@@ -148,29 +323,35 @@ pub async fn get_backup_status(state: State<'_, AppState>) -> Result<BackupInfo,
         });
     }
 
-    let mut entries: Vec<_> = std::fs::read_dir(&backup_dir)
-        .map_err(|e| format!("failed to read backup dir: {e}"))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .collect();
+    let last_backup = chain.snapshots.last().map(|s| s.ts);
+    let count = chain.snapshots.len() as u64;
 
-    entries.sort_by_key(|e| e.path());
-
-    let count = entries.len() as u64;
-    let last_backup = entries.last().and_then(|e| {
-        e.metadata().ok().and_then(|m| m.created().ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-    });
-
-    let backup_size = entries
+    // 物理占用：每个快照中“复制的新文件”（非 segment 的 db/config/chat/meta/.managed 等小文件）
+    // 各占一份；segment_store 里每个 segment 整链只占一份（其余快照硬链接共享）
+    let fresh_bytes: u64 = chain
+        .snapshots
         .iter()
-        .filter_map(|e| dir_size(&e.path()).ok())
+        .flat_map(|s| s.files.iter())
+        .filter(|f| !chain.segment_store.iter().any(|n| n == &f.name))
+        .map(|f| f.size)
+        .sum();
+    let segment_bytes: u64 = chain
+        .segment_store
+        .iter()
+        .map(|seg| {
+            chain
+                .snapshots
+                .iter()
+                .flat_map(|s| s.files.iter())
+                .find(|f| &f.name == seg)
+                .map(|f| f.size)
+                .unwrap_or(0)
+        })
         .sum();
 
     Ok(BackupInfo {
         last_backup,
-        backup_size,
+        backup_size: fresh_bytes + segment_bytes,
         backup_count: count,
     })
 }
@@ -538,6 +719,146 @@ mod tests {
         let check = Connection::open(dest.join("data.db")).unwrap();
         let x: i64 = check.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
         assert_eq!(x, 42);
+
+        // 清理
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+        unsafe { std::env::remove_var("LS_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn test_snapshot_incremental_hardlinks_segments() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        use crate::db;
+        use crate::indexer::IndexerService;
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        let base = std::env::temp_dir().join(format!("ls_incr_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // config.json 放进 LS_CONFIG_DIR 指向的目录（config.rs 的测试后门）
+        let config_dir = base.join("config_dir");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.json"), r#"{"theme":"dark"}"#).unwrap();
+        unsafe { std::env::set_var("LS_CONFIG_DIR", &config_dir) };
+
+        // 小 SQLite 库（WAL 模式）
+        let db_path = base.join("data.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(42);",
+            )
+            .unwrap();
+        }
+
+        // data_dir 放 chat_history.json；index_dir 模拟 Tantivy：2 个 segment + meta.json
+        let data_dir = base.join("data");
+        let index_dir = data_dir.join(INDEX_DIR_NAME);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("s1.idx"), "segment-one").unwrap();
+        std::fs::write(index_dir.join("s2.pos"), "segment-two").unwrap();
+        std::fs::write(index_dir.join("meta.json"), r#"{"version":1}"#).unwrap();
+        std::fs::write(data_dir.join("chat_history.json"), "[]").unwrap();
+
+        let db_str = db_path.to_str().unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        db::init_db(&conn).unwrap();
+        drop(conn);
+        let pool = db::get_pool(db_str).unwrap();
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            pool,
+            im,
+            indexer,
+            scanner,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            data_dir,
+            index_dir.clone(),
+            db_path,
+            dummy_tx,
+            None,
+        );
+
+        let mut chain = ChainHead::default();
+        let b1 = base.join("backup_1");
+        let b2 = base.join("backup_2");
+        std::fs::create_dir_all(&b1).unwrap();
+        std::fs::create_dir_all(&b2).unwrap();
+
+        // 第一次：2 segments 复制 + meta 复制 + data.db + config.json + chat_history.json
+        let m1 = snapshot_incremental(&state, &b1, &mut chain).unwrap();
+        assert_eq!(m1.files.len(), 6);
+
+        // 第二次前：新增 s3.idx、修改 meta.json
+        std::fs::write(index_dir.join("s3.idx"), "segment-three").unwrap();
+        std::fs::write(index_dir.join("meta.json"), r#"{"version":2}"#).unwrap();
+
+        let m2 = snapshot_incremental(&state, &b2, &mut chain).unwrap();
+
+        // backup_2 清单：s1/s2（硬链接）+ s3（复制）+ meta（新副本）+ 3 个小文件
+        assert_eq!(m2.files.len(), 7);
+        let names1: Vec<&str> = m1.files.iter().map(|f| f.name.as_str()).collect();
+        let names2: Vec<&str> = m2.files.iter().map(|f| f.name.as_str()).collect();
+        for n in [
+            "s1.idx",
+            "s2.pos",
+            "s3.idx",
+            "meta.json",
+            "data.db",
+            "config.json",
+            "chat_history.json",
+        ] {
+            assert!(names2.contains(&n), "backup_2 清单缺少 {n}");
+        }
+
+        // meta.json 每次都是全新副本：backup_1 是 v1、backup_2 是 v2
+        assert_eq!(
+            std::fs::read_to_string(b1.join(INDEX_DIR_NAME).join("meta.json")).unwrap(),
+            r#"{"version":1}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(b2.join(INDEX_DIR_NAME).join("meta.json")).unwrap(),
+            r#"{"version":2}"#
+        );
+
+        // s1/s2 与 live 索引是同一 inode（硬链接）→ nlink==2；s3 与 backup_1 的 s1 是独立副本 → nlink==1
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(std::fs::metadata(b2.join(INDEX_DIR_NAME).join("s1.idx")).unwrap().nlink(), 2);
+            assert_eq!(std::fs::metadata(b2.join(INDEX_DIR_NAME).join("s2.pos")).unwrap().nlink(), 2);
+            assert_eq!(std::fs::metadata(b2.join(INDEX_DIR_NAME).join("s3.idx")).unwrap().nlink(), 1);
+            assert_eq!(std::fs::metadata(b1.join(INDEX_DIR_NAME).join("s1.idx")).unwrap().nlink(), 1);
+        }
+        assert_eq!(
+            std::fs::read_to_string(b2.join(INDEX_DIR_NAME).join("s1.idx")).unwrap(),
+            "segment-one"
+        );
+
+        // segment_store 每个 segment 只登记一次
+        assert_eq!(chain.segment_store.len(), 3);
+        for n in ["s1.idx", "s2.pos", "s3.idx"] {
+            assert!(chain.segment_store.iter().any(|s| s == n), "segment_store 缺少 {n}");
+        }
+
+        // data.db / config.json / chat_history.json 两次备份都出现
+        for n in ["data.db", "config.json", "chat_history.json"] {
+            assert!(names1.contains(&n), "backup_1 清单缺少 {n}");
+            assert!(names2.contains(&n), "backup_2 清单缺少 {n}");
+        }
 
         // 清理
         drop(state);
