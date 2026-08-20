@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -44,6 +45,7 @@ fn main() {
             let src = std::path::PathBuf::from(prefix).join(bin);
             if src.exists() {
                 std::fs::copy(&src, &dst).ok();
+                #[cfg(unix)]
                 std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).ok();
                 break;
             }
@@ -60,6 +62,7 @@ fn main() {
             let src = std::path::PathBuf::from(prefix).join("ffmpeg");
             if src.exists() {
                 std::fs::copy(&src, &ff_dst).ok();
+                #[cfg(unix)]
                 std::fs::set_permissions(&ff_dst, std::fs::Permissions::from_mode(0o755)).ok();
                 break;
             }
