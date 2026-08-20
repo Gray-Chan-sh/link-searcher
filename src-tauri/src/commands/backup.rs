@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::config::{config_file_path, INDEX_DIR_NAME};
+use crate::config::{config_file_path, load_config, AppConfig, INDEX_DIR_NAME};
 use crate::search::IndexManager;
 use crate::state::AppState;
 
@@ -48,6 +48,12 @@ pub struct BackupSnapshot {
     pub ts: i64,
     pub kind: String,
     pub size: u64,
+}
+
+#[derive(Serialize)]
+pub struct BackupExportResult {
+    pub has_secrets: bool,
+    pub dest_path: String,
 }
 
 /// 增量备份链：`{data_dir}/backups/.chain.json`，记录全部快照 + 已存储的
@@ -479,6 +485,76 @@ pub async fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupSnapsh
         })
         .collect();
     Ok(snapshots)
+}
+
+#[tauri::command]
+pub async fn export_backup(
+    state: State<'_, AppState>,
+    dest_path: String,
+    password: Option<String>,
+) -> Result<BackupExportResult, String> {
+    if dest_path.trim().is_empty() {
+        return Err("导出路径不能为空".to_string());
+    }
+    let tmp = std::env::temp_dir().join(format!("ls_export_{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let _snapshot = snapshot_core(&state, &tmp)?;
+
+    let chain_path = state.data_dir.join("backups").join(".chain.json");
+    if chain_path.is_file() {
+        std::fs::copy(&chain_path, tmp.join(".chain.json"))
+            .map_err(|e| format!("failed to copy chain: {e}"))?;
+    }
+
+    let config = load_config();
+    let has_secrets = has_config_secrets(&config);
+
+    let file = std::fs::File::create(&dest_path)
+        .map_err(|e| format!("failed to create zip: {e}"))?;
+    let mut zip_writer = zip::ZipWriter::new(file);
+
+    for entry in collect_files(&tmp)? {
+        let rel = entry
+            .strip_prefix(&tmp)
+            .map_err(|e| format!("path strip error: {e}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let data = std::fs::read(&entry)
+            .map_err(|e| format!("failed to read {entry:?}: {e}"))?;
+        let mut options = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        if let Some(ref pw) = password {
+            if !pw.is_empty() {
+                options = options.with_aes_encryption(zip::AesMode::Aes256, pw);
+            }
+        }
+        zip_writer.start_file(&rel, options)
+            .map_err(|e| format!("zip start_file failed: {e}"))?;
+        use std::io::Write;
+        zip_writer.write_all(&data)
+            .map_err(|e| format!("zip write failed: {e}"))?;
+    }
+
+    zip_writer.finish().map_err(|e| format!("zip finish failed: {e}"))?;
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    log::info!("backup exported to {dest_path}, has_secrets={has_secrets}");
+    Ok(BackupExportResult { has_secrets, dest_path: dest_path.clone() })
+}
+
+fn has_config_secrets(config: &AppConfig) -> bool {
+    if !config.ai_api_key.is_empty()
+        || !config.embedding_api_key.is_empty()
+        || !config.llm_api_key.is_empty()
+    {
+        return true;
+    }
+    for p in &config.providers {
+        if !p.api_key.is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 #[tauri::command]
