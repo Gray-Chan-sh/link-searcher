@@ -12,6 +12,7 @@
 - **修复 app_settings seed 死键**：seed 写 `auto_backup_enabled`/`auto_backup_interval_days` 但 UI/白名单读 `auto_backup`/`backup_interval`，导致"自动备份"开关默认失效、设置永不生效。修改 seed 为新键名 + 新增 `migrate_legacy_backup_settings` 幂等迁移（旧值复制到新键、删除死键），带迁移测试（`src-tauri/src/db/mod.rs`）
 - **新增公共快照引擎** `snapshot_core`：快照 `.ls-index` + `data.db`（SQLite 在线备份 API，WAL 安全）+ `config.json`（config_dir）+ `chat_history.json`（data_dir），返回含 sha256 的 `SnapshotManifest`；`trigger_backup` 改走引擎并写 `snapshot.json`；新增集成级单测（`src-tauri/src/commands/backup.rs`）
 - **新增前端 IPC 封装** `src/api/backup.ts`：9 个命令的类型化包装（触发/状态/列表/导出/恢复/目录重映射）（`src/api/backup.ts`）
+- **段级增量备份链**：`trigger_backup` 从"整目录全量复制"改为增量——Tantivy 不可变 segment 首次复制后，后续快照经 `.chain.json`（atomic tmp+rename）记录的 `segment_store` 直接硬链接复用（跨设备失败回退复制）；`meta.json`/`.managed.json` 等原子替换小文件与 `data.db`/`config.json`/`chat_history.json` 每次全量（体积大头在 segment，DB 为 MB 级不值得页级增量）。`get_backup_status` 改从链计算物理占用（每快照小文件一份 + 每个 segment 全局一份）。链文件损坏自动重置为空链而非阻断备份（`src-tauri/src/commands/backup.rs`）
 
 ---
 
