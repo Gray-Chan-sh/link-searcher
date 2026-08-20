@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-20（修复：Windows/Linux 构建失败——OCR 平台 stub 缺失 + opener 错误类型）
+
+**动机**：v0.1.4 构建中 Windows/Linux 平台编译不过。
+
+- **E0425 `recognize_from_path_with_regions` 未找到（Windows/Linux）**：`apple_vision.rs` 有非 macOS 的 `recognize_from_path` stub 但漏了 `recognize_from_path_with_regions`，`ocr_image_with_regions` 的 AppleVision 分支在非 macOS 编译失败。修复：补上非 macOS stub（与 `windows_ocr.rs` 模式一致）
+- **E0308 `opener::open` 错误类型不匹配（Linux）**：`reveal_in_file_manager` 声明返回 `io::Result` 但 `opener::open` 返回 `Result<(), OpenError>`。修复：`map_err` 转为 `io::Error::other`
+
+---
+
 ## 2026-08-20（修复：Windows Release 构建失败——build.rs 使用 Unix 专属 API）
 
 **动机**：v0.1.3 构建中 Windows 平台失败——`build.rs` 编译不过。
