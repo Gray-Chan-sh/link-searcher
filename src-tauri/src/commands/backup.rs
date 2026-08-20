@@ -2,10 +2,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, State};
 
-use crate::config::INDEX_DIR_NAME;
+use crate::config::{config_file_path, INDEX_DIR_NAME};
 use crate::search::IndexManager;
 use crate::state::AppState;
 
@@ -16,21 +17,47 @@ pub struct BackupInfo {
     pub backup_count: u64,
 }
 
-#[tauri::command]
-pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
-    let backup_dir = state.data_dir.join("backups");
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| format!("time error: {e}"))?
-        .as_secs();
-    let backup_name = format!("backup_{timestamp}");
-    let dest = backup_dir.join(&backup_name);
+/// 快照中的单个文件：相对名（索引内用 `/` 分隔）+ 大小 + sha256。
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotFile {
+    pub name: String,
+    pub size: u64,
+    pub sha256: String,
+}
 
-    std::fs::create_dir_all(&dest).map_err(|e| format!("failed to create backup dir: {e}"))?;
+/// 一次快照的清单，写入 `snapshot.json`；后续增量链 / 导出 zip / 恢复均以此为准。
+#[derive(Serialize, Deserialize)]
+pub struct SnapshotManifest {
+    pub files: Vec<SnapshotFile>,
+    pub size: u64,
+}
+
+/// 把 `.ls-index` / `data.db` / `config.json` / `chat_history.json` 写入 `dest`，
+/// 返回清单。data.db 用 SQLite 在线备份 API（WAL 安全），Busy/Locked 重试 3 次。
+fn snapshot_core(state: &AppState, dest: &std::path::Path) -> Result<SnapshotManifest, String> {
+    let mut files: Vec<SnapshotFile> = Vec::new();
+    let mut total_size: u64 = 0;
 
     // Backup Tantivy index
     let index_dest = dest.join(INDEX_DIR_NAME);
     copy_dir(&state.index_dir, &index_dest)?;
+    for f in collect_files(&index_dest)? {
+        let name = f
+            .strip_prefix(&index_dest)
+            .map_err(|e| format!("path strip error: {e}"))?
+            .to_string_lossy()
+            .replace('\\', "/");
+        if name.ends_with("-wal") || name.ends_with("-shm") {
+            continue;
+        }
+        let meta = std::fs::metadata(&f).map_err(|e| format!("failed to stat {f:?}: {e}"))?;
+        total_size += meta.len();
+        files.push(SnapshotFile {
+            name,
+            size: meta.len(),
+            sha256: file_sha256(&f)?,
+        });
+    }
 
     // Backup SQLite database（在线备份 API，保证 WAL 一致性，不直接 fs::copy 活跃 DB）
     let db_dest = dest.join("data.db");
@@ -53,6 +80,55 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
     if r != StepResult::Done {
         return Err("数据库繁忙，备份未完成，请重试".to_string());
     }
+    drop(backup);
+    drop(src_conn);
+    drop(dst_conn);
+    let db_meta = std::fs::metadata(&db_dest).map_err(|e| format!("failed to stat {db_dest:?}: {e}"))?;
+    total_size += db_meta.len();
+    files.push(SnapshotFile {
+        name: "data.db".to_string(),
+        size: db_meta.len(),
+        sha256: file_sha256(&db_dest)?,
+    });
+
+    // config.json 位于 config_dir（LS_CONFIG_DIR / ~/.config/.link-searcher），非 data_dir
+    copy_file_if_exists(
+        &config_file_path(),
+        &dest.join("config.json"),
+        "config.json",
+        &mut files,
+        &mut total_size,
+    )?;
+
+    // chat_history.json 位于 data_dir
+    copy_file_if_exists(
+        &state.data_dir.join("chat_history.json"),
+        &dest.join("chat_history.json"),
+        "chat_history.json",
+        &mut files,
+        &mut total_size,
+    )?;
+
+    Ok(SnapshotManifest { files, size: total_size })
+}
+
+#[tauri::command]
+pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
+    let backup_dir = state.data_dir.join("backups");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("time error: {e}"))?
+        .as_secs();
+    let backup_name = format!("backup_{timestamp}");
+    let dest = backup_dir.join(&backup_name);
+
+    std::fs::create_dir_all(&dest).map_err(|e| format!("failed to create backup dir: {e}"))?;
+
+    let manifest = snapshot_core(&state, &dest)?;
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("failed to serialize manifest: {e}"))?;
+    std::fs::write(dest.join("snapshot.json"), manifest_json)
+        .map_err(|e| format!("failed to write snapshot.json: {e}"))?;
 
     // Cleanup old backups: keep only the 10 most recent
     cleanup_old_backups(&backup_dir, 10);
@@ -239,6 +315,61 @@ fn copy_dir_depth(src: &std::path::Path, dst: &std::path::Path, depth: u32) -> R
     Ok(())
 }
 
+/// 递归收集目录下所有文件（不包含目录本身）。
+fn collect_files(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut out = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for entry in std::fs::read_dir(&d).map_err(|e| format!("failed to read {d:?}: {e}"))? {
+            let entry = entry.map_err(|e| format!("read entry error: {e}"))?;
+            let path = entry.path();
+            if entry.file_type().map_err(|e| format!("file type error: {e}"))?.is_dir() {
+                dirs.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn file_sha256(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut hasher = Sha256::new();
+    let mut f = std::fs::File::open(path).map_err(|e| format!("failed to open {path:?}: {e}"))?;
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("failed to read {path:?}: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 源存在则复制并计入清单，否则跳过。
+fn copy_file_if_exists(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    name: &str,
+    files: &mut Vec<SnapshotFile>,
+    total_size: &mut u64,
+) -> Result<(), String> {
+    if !src.is_file() {
+        return Ok(());
+    }
+    std::fs::copy(src, dst).map_err(|e| format!("failed to copy {src:?}: {e}"))?;
+    let meta = std::fs::metadata(dst).map_err(|e| format!("failed to stat {dst:?}: {e}"))?;
+    *total_size += meta.len();
+    files.push(SnapshotFile {
+        name: name.to_string(),
+        size: meta.len(),
+        sha256: file_sha256(dst)?,
+    });
+    Ok(())
+}
+
 fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
     let mut total = 0u64;
     let mut dirs = vec![path.to_path_buf()];
@@ -308,5 +439,109 @@ mod tests {
         assert_eq!(x, 42);
         let _ = std::fs::remove_file(&src_path);
         let _ = std::fs::remove_file(&dst_path);
+    }
+
+    #[test]
+    fn test_snapshot_core_copies_all_artifacts() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        use crate::db;
+        use crate::indexer::IndexerService;
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        let base = std::env::temp_dir().join(format!("ls_snap_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // config.json 放进 LS_CONFIG_DIR 指向的目录（config.rs 的测试后门）
+        let config_dir = base.join("config_dir");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.json"), r#"{"theme":"dark"}"#).unwrap();
+        unsafe { std::env::set_var("LS_CONFIG_DIR", &config_dir) };
+
+        // 小 SQLite 库（WAL 模式）
+        let db_path = base.join("data.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(42);",
+            )
+            .unwrap();
+        }
+
+        // data_dir 放 chat_history.json；index_dir 放一个文本文件
+        let data_dir = base.join("data");
+        let index_dir = data_dir.join(INDEX_DIR_NAME);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(data_dir.join("chat_history.json"), "[]").unwrap();
+
+        // AppState（snapshot_core 只用 db_path/data_dir/index_dir，其余字段占位）
+        let db_str = db_path.to_str().unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        db::init_db(&conn).unwrap();
+        drop(conn);
+        let pool = db::get_pool(db_str).unwrap();
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            pool,
+            im,
+            indexer,
+            scanner,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            data_dir,
+            index_dir,
+            db_path,
+            dummy_tx,
+            None,
+        );
+
+        let dest = base.join("backup_1");
+        std::fs::create_dir_all(&dest).unwrap();
+        let manifest = snapshot_core(&state, &dest).unwrap();
+
+        // 4 类产物全部存在
+        assert!(dest.join(".ls-index/a.txt").is_file());
+        assert!(dest.join("data.db").is_file());
+        assert!(dest.join("config.json").is_file());
+        assert!(dest.join("chat_history.json").is_file());
+
+        // 清单：1 索引文件 + data.db + config.json + chat_history.json
+        assert_eq!(manifest.files.len(), 4);
+        let names: Vec<&str> = manifest.files.iter().map(|f| f.name.as_str()).collect();
+        for n in ["a.txt", "data.db", "config.json", "chat_history.json"] {
+            assert!(names.contains(&n), "manifest 缺少 {n}");
+        }
+        let total: u64 = manifest.files.iter().map(|f| f.size).sum();
+        assert_eq!(manifest.size, total);
+
+        // sha256 正确性（"hello" 的 sha256 与 size=5）
+        let expected_hello: String = Sha256::digest(b"hello")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let a = manifest.files.iter().find(|f| f.name == "a.txt").unwrap();
+        assert_eq!(a.sha256, expected_hello);
+        assert_eq!(a.size, 5);
+
+        // 备份的 data.db 可读：查询到插入的行
+        let check = Connection::open(dest.join("data.db")).unwrap();
+        let x: i64 = check.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(x, 42);
+
+        // 清理
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+        unsafe { std::env::remove_var("LS_CONFIG_DIR") };
     }
 }
