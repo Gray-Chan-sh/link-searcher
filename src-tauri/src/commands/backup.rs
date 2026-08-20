@@ -42,6 +42,14 @@ pub struct ChainSnapshot {
     pub files: Vec<SnapshotFile>,
 }
 
+#[derive(Serialize)]
+pub struct BackupSnapshot {
+    pub id: String,
+    pub ts: i64,
+    pub kind: String,
+    pub size: u64,
+}
+
 /// 增量备份链：`{data_dir}/backups/.chain.json`，记录全部快照 + 已存储的
 /// 不可变 segment 文件集合（segment_store，链内去重，硬链接共享一份物理副本）。
 #[derive(Serialize, Deserialize, Default)]
@@ -451,6 +459,26 @@ pub async fn get_backup_status(state: State<'_, AppState>) -> Result<BackupInfo,
         backup_size: fresh_bytes + segment_bytes,
         backup_count: count,
     })
+}
+
+#[tauri::command]
+pub async fn list_backups(state: State<'_, AppState>) -> Result<Vec<BackupSnapshot>, String> {
+    let backup_dir = state.data_dir.join("backups");
+    let chain = load_chain(&backup_dir)?;
+    let snapshots = chain
+        .snapshots
+        .iter()
+        .map(|s| {
+            let size: u64 = s.files.iter().map(|f| f.size).sum();
+            BackupSnapshot {
+                id: s.id.clone(),
+                ts: s.ts,
+                kind: s.kind.clone(),
+                size,
+            }
+        })
+        .collect();
+    Ok(snapshots)
 }
 
 #[tauri::command]

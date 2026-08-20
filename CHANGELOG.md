@@ -14,6 +14,7 @@
 - **新增前端 IPC 封装** `src/api/backup.ts`：9 个命令的类型化包装（触发/状态/列表/导出/恢复/目录重映射）（`src/api/backup.ts`）
 - **段级增量备份链**：`trigger_backup` 从"整目录全量复制"改为增量——Tantivy 不可变 segment 首次复制后，后续快照经 `.chain.json`（atomic tmp+rename）记录的 `segment_store` 直接硬链接复用（跨设备失败回退复制）；`meta.json`/`.managed.json` 等原子替换小文件与 `data.db`/`config.json`/`chat_history.json` 每次全量（体积大头在 segment，DB 为 MB 级不值得页级增量）。`get_backup_status` 改从链计算物理占用（每快照小文件一份 + 每个 segment 全局一份）。链文件损坏自动重置为空链而非阻断备份（`src-tauri/src/commands/backup.rs`）
 - **备份链合并压缩**：新增 `merge_chain(N=10)`，当快照数达到阈值时合并最旧 N-1 个为 consolidated "merged" 快照（segment 硬链接复用，非 segment 文件取最新版），旧目录删除并更新 baseline。新增 `prune_orphan_dirs` 清理未引用目录。`trigger_backup` 用 `merge_chain` + `prune_orphan_dirs` 替换原来简单 LRU 裁剪 + `cleanup_old_backups`。带合并集成测试（`src-tauri/src/commands/backup.rs`）
+- **新增 list_backups IPC 命令**：读取 `.chain.json` 返回 `BackupSnapshot[]`（id/ts/kind/size），注册到 `lib.rs` invoke_handler（`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
 
 ---
 
