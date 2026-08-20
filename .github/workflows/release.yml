@@ -51,6 +51,8 @@ jobs:
             libxdo-dev \
             libappindicator3-dev \
             librsvg2-dev \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev \
             patchelf
 
       - name: Install npm deps (incl. Tauri CLI)

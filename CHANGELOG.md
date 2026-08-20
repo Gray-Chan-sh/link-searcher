@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-20（修复：Linux Release 构建缺少 pipewire 系统库）
+
+**动机**：v0.1.2 构建中 Linux 平台失败——`libspa-sys` build script 找不到 `libpipewire-0.3`。
+
+- **根因**：`tauri-plugin-mcp`（debug-only 插件，但依赖无条件声明）→ `xcap` → `pipewire` → `libspa-sys`，Release 构建同样编译该链，而 CI 未安装系统库
+- **修复**：`.github/workflows/release.yml` Linux 依赖步骤补装 `libpipewire-0.3-dev` + `libspa-0.2-dev`
+- **备注**：插件在 release 中不初始化，仅依赖被编译；后续可作为非默认 feature 门控以彻底移除编译开销
+
+---
+
 ## 2026-08-20（修复：GitHub Actions 四平台 Release 构建失败）
 
 **动机**：打 tag 触发 Release workflow，aarch64/x86_64 macOS、Windows、Linux 全部构建失败。
