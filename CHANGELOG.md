@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-20（修复：GitHub Actions 四平台 Release 构建失败）
+
+**动机**：打 tag 触发 Release workflow，aarch64/x86_64 macOS、Windows、Linux 全部构建失败。
+
+- **E0583 `logs` 模块缺失（全平台）**：`.gitignore` 裸 `logs` 规则匹配任意层级的 `logs` 目录，把 `src-tauri/src/logs/`（mod.rs + session.rs）整个忽略、从未提交；CI 检出后 `pub mod logs;` 找不到文件。修复：删除该 ignore 条目（运行时日志写入 OS 数据目录，不进仓库），并强制提交 `logs` 模块
+- **objc2 编译失败（Windows/Linux）**：`objc2`/`objc2-foundation`/`objc2-vision` 是无条件依赖但仅 macOS 可用（Apple Vision OCR）。修复：移入 `[target.'cfg(target_os = "macos")'.dependencies]`
+- **ort-sys 无 x86_64 macOS 预编译产物**：`ort = "2.0.0-rc.13"` 是全库无引用的死依赖（PaddleOCR 走 tract、embedding 走 HTTP 网关、音频走 sherpa-onnx）。修复：从 `Cargo.toml` 删除
+
+---
+
 ## 2026-08-18（文档：AI 聊天检索范围章节重写）
 
 **动机**：第八章「控制检索范围」仍描述旧交互（专注模式/范围按钮），与统一后的 `retrieval_scope` 设计不符。
