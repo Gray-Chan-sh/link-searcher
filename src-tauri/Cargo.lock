@@ -3735,6 +3735,7 @@ dependencies = [
  "rwml",
  "serde",
  "serde_json",
+ "sha2",
  "sherpa-onnx",
  "symphonia",
  "tantivy",

@@ -36,9 +36,10 @@ tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 md-5 = "0.10"
+sha2 = "0.10"
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"
-zip = "2"
+zip = { version = "2", features = ["aes-crypto"] }
 image = "0.25"
 imageproc = "0.25"
 pure-onnx-ocr = "0.1"
