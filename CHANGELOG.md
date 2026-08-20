@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-20（备份功能 Phase 0：依赖、seed 死键修复、公共快照引擎、前端封装）
+
+**动机**：跨平台备份/恢复功能开工（设计见 `.omo/plans/backup-cross-platform.md`）。Phase 0 打地基：依赖就绪、修历史遗留 seed 死键、抽公共快照引擎供后续增量链/导出/恢复复用。
+
+- **新增 Cargo 依赖**：`zip` 补 `aes-crypto` feature（导出加密用）、新增 `sha2`（清单校验和）（`src-tauri/Cargo.toml`）
+- **修复 app_settings seed 死键**：seed 写 `auto_backup_enabled`/`auto_backup_interval_days` 但 UI/白名单读 `auto_backup`/`backup_interval`，导致"自动备份"开关默认失效、设置永不生效。修改 seed 为新键名 + 新增 `migrate_legacy_backup_settings` 幂等迁移（旧值复制到新键、删除死键），带迁移测试（`src-tauri/src/db/mod.rs`）
+- **新增公共快照引擎** `snapshot_core`：快照 `.ls-index` + `data.db`（SQLite 在线备份 API，WAL 安全）+ `config.json`（config_dir）+ `chat_history.json`（data_dir），返回含 sha256 的 `SnapshotManifest`；`trigger_backup` 改走引擎并写 `snapshot.json`；新增集成级单测（`src-tauri/src/commands/backup.rs`）
+- **新增前端 IPC 封装** `src/api/backup.ts`：9 个命令的类型化包装（触发/状态/列表/导出/恢复/目录重映射）（`src/api/backup.ts`）
+
+---
+
 ## 2026-08-20（修复：Windows/Linux 构建失败——OCR 平台 stub 缺失 + opener 错误类型）
 
 **动机**：v0.1.4 构建中 Windows/Linux 平台编译不过。
