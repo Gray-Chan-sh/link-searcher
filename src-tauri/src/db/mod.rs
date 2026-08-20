@@ -70,6 +70,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
     seed_default_settings(&tx)?;
 
+    // Settings key rename: `auto_backup_enabled`/`auto_backup_interval_days`
+    // were seeded but never read (UI + whitelist use `auto_backup`/`backup_interval`).
+    migrate_legacy_backup_settings(&tx)?;
+
     tx.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
         [SCHEMA_VERSION],
@@ -269,14 +273,37 @@ pub fn vacuum(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Rename the dead `auto_backup_enabled`/`auto_backup_interval_days` setting
+/// keys to the names the UI and settings whitelist read. Copies the legacy
+/// value only when the new key is absent, then drops the dead key.
+/// Idempotent — safe on every startup.
+fn migrate_legacy_backup_settings(tx: &Connection) -> Result<()> {
+    for (legacy, current) in [
+        ("auto_backup_enabled", "auto_backup"),
+        ("auto_backup_interval_days", "backup_interval"),
+    ] {
+        tx.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value)
+             SELECT ?1, value FROM app_settings
+             WHERE key = ?2
+               AND NOT EXISTS (SELECT 1 FROM app_settings WHERE key = ?1)",
+            rusqlite::params![current, legacy],
+        )
+        .context(format!("failed to migrate setting '{legacy}' to '{current}'"))?;
+        tx.execute("DELETE FROM app_settings WHERE key = ?1", [legacy])
+            .context(format!("failed to drop legacy setting '{legacy}'"))?;
+    }
+    Ok(())
+}
+
 fn seed_default_settings(conn: &Connection) -> Result<()> {
     let defaults = [
         ("ocr_engine", "AppleVision"),
         ("ocr_lang", "chi_sim"),
         ("scheduled_scan_time", "02:00"),
         ("max_results", "1000"),
-        ("auto_backup_enabled", "1"),
-        ("auto_backup_interval_days", "7"),
+        ("auto_backup", "1"),
+        ("backup_interval", "7"),
         ("theme", "system"),
     ];
     for (key, value) in defaults {
@@ -341,6 +368,43 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(!names.contains(&"private".to_string()), "private still present: {names:?}");
+    }
+
+    #[test]
+    fn test_legacy_backup_settings_migrated() {
+        // Simulate a database seeded before the auto_backup key rename.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO app_settings (key, value)
+             VALUES ('auto_backup_enabled', '1'), ('auto_backup_interval_days', '7');",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+
+        let get = |conn: &Connection, key: &str| -> String {
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(get(&conn, "auto_backup"), "1");
+        assert_eq!(get(&conn, "backup_interval"), "7");
+        let legacy_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM app_settings WHERE key IN ('auto_backup_enabled','auto_backup_interval_days')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(legacy_count, 0, "legacy keys should be removed");
+
+        // Idempotent on re-run.
+        run_migrations(&conn).unwrap();
+        assert_eq!(get(&conn, "auto_backup"), "1");
+        assert_eq!(get(&conn, "backup_interval"), "7");
     }
 
     #[test]
