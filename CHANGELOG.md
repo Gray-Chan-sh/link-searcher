@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-20（修复：Windows Release 构建失败——build.rs 使用 Unix 专属 API）
+
+**动机**：v0.1.3 构建中 Windows 平台失败——`build.rs` 编译不过。
+
+- **根因**：`build.rs` 无条件 `use std::os::unix::fs::PermissionsExt`，并在复制 poppler/ffmpeg 后调用 `Permissions::from_mode(0o755)`（Unix 专属）；Windows 上该 API 不存在（复制循环因 macOS 路径不存在本来就不会执行）
+- **修复**：`src-tauri/build.rs` 给 import 和两处 `set_permissions` 加 `#[cfg(unix)]`
+
+---
+
 ## 2026-08-20（修复：Linux Release 构建缺少 pipewire 系统库）
 
 **动机**：v0.1.2 构建中 Linux 平台失败——`libspa-sys` build script 找不到 `libpipewire-0.3`。
