@@ -52,9 +52,6 @@ log = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSDictionary"] }
-objc2-vision = { version = "0.3", features = ["VNRecognizeTextRequest", "VNRequestHandler", "VNTypes", "VNDefines"] }
 anydoc = "0.1.6"
 tar = "0.4.46"
 flate2 = "1.1.9"
@@ -62,7 +59,6 @@ bzip2 = "0.6.1"
 xz2 = "0.1.7"
 symphonia = { version = "0.6.0", features = ["all"] }
 hound = "3.5.1"
-ort = "2.0.0-rc.13"
 kaldi-native-fbank = "0.1.0"
 ndarray = "0.17.2"
 pdf-inspector = "0.1.7"
@@ -73,6 +69,11 @@ rwml = { version = "0.1", default-features = false }
 
 # MCP (Model Context Protocol) — debug-only AI agent integration
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSDictionary"] }
+objc2-vision = { version = "0.3", features = ["VNRecognizeTextRequest", "VNRequestHandler", "VNTypes", "VNDefines"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.61", features = [
