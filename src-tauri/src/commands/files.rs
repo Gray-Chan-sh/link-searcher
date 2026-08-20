@@ -427,7 +427,7 @@ fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or(path);
-    opener::open(parent)
+    opener::open(parent).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
 #[derive(Serialize)]

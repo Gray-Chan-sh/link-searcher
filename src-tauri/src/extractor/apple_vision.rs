@@ -110,3 +110,12 @@ fn recognize_from_path_inner(path: &Path, lang: &str) -> Result<(String, usize),
 pub fn recognize_from_path(_path: &Path, _lang: &str) -> Result<String, String> {
     Err("Apple Vision OCR is only available on macOS 10.15+".to_string())
 }
+
+/// Stub for non-macOS platforms — returns a descriptive error.
+#[cfg(not(target_os = "macos"))]
+pub fn recognize_from_path_with_regions(
+    _path: &Path,
+    _lang: &str,
+) -> Result<(String, usize), String> {
+    Err("Apple Vision OCR is only available on macOS 10.15+".to_string())
+}
