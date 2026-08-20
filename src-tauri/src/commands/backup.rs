@@ -79,6 +79,7 @@ fn save_chain(backup_dir: &std::path::Path, chain: &ChainHead) -> Result<(), Str
     std::fs::rename(&tmp, &path).map_err(|e| format!("failed to write chain file: {e}"))
 }
 
+#[allow(dead_code)]
 /// 把 `.ls-index` / `data.db` / `config.json` / `chat_history.json` 写入 `dest`，
 /// 返回清单。data.db 用 SQLite 在线备份 API（WAL 安全），Busy/Locked 重试 3 次。
 fn snapshot_core(state: &AppState, dest: &std::path::Path) -> Result<SnapshotManifest, String> {
@@ -264,6 +265,110 @@ fn snapshot_incremental(
     Ok(SnapshotManifest { files, size: total_size })
 }
 
+const MERGE_THRESHOLD: usize = 10;
+
+fn merge_chain(backup_dir: &std::path::Path, chain: &mut ChainHead) -> Result<(), String> {
+    if chain.snapshots.len() < MERGE_THRESHOLD {
+        return Ok(());
+    }
+    let to_merge = chain.snapshots.len() - 1;
+
+    let merged_id = format!(
+        "merged_{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("time error: {e}"))?
+            .as_secs()
+    );
+    let merged_dir = backup_dir.join(&merged_id);
+    std::fs::create_dir_all(&merged_dir).map_err(|e| format!("failed to create merged dir: {e}"))?;
+
+    let mut latest_non_segs: std::collections::HashMap<String, SnapshotFile> = std::collections::HashMap::new();
+    let mut seen_segs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut merged_files: Vec<SnapshotFile> = Vec::new();
+    let mut merged_size: u64 = 0;
+
+    for snap in &chain.snapshots[..to_merge] {
+        let snap_dir = backup_dir.join(&snap.id);
+        for file in &snap.files {
+            let is_seg = chain.segment_store.iter().any(|s| s == &file.name);
+            if is_seg && !seen_segs.contains(&file.name) {
+                let src = snap_dir.join(INDEX_DIR_NAME).join(&file.name);
+                let dst = merged_dir.join(INDEX_DIR_NAME).join(&file.name);
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| format!("failed to create {parent:?}: {e}"))?;
+                }
+                if std::fs::hard_link(&src, &dst).is_err() {
+                    std::fs::copy(&src, &dst).map_err(|e| format!("failed to copy {src:?}: {e}"))?;
+                }
+                seen_segs.insert(file.name.clone());
+                merged_files.push(file.clone());
+                merged_size += file.size;
+            } else if !is_seg {
+                latest_non_segs.insert(file.name.clone(), file.clone());
+            }
+        }
+    }
+
+    for (name, file) in &latest_non_segs {
+        for snap in chain.snapshots[..to_merge].iter().rev() {
+            if snap.files.iter().any(|f| &f.name == name) {
+                let snap_dir = backup_dir.join(&snap.id);
+                let src = snap_dir.join(name);
+                if src.is_file() {
+                    let dst = merged_dir.join(name);
+                    std::fs::copy(&src, &dst).map_err(|e| format!("failed to copy {src:?}: {e}"))?;
+                    merged_files.push(file.clone());
+                    merged_size += file.size;
+                }
+                break;
+            }
+        }
+    }
+
+    let manifest = SnapshotManifest { files: merged_files.clone(), size: merged_size };
+    let manifest_json = serde_json::to_string_pretty(&manifest)
+        .map_err(|e| format!("failed to serialize manifest: {e}"))?;
+    std::fs::write(merged_dir.join("snapshot.json"), manifest_json)
+        .map_err(|e| format!("failed to write snapshot.json: {e}"))?;
+
+    let removed_ids: Vec<String> = chain.snapshots.drain(..to_merge).map(|s| s.id).collect();
+    for id in &removed_ids {
+        let dir = backup_dir.join(id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    chain.snapshots.insert(0, ChainSnapshot {
+        id: merged_id.clone(),
+        ts: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| format!("time error: {e}"))?
+            .as_secs() as i64,
+        kind: "merged".to_string(),
+        files: merged_files,
+    });
+    chain.baseline_id = merged_id;
+
+    Ok(())
+}
+
+fn prune_orphan_dirs(backup_dir: &std::path::Path, chain: &ChainHead) {
+    let valid_ids: std::collections::HashSet<&str> =
+        chain.snapshots.iter().map(|s| s.id.as_str()).collect();
+    if let Ok(entries) = std::fs::read_dir(backup_dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if (name.starts_with("backup_") || name.starts_with("merged_"))
+                    && !valid_ids.contains(name.as_str())
+                {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
     let backup_dir = state.data_dir.join("backups");
@@ -290,22 +395,14 @@ pub async fn trigger_backup(state: State<'_, AppState>) -> Result<(), String> {
         files: manifest.files.clone(),
     });
 
-    // 只保留最近 10 个快照；被剪掉的是 baseline 也没关系（下次全量快照会重建 baseline）
-    while chain.snapshots.len() > 10 {
-        let dropped = chain.snapshots.remove(0);
-        if dropped.id == chain.baseline_id {
-            chain.baseline_id.clear();
-        }
-    }
+    merge_chain(&backup_dir, &mut chain)?;
     save_chain(&backup_dir, &chain)?;
+    prune_orphan_dirs(&backup_dir, &chain);
 
     let manifest_json = serde_json::to_string_pretty(&manifest)
         .map_err(|e| format!("failed to serialize manifest: {e}"))?;
     std::fs::write(dest.join("snapshot.json"), manifest_json)
         .map_err(|e| format!("failed to write snapshot.json: {e}"))?;
-
-    // Cleanup old backups: keep only the 10 most recent
-    cleanup_old_backups(&backup_dir, 10);
 
     log::info!("backup completed: {backup_name}");
     Ok(())
@@ -549,37 +646,6 @@ fn copy_file_if_exists(
         sha256: file_sha256(dst)?,
     });
     Ok(())
-}
-
-fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    let mut dirs = vec![path.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let meta = entry.metadata()?;
-            if meta.is_dir() {
-                dirs.push(entry.path());
-            } else {
-                total += meta.len();
-            }
-        }
-    }
-    Ok(total)
-}
-
-fn cleanup_old_backups(backup_dir: &std::path::Path, keep: usize) {
-    let mut entries: Vec<_> = match std::fs::read_dir(backup_dir) {
-        Ok(e) => e.filter_map(|e| e.ok()).filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)).collect(),
-        Err(_) => return,
-    };
-    entries.sort_by_key(|e| e.path());
-    while entries.len() > keep {
-        if let Some(old) = entries.first() {
-            let _ = std::fs::remove_dir_all(old.path());
-            entries.remove(0);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -864,5 +930,66 @@ mod tests {
         drop(state);
         let _ = std::fs::remove_dir_all(&base);
         unsafe { std::env::remove_var("LS_CONFIG_DIR") };
+    }
+
+    #[test]
+    fn test_merge_chain_materializes_baseline() {
+        let base = std::env::temp_dir().join(format!("ls_merge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let mut chain = ChainHead::default();
+        let n = MERGE_THRESHOLD;
+
+        for i in 0..n {
+            let id = format!("backup_{i}");
+            let dir = base.join(&id);
+            std::fs::create_dir_all(dir.join(INDEX_DIR_NAME)).unwrap();
+            std::fs::write(dir.join(INDEX_DIR_NAME).join(format!("seg_{i}.idx")), format!("seg-content-{i}")).unwrap();
+            std::fs::write(dir.join("data.db"), format!("db-content-{i}")).unwrap();
+            let seg_file = SnapshotFile {
+                name: format!("seg_{i}.idx"),
+                size: (format!("seg-content-{i}").len()) as u64,
+                sha256: "dummy".to_string(),
+            };
+            let db_file = SnapshotFile {
+                name: "data.db".to_string(),
+                size: (format!("db-content-{i}").len()) as u64,
+                sha256: "dummy".to_string(),
+            };
+            chain.segment_store.push(format!("seg_{i}.idx"));
+            chain.snapshots.push(ChainSnapshot {
+                id: id.clone(),
+                ts: i as i64,
+                kind: if i == 0 { "baseline" } else { "incremental" }.to_string(),
+                files: vec![seg_file, db_file],
+            });
+        }
+        chain.baseline_id = "backup_0".to_string();
+
+        assert_eq!(chain.snapshots.len(), n);
+        for i in 0..n {
+            assert!(base.join(format!("backup_{i}")).is_dir());
+        }
+
+        merge_chain(&base, &mut chain).unwrap();
+
+        assert_eq!(chain.snapshots.len(), 2);
+        assert_eq!(chain.snapshots[0].kind, "merged");
+        assert_eq!(chain.snapshots[1].id, format!("backup_{}", n - 1));
+        assert!(!chain.baseline_id.is_empty());
+
+        for i in 0..(n - 1) {
+            assert!(!base.join(format!("backup_{i}")).is_dir(), "backup_{i} should be removed");
+        }
+        assert!(base.join(&chain.snapshots[0].id).is_dir());
+
+        let merged_files: Vec<&str> = chain.snapshots[0].files.iter().map(|f| f.name.as_str()).collect();
+        for i in 0..(n - 1) {
+            assert!(merged_files.contains(&format!("seg_{i}.idx").as_str()), "merged missing seg_{i}.idx");
+        }
+        assert!(merged_files.contains(&"data.db"), "merged missing data.db");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
