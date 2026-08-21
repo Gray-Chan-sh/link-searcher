@@ -370,13 +370,12 @@ export default function AiChat() {
                     ? 'bg-blue-500 text-white'
                     : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
                 }`}
-              >
-                {t(`session_range_${r}`)}
-              </button>
-                  ))}
-                )}
-              </div>
-        </div>
+               >
+                 {t(`session_range_${r}`)}
+               </button>
+             ))}
+           </div>
+         </div>
         <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
           {visibleSessions.map(s => (
             <div
