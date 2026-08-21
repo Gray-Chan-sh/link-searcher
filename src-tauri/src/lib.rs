@@ -312,7 +312,7 @@ get_dir_children,
                 cancel_scan,
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(Mutex::new(ScanDelta::default())),
-                data_dir,
+                data_dir.clone(),
                 index_dir,
                 db_path.clone(),
                 watcher_tx,
@@ -388,7 +388,7 @@ get_dir_children,
 
                 let pdf_ok = pdf::is_pdftoppm_available();
 
-                let funasr_ok = crate::extractor::audio::funasr_model_ready();
+                let funasr_ok = crate::extractor::audio::funasr_model_ready(&data_dir);
                 let ffmpeg_ok = crate::extractor::audio::ffmpeg_available();
 
                 log::info!(
