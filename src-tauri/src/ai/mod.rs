@@ -4,6 +4,8 @@
 //! `ai_api_base` disables the feature; every public entry point degrades
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
+pub mod local_embed;
+
 use std::collections::HashMap;
 
 use crate::config::{ModelType, ProviderConfig};
@@ -109,7 +111,11 @@ pub fn ai_enabled() -> bool {
 
 /// True when an embedding model is active (semantic search usable).
 pub fn embedding_enabled() -> bool {
-    resolve_active_endpoint(&crate::config::load_config(), ModelType::Embedding).is_some()
+    let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        return local_embed::bge_model_ready(&cfg.data_dir);
+    }
+    resolve_active_endpoint(&cfg, ModelType::Embedding).is_some()
 }
 
 /// True when an LLM model is active (summary / RAG usable).
@@ -170,6 +176,13 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
 
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        if local_embed::bge_model_ready(&cfg.data_dir) {
+            let _ = local_embed::init_local_embedder(&cfg.data_dir);
+            return local_embed::embed_batch_local(texts);
+        }
+        return vec![None; texts.len()];
+    }
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
         return vec![None; texts.len()];
     };
@@ -230,6 +243,14 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
 }
 
 pub fn embed(text: &str) -> Option<Vec<f32>> {
+    let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        if local_embed::bge_model_ready(&cfg.data_dir) {
+            let _ = local_embed::init_local_embedder(&cfg.data_dir);
+            return local_embed::embed_query_local(text);
+        }
+        return None;
+    }
     embed_batch(&[text.to_string()]).into_iter().next().flatten()
 }
 

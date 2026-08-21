@@ -27,7 +27,11 @@ pub fn bge_model_ready(data_dir: &Path) -> bool {
 /// Load the BGE model and tokenizer into the global singleton.
 /// Idempotent — subsequent calls are no-ops.
 pub fn init_local_embedder(data_dir: &Path) -> Result<(), String> {
-    INSTANCE.get_or_try_init(|| build(data_dir))?;
+    if INSTANCE.get().is_some() {
+        return Ok(());
+    }
+    let embedder = build(data_dir)?;
+    let _ = INSTANCE.set(embedder);
     Ok(())
 }
 
@@ -50,11 +54,11 @@ fn build(data_dir: &Path) -> Result<LocalEmbedder, String> {
 
     let mut tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
         .map_err(|e| format!("加载 BGE tokenizer: {e}"))?;
-    tokenizer.with_padding(Some(tokenizers::PaddingParams {
+    let _ = tokenizer.with_padding(Some(tokenizers::PaddingParams {
         strategy: tokenizers::PaddingStrategy::Fixed(MAX_SEQ_LEN),
         ..Default::default()
     }));
-    tokenizer.with_truncation(Some(tokenizers::TruncationParams {
+    let _ = tokenizer.with_truncation(Some(tokenizers::TruncationParams {
         max_length: MAX_SEQ_LEN,
         ..Default::default()
     }));
@@ -78,9 +82,8 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
 
     // Tokenize — lock tokenizer, release before model inference.
     let token_data = {
-        let mut tok = e.tokenizer.lock().unwrap_or_else(|p| p.into_inner());
-        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        let batch = match tok.encode_batch(&refs, true) {
+        let tok = e.tokenizer.lock().unwrap_or_else(|p| p.into_inner());
+        let batch = match tok.encode_batch(texts.to_vec(), true) {
             Ok(b) => b,
             Err(e) => {
                 log::warn!("[BGE] tokenize batch failed: {e}");
@@ -130,8 +133,8 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
 
     // Inference.
     let output = {
-        let mut model = e.model.lock().unwrap_or_else(|p| p.into_inner());
-        match model.run(tvec![ids_t, mask_t, type_t]) {
+        let model = e.model.lock().unwrap_or_else(|p| p.into_inner());
+        match model.run(tvec![ids_t.into(), mask_t.into(), type_t.into()]) {
             Ok(o) => o,
             Err(e) => {
                 log::warn!("[BGE] inference failed: {e}");
