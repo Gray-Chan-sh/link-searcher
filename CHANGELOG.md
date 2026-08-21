@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-08-21（内置 BGE 嵌入模型 — 本地离线语义搜索）
+
+**动机**：支持无需远程 API 的本地语义搜索，隐私优先，离线可用。
+
+- **新增依赖**：`tract-onnx = "0.20"`（ONNX 推理，与 PaddleOCR 共用 tract 引擎）、`tokenizers = "0.20"`（HuggingFace tokenizer）（`src-tauri/Cargo.toml`）
+- **本地嵌入引擎**：新建 `ai/local_embed.rs`，基于 tract-onnx + tokenizers 运行 BAAI/bge-small-zh-v1.5（95MB ONNX + 5MB tokenizer.json，512 维，中英双语）。OnceLock 单例模式，CLS pooling + L2 归一化。BGE 查询指令前缀硬编码（`src-tauri/src/ai/local_embed.rs`）
+- **BGE 模型下载命令**：新建 `commands/bge.rs`，`install_bge` 从 hf_mirror/ModelScope 首次使用时下载到 `data_dir/models/bge-small-zh-v1.5/`，`check_bge_installed` 检查模型就绪状态。AtomicBool 防重入，后台线程 + 事件通知（`src-tauri/src/commands/bge.rs`）
+- **嵌入管线双模式分叉**：`ai::embed_batch()` 和 `ai::embed()` 检测 `active_embedding_model_id` 是否以 `"local:"` 开头，是则走本地 ONNX 推理（query 模式加指令前缀），否则走现有 HTTP 路径。`embedding_enabled()` 同时检测本地模型文件就绪状态。所有下游代码（搜索/回填/聊天）零修改（`src-tauri/src/ai/mod.rs`）
+- **配置格式扩展**：`set_active_model` 支持 `"local:bge-small-zh-v1.5"` 格式，跳过 provider 查找。新增 `is_local_embedding_model()` 辅助函数（`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`）
+- **Settings UI 集成**：Settings 页 AI 标签 Embedding 下拉菜单顶部新增「内置 / bge-small-zh-v1.5」选项（已安装时），未安装时显示下载按钮。4 语种 i18n 补全（`src/pages/Settings.tsx`、`src/api/settings.ts`、`src/i18n/{zh,en,ja,ko}.ts`）
+
 ## 2026-08-20（备份功能 Phase 0：依赖、seed 死键修复、公共快照引擎、前端封装）
 
 **动机**：跨平台备份/恢复功能开工（设计见 `.omo/plans/backup-cross-platform.md`）。Phase 0 打地基：依赖就绪、修历史遗留 seed 死键、抽公共快照引擎供后续增量链/导出/恢复复用。
