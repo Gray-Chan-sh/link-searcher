@@ -19,7 +19,13 @@ struct PragmaCustomizer;
 
 impl CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
     fn on_acquire(&self, conn: &mut Connection) -> Result<(), rusqlite::Error> {
-        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;\
+             PRAGMA journal_mode=WAL;\
+             PRAGMA wal_autocheckpoint=1000;\
+             PRAGMA journal_size_limit=67108864;\
+             PRAGMA busy_timeout=5000;",
+        )
     }
 }
 
@@ -44,6 +50,7 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
 /// Callers must ensure the connection's pragmas (WAL, foreign keys) are set,
 /// typically via [`get_pool`] with [`PragmaCustomizer`].
 pub fn init_db(conn: &Connection) -> Result<()> {
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
     run_migrations(conn)
 }
 
