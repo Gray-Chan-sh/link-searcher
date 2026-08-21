@@ -109,6 +109,7 @@ const ko: Record<string, string> = {
      file_tree_unindexed: '미색인',
      file_tree_menu_scope: '범위에 추가',
      file_tree_menu_mention: '이 파일 참조',
+     file_tree_search_no_results: '일치하는 파일이 없습니다',
     set_session_scope: '세션 범위로 설정',
     clear_session_scope: '세션 범위 지우기',
     no_dirs: '디렉터리가 설정되지 않았습니다',

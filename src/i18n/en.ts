@@ -109,6 +109,7 @@ const en: Record<string, string> = {
      file_tree_unindexed: 'unindexed',
      file_tree_menu_scope: 'Add to scope',
      file_tree_menu_mention: 'Mention this file',
+     file_tree_search_no_results: 'No matching files found',
     set_session_scope: 'Set as session scope',
     clear_session_scope: 'Clear session scope',
     no_dirs: 'No directories configured',

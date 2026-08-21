@@ -109,6 +109,7 @@ const ja: Record<string, string> = {
      file_tree_unindexed: '未インデックス',
      file_tree_menu_scope: 'スコープに追加',
      file_tree_menu_mention: 'このファイルを参照',
+     file_tree_search_no_results: '一致するファイルがありません',
     set_session_scope: 'セッション範囲に設定',
     clear_session_scope: 'セッション範囲をクリア',
     no_dirs: 'ディレクトリが設定されていません',
