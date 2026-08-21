@@ -9,7 +9,7 @@ import { useI18n } from '../i18n'
 import { LoadingSpinner, PlusIcon } from '../icons'
 import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
-import { checkDependencies, getVersion, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
+import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type BgeStatus, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
 import { triggerBackup, getBackupStatus, exportBackup, restoreFromZip, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type DeadDir } from '../api/backup'
 
 const OCR_LANGS = [
@@ -42,6 +42,8 @@ export default function Settings() {
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
+  const [bgeStatus, setBgeStatus] = useState<BgeStatus | null>(null)
+  const [bgeInstalling, setBgeInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [caps, setCaps] = useState<AiCapabilities | null>(null)
   const [aiWarn, setAiWarn] = useState<string | null>(null)
@@ -91,6 +93,13 @@ export default function Settings() {
       await message(e.payload.message, { title: 'FunASR', kind: e.payload.success ? 'info' : 'warning' })
       checkDependencies().then(setDeps).catch(() => {})
     }).then(u => unlisteners.push(u))
+    listen<{ success: boolean; message: string }>('bge-install-done', async e => {
+      setBgeInstalling(false)
+      checkBgeInstalled().then(setBgeStatus).catch(() => {})
+      if (e.payload.message) {
+        await message(e.payload.message, { title: 'BGE', kind: e.payload.success ? 'info' : 'warning' })
+      }
+    }).then(u => unlisteners.push(u))
     return () => {
       unlisteners.forEach(u => u())
     }
@@ -98,6 +107,10 @@ export default function Settings() {
 
   useEffect(() => {
     aiCapabilities().then(setCaps).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    checkBgeInstalled().then(setBgeStatus).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -130,12 +143,17 @@ export default function Settings() {
     (appConfig?.active_embedding_model_id ?? '').startsWith(`${p.id}:`) ||
     (appConfig?.active_llm_model_id ?? '').startsWith(`${p.id}:`)
 
-  const modelOptions = (kind: 'embedding' | 'llm'): { value: string; label: string }[] =>
-    (appConfig?.providers ?? []).flatMap(p =>
+  const modelOptions = (kind: 'embedding' | 'llm'): { value: string; label: string }[] => {
+    const remote = (appConfig?.providers ?? []).flatMap(p =>
       p.models
         .filter(m => m.enabled !== false && m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
         .map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} / ${m.id}` })),
     )
+    if (kind === 'embedding' && bgeStatus?.installed) {
+      return [{ value: 'local:bge-small-zh-v1.5', label: t('bge_install') }, ...remote]
+    }
+    return remote
+  }
 
   const modelInUse = (p: ProviderInfo, modelId: string) =>
     appConfig?.active_embedding_model_id === `${p.id}:${modelId}` ||
@@ -650,6 +668,22 @@ export default function Settings() {
               availableLabel={t('ai_available')}
               notConfiguredLabel={t('ai_not_configured')}
             />
+            {bgeStatus && !bgeStatus.installed && (
+              <button
+                onClick={() => {
+                  setBgeInstalling(true)
+                  installBge().catch(e => {
+                    setBgeInstalling(false)
+                    setLocalError(e instanceof Error ? e.message : String(e))
+                  })
+                }}
+                disabled={bgeInstalling}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/50 disabled:opacity-50 transition-colors"
+              >
+                {bgeInstalling && <LoadingSpinner className="size-3" />}
+                {bgeInstalling ? t('bge_downloading') : t('bge_download')}
+              </button>
+            )}
             <UsageSelect
               label={t('llm_model')}
               value={appConfig?.active_llm_model_id ?? ''}
