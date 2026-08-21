@@ -20,6 +20,7 @@ const ko: Record<string, string> = {
     scan_now: '지금 스캔',
     rebuild_index: '인덱스 재구축',
     last_scan: '마지막 스캔',
+    last_backup: '마지막 백업',
     files: '파일',
     ocr_engine: 'OCR 엔진',
     doc_engine: '문서 추출 엔진',

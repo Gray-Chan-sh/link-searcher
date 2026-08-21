@@ -21,6 +21,7 @@
 - **新增备份设置页 Tab**：设置页新增「备份」标签页，含备份触发/状态展示、ZIP 导出（可选密码 + has_secrets 风险提示）、ZIP 恢复（文件选择器）、死目录列表与重映射/删除操作。4 语种 i18n 键补全（`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
 - **备份功能测试补全**：新增 `test_has_config_secrets`（API Key 检测逻辑覆盖 legacy/embedding/LLM/provider 四类密钥）和 `test_snapshot_core_creates_zip_ready_dir`（验证快照产物目录结构完整且清单 size 一致）（`src-tauri/src/commands/backup.rs`）
 - **备份功能文档补全**：README.md 索引与监控表新增增量备份链/ZIP 导出恢复/死目录重映射描述；`docs/09-backup-migrate.md` 补充增量备份链机制、ZIP 导出（AES-256 加密）、ZIP 恢复、死目录处理四节，验证清单同步扩展
+- **StatusBar 备份状态**：状态栏右下角展示上次备份时间（每 60s 刷新），4 语种 i18n 补全（`src/components/StatusBar.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
 
 ---
 

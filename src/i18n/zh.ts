@@ -20,6 +20,7 @@ const zh: Record<string, string> = {
     scan_now: '开始扫描',
     rebuild_index: '重建索引',
     last_scan: '上次扫描',
+    last_backup: '上次备份',
     files: '个文件',
     ocr_engine: 'OCR 引擎',
     doc_engine: '文档提取引擎',

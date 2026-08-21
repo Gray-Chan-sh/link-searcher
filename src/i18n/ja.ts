@@ -20,6 +20,7 @@ const ja: Record<string, string> = {
     scan_now: '今すぐスキャン',
     rebuild_index: 'インデックスを再構築',
     last_scan: '最終スキャン',
+    last_backup: '最終バックアップ',
     files: 'ファイル',
     ocr_engine: 'OCRエンジン',
     doc_engine: '文書抽出エンジン',
