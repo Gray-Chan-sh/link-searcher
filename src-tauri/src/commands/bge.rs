@@ -13,9 +13,9 @@ const MODEL_FILE: &str = "model.onnx";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 
 const HF_MIRROR_BASE: &str =
-    "https://hf-mirror.com/BAAI/bge-small-zh-v1.5/resolve/main";
+    "https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main";
 const MODELSCOPE_BASE: &str =
-    "https://modelscope.cn/models/BAAI/bge-small-zh-v1.5/resolve/master";
+    "https://modelscope.cn/models/Xenova/bge-small-zh-v1.5/resolve/master";
 
 static INSTALLING: AtomicBool = AtomicBool::new(false);
 
@@ -83,11 +83,12 @@ fn download_inner(model_dir: &Path) -> BgeInstallResult {
         Ok("modelscope")
     );
 
-    let files = [MODEL_FILE, TOKENIZER_FILE];
-    for file_name in &files {
-        let dest = model_dir.join(file_name);
+    // (remote_path, local_filename) — model.onnx lives in onnx/ subdirectory
+    let files = [("onnx/model.onnx", MODEL_FILE), ("tokenizer.json", TOKENIZER_FILE)];
+    for (remote, local) in &files {
+        let dest = model_dir.join(local);
         if dest.is_file() {
-            log::info!("[BGE] {} 已存在，跳过", file_name);
+            log::info!("[BGE] {} 已存在，跳过", local);
             continue;
         }
 
@@ -102,8 +103,8 @@ fn download_inner(model_dir: &Path) -> BgeInstallResult {
 
         let mut downloaded = false;
         for (i, base) in base_urls.iter().enumerate() {
-            let url = format!("{}/{}", base, file_name);
-            log::info!("[BGE] 下载 {} ({})", file_name, url);
+            let url = format!("{}/{}", base, remote);
+            log::info!("[BGE] 下载 {} ({})", local, url);
             match download(&url, &dest) {
                 Ok(()) => {
                     downloaded = true;
@@ -112,7 +113,7 @@ fn download_inner(model_dir: &Path) -> BgeInstallResult {
                 Err(e) => {
                     let _ = std::fs::remove_file(&dest);
                     if i + 1 == base_urls.len() {
-                        let msg = format!("下载 {} 失败: {e}", file_name);
+                        let msg = format!("下载 {} 失败: {e}", local);
                         log::error!("[BGE] {msg}");
                         return BgeInstallResult { success: false, message: msg };
                     }
@@ -123,13 +124,13 @@ fn download_inner(model_dir: &Path) -> BgeInstallResult {
         if !downloaded {
             return BgeInstallResult {
                 success: false,
-                message: format!("下载 {} 失败", file_name),
+                message: format!("下载 {} 失败", local),
             };
         }
     }
 
     if bge_model_ready(model_dir) {
-        let size: u64 = files
+        let size: u64 = [MODEL_FILE, TOKENIZER_FILE]
             .iter()
             .filter_map(|f| std::fs::metadata(model_dir.join(f)).ok().map(|m| m.len()))
             .sum();
