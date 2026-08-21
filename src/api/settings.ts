@@ -58,3 +58,16 @@ export interface FunasrInstallResult {
 export async function installFunasr(): Promise<void> {
     return invoke('install_funasr')
 }
+
+export interface BgeStatus {
+    installed: boolean
+    model_dir: string
+}
+
+export async function installBge(): Promise<void> {
+    return invoke('install_bge')
+}
+
+export async function checkBgeInstalled(): Promise<BgeStatus> {
+    return invoke<BgeStatus>('check_bge_installed')
+}
