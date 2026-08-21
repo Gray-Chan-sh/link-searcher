@@ -112,8 +112,13 @@ pub fn ai_enabled() -> bool {
 /// True when an embedding model is active (semantic search usable).
 pub fn embedding_enabled() -> bool {
     let cfg = crate::config::load_config();
-    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
-        return local_embed::bge_model_ready(&cfg.data_dir);
+    let model_id = &cfg.active_embedding_model_id;
+    let is_local = crate::config::is_local_embedding_model(model_id);
+    log::info!("[AI] embedding_enabled: model_id={model_id}, is_local={is_local}, data_dir={:?}", cfg.data_dir);
+    if is_local {
+        let ready = local_embed::bge_model_ready(&cfg.data_dir);
+        log::info!("[AI] local model ready={ready}, checking path: {:?}", cfg.data_dir.join("models").join("bge-small-zh-v1.5"));
+        return ready;
     }
     resolve_active_endpoint(&cfg, ModelType::Embedding).is_some()
 }
@@ -662,6 +667,15 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
 
 fn test_embedding() -> GatewayTest {
     let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        if !local_embed::bge_model_ready(&cfg.data_dir) {
+            return GatewayTest { kind: "embedding", ok: false, detail: "BGE 模型未下载".into() };
+        }
+        return match local_embed::init_local_embedder(&cfg.data_dir) {
+            Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "内置 bge-small-zh-v1.5".into() },
+            Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
+        };
+    }
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
         return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into() };
     };
