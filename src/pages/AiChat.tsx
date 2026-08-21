@@ -498,7 +498,7 @@ export default function AiChat() {
                         <span className="truncate flex-1">{path}</span>
                         <span className="shrink-0 text-[9px] text-gray-400">+ 范围</span>
                       </div>
-                    ))
+                    )
                   ) : (
                     <div className="px-2 py-4 text-center text-[10px] text-gray-400">{t('file_tree_search_no_results')}</div>
                   )
