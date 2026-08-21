@@ -20,6 +20,7 @@ const en: Record<string, string> = {
     scan_now: 'Scan Now',
     rebuild_index: 'Rebuild Index',
     last_scan: 'Last Scan',
+    last_backup: 'Last Backup',
     files: 'files',
     ocr_engine: 'OCR Engine',
     doc_engine: 'Document Engine',

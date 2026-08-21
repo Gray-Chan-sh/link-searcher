@@ -4,6 +4,7 @@ import { useIndexStatus } from '../hooks/useIndexStatus'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { listenScanProgress, type ScanProgress } from '../api/index'
+import { getBackupStatus, type BackupStatus } from '../api/backup'
 
 const LAST_READ_KEY = 'last_read_brief_ts'
 
@@ -13,6 +14,7 @@ export default function StatusBar() {
   const { status, loading, error } = useIndexStatus()
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null)
   const [hasUnreadBrief, setHasUnreadBrief] = useState(false)
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
 
   // Light the brief icon when a NEW task brief arrives (newest timestamp > the
   // last one the user acknowledged). Survives page switches (persisted).
@@ -35,6 +37,14 @@ export default function StatusBar() {
     const q = briefs[0]?.task ?? ''
     navigate(q ? `/logs?q=${encodeURIComponent(`[TASK] ${q}`)}` : '/logs')
   }
+
+  useEffect(() => {
+    getBackupStatus().then(setBackupStatus).catch(() => {})
+    const id = setInterval(() => {
+      getBackupStatus().then(setBackupStatus).catch(() => {})
+    }, 60_000)
+    return () => clearInterval(id)
+  }, [])
 
   useEffect(() => {
     const unlisten = listenScanProgress(setScanProgress)
@@ -97,10 +107,15 @@ export default function StatusBar() {
                 {status?.briefs?.[0]?.summary}
               </button>
             )}
-            {status.last_scan && (
+{status.last_scan && (
                <span>
                   {t('last_scan')}: {new Date(status.last_scan / 1000).toLocaleTimeString()}
                </span>
+             )}
+            {backupStatus && backupStatus.last_backup && (
+              <span className="text-gray-400 dark:text-gray-500">
+                💾 {t('last_backup')}: {new Date(backupStatus.last_backup * 1000).toLocaleTimeString()}
+              </span>
             )}
           </div>
         </>
