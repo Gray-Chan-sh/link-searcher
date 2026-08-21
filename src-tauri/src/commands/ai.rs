@@ -986,7 +986,7 @@ async fn prepare_conversation_prompt(
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
                         mention_has_content = true;
-                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 2000)));
+                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 20000)));
                         evidence.push(EvidenceItem {
                             file_id: fid.clone(),
                             path: resolved_path.clone(),
