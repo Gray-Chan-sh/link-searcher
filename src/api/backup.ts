@@ -37,8 +37,8 @@ export async function listBackups(): Promise<BackupSnapshot[]> {
     return invoke<BackupSnapshot[]>('list_backups')
 }
 
-export async function exportBackup(destPath: string, password?: string | null): Promise<BackupExportResult> {
-    return invoke<BackupExportResult>('export_backup', { destPath, password: password ?? null })
+export async function exportBackup(destPath: string, password?: string | null, backupName?: string | null): Promise<BackupExportResult> {
+    return invoke<BackupExportResult>('export_backup', { destPath, password: password ?? null, backupName: backupName ?? null })
 }
 
 export async function restoreBackup(backupName: string): Promise<void> {
