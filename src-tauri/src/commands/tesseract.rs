@@ -92,7 +92,7 @@ pub struct DependencyStatus {
 
 /// Check the availability of external tools (Tesseract, pdftoppm, etc.)
 #[tauri::command]
-pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
+pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencyStatus>, String> {
     Ok(vec![
         DependencyStatus {
             name: "Tesseract OCR".into(),
@@ -115,7 +115,7 @@ pub fn check_dependencies() -> Result<Vec<DependencyStatus>, String> {
         DependencyStatus {
             name: "FunASR (音频转写)".into(),
             command: "data_dir/models/funasr (sherpa-onnx int8 models)".into(),
-            available: crate::extractor::audio::funasr_model_ready(),
+            available: crate::extractor::audio::funasr_model_ready(&state.data_dir),
             install_guide: "在设置页点击「下载 FunASR 模型」\n（自动下载 sherpa-onnx-funasr-nano-int8，约 850MB）\n或手动: 将下列归档解压到 <data_dir>/models/funasr/\n  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2".into(),
         },
     ])

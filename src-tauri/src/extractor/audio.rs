@@ -98,9 +98,8 @@ fn funasr_dir() -> Option<PathBuf> {
         .find(|d| model_present(d))
 }
 
-/// True when all sherpa-onnx model files are present in the data dir.
-pub fn funasr_model_ready() -> bool {
-    let dir = crate::config::load_config().data_dir.join(MODEL_SUBDIR);
+pub fn funasr_model_ready(data_dir: &Path) -> bool {
+    let dir = data_dir.join(MODEL_SUBDIR);
     model_present(&dir)
 }
 
@@ -161,7 +160,7 @@ impl AudioExtractor {
         let meta = std::fs::metadata(path).context("audio stat")?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
 
-        if !funasr_model_ready() {
+        if !funasr_dir().is_some() {
             let probed = funasr_candidates()
                 .iter()
                 .map(|p| p.display().to_string())
