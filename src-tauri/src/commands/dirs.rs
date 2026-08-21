@@ -298,9 +298,10 @@ pub async fn update_dir(
 pub struct DirTreeNode {
     pub name: String,
     pub path: String,
-    /// 目录标识（懒加载后 children 为空，无法靠长度区分文件/目录）。
     pub is_dir: bool,
     pub children: Vec<DirTreeNode>,
+    pub indexed: Option<bool>,
+    pub status: Option<String>,
 }
 
 #[tauri::command]
@@ -314,26 +315,58 @@ pub fn get_dir_tree(state: State<'_, AppState>, dir_id: String, include_files: O
     build_dir_tree(&dir.path, include_files.unwrap_or(false), &mut budget)
 }
 
-/// 懒加载：返回 `parent_path` 目录的单层子项（文件+目录，隐藏已过滤），
-/// 无预算限制（单层，不可能爆炸）。
+/// 懒加载：返回 `parent_path` 目录的单层子项（文件+目录，隐藏已过滤）。
+/// 同时返回每文件的 indexed 状态（从 file_tracking 表查询）。
 #[tauri::command]
-pub fn get_dir_children(parent_path: String) -> Result<Vec<DirTreeNode>, String> {
+pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Result<Vec<DirTreeNode>, String> {
     let mut children = Vec::new();
+
+    let indexed_set: Result<std::collections::HashSet<String>, String> = (|| {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let mut stmt = conn.prepare(
+            "SELECT path FROM file_tracking WHERE status='active' AND indexed=1"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        let mut set = std::collections::HashSet::new();
+        for row in rows {
+            if let Ok(path) = row { set.insert(path); }
+        }
+        Ok(set)
+    })();
+
     if let Ok(entries) = std::fs::read_dir(&parent_path) {
         for entry in entries.flatten() {
             if let Ok(ft) = entry.file_type() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.') { continue; }
                 let path = entry.path().to_string_lossy().to_string();
+                let is_file = !ft.is_dir();
+                let (indexed, status) = if is_file {
+                    if let Ok(set) = &indexed_set {
+                        if set.contains(&path) { (true, Some("indexed".to_string())) }
+                        else { (false, Some("unindexed".to_string())) }
+                    } else { (false, None) }
+                } else { (false, None) };
+
                 children.push(DirTreeNode {
-                    name, path,
+                    name,
+                    path: path.clone(),
                     is_dir: ft.is_dir(),
                     children: vec![],
+                    indexed: Some(is_file && matches!(indexed_set, Ok(ref s) if s.contains(&path))),
+                    status,
                 });
             }
         }
     }
-    children.sort_by(|a, b| a.name.cmp(&b.name));
+    children.sort_by(|a, b| {
+        use std::cmp::Ordering;
+        if a.is_dir != b.is_dir {
+            return if a.is_dir { Ordering::Less } else { Ordering::Greater };
+        }
+        a.name.cmp(&b.name)
+    });
     Ok(children)
 }
 
@@ -357,11 +390,11 @@ fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> R
                     let sub = build_dir_tree(&path, include_files, budget)?;
                     if *budget > 0 {
                         *budget -= 1;
-                        children.push(DirTreeNode { name, path, is_dir: true, children: sub.children });
+                        children.push(DirTreeNode { name, path, is_dir: true, children: sub.children, indexed: None, status: None });
                     }
                 } else if include_files && ft.is_file() {
                     *budget -= 1;
-                    children.push(DirTreeNode { name, path, is_dir: false, children: vec![] });
+                    children.push(DirTreeNode { name, path, is_dir: false, children: vec![], indexed: None, status: None });
                 }
             }
         }
@@ -371,5 +404,5 @@ fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> R
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    Ok(DirTreeNode { name, path: root_path.to_string(), is_dir: true, children })
+    Ok(DirTreeNode { name, path: root_path.to_string(), is_dir: true, children, indexed: None, status: None })
 }

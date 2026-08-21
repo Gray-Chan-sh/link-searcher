@@ -30,6 +30,8 @@ export interface DirTreeNode {
   path: string
   is_dir: boolean
   children: DirTreeNode[]
+  indexed?: boolean
+  status?: string
 }
 
 export async function getDirTree(dirId: string, includeFiles?: boolean): Promise<DirTreeNode> {

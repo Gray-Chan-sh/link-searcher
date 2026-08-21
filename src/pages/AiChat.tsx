@@ -17,8 +17,9 @@ export default function AiChat() {
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
   // 树状文件浏览器
   const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
-  const [treeExpanded, setTreeExpanded] = useState(false)
+  const [treeExpanded, setTreeExpanded] = useState(true)
   const [pendingMention, setPendingMention] = useState<string | null>(null)
+  const [treeFilter, setTreeFilter] = useState('')
   // 会话列表搜索与时间筛选
   const [sessionFilter, setSessionFilter] = useState('')
   const [sessionRange, setSessionRange] = useState<'all' | 'today' | 'week' | 'older'>('all')
@@ -447,41 +448,53 @@ export default function AiChat() {
           </div>
         )}
         {/* 文件树面板 */}
-        <div className="border-t border-gray-200 dark:border-gray-800">
+        <div className="border-t border-gray-200 dark:border-gray-800 flex flex-col min-h-0">
           <button
             onClick={() => setTreeExpanded(v => !v)}
-            className="w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+            className="shrink-0 w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
           >
             <span className="flex items-center gap-1.5"><FolderIcon className="size-4" /> <span className="text-sm">{t('file_tree')}</span></span>
             <span className="text-[10px]">{treeExpanded ? '▾' : '▸'}</span>
           </button>
           {treeExpanded && (
-            <div className="max-h-72 overflow-y-auto p-2 space-y-1">
-              {dirTrees.map(dt => (
-                <div key={dt.id}>
-                  <div className="px-2 py-0.5 flex items-center gap-1">
-                    <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
-                    <button
-                      type="button"
-                      onClick={() => activeSession?.retrieval_scope?.includes('') ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
-                      title={activeSession?.retrieval_scope?.includes('') ? t('clear_session_scope') : t('set_session_scope')}
-                      className={`text-[10px] ${
-                        activeSession?.retrieval_scope?.includes('')
-                          ? 'text-purple-600 dark:text-purple-300 font-medium'
-                          : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
-                      } shrink-0`}
-                    >
-                      {activeSession?.retrieval_scope?.includes('') ? '范围✓' : '范围'}
-                    </button>
+            <div className="flex-1 flex flex-col min-h-0">
+              {/* 搜索过滤 */}
+              <div className="px-2 py-1">
+                <input
+                  type="text"
+                  value={treeFilter}
+                  onChange={e => setTreeFilter(e.target.value)}
+                  placeholder={t('file_tree_search')}
+                  className="w-full text-[10px] bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded px-2 py-1 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                />
+              </div>
+              <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
+                {dirTrees.map(dt => (
+                  <div key={dt.id}>
+                    <div className="px-2 py-0.5 flex items-center gap-1">
+                      <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
+                      <button
+                        type="button"
+                        onClick={() => activeSession?.retrieval_scope?.includes('') ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
+                        title={activeSession?.retrieval_scope?.includes('') ? t('clear_session_scope') : t('set_session_scope')}
+                        className={`text-[10px] ${
+                          activeSession?.retrieval_scope?.includes('')
+                            ? 'text-purple-600 dark:text-purple-300 font-medium'
+                            : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
+                        } shrink-0`}
+                      >
+                        {activeSession?.retrieval_scope?.includes('') ? '范围✓' : '范围'}
+                      </button>
+                    </div>
+                    {dt.root && sortTreeNodes(dt.root).filter(n => passesFilter(n, treeFilter)).map(child => (
+                      <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onScope={handleAddToScope} filter={treeFilter} />
+                    ))}
                   </div>
-                  {dt.root && sortTreeNodes(dt.root).map(child => (
-                    <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onScope={handleAddToScope} />
-                  ))}
-                </div>
-              ))}
-              {dirTrees.length === 0 && (
-                <div className="px-2 py-1 text-[10px] text-gray-400">{t('no_dirs')}</div>
-              )}
+                ))}
+                {dirTrees.length === 0 && (
+                  <div className="px-2 py-1 text-[10px] text-gray-400">{t('no_dirs')}</div>
+                )}
+              </div>
             </div>
           )}
         </div>
@@ -549,13 +562,23 @@ function sortTreeNodes(nodes: DirTreeNode[]): DirTreeNode[] {
   })
 }
 
-/** 递归文件树：左键展开/加入对话；右键文件/目录统一「加入检索范围」。
- *  `node.path` 为绝对路径，`basePath` 为目录根，点击时转相对路径（与 file_tracking 一致）。 */
-function TreeFileList({ node, basePath, onPick, onScope }: {
+function passesFilter(node: DirTreeNode, filter: string): boolean {
+  if (!filter.trim()) return true
+  const q = filter.toLowerCase()
+  if (node.name.toLowerCase().includes(q)) return true
+  if (node.path.toLowerCase().includes(q)) return true
+  if (node.children.length > 0) {
+    return node.children.some(c => passesFilter(c, q))
+  }
+  return false
+}
+
+function TreeFileList({ node, basePath, onPick, onScope, filter }: {
   node: DirTreeNode
   basePath: string
   onPick: (relPath: string) => void
   onScope?: (relPath: string) => void
+  filter?: string
 }) {
   const { t } = useI18n()
   const [open, setOpen] = useState(false)
@@ -563,12 +586,15 @@ function TreeFileList({ node, basePath, onPick, onScope }: {
     node.children.length > 0 ? node.children : null,
   )
   const [loading, setLoading] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const isDir = node.is_dir || node.children.length > 0
   const rel = node.path.startsWith(basePath)
     ? node.path.slice(basePath.length).replace(/^\/+/, '')
     : node.path
 
   const sortedChildren = children ? sortTreeNodes(children) : null
+  const filteredChildren = sortedChildren && filter ? sortedChildren.filter(c => passesFilter(c, filter)) : sortedChildren
+  const showMatch = filter && node.name.toLowerCase().includes(filter.toLowerCase())
 
   const handleToggle = useCallback(() => {
     if (!isDir) return
@@ -585,29 +611,70 @@ function TreeFileList({ node, basePath, onPick, onScope }: {
     }
   }, [isDir, open, children, loading, node.path])
 
+  // 点击外部关闭右键菜单
+  useEffect(() => {
+    if (!contextMenu) return
+    const close = () => setContextMenu(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [contextMenu])
+
   return (
     <div>
-      <button
-        type="button"
-        draggable
-        onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
-        onClick={isDir ? handleToggle : () => onPick(rel)}
-        onContextMenu={e => {
-          e.preventDefault()
-          // 右键统一入口：文件/目录都加入检索范围
-          if (onScope) onScope(rel)
-          else onPick(rel)
-        }}
-        className="w-full flex items-center gap-1.5 px-2 py-1 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded transition-colors"
-        title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
-      >
-        <span className="text-sm shrink-0">{isDir ? (open ? '📂' : (loading ? '⋯' : '📁')) : '📄'}</span>
-        <span className="truncate text-xs">{node.name}</span>
-        {!isDir && <span className="ml-auto text-[10px] text-gray-400 opacity-0 group-hover:opacity-100">+</span>}
-      </button>
-      {open && sortedChildren && sortedChildren.map(child => (
+      <div className="group relative">
+        <button
+          type="button"
+          draggable
+          onDragStart={e => { e.dataTransfer.setData('text/plain', rel); e.dataTransfer.effectAllowed = 'copy' }}
+          onClick={isDir ? handleToggle : () => onPick(rel)}
+          onContextMenu={e => {
+            e.preventDefault()
+            setContextMenu({ x: e.clientX, y: e.clientY })
+          }}
+          className={`w-full flex items-center gap-1.5 px-2 py-1 text-sm rounded transition-colors ${
+            showMatch ? 'bg-yellow-50 dark:bg-yellow-900/10' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+          } text-gray-700 dark:text-gray-200`}
+          title={isDir ? `${t('file_tree_dir_hint')}${rel}` : `${t('file_tree_file_hint')}${rel}`}
+        >
+          {/* 索引状态标识 */}
+          {!isDir && (
+            <span className={`shrink-0 size-1.5 rounded-full ${
+              node.indexed === true ? 'bg-green-500' : node.indexed === false ? 'bg-gray-300 dark:bg-gray-600' : 'bg-transparent'
+            }`} />
+          )}
+          <span className="text-sm shrink-0">{isDir ? (open ? '📂' : (loading ? '⋯' : '📁')) : '📄'}</span>
+          <span className="truncate text-xs">{node.name}</span>
+          {showMatch && <span className="ml-1 text-[9px] text-yellow-600 dark:text-yellow-400 shrink-0">✓</span>}
+          {!isDir && node.indexed === false && (
+            <span className="ml-auto text-[9px] text-gray-400 dark:text-gray-600 shrink-0">{t('file_tree_unindexed')}</span>
+          )}
+        </button>
+        {/* 右键菜单 */}
+        {contextMenu && (
+          <div
+            className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded shadow-lg py-1 text-xs"
+            style={{ left: contextMenu.x, top: contextMenu.y }}
+          >
+            <button
+              className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { onScope?.(rel); setContextMenu(null) }}
+            >
+              {t('file_tree_menu_scope')}
+            </button>
+            {!isDir && (
+              <button
+                className="w-full px-3 py-1.5 text-left text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { onPick(rel); setContextMenu(null) }}
+              >
+                {t('file_tree_menu_mention')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {open && filteredChildren && filteredChildren.map(child => (
         <div key={child.path} className="pl-3">
-          <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} onScope={onScope} />
+          <TreeFileList key={child.path} node={child} basePath={basePath} onPick={onPick} onScope={onScope} filter={filter} />
         </div>
       ))}
     </div>
