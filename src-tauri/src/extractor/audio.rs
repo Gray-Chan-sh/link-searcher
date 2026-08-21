@@ -92,15 +92,36 @@ fn model_present(dir: &Path) -> bool {
         .all(|f| dir.join(f).is_file())
 }
 
+/// Check a candidate dir AND its immediate subdirectories for required files.
+/// The installer keeps files in `sherpa-onnx-funasr-nano-int8-2025-12-30/`
+/// while dev/bundled copies may be flat.
+fn find_model_dir(candidate: &Path) -> Option<PathBuf> {
+    if model_present(candidate) {
+        return Some(candidate.to_path_buf());
+    }
+    // Check immediate subdirectories (installed layout keeps files in subdir).
+    if let Ok(entries) = std::fs::read_dir(candidate) {
+        for e in entries.flatten() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                let p = e.path();
+                if model_present(&p) {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
 fn funasr_dir() -> Option<PathBuf> {
     funasr_candidates()
         .into_iter()
-        .find(|d| model_present(d))
+        .find_map(|d| find_model_dir(&d))
 }
 
 pub fn funasr_model_ready(data_dir: &Path) -> bool {
     let dir = data_dir.join(MODEL_SUBDIR);
-    model_present(&dir)
+    find_model_dir(&dir).is_some()
 }
 
 /// URL used by the installer (`download_funasr_model`).
