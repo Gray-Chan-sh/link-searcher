@@ -43,6 +43,8 @@ zip = { version = "2", features = ["aes-crypto"] }
 image = "0.25"
 imageproc = "0.25"
 pure-onnx-ocr = "0.1"
+tract-onnx = "0.20"
+tokenizers = "0.20"
 ab_glyph = "0.2"
 encoding_rs = "0.8"
 opener = "0.7"

@@ -152,6 +152,10 @@ pub fn config_file_path() -> PathBuf {
     config_dir().join(CONFIG_FILE)
 }
 
+pub fn is_local_embedding_model(model_id: &str) -> bool {
+    model_id.starts_with("local:")
+}
+
 fn config_dir() -> PathBuf {
     // 测试后门：LS_CONFIG_DIR 覆盖配置目录，避免 wire 测试读写真实用户配置。
     if let Ok(dir) = std::env::var("LS_CONFIG_DIR") {

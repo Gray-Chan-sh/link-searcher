@@ -224,9 +224,7 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
         "llm" => &mut config.active_llm_model_id,
         _ => return Err(format!("unknown kind: {kind}")),
     };
-    // Selecting a model implies enabling it — the active id must never
-    // point at a model hidden from the enabled set.
-    if !model_id.is_empty() {
+    if !model_id.is_empty() && !model_id.starts_with("local:") {
         if let Some((pid, mid)) = model_id.split_once(':') {
             if let Some(p) = config.providers.iter_mut().find(|p| p.id == pid) {
                 if let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
