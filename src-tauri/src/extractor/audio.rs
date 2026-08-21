@@ -98,10 +98,10 @@ fn funasr_dir() -> Option<PathBuf> {
         .find(|d| model_present(d))
 }
 
-/// Public check used by startup dependency detection and `check_dependencies`.
-/// True when all four sherpa-onnx model files are present on disk.
+/// True when all sherpa-onnx model files are present in the data dir.
 pub fn funasr_model_ready() -> bool {
-    funasr_dir().is_some()
+    let dir = crate::config::load_config().data_dir.join(MODEL_SUBDIR);
+    model_present(&dir)
 }
 
 /// URL used by the installer (`download_funasr_model`).
