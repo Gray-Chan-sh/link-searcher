@@ -1238,4 +1238,101 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+    #[test]
+    fn test_has_config_secrets() {
+        use crate::config::{AppConfig, ProviderConfig};
+
+        let mut cfg = AppConfig::default();
+        assert!(!has_config_secrets(&cfg));
+
+        cfg.ai_api_key = "sk-test".to_string();
+        assert!(has_config_secrets(&cfg));
+
+        cfg.ai_api_key = String::new();
+        cfg.embedding_api_key = "emb-key".to_string();
+        assert!(has_config_secrets(&cfg));
+
+        cfg.embedding_api_key = String::new();
+        assert!(!has_config_secrets(&cfg));
+
+        cfg.providers.push(ProviderConfig {
+            id: "p1".into(),
+            name: "test".into(),
+            base_url: "http://localhost".into(),
+            api_key: "provider-key".into(),
+            models: vec![],
+        });
+        assert!(has_config_secrets(&cfg));
+    }
+
+    #[test]
+    fn test_snapshot_core_creates_zip_ready_dir() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+
+        use crate::db;
+        use crate::indexer::IndexerService;
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        let base = std::env::temp_dir().join(format!("ls_ziprt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let config_dir = base.join("config_dir");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(config_dir.join("config.json"), r#"{"theme":"dark"}"#).unwrap();
+        unsafe { std::env::set_var("LS_CONFIG_DIR", &config_dir) };
+
+        let db_path = base.join("data.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE t(x INTEGER); INSERT INTO t VALUES(99);",
+            )
+            .unwrap();
+        }
+
+        let data_dir = base.join("data");
+        let index_dir = data_dir.join(INDEX_DIR_NAME);
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("doc.txt"), "hello zip").unwrap();
+        std::fs::write(data_dir.join("chat_history.json"), "[]").unwrap();
+
+        let db_str = db_path.to_str().unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        db::init_db(&conn).unwrap();
+        drop(conn);
+        let pool = db::get_pool(db_str).unwrap();
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            pool, im, indexer, scanner,
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            data_dir, index_dir, db_path, dummy_tx, None,
+        );
+
+        let dest = base.join("snapshot_out");
+        std::fs::create_dir_all(&dest).unwrap();
+        let manifest = snapshot_core(&state, &dest).unwrap();
+
+        assert!(dest.join(INDEX_DIR_NAME).join("doc.txt").is_file());
+        assert!(dest.join("data.db").is_file());
+        assert!(dest.join("config.json").is_file());
+        assert!(dest.join("chat_history.json").is_file());
+
+        let total: u64 = manifest.files.iter().map(|f| f.size).sum();
+        assert_eq!(manifest.size, total);
+        assert!(manifest.size > 0);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(&base);
+        unsafe { std::env::remove_var("LS_CONFIG_DIR") };
+    }
 }
