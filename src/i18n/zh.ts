@@ -109,6 +109,7 @@ const zh: Record<string, string> = {
      file_tree_unindexed: '未索引',
      file_tree_menu_scope: '加入检索范围',
      file_tree_menu_mention: '提及此文件',
+     file_tree_search_no_results: '未找到匹配文件',
     set_session_scope: '设为会话范围',
     clear_session_scope: '清除会话范围',
     no_dirs: '未配置目录',

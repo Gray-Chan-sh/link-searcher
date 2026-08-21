@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
+import { searchFilePaths } from '../api/files'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
@@ -20,6 +21,8 @@ export default function AiChat() {
   const [treeExpanded, setTreeExpanded] = useState(true)
   const [pendingMention, setPendingMention] = useState<string | null>(null)
   const [treeFilter, setTreeFilter] = useState('')
+  const [searchResults, setSearchResults] = useState<string[]>([])
+  const [searching, setSearching] = useState(false)
   // 会话列表搜索与时间筛选
   const [sessionFilter, setSessionFilter] = useState('')
   const [sessionRange, setSessionRange] = useState<'all' | 'today' | 'week' | 'older'>('all')
@@ -94,6 +97,16 @@ export default function AiChat() {
   const handleTreeClick = useCallback((path: string) => {
     setPendingMention(path)
   }, [])
+
+  useEffect(() => {
+    if (!treeFilter.trim()) { setSearchResults([]); return }
+    setSearching(true)
+    const timer = setTimeout(() => {
+      searchFilePaths(treeFilter.trim(), 30).then(setSearchResults).catch(() => {})
+      setSearching(false)
+    }, 1500)
+    return () => clearTimeout(timer)
+  }, [treeFilter])
 
   const handleSessionChange = useCallback((session: ChatSession | null) => {
     setActiveSession(session)
@@ -360,8 +373,9 @@ export default function AiChat() {
               >
                 {t(`session_range_${r}`)}
               </button>
-            ))}
-          </div>
+                  ))}
+                )}
+              </div>
         </div>
         <div className="flex-1 overflow-y-auto p-1 space-y-0.5">
           {visibleSessions.map(s => (
@@ -469,7 +483,28 @@ export default function AiChat() {
                 />
               </div>
               <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-                {dirTrees.map(dt => (
+                {treeFilter.trim() ? (
+                  searching ? (
+                    <div className="px-2 py-4 text-center text-[10px] text-gray-400">搜索中…</div>
+                  ) : searchResults.length > 0 ? (
+                    searchResults.map(path => (
+                      <div
+                        key={path}
+                        onClick={() => { setPendingMention(path); setTreeFilter(''); setSearchResults([]) }}
+                        onContextMenu={e => { e.preventDefault(); handleAddToScope(path) }}
+                        className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded cursor-pointer"
+                        title={`${t('file_tree_file_hint')}${path}`}
+                      >
+                        <span className="shrink-0 text-[10px]">📄</span>
+                        <span className="truncate flex-1">{path}</span>
+                        <span className="shrink-0 text-[9px] text-gray-400">+ 范围</span>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="px-2 py-4 text-center text-[10px] text-gray-400">{t('file_tree_search_no_results')}</div>
+                  )
+                ) : (
+                  dirTrees.map(dt => (
                   <div key={dt.id}>
                     <div className="px-2 py-0.5 flex items-center gap-1">
                       <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
