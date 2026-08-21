@@ -10,6 +10,7 @@ import { LoadingSpinner, PlusIcon } from '../icons'
 import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { checkDependencies, getVersion, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
+import { triggerBackup, getBackupStatus, exportBackup, restoreFromZip, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type DeadDir } from '../api/backup'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -54,8 +55,11 @@ export default function Settings() {
   const [adding, setAdding] = useState(false)
   const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [modelFilter, setModelFilter] = useState<Record<string, string>>({})
-  // 展开集合：默认空 = 全量列表默认折叠（搜索时自动展开）；点击组头切换。
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
+  const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
+  const [backingUp, setBackingUp] = useState(false)
+  const [exportPassword, setExportPassword] = useState('')
+  const [deadDirs, setDeadDirs] = useState<DeadDir[]>([])
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -94,6 +98,11 @@ export default function Settings() {
 
   useEffect(() => {
     aiCapabilities().then(setCaps).catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    getBackupStatus().then(setBackupStatus).catch(() => {})
+    getDeadDirs().then(setDeadDirs).catch(() => {})
   }, [])
 
   const persistProviders = async (providers: ProviderInfo[]) => {
@@ -336,6 +345,69 @@ export default function Settings() {
     await setLang(newLang as 'zh' | 'en' | 'ja' | 'ko')
   }
 
+  const handleBackupNow = async () => {
+    setBackingUp(true)
+    try {
+      await triggerBackup()
+      const s = await getBackupStatus()
+      setBackupStatus(s)
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBackingUp(false)
+    }
+  }
+
+  const handleExportBackup = async () => {
+    try {
+      const dest = await open({ directory: false, multiple: false, title: t('backup_export_zip'), filters: [{ name: 'ZIP', extensions: ['zip'] }] })
+      if (!dest) return
+      const result = await exportBackup(dest as string, exportPassword || undefined)
+      if (result.has_secrets) {
+        await message(t('backup_export_no_password_warning'), { title: t('backup_export'), kind: 'warning' })
+      }
+      await message(t('backup_export_done', { path: result.dest_path }), { title: t('backup_export'), kind: 'info' })
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleRestoreZip = async () => {
+    try {
+      const file = await open({ directory: false, multiple: false, title: t('backup_restore_select'), filters: [{ name: 'ZIP', extensions: ['zip'] }] })
+      if (!file) return
+      const confirmed = await ask(t('confirm_rebuild'), { title: t('backup_restore'), kind: 'warning' })
+      if (!confirmed) return
+      await restoreFromZip(file as string, exportPassword || undefined)
+      const restart = await ask(t('backup_restore'), { title: t('backup_restore'), kind: 'info' })
+      if (restart) await restartApp()
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleRemapDir = async (dirId: string) => {
+    try {
+      const newPath = await open({ directory: true, multiple: false, title: t('backup_remap_select') })
+      if (!newPath) return
+      await remapDir(dirId, newPath as string)
+      setDeadDirs(d => d.filter(x => x.id !== dirId))
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleRemoveDir = async (dirId: string) => {
+    const confirmed = await ask(t('confirm_remove_dir'), { title: t('backup_remove'), kind: 'warning' })
+    if (!confirmed) return
+    try {
+      await removeDirWithFiles(dirId)
+      setDeadDirs(d => d.filter(x => x.id !== dirId))
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const selectedEngine = ocrEngines.find(e => e.engine_type === (settings['ocr_engine'] ?? 'PaddleOCR'))
 
   const handleFieldChange = (key: string, value: string) => {
@@ -395,6 +467,7 @@ export default function Settings() {
           { id: 'index', key: t('tab_index') },
           { id: 'docs', key: t('tab_docs') },
           { id: 'ai', key: t('tab_ai') },
+          { id: 'backup', key: t('tab_backup') },
           { id: 'system', key: t('tab_system') },
         ].map(tab => (
           <button
@@ -896,6 +969,86 @@ export default function Settings() {
         </Section>
         </div>
 
+        <div className={activeTab === 'backup' ? 'space-y-6' : 'hidden'}>
+        <Section title={t('backup_actions')}>
+          <div className="space-y-2 text-sm text-gray-700 dark:text-gray-300">
+            {backupStatus ? (
+              <>
+                {backupStatus.last_backup !== null && (
+                  <p>{t('backup_status_last', { time: new Date(backupStatus.last_backup * 1000).toLocaleString() })}</p>
+                )}
+                {backupStatus.last_backup === null && <p className="text-gray-400 dark:text-gray-500">{t('backup_none')}</p>}
+                <p>{t('backup_status_count', { n: String(backupStatus.backup_count) })}</p>
+                <p>{t('backup_status_size', { size: formatSize(backupStatus.backup_size) })}</p>
+              </>
+            ) : (
+              <p className="text-gray-400 dark:text-gray-500">{t('loading')}</p>
+            )}
+          </div>
+          <button
+            onClick={handleBackupNow}
+            disabled={backingUp}
+            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
+          >
+            {backingUp && <LoadingSpinner className="size-3" />}
+            {backingUp ? t('backup_in_progress') : t('backup_now')}
+          </button>
+        </Section>
+
+        <Section title={t('backup_export')}>
+          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('backup_export_password')}</label>
+          <input
+            type="password"
+            value={exportPassword}
+            onChange={e => setExportPassword(e.target.value)}
+            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+          />
+          <button
+            onClick={handleExportBackup}
+            className="mt-2 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+          >
+            {t('backup_export_zip')}
+          </button>
+        </Section>
+
+        <Section title={t('backup_restore')}>
+          <button
+            onClick={handleRestoreZip}
+            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+          >
+            {t('backup_restore_zip')}
+          </button>
+        </Section>
+
+        {deadDirs.length > 0 && (
+          <Section title={t('backup_dead_dirs')}>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">{t('backup_dead_dirs_desc')}</p>
+            <div className="space-y-2">
+              {deadDirs.map(d => (
+                <div key={d.id} className="flex items-center gap-3 p-2 bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700 rounded-lg">
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-mono text-gray-900 dark:text-gray-100 truncate">{d.path}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{t('backup_dead_dir_files', { n: String(d.file_count) })}</p>
+                  </div>
+                  <button
+                    onClick={() => handleRemapDir(d.id)}
+                    className="px-2 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+                  >
+                    {t('backup_remap')}
+                  </button>
+                  <button
+                    onClick={() => handleRemoveDir(d.id)}
+                    className="px-2 py-1 text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 rounded hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                  >
+                    {t('backup_remove')}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </Section>
+        )}
+        </div>
+
         <div className={activeTab === 'system' ? 'space-y-6' : 'hidden'}>
         <Section title={t('tab_system')}>
           <ToggleField
@@ -1172,4 +1325,11 @@ function filterGuide(guide: string): string {
   const prefix = `${platform}:`
   const line = guide.split('\n').find(l => l.startsWith(prefix))
   return line ? line.slice(prefix.length).trimStart() : guide
+}
+
+function formatSize(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`
 }
