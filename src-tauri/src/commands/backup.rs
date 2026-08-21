@@ -557,6 +557,162 @@ fn has_config_secrets(config: &AppConfig) -> bool {
     false
 }
 
+fn restore_from_dir(
+    src: &std::path::Path,
+    index_dir: &std::path::Path,
+    index_manager: &std::sync::Arc<std::sync::RwLock<IndexManager>>,
+    indexer: &crate::indexer::IndexerService,
+    db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+) -> Result<(), String> {
+    let index_src = src.join(INDEX_DIR_NAME);
+    if index_src.is_dir() {
+        let tmp_name = format!("index.restore-{}", uuid::Uuid::new_v4().simple());
+        let tmp_dir = index_dir.with_file_name(&tmp_name);
+        copy_dir(&index_src, &tmp_dir)?;
+
+        match IndexManager::open_or_create(&tmp_dir) {
+            Ok(new_mgr) => {
+                if let Ok(mut mgr) = index_manager.write() {
+                    *mgr = new_mgr;
+                }
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(format!("无法打开恢复的索引: {e}"));
+            }
+        }
+        indexer.reset_writer();
+
+        let old = index_dir.with_file_name("index.old");
+        if index_dir.exists() {
+            let _ = std::fs::remove_dir_all(&old);
+            let _ = std::fs::rename(index_dir, &old);
+        }
+        if let Err(e) = std::fs::rename(&tmp_dir, index_dir) {
+            if old.exists() {
+                let _ = std::fs::rename(&old, index_dir);
+            }
+            return Err(format!("切换索引目录失败: {e}"));
+        }
+        let _ = std::fs::remove_dir_all(&old);
+    }
+
+    let db_src = src.join("data.db");
+    if db_src.is_file() {
+        let staging = std::env::temp_dir().join(format!(
+            "ls-restore-{}.db",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::copy(&db_src, &staging).map_err(|e| format!("复制备份数据库失败: {e}"))?;
+        let restore_result = (|| -> Result<(), String> {
+            let src_conn = Connection::open(&staging)
+                .map_err(|e| format!("打开备份数据库失败: {e}"))?;
+            let mut dst = db_pool
+                .get()
+                .map_err(|e| format!("获取数据库连接失败: {e}"))?;
+            let backup = Backup::new(&src_conn, &mut dst)
+                .map_err(|e| format!("初始化恢复失败: {e}"))?;
+            let mut r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
+            let mut busy = 0;
+            while r == StepResult::Busy || r == StepResult::Locked {
+                busy += 1;
+                if busy >= 3 {
+                    return Err("数据库繁忙，恢复未完成，请重试".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
+            }
+            if r != StepResult::Done {
+                return Err("数据库繁忙，恢复未完成，请重试".to_string());
+            }
+            Ok(())
+        })();
+        let _ = std::fs::remove_file(&staging);
+        restore_result?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn restore_from_zip(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    zip_path: String,
+    password: Option<String>,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    if state
+        .is_restoring
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("正在恢复中，请稍候".to_string());
+    }
+
+    let tmp = std::env::temp_dir().join(format!("ls_restore_zip_{}", uuid::Uuid::new_v4().simple()));
+    let index_dir = state.index_dir.clone();
+    let index_manager = state.index_manager.clone();
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    let is_restoring = state.is_restoring.clone();
+    let zip_path_in = zip_path.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+        let file = std::fs::File::open(&zip_path_in)
+            .map_err(|e| format!("failed to open zip: {e}"))?;
+        let mut archive = zip::ZipArchive::new(file)
+            .map_err(|e| format!("failed to read zip: {e}"))?;
+
+        for i in 0..archive.len() {
+            let pw = password.as_deref().unwrap_or("");
+            let mut entry = if pw.is_empty() {
+                archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?
+            } else {
+                archive.by_index_decrypt(i, pw.as_bytes())
+                    .map_err(|e| format!("zip entry {i} decrypt: {e}"))?
+            };
+            let name = entry.name().to_string();
+            if entry.is_dir() {
+                std::fs::create_dir_all(tmp.join(&name))
+                    .map_err(|e| format!("failed to create dir {name}: {e}"))?;
+            } else {
+                if let Some(parent) = tmp.join(&name).parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create parent {parent:?}: {e}"))?;
+                }
+                use std::io::Read;
+                let mut data = Vec::new();
+                entry.read_to_end(&mut data)
+                    .map_err(|e| format!("failed to read {name}: {e}"))?;
+                std::fs::write(tmp.join(&name), &data)
+                    .map_err(|e| format!("failed to write {name}: {e}"))?;
+            }
+        }
+
+        if !tmp.join("snapshot.json").is_file() {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err("无效的备份文件：缺少 snapshot.json".to_string());
+        }
+
+        let r = restore_from_dir(&tmp, &index_dir, &index_manager, &indexer, &db_pool);
+        let _ = std::fs::remove_dir_all(&tmp);
+        r
+    })
+    .await
+    .map_err(|e| format!("恢复任务异常: {e}"))?;
+    result?;
+
+    is_restoring.store(false, Ordering::SeqCst);
+    log::info!("restored from zip: {zip_path}");
+
+    let _ = app.emit("restore-completed", serde_json::json!({ "name": zip_path }));
+    app.restart()
+}
+
 #[tauri::command]
 pub async fn restore_backup(
     state: State<'_, AppState>,
@@ -585,80 +741,7 @@ pub async fn restore_backup(
         if !backup_dir.is_dir() {
             return Err(format!("备份不存在: {backup_name_in}"));
         }
-        // 1. 恢复索引：复制到临时目录 → 切换 IndexManager → 原子替换（同 rebuild_index 的 tmp→rename 模式）
-        let index_src = backup_dir.join(INDEX_DIR_NAME);
-        if index_src.is_dir() {
-            let tmp_name = format!("index.restore-{}", uuid::Uuid::new_v4().simple());
-            let tmp_dir = index_dir.with_file_name(&tmp_name);
-            copy_dir(&index_src, &tmp_dir)?;
-
-            match IndexManager::open_or_create(&tmp_dir) {
-                Ok(new_mgr) => {
-                    if let Ok(mut mgr) = index_manager.write() {
-                        *mgr = new_mgr;
-                    }
-                }
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&tmp_dir);
-                    return Err(format!("无法打开恢复的索引: {e}"));
-                }
-            }
-            // 后续写入落到恢复后的索引，而不是已删除的旧目录
-            indexer.reset_writer();
-
-            let old = index_dir.with_file_name("index.old");
-            if index_dir.exists() {
-                let _ = std::fs::remove_dir_all(&old);
-                let _ = std::fs::rename(&index_dir, &old);
-            }
-            if let Err(e) = std::fs::rename(&tmp_dir, &index_dir) {
-                if old.exists() {
-                    let _ = std::fs::rename(&old, &index_dir);
-                }
-                return Err(format!("切换索引目录失败: {e}"));
-            }
-            let _ = std::fs::remove_dir_all(&old);
-        }
-
-        // 2. 恢复数据库：SQLite 在线备份 API 写入活跃连接，不直接覆盖 data.db（WAL 模式安全）
-        let db_src = backup_dir.join("data.db");
-        if db_src.is_file() {
-            // 备份的 data.db 是 WAL 库的静态副本，先复制到可写临时文件再打开：
-            // 只读打开 WAL 库会因缺少 -wal/-shm 失败，直接读备份目录又会污染备份文件
-            let staging = std::env::temp_dir().join(format!(
-                "ls-restore-{}.db",
-                uuid::Uuid::new_v4().simple()
-            ));
-            std::fs::copy(&db_src, &staging).map_err(|e| format!("复制备份数据库失败: {e}"))?;
-            let restore_result = (|| -> Result<(), String> {
-                let src = Connection::open(&staging)
-                    .map_err(|e| format!("打开备份数据库失败: {e}"))?;
-                let mut dst = db_pool
-                    .get()
-                    .map_err(|e| format!("获取数据库连接失败: {e}"))?;
-                let backup = Backup::new(&src, &mut dst)
-                    .map_err(|e| format!("初始化恢复失败: {e}"))?;
-                // step(-1) 一次性备份全部页；Busy/Locked 为瞬时错误，重试（同 rusqlite::Connection::restore）
-                let mut r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
-                let mut busy = 0;
-                while r == StepResult::Busy || r == StepResult::Locked {
-                    busy += 1;
-                    if busy >= 3 {
-                        return Err("数据库繁忙，恢复未完成，请重试".to_string());
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    r = backup.step(-1).map_err(|e| format!("恢复数据库失败: {e}"))?;
-                }
-                if r != StepResult::Done {
-                    return Err("数据库繁忙，恢复未完成，请重试".to_string());
-                }
-                Ok(())
-            })();
-            let _ = std::fs::remove_file(&staging);
-            restore_result?;
-        }
-
-        Ok(())
+        restore_from_dir(&backup_dir, &index_dir, &index_manager, &indexer, &db_pool)
     })
     .await
     .map_err(|e| format!("恢复任务异常: {e}"))?;

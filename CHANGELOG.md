@@ -16,6 +16,7 @@
 - **备份链合并压缩**：新增 `merge_chain(N=10)`，当快照数达到阈值时合并最旧 N-1 个为 consolidated "merged" 快照（segment 硬链接复用，非 segment 文件取最新版），旧目录删除并更新 baseline。新增 `prune_orphan_dirs` 清理未引用目录。`trigger_backup` 用 `merge_chain` + `prune_orphan_dirs` 替换原来简单 LRU 裁剪 + `cleanup_old_backups`。带合并集成测试（`src-tauri/src/commands/backup.rs`）
 - **新增 list_backups IPC 命令**：读取 `.chain.json` 返回 `BackupSnapshot[]`（id/ts/kind/size），注册到 `lib.rs` invoke_handler（`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
 - **新增 export_backup 导出 zip 命令**：`snapshot_core` 快照当前状态到临时目录 → 打包为单 zip（Deflated 压缩），可选 AES-256 加密（`password` 参数非空时启用）。自动检测 config 中 API Key 等秘密并返回 `has_secrets` 标志。注册到 `lib.rs` invoke_handler（`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
+- **新增 restore_from_zip 命令**：从 zip 恢复备份（支持 AES-256 解密密码）。提取到临时目录，验证 `snapshot.json` 清单，复用 `restore_from_dir` 公共恢复引擎（索引切换 + 数据库在线备份恢复）。提取 `restore_from_dir` 公共函数，`restore_backup` 同步迁移复用。注册到 `lib.rs` invoke_handler（`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
 
 ---
 
