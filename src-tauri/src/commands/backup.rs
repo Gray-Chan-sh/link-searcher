@@ -56,6 +56,13 @@ pub struct BackupExportResult {
     pub dest_path: String,
 }
 
+#[derive(Serialize)]
+pub struct DeadDirInfo {
+    pub id: String,
+    pub path: String,
+    pub file_count: u64,
+}
+
 /// 增量备份链：`{data_dir}/backups/.chain.json`，记录全部快照 + 已存储的
 /// 不可变 segment 文件集合（segment_store，链内去重，硬链接共享一份物理副本）。
 #[derive(Serialize, Deserialize, Default)]
@@ -711,6 +718,58 @@ pub async fn restore_from_zip(
 
     let _ = app.emit("restore-completed", serde_json::json!({ "name": zip_path }));
     app.restart()
+}
+
+#[tauri::command]
+pub async fn get_dead_dirs(state: State<'_, AppState>) -> Result<Vec<DeadDirInfo>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let dirs = crate::db::dir_config::list_dirs(&conn).map_err(|e| format!("db error: {e}"))?;
+    let mut result = Vec::new();
+    for d in dirs {
+        if !std::path::Path::new(&d.path).is_dir() {
+            let count = crate::db::tracker::count_files_by_dir(&conn, &d.id)
+                .map_err(|e| format!("db error: {e}"))?;
+            result.push(DeadDirInfo {
+                id: d.id,
+                path: d.path,
+                file_count: count,
+            });
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn remap_dir(state: State<'_, AppState>, dir_id: String, new_path: String) -> Result<(), String> {
+    if dir_id.trim().is_empty() || new_path.trim().is_empty() {
+        return Err("dir_id 和 new_path 不能为空".to_string());
+    }
+    let new_path = std::path::PathBuf::from(&new_path);
+    if !new_path.is_dir() {
+        return Err(format!("目标路径不存在或不是目录: {new_path:?}"));
+    }
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    conn.execute(
+        "UPDATE dir_config SET path=?1, updated_at=?2 WHERE id=?3",
+        rusqlite::params![new_path.to_str().unwrap_or(""), chrono::Utc::now().timestamp(), dir_id],
+    )
+    .map_err(|e| format!("db error: {e}"))?;
+    log::info!("remapped dir {dir_id} to {new_path:?}");
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_dir_with_files(state: State<'_, AppState>, dir_id: String) -> Result<(), String> {
+    if dir_id.trim().is_empty() {
+        return Err("dir_id 不能为空".to_string());
+    }
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let count = crate::db::tracker::delete_files_by_dir(&conn, &dir_id)
+        .map_err(|e| format!("db error: {e}"))?;
+    crate::db::dir_config::remove_dir(&conn, &dir_id)
+        .map_err(|e| format!("db error: {e}"))?;
+    log::info!("removed dir {dir_id} and {count} associated files");
+    Ok(())
 }
 
 #[tauri::command]

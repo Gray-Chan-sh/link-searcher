@@ -219,6 +219,23 @@ pub fn get_files_by_dir(conn: &Connection, dir_id: &str) -> Result<Vec<FileRecor
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect files_by_dir")
 }
 
+pub fn count_files_by_dir(conn: &Connection, dir_id: &str) -> Result<u64> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM file_tracking WHERE dir_id=?1",
+        rusqlite::params![dir_id],
+        |r| r.get(0),
+    )
+    .context("count_files_by_dir failed")?;
+    Ok(count as u64)
+}
+
+pub fn delete_files_by_dir(conn: &Connection, dir_id: &str) -> Result<u64> {
+    let n = conn
+        .execute("DELETE FROM file_tracking WHERE dir_id=?1", rusqlite::params![dir_id])
+        .context("delete_files_by_dir failed")?;
+    Ok(n as u64)
+}
+
 pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
     let dirs = crate::db::dir_config::list_dirs(conn)
         .context("failed to list dirs for migration")?;
