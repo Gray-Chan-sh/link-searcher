@@ -499,30 +499,54 @@ pub async fn export_backup(
     state: State<'_, AppState>,
     dest_path: String,
     password: Option<String>,
+    backup_name: Option<String>,
 ) -> Result<BackupExportResult, String> {
     if dest_path.trim().is_empty() {
         return Err("导出路径不能为空".to_string());
-    }
-    let tmp = std::env::temp_dir().join(format!("ls_export_{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
-    let _snapshot = snapshot_core(&state, &tmp)?;
-
-    let chain_path = state.data_dir.join("backups").join(".chain.json");
-    if chain_path.is_file() {
-        std::fs::copy(&chain_path, tmp.join(".chain.json"))
-            .map_err(|e| format!("failed to copy chain: {e}"))?;
     }
 
     let config = load_config();
     let has_secrets = has_config_secrets(&config);
 
-    let file = std::fs::File::create(&dest_path)
+    let (source_dir, cleanup_tmp) = match &backup_name {
+        Some(name) if !name.is_empty() => {
+            let dir = state.data_dir.join("backups").join(name);
+            if !dir.is_dir() {
+                return Err(format!("备份不存在: {name}"));
+            }
+            (dir, None::<std::path::PathBuf>)
+        }
+        _ => {
+            let tmp = std::env::temp_dir().join(format!("ls_export_{}", uuid::Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
+            let _snapshot = snapshot_core(&state, &tmp)?;
+            let chain_path = state.data_dir.join("backups").join(".chain.json");
+            if chain_path.is_file() {
+                std::fs::copy(&chain_path, tmp.join(".chain.json"))
+                    .map_err(|e| format!("failed to copy chain: {e}"))?;
+            }
+            (tmp.clone(), Some(tmp))
+        }
+    };
+
+    zip_dir(&source_dir, &dest_path, password.as_deref())?;
+    if let Some(t) = cleanup_tmp {
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    let label = backup_name.as_deref().unwrap_or("live");
+    log::info!("backup exported ({label}) to {dest_path}, has_secrets={has_secrets}");
+    Ok(BackupExportResult { has_secrets, dest_path: dest_path.clone() })
+}
+
+fn zip_dir(source: &std::path::Path, dest: &str, password: Option<&str>) -> Result<(), String> {
+    let file = std::fs::File::create(dest)
         .map_err(|e| format!("failed to create zip: {e}"))?;
     let mut zip_writer = zip::ZipWriter::new(file);
 
-    for entry in collect_files(&tmp)? {
+    for entry in collect_files(source)? {
         let rel = entry
-            .strip_prefix(&tmp)
+            .strip_prefix(source)
             .map_err(|e| format!("path strip error: {e}"))?
             .to_string_lossy()
             .replace('\\', "/");
@@ -530,7 +554,7 @@ pub async fn export_backup(
             .map_err(|e| format!("failed to read {entry:?}: {e}"))?;
         let mut options = zip::write::FileOptions::<()>::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        if let Some(ref pw) = password {
+        if let Some(pw) = password {
             if !pw.is_empty() {
                 options = options.with_aes_encryption(zip::AesMode::Aes256, pw);
             }
@@ -543,10 +567,7 @@ pub async fn export_backup(
     }
 
     zip_writer.finish().map_err(|e| format!("zip finish failed: {e}"))?;
-    let _ = std::fs::remove_dir_all(&tmp);
-
-    log::info!("backup exported to {dest_path}, has_secrets={has_secrets}");
-    Ok(BackupExportResult { has_secrets, dest_path: dest_path.clone() })
+    Ok(())
 }
 
 fn has_config_secrets(config: &AppConfig) -> bool {

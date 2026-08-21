@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { ask, open, message } from '@tauri-apps/plugin-dialog'
+import { ask, open, message, save } from '@tauri-apps/plugin-dialog'
 import { listen } from '@tauri-apps/api/event'
 import { useSettings } from '../hooks/useSettings'
 import { usePersistentState } from '../hooks/usePersistentState'
@@ -10,7 +10,7 @@ import { LoadingSpinner, PlusIcon } from '../icons'
 import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type BgeStatus, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
-import { triggerBackup, getBackupStatus, exportBackup, restoreFromZip, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type DeadDir } from '../api/backup'
+import { triggerBackup, getBackupStatus, exportBackup, restoreBackup, listBackups, restoreFromZip, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -62,6 +62,7 @@ export default function Settings() {
   const [backingUp, setBackingUp] = useState(false)
   const [exportPassword, setExportPassword] = useState('')
   const [deadDirs, setDeadDirs] = useState<DeadDir[]>([])
+  const [backups, setBackups] = useState<BackupSnapshot[]>([])
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -115,7 +116,10 @@ export default function Settings() {
 
   useEffect(() => {
     getBackupStatus().then(setBackupStatus).catch(() => {})
+    listBackups().then(setBackups).catch(() => {})
     getDeadDirs().then(setDeadDirs).catch(() => {})
+    const id = setInterval(() => { getBackupStatus().then(setBackupStatus).catch(() => {}); listBackups().then(setBackups).catch(() => {}) }, 60_000)
+    return () => clearInterval(id)
   }, [])
 
   const persistProviders = async (providers: ProviderInfo[]) => {
@@ -301,6 +305,17 @@ export default function Settings() {
     }
   }, [])
 
+  const handleRestoreFromBackup = async (backupName: string) => {
+    const confirmed = await ask(t('confirm_restore_backup', { name: backupName }), { title: t('backup_restore'), kind: 'warning' })
+    if (!confirmed) return
+    try {
+      await restoreBackup(backupName)
+      await message(t('backup_restore_completed'), { title: t('backup_restore'), kind: 'info' })
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const handleFunasrInstall = async () => {
     if (funasrInstalling) return
     const confirmed = await ask(t('confirm_install_funasr'), {
@@ -376,15 +391,20 @@ export default function Settings() {
     }
   }
 
-  const handleExportBackup = async () => {
+  const handleExportBackup = async (backupName?: string) => {
     try {
-      const dest = await open({ directory: false, multiple: false, title: t('backup_export_zip'), filters: [{ name: 'ZIP', extensions: ['zip'] }] })
+      const dest = await save({
+        filters: [{ name: 'ZIP', extensions: ['zip'] }],
+        defaultPath: `link-searcher-backup-${backupName ?? new Date().toISOString().slice(0, 10)}.zip`,
+        title: t('backup_export_zip'),
+      })
       if (!dest) return
-      const result = await exportBackup(dest as string, exportPassword || undefined)
+      const result = await exportBackup(dest as string, exportPassword || undefined, backupName || null)
       if (result.has_secrets) {
         await message(t('backup_export_no_password_warning'), { title: t('backup_export'), kind: 'warning' })
       }
       await message(t('backup_export_done', { path: result.dest_path }), { title: t('backup_export'), kind: 'info' })
+      listBackups().then(setBackups).catch(() => {})
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e))
     }
@@ -1038,12 +1058,42 @@ export default function Settings() {
             className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
           />
           <button
-            onClick={handleExportBackup}
+            onClick={() => handleExportBackup()}
             className="mt-2 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
           >
-            {t('backup_export_zip')}
+            {t('backup_export_current')}
           </button>
         </Section>
+
+        {backups.length > 0 && (
+          <Section title={t('backup_list')}>
+            <div className="space-y-1.5">
+              {[...backups].reverse().map(snap => (
+                <div key={snap.id} className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700">
+                  <span className={`shrink-0 w-2 h-2 rounded-full ${snap.kind === 'baseline' || snap.kind === 'merged' ? 'bg-green-500' : 'bg-blue-400'}`} />
+                  <span className="font-mono text-gray-900 dark:text-gray-100 flex-1 truncate">{snap.id}</span>
+                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{new Date(snap.ts * 1000).toLocaleDateString()} {new Date(snap.ts * 1000).toLocaleTimeString()}</span>
+                  <span className="text-gray-400 dark:text-gray-500 shrink-0">{formatSize(snap.size)}</span>
+                  <button
+                    onClick={() => handleExportBackup(snap.id)}
+                    title={t('backup_export_snapshot')}
+                    className="px-2 py-0.5 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                  >
+                    {t('backup_export')}
+                  </button>
+                  <button
+                    onClick={() => handleRestoreFromBackup(snap.id)}
+                    title={t('backup_restore_from_backup')}
+                    className="px-2 py-0.5 text-xs rounded bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                  >
+                    {t('backup_restore')}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">{t('backup_keep_policy', { n: 10 })}</p>
+          </Section>
+        )}
 
         <Section title={t('backup_restore')}>
           <button

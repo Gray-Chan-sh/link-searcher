@@ -8,6 +8,8 @@
 
 **动机**：支持无需远程 API 的本地语义搜索，隐私优先，离线可用。
 
+- **备份管理增强**：导出历史快照支持（`export_backup` 新增 `backup_name` 参数，可导出任意历史快照为 zip，支持 AES-256 加密）；Settings 备份 Tab 新增「备份列表」Section（调 `listBackups()` 展示全部快照，每项带「导出此快照」+「恢复」按钮，恢复前二次确认；底部注明「自动保留最近 10 个快照，超出时合并压缩」）。恢复双路径（从内部备份列表直接恢复 / 从外部 ZIP 恢复）。导出对话框改用 `save()` 支持自定义文件名，默认 `link-searcher-backup-YYYY-MM-DD.zip`。4 语种 i18n 补全（`src-tauri/src/commands/backup.rs`、`src/pages/Settings.tsx`、`src/api/backup.ts`、`src/i18n/{zh,en,ja,ko}.ts`）
+
 - **新增依赖**：`tract-onnx = "0.20"`（ONNX 推理，与 PaddleOCR 共用 tract 引擎）、`tokenizers = "0.20"`（HuggingFace tokenizer）（`src-tauri/Cargo.toml`）
 - **本地嵌入引擎**：新建 `ai/local_embed.rs`，基于 tract-onnx + tokenizers 运行 BAAI/bge-small-zh-v1.5（95MB ONNX + 5MB tokenizer.json，512 维，中英双语）。OnceLock 单例模式，CLS pooling + L2 归一化。BGE 查询指令前缀硬编码（`src-tauri/src/ai/local_embed.rs`）
 - **BGE 模型下载命令**：新建 `commands/bge.rs`，`install_bge` 从 hf_mirror/ModelScope 首次使用时下载到 `data_dir/models/bge-small-zh-v1.5/`，`check_bge_installed` 检查模型就绪状态。AtomicBool 防重入，后台线程 + 事件通知（`src-tauri/src/commands/bge.rs`）
