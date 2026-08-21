@@ -19,6 +19,7 @@
 - **新增 restore_from_zip 命令**：从 zip 恢复备份（支持 AES-256 解密密码）。提取到临时目录，验证 `snapshot.json` 清单，复用 `restore_from_dir` 公共恢复引擎（索引切换 + 数据库在线备份恢复）。提取 `restore_from_dir` 公共函数，`restore_backup` 同步迁移复用。注册到 `lib.rs` invoke_handler（`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
 - **新增死目录处理命令**：`get_dead_dirs` 列出磁盘上不存在的监控目录（含关联文件数），`remap_dir` 更新目录路径（file_tracking 用相对路径无需迁移），`remove_dir_with_files` 删除目录配置及所有关联文件记录。新增 `count_files_by_dir` / `delete_files_by_dir` DB 辅助函数（`src-tauri/src/db/tracker.rs`、`src-tauri/src/commands/backup.rs`、`src-tauri/src/lib.rs`）
 - **新增备份设置页 Tab**：设置页新增「备份」标签页，含备份触发/状态展示、ZIP 导出（可选密码 + has_secrets 风险提示）、ZIP 恢复（文件选择器）、死目录列表与重映射/删除操作。4 语种 i18n 键补全（`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
+- **备份功能测试补全**：新增 `test_has_config_secrets`（API Key 检测逻辑覆盖 legacy/embedding/LLM/provider 四类密钥）和 `test_snapshot_core_creates_zip_ready_dir`（验证快照产物目录结构完整且清单 size 一致）（`src-tauri/src/commands/backup.rs`）
 
 ---
 
