@@ -8,8 +8,9 @@ export function mergeScopePrefixes(paths: string[]): string[] {
   const trimmed = paths.map(p => p.trim().replace(/\/+$/, ''))
   // 空字符串吸收
   if (trimmed.some(p => p === '')) return ['']
-  const kept = trimmed.filter(Boolean)
-  return kept.filter((p, i) =>
-    !kept.some((q, j) => j !== i && p.startsWith(q + '/'))
+  // 去精确重复 + 父吞子
+  const unique = [...new Set(trimmed.filter(Boolean))]
+  return unique.filter((p, i) =>
+    !unique.some((q, j) => j !== i && p.startsWith(q + '/'))
   )
 }

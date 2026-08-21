@@ -502,6 +502,60 @@ pub async fn suggest(state: State<'_, AppState>, prefix: String) -> Result<Vec<S
         .map_err(|e| format!("suggest failed: {e}"))
 }
 
+/// 文件树剪枝搜索：从根遍历，每个分支只返回最浅的命中节点（目录或文件），命中即停、不向下展开。
+/// SQL 用 LIKE 预过滤（含命中段的路径必含搜索词，安全），Rust 端全量剪枝后返回所有结果（无 LIMIT）。
+#[tauri::command]
+pub async fn search_tree_prune(
+    state: State<'_, AppState>,
+    term: String,
+) -> Result<Vec<String>, String> {
+    let conn = state
+        .db
+        .get()
+        .map_err(|e| format!("db connection failed: {e}"))?;
+    // ponytail: LIKE 预过滤是安全的——一个会命中的目录段必然对应至少一条已索引文件路径，必含 term。
+    // 若未来要支持"无已索引文件的空目录也搜得到"，需改为走文件系统遍历（get_dir_tree）。
+    let like = format!("%{}%", term.to_lowercase());
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT path FROM file_tracking WHERE lower(path) LIKE ?1 AND status='active' ORDER BY path",
+        )
+        .map_err(|e| format!("prepare failed: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![like], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("query failed: {e}"))?;
+    let paths: Vec<String> = rows
+        .map(|r| r.map_err(|e| format!("row failed: {e}")))
+        .collect::<Result<_, _>>()?;
+
+    let term = term.to_lowercase();
+    let mut out: Vec<String> = Vec::new();
+    let mut pruned: Vec<String> = Vec::new();
+
+    for path in paths {
+        if pruned.iter().any(|p| path.starts_with(p)) {
+            continue;
+        }
+        let segs: Vec<&str> = path.split('/').collect();
+        let mut prefix = String::new();
+        for (i, seg) in segs.iter().enumerate() {
+            prefix = if prefix.is_empty() {
+                seg.to_string()
+            } else {
+                format!("{prefix}/{seg}")
+            };
+            if seg.to_lowercase().contains(&term) {
+                out.push(prefix.clone());
+                if i < segs.len() - 1 {
+                    pruned.push(format!("{prefix}/"));
+                }
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn search_file_paths(
     state: State<'_, AppState>,

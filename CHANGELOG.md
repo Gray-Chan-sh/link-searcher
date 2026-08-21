@@ -4,6 +4,37 @@
 
 ---
 
+## 2026-08-22（修复 — AI 聊天检索管线 7 项缺陷：scope/语义/改写/去重/ASR/时间戳）
+
+**根因**：导出会话 JSON 分析发现首轮路由走 `smartSearchStream` → `prepare_smart_prompt` 硬编码 `semantic:false`、`rewritten:false`、不传 `session_retrieval_scope`，导致 scope/语义/改写全部失效。`bm25_relevant_hits` 无 MD5 去重导致同内容不同路径文件重复命中。音频 ASR 参数不当导致转录乱码。
+
+- **浏览页新增「导出识别文字」**：右键文件 → 导出提取/OCR 的文本到 .txt 文件。调 `preview_file` 获取完整文本（无截断），Tauri save 对话框选保存位置，`writeTextFile` 写入。空内容时提示。4 语种 i18n（`src/pages/Browse.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
+
+- **首轮 scope 不生效**：`ChatPanel.tsx` `handleSend` 路由条件 `hasScope` 不检查 `session.retrieval_scope`，用户通过右键"加入检索范围"设了 scope 但首轮无 @mention 时走 `smartSearchStream`（不传 scope）。改为始终走 `conversationAskStream`（`prepare_conversation_prompt` 完整处理 scope 解析+语义+改写）（`src/components/ChatPanel.tsx`）
+- **恢复挂起请求不走 scope**：`ChatPanel.tsx` resume effect `sourceIds.length === 0` 分支调 `smartSearch`（无 scope），改为始终调 `conversationAsk` 并传 `session.retrieval_scope` + `strict_docs`（`src/components/ChatPanel.tsx`）
+- **语义搜索分数恒 null**：`prepare_smart_prompt` 硬编码 `semantic: false` + `semantic_score: None`。重构为调用 `bm25_relevant_hits`（内部按 `embedding_enabled()` 走 `semantic_fuse` 加权混合），`ScoredHit.semantic_score`/`rrf_score` 正确传播到 `EvidenceItem`（`src-tauri/src/commands/ai.rs`）
+- **查询改写恒 false**：同上根因，`prepare_smart_prompt` 硬编码 `rewritten: false`。重构后走 `bm25_relevant_hits` 路径，one-shot 无历史时改写正确返回 false（无 parent 消息），多轮路径已在 `prepare_conversation_prompt` 中正确实现（`src-tauri/src/commands/ai.rs`）
+- **搜索结果重复**：`bm25_relevant_hits` 收集 BM25 命中时不按 MD5 去重，同内容不同路径文件各占一条。加 `HashSet<String>` 跟踪已见 MD5，同 MD5 只保留首条（BM25 已按分降序，保留最高分）。`semantic_fuse` 在去重后的候选集上运行，自动受益（`src-tauri/src/commands/ai.rs`）
+- **音频转录乱码**：FunASR-Nano 配置 `max_new_tokens: 512` 截断长段、`itn: 1` 数字乱码、硬切分无 overlap 切断词语、段间 `" "` 拼接破坏 CJK。改为 `max_new_tokens: 1024`、`itn: 0`、1s overlap 硬切分回退、段间 `""` 拼接（`src-tauri/src/extractor/audio.rs`）
+- **会话 created_at=0**：前端创建 ChatSession 时 `created_at` 默认 0，`save_chat_session_impl` 的 `Some(existing)` 分支直接覆盖后端创建时的 `created_at: now`。改为 `created_at == 0` 时保留已有值（`Some` 分支）或设为 `now`（`None` 分支）（`src-tauri/src/commands/ai.rs`）
+- **scope 过滤静默失效**：`searcher.rs` 的 `RegexQuery` 对含中文/全角字符的 STRING 字段路径匹配可能静默失败，fallback 到 `AllQuery` 禁用过滤。在 `bm25_relevant_hits` 加 post-filter 安全网：BM25 结果按 `path_prefixes` 再过滤一次，保证 scope 正确性。同时增大 fetch 量补偿 post-filter 损失（`src-tauri/src/commands/ai.rs`）
+- **scope 文件路径不解析为 file_id**：`session_retrieval_scope` 中的文件路径只进 `path_prefixes`（RegexQuery + post-filter），但 BM25 top-50 命中里可能没有该文件 → post-filter 后为空 → strict_docs 拒绝回答。改为先 `get_file_by_path` 精确匹配 + `search_file_ids_by_path_fragment` LIKE 回退解析为 `file_id`，用可靠的 TermQuery 而非 RegexQuery（`src-tauri/src/commands/ai.rs`）
+- **strict_docs 默认 false**：用户期望引用文件时默认严格模式。`create_chat_session_impl` 和前端 `AiChat.tsx` 两处创建 ChatSession 改为 `strict_docs: true`（`src-tauri/src/commands/ai.rs`、`src/pages/AiChat.tsx`）
+- **per_turn_scopes 导出为空**：`patchSession` 用闭包中的陈旧 `session` 做 spread，catch 分支（错误回答）覆盖了 step 1 设的 `per_turn_scopes`。改为 `patchSession` 优先用 `sessionRef.current`（最新值），保留 async 调用间累积的 `per_turn_scopes`（`src/components/ChatPanel.tsx`）
+- **semantic_fuse 诊断日志**：cosine 全零时打 WARN 显示 query 向量维度/非零状态/doc 维度，便于排查 embedding 模型问题（`src-tauri/src/commands/ai.rs`）
+- **scope 内文件搜不到**：`session_retrieval_scope` 文件路径先 `get_file_by_path` 精确匹配 + `search_file_ids_by_path_fragment` LIKE 回退解析为 `file_id`，用 TermQuery 而非 RegexQuery；BM25 零命中时用空查询重试（match-all within file_ids scope），确保 scope 内文件内容被返回即使查询词不匹配索引内容（`src-tauri/src/commands/ai.rs`）
+- **检索范围可重复添加**：`mergeScopePrefixes` 只做父吞子去重，不去精确重复。加 `new Set()` 去重后再父吞子（`src/utils/scopeMerge.ts`）
+- **引用文件行为不统一**：`retrieval_scope` 文件只做 BM25 过滤（可能零命中→strict_docs 拒绝），而 @mention 文件直接注入 LLM prompt。两者行为不一致，且 @mention 是单轮 chip（发送后清空），与会话级设计冲突。改为 `retrieval_scope` 文件解析后也直接注入（带 [N] 编号），与 @mention 统一行为，每轮都注入直到用户删除（`src-tauri/src/commands/ai.rs`）
+- **扫描件 PDF 水印检测漏判导致 OCR 不触发**：`try_pdftotext_extract` 的 `is_watermark_text` 过滤条件 `n.len() > 20`（字节）对短中文水印（如"证据第页"=12字节）过滤过严，导致 normalize 后的页面全部被过滤掉→`normalized` 为空→水印检测返回 false→pdftotext 返回的 640 字符页码文本被误当有效内容→OCR 从未运行。改为 `n.chars().count() > 2`（字符数），让短中文水印能被检测（`src-tauri/src/extractor/pdf.rs`）
+
+## 2026-08-21（修复 — 文件树搜索 JSX 解析错误 + 树剪枝搜索）
+
+**根因**：`AiChat.tsx` 文件树搜索块用三层嵌套三元 + 括号化 JSX 分支写在单个 `{}` 内，`oxc`/esbuild 解析器把第 488 行 `)` 误判为外层分组关闭、导致 502 行 `:` 无匹配 `?`。此前 3 个 commit（`efac8f4`/`c119904`/`2698543`）均只重新平衡括号，未消除嵌套三元本身这个解析器陷阱，故每次 `tauri dev` 重新报错。
+
+- **文件树搜索 JSX 反复编译失败**：将三层嵌套三元改为 IIFE（`(() => { if … return … })()`），零嵌套三元、零行为变化，`oxc` 干净通过（`src/pages/AiChat.tsx`）
+- **dirs.rs 未使用变量警告**：`build_dir_tree` 中 `let (indexed, status)` 的 `indexed` 从未读取（line 357 已内联重算），改为 `let (_, status)` 消除 `unused_variables` 警告（`src-tauri/src/commands/dirs.rs`）
+- **文件树搜索改为树剪枝算法**：`AiChat.tsx` 树过滤框从 `searchFilePaths`（SQL `LIKE` 返回所有文件路径）改为 `search_tree_prune`（Rust 端逐段检查路径，每分支取最浅命中节点——目录或文件，命中即停不向下展开，祖先吞并后代）。全量返回无上限。前端加最短输入拦截（半角 ≥3 / 全角 ≥2）（`src-tauri/src/commands/search.rs`、`src-tauri/src/lib.rs`、`src/api/files.ts`、`src/pages/AiChat.tsx`、`src/i18n/{zh,en,ja,ko}.ts`）
+
 ## 2026-08-21（内置 BGE 嵌入模型 — 本地离线语义搜索）
 
 **动机**：支持无需远程 API 的本地语义搜索，隐私优先，离线可用。

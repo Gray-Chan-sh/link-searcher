@@ -402,7 +402,7 @@ pub fn is_watermark_text(pages: &[String]) -> bool {
     let normalized: Vec<String> = pages
         .iter()
         .map(|p| normalize_for_watermark(p))
-        .filter(|n| n.len() > 20)
+        .filter(|n| n.chars().count() > 2)
         .collect();
     if normalized.len() < 2 {
         return false;

@@ -1,13 +1,36 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
-import { searchFilePaths } from '../api/files'
+import { searchFilePaths, searchTreePrune } from '../api/files'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { save, ask } from '@tauri-apps/plugin-dialog'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import ChatPanel from '../components/ChatPanel'
+
+type ResultNode = { name: string; path: string; isMatch: boolean; children: ResultNode[] }
+
+function buildResultTree(paths: string[]): ResultNode[] {
+  const matchSet = new Set(paths)
+  const roots: ResultNode[] = []
+  const nodeMap = new Map<string, ResultNode>()
+  for (const path of paths) {
+    let cur = ''
+    let siblings = roots
+    for (const seg of path.split('/')) {
+      cur = cur ? `${cur}/${seg}` : seg
+      let node = nodeMap.get(cur)
+      if (!node) {
+        node = { name: seg, path: cur, isMatch: matchSet.has(cur), children: [] }
+        nodeMap.set(cur, node)
+        siblings.push(node)
+      }
+      siblings = node.children
+    }
+  }
+  return roots
+}
 
 export default function AiChat() {
   const { t } = useI18n()
@@ -99,12 +122,16 @@ export default function AiChat() {
   }, [])
 
   useEffect(() => {
-    if (!treeFilter.trim()) { setSearchResults([]); return }
+    const q = treeFilter.trim()
+    if (!q) { setSearchResults([]); return }
+    const hasFullWidth = /[\u3000-\u9fff\uff00-\uffef\u3040-\u30ff\uac00-\ud7af]/.test(q)
+    const minLen = hasFullWidth ? 2 : 3
+    if (q.length < minLen) { setSearchResults([]); return }
     setSearching(true)
     const timer = setTimeout(() => {
-      searchFilePaths(treeFilter.trim(), 30).then(setSearchResults).catch(() => {})
+      searchTreePrune(q).then(setSearchResults).catch(() => {})
       setSearching(false)
-    }, 1500)
+    }, 500)
     return () => clearTimeout(timer)
   }, [treeFilter])
 
@@ -161,7 +188,7 @@ export default function AiChat() {
     if (sessions.length === 0) {
       createChatSession().then(id => {
         setActiveId(id)
-        setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [] })
+        setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true })
         refreshList()
       }).catch(() => {})
     } else {
@@ -191,7 +218,7 @@ export default function AiChat() {
   const handleNewSession = useCallback(async () => {
     try {
       const id = await createChatSession()
-      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [] })
+      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true })
       setActiveId(id)
       refreshList()
     } catch { /* ignore */ }
@@ -482,49 +509,58 @@ export default function AiChat() {
                 />
               </div>
               <div className="flex-1 overflow-y-auto px-2 pb-2 space-y-1">
-                {treeFilter.trim() ? (
-                  searching ? (
-                    <div className="px-2 py-4 text-center text-[10px] text-gray-400">搜索中…</div>
-                  ) : searchResults.length > 0 ? (
-                    searchResults.map(path => (
-                      <div
-                        key={path}
-                        onClick={() => { setPendingMention(path); setTreeFilter(''); setSearchResults([]) }}
-                        onContextMenu={e => { e.preventDefault(); handleAddToScope(path) }}
-                        className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 rounded cursor-pointer"
-                        title={`${t('file_tree_file_hint')}${path}`}
-                      >
-                        <span className="shrink-0 text-[10px]">📄</span>
-                        <span className="truncate flex-1">{path}</span>
-                        <span className="shrink-0 text-[9px] text-gray-400">+ 范围</span>
+                {(() => {
+                  if (!treeFilter.trim()) return dirTrees.map(dt => (
+                    <div key={dt.id}>
+                      <div className="px-2 py-0.5 flex items-center gap-1">
+                        <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
+                        <button
+                          type="button"
+                          onClick={() => activeSession?.retrieval_scope?.includes('') ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
+                          title={activeSession?.retrieval_scope?.includes('') ? t('clear_session_scope') : t('set_session_scope')}
+                          className={`text-[10px] ${
+                            activeSession?.retrieval_scope?.includes('')
+                              ? 'text-purple-600 dark:text-purple-300 font-medium'
+                              : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
+                          } shrink-0`}
+                        >
+                          {activeSession?.retrieval_scope?.includes('') ? '范围✓' : '范围'}
+                        </button>
                       </div>
-                    ))
-                  : (
-                    <div className="px-2 py-4 text-center text-[10px] text-gray-400">{t('file_tree_search_no_results')}</div>
-                  )
-                ) : (
-                  dirTrees.map(dt => (
-                  <div key={dt.id}>
-                    <div className="px-2 py-0.5 flex items-center gap-1">
-                      <span className="flex-1 text-[10px] font-medium text-gray-400 dark:text-gray-500 truncate">{dt.label}</span>
-                      <button
-                        type="button"
-                        onClick={() => activeSession?.retrieval_scope?.includes('') ? handleClearSessionScope() : handleSetSessionScope(dt.id)}
-                        title={activeSession?.retrieval_scope?.includes('') ? t('clear_session_scope') : t('set_session_scope')}
-                        className={`text-[10px] ${
-                          activeSession?.retrieval_scope?.includes('')
-                            ? 'text-purple-600 dark:text-purple-300 font-medium'
-                            : 'text-gray-400 hover:text-purple-500 dark:text-gray-500 dark:hover:text-purple-400'
-                        } shrink-0`}
-                      >
-                        {activeSession?.retrieval_scope?.includes('') ? '范围✓' : '范围'}
-                      </button>
+                      {dt.root && sortTreeNodes(dt.root).filter(n => passesFilter(n, treeFilter)).map(child => (
+                        <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onScope={handleAddToScope} filter={treeFilter} />
+                      ))}
                     </div>
-                    {dt.root && sortTreeNodes(dt.root).filter(n => passesFilter(n, treeFilter)).map(child => (
-                      <TreeFileList key={child.path} node={child} basePath={dt.basePath} onPick={handleTreeClick} onScope={handleAddToScope} filter={treeFilter} />
-                    ))}
-                  </div>
-                ))}
+                  ));
+                  const q = treeFilter.trim();
+                  const hasFullWidth = /[\u3000-\u9fff\uff00-\uffef\u3040-\u30ff\uac00-\ud7af]/.test(q);
+                  const minLen = hasFullWidth ? 2 : 3;
+                  if (q.length < minLen) return <div className="px-2 py-4 text-center text-[10px] text-gray-400">{t('file_tree_min_chars', { n: minLen })}</div>;
+                  if (searching) return <div className="px-2 py-4 text-center text-[10px] text-gray-400">搜索中…</div>;
+                  if (searchResults.length > 0) {
+                    const tree = buildResultTree(searchResults);
+                    const render = (nodes: ResultNode[], depth: number) => nodes.map(n => (
+                      <div key={n.path}>
+                        <div
+                          style={{ paddingLeft: `${depth * 12}px` }}
+                          className={n.isMatch
+                            ? "flex items-center gap-1.5 py-1 text-xs text-gray-700 dark:text-gray-200 bg-blue-50 dark:bg-blue-950/30 hover:bg-blue-100 dark:hover:bg-blue-900/40 rounded cursor-pointer"
+                            : "flex items-center gap-1.5 py-0.5 text-[10px] text-gray-400 dark:text-gray-500"}
+                          onClick={n.isMatch ? () => { setPendingMention(n.path); setTreeFilter(''); setSearchResults([]) } : undefined}
+                          onContextMenu={n.isMatch ? (e) => { e.preventDefault(); handleAddToScope(n.path) } : undefined}
+                          title={n.isMatch ? `${t('file_tree_file_hint')}${n.path}` : undefined}
+                        >
+                          <span className="shrink-0 text-[10px]">{n.children.length > 0 || !n.name.includes('.') ? '📁' : '📄'}</span>
+                          <span className={`truncate flex-1 ${n.isMatch ? 'font-medium' : ''}`}>{n.name}</span>
+                          {n.isMatch && <span className="shrink-0 text-[9px] text-gray-400">+ 范围</span>}
+                        </div>
+                        {n.children.length > 0 && render(n.children, depth + 1)}
+                      </div>
+                    ));
+                    return render(tree, 0);
+                  }
+                  return <div className="px-2 py-4 text-center text-[10px] text-gray-400">{t('file_tree_search_no_results')}</div>;
+                })()}
                 {dirTrees.length === 0 && (
                   <div className="px-2 py-1 text-[10px] text-gray-400">{t('no_dirs')}</div>
                 )}

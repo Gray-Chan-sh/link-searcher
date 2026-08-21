@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
-import { ask } from '@tauri-apps/plugin-dialog'
+import { ask, save } from '@tauri-apps/plugin-dialog'
+import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { useI18n } from '../i18n'
-import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities } from '../api/files'
+import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, previewFile } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFiles } from '../api/index'
 import { LoadingSpinner, SearchIcon } from '../icons'
@@ -750,6 +751,22 @@ return (
                 onClick={() => { revealInFolder(contextMenu.item.file_id); setContextMenu(null) }}
               >
                 {t('show_in_folder')}
+              </button>
+              <button
+                className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={async () => {
+                  const fid = contextMenu.item.file_id
+                  setContextMenu(null)
+                  try {
+                    const text = await previewFile(fid)
+                    if (!text.trim()) { alert(t('no_text_to_export')); return }
+                    const name = contextMenu.item.file_name.replace(/\.[^.]+$/, '') + '.txt'
+                    const path = await save({ defaultPath: name, filters: [{ name: 'Text', extensions: ['txt'] }] })
+                    if (path) await writeTextFile(path, text)
+                  } catch (e) { console.error('[Browse] export text failed:', e) }
+                }}
+              >
+                {t('export_text')}
               </button>
             </>
           ) : null}
