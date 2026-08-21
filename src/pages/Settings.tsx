@@ -60,6 +60,7 @@ export default function Settings() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   const [backingUp, setBackingUp] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const [exportPassword, setExportPassword] = useState('')
   const [deadDirs, setDeadDirs] = useState<DeadDir[]>([])
   const [backups, setBackups] = useState<BackupSnapshot[]>([])
@@ -392,7 +393,9 @@ export default function Settings() {
   }
 
   const handleExportBackup = async (backupName?: string) => {
+    if (exporting) return
     try {
+      setExporting(true)
       const dest = await save({
         filters: [{ name: 'ZIP', extensions: ['zip'] }],
         defaultPath: `link-searcher-backup-${backupName ?? new Date().toISOString().slice(0, 10)}.zip`,
@@ -401,12 +404,14 @@ export default function Settings() {
       if (!dest) return
       const result = await exportBackup(dest as string, exportPassword || undefined, backupName || null)
       if (result.has_secrets) {
-        await message(t('backup_export_no_password_warning'), { title: t('backup_export'), kind: 'warning' })
+        await message(t('backup_export_no_password_warning'), { title: t('backup_export_current'), kind: 'warning' })
       }
-      await message(t('backup_export_done', { path: result.dest_path }), { title: t('backup_export'), kind: 'info' })
+      await message(t('backup_export_done', { path: result.dest_path }), { title: t('backup_export_current'), kind: 'info' })
       listBackups().then(setBackups).catch(() => {})
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
     }
   }
 
@@ -1049,20 +1054,25 @@ export default function Settings() {
           </button>
         </Section>
 
-        <Section title={t('backup_export')}>
-          <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('backup_export_password')}</label>
-          <input
-            type="password"
-            value={exportPassword}
-            onChange={e => setExportPassword(e.target.value)}
-            className="w-full px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
-          />
-          <button
-            onClick={() => handleExportBackup()}
-            className="mt-2 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
-          >
-            {t('backup_export_current')}
-          </button>
+        <Section title={t('backup_export_current')}>
+          <div className="flex items-center gap-3">
+            <input
+              type="password"
+              value={exportPassword}
+              onChange={e => setExportPassword(e.target.value)}
+              placeholder={t('backup_export_password_placeholder')}
+              className="flex-1 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
+            />
+            <button
+              onClick={handleExportBackup}
+              disabled={backingUp || exporting}
+              className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+            >
+              {(backingUp || exporting) && <LoadingSpinner className="size-3" />}
+              {exporting ? t('backup_exporting') : t('backup_export_now')}
+            </button>
+          </div>
+          <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">{t('backup_export_current_hint')}</p>
         </Section>
 
         {backups.length > 0 && (
@@ -1076,10 +1086,11 @@ export default function Settings() {
                   <span className="text-gray-400 dark:text-gray-500 shrink-0">{formatSize(snap.size)}</span>
                   <button
                     onClick={() => handleExportBackup(snap.id)}
+                    disabled={exporting}
                     title={t('backup_export_snapshot')}
-                    className="px-2 py-0.5 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                    className="px-2 py-0.5 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    {t('backup_export')}
+                    {t('backup_export_snapshot_short')}
                   </button>
                   <button
                     onClick={() => handleRestoreFromBackup(snap.id)}
