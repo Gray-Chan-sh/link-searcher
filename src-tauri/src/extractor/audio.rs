@@ -152,12 +152,12 @@ fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
         tokenizer: Some(f("Qwen3-0.6B")),
         system_prompt: Some("You are a helpful assistant.".into()),
         user_prompt: Some("语音转写：".into()),
-        max_new_tokens: 512,
+        max_new_tokens: 1024,
         temperature: 1e-06,
         top_p: 0.8,
         seed: 42,
         language: None,
-        itn: 1,
+        itn: 0,
         hotwords: None,
         ..Default::default()
     };
@@ -270,7 +270,7 @@ impl AudioExtractor {
             .iter()
             .filter_map(|seg| transcribe(rec, seg))
             .collect::<Vec<_>>()
-            .join(" ");
+            .join("");
 
         if text.trim().is_empty() {
             return Ok(format!(
@@ -285,21 +285,29 @@ impl AudioExtractor {
 
 /// Split `samples` into bounded chunks (≤30s each) for LLM decoding.
 /// Uses Silero VAD when its model is present; otherwise falls back to a
-/// fixed 28s hard split with 0.5s overlap at boundaries. Always returns
+/// fixed 28s hard split with 1s overlap at boundaries. Always returns
 /// a non-empty list — never feed long audio whole (OOM).
 fn recognize_segments(samples: &[f32]) -> Vec<Vec<f32>> {
     if let Some(segments) = vad_segments(samples) {
         return segments;
     }
-    // Fixed hard split: 28s chunks (28 * 16000 samples), no overlap.
+    // Fixed hard split: 28s chunks with 1s overlap to avoid cutting words at boundaries.
     const CHUNK: usize = 28 * 16000;
+    const OVERLAP: usize = 16000;
     if samples.len() <= CHUNK {
         return vec![samples.to_vec()];
     }
-    samples
-        .chunks(CHUNK)
-        .map(|c| c.to_vec())
-        .collect()
+    let mut result = Vec::new();
+    let mut start = 0;
+    while start < samples.len() {
+        let end = (start + CHUNK).min(samples.len());
+        result.push(samples[start..end].to_vec());
+        if end == samples.len() {
+            break;
+        }
+        start = end.saturating_sub(OVERLAP);
+    }
+    result
 }
 
 fn vad_available() -> bool {

@@ -220,51 +220,36 @@ fn prepare_smart_prompt(
     state: &tauri::State<'_, AppState>,
     query: &str,
 ) -> Result<PreparedSmart, String> {
-    use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
+    let hits = bm25_relevant_hits(
+        state, &query.to_lowercase(), 3, crate::ai::embedding_enabled(),
+        None, None, None, None, None, None,
+    )?;
 
     let (context, source_ids, source_files, evidence) = {
-        let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
-        let reader = mgr.reader().map_err(|e| format!("{e}"))?;
-        let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
-        drop(mgr);
-
-        let params = SearchParams {
-            // NL questions become an exact PhraseQuery if parsed verbatim
-            // (Tantivy default) — re-tokenise as explicit OR so any term hits.
-            query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-            dir_ids: None, file_ids: None, ext_filter: None,
-            date_from: None, date_to: None, path_prefixes: None,
-            sort: SortField::Score, sort_order: "desc".to_string(),
-            page: 1, page_size: 15, fuzzy: false, semantic: false,
-        };
-        let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
-
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         let mut docs: Vec<String> = Vec::new();
         let mut sids: Vec<String> = Vec::new();
         let mut sf: Vec<String> = Vec::new();
         let mut ev: Vec<EvidenceItem> = Vec::new();
-        // 首轮来源收敛为 top3：作为会话起点守卫，避免弱相关命中
-        // （如“年度/报告”类泛词全库命中）从第一轮就把来源带偏。
-        for hit in result.hits.iter().take(3) {
+        for hit in &hits {
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
                 if let Some(md5) = &rec.md5 {
                     if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                         if !text.trim().is_empty() {
-docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
-                sids.push(hit.file_id.clone());
-                sf.push(rec.path.clone());
-                ev.push(EvidenceItem {
-                    file_id: hit.file_id.clone(),
-                    path: rec.path.clone(),
-                    snippet: truncate_text(&text, 200),
-                    bm25_score: Some(hit.score),
-                    semantic_score: None,
-                    rrf_score: None,
-                    rewritten: false,
-                    rewritten_query: None,
-                    from_history: false,
-                });
+                            docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
+                            sids.push(hit.file_id.clone());
+                            sf.push(rec.path.clone());
+                            ev.push(EvidenceItem {
+                                file_id: hit.file_id.clone(),
+                                path: rec.path.clone(),
+                                snippet: truncate_text(&text, 200),
+                                bm25_score: hit.bm25_score,
+                                semantic_score: hit.semantic_score,
+                                rrf_score: hit.rrf_score,
+                                rewritten: false,
+                                rewritten_query: None,
+                                from_history: false,
+                            });
                         }
                     }
                 }
@@ -607,6 +592,12 @@ fn semantic_fuse(
     if scored.is_empty() {
         return None;
     }
+    let max_cos = scored.iter().map(|(_, _, c)| *c).fold(0.0_f64, f64::max);
+    if max_cos == 0.0 {
+        log::warn!("[AI] semantic_fuse: all cosine=0.0 — q_vec dim={} nonzero={} doc dim={}",
+            q_vec.len(), q_vec.iter().any(|x| *x != 0.0),
+            emb_map.values().next().map(|v| v.len()).unwrap_or(0));
+    }
     // BM25 分数归一化到 0~1（max 归一到 1）——与 cosine 同尺度才能加权。
     let pairs: Vec<(String, f64, f64)> = scored
         .iter()
@@ -657,35 +648,70 @@ fn bm25_relevant_hits(
     drop(mgr);
 
     // When semantic fusion is active we fetch more candidates for the RRF pool.
+    // When path_prefixes are set, fetch more to compensate for post-filtering
+    // (RegexQuery on STRING fields can silently fail on Unicode paths).
     let fetch = if semantic && crate::ai::embedding_enabled() {
         limit.max(100)
+    } else if path_prefixes.as_ref().map_or(false, |p| !p.is_empty()) {
+        limit.max(50)
     } else {
         limit
     };
     let params = SearchParams {
         query: crate::search::schema::split_query_terms(&query.to_lowercase()),
-        dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter,
+        dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter: ext_filter.clone(),
         date_from, date_to, path_prefixes: path_prefixes.clone(),
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
     log::info!("[AI] bm25_relevant_hits: q={query} dir_ids={:?} path_prefixes={:?} file_ids={:?}", dir_ids, path_prefixes, file_ids);
-    let result = searcher.search(&params).map_err(|e| format!("{e}"))?;
+    let mut result = searcher.search(&params).map_err(|e| format!("{e}"))?;
+
+    // Fallback: if BM25 returns zero hits but file_ids scope the search to
+    // specific files, retry with an empty query (match-all within scope) so
+    // the user's scoped files are still returned even when query terms
+    // don't match the indexed content (tokenization/extraction differences).
+    if result.hits.is_empty() && file_ids.as_ref().map_or(false, |ids| !ids.is_empty()) {
+        let fallback_params = SearchParams {
+            query: String::new(),
+            dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter: ext_filter.clone(),
+            date_from, date_to, path_prefixes: path_prefixes.clone(),
+            sort: SortField::Score, sort_order: "desc".to_string(),
+            page: 1, page_size: fetch, fuzzy: false, semantic: false,
+        };
+        log::info!("[AI] bm25_relevant_hits: zero hits with file_ids, retrying with empty query");
+        result = searcher.search(&fallback_params).map_err(|e| format!("{e}"))?;
+    }
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut bm25_hits: Vec<ScoredHit> = Vec::new();
+    let mut seen_md5: std::collections::HashSet<String> = std::collections::HashSet::new();
     for hit in result.hits {
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-            if rec.status == "active" && rec.md5.is_some() {
-                bm25_hits.push(ScoredHit {
-                    file_id: hit.file_id,
-                    path: rec.path,
-                    bm25_score: Some(hit.score),
-                    semantic_score: None,
-                    rrf_score: None,
-                    from_history: false,
-                });
+            if rec.status == "active" {
+                if let Some(md5) = &rec.md5 {
+                    if seen_md5.insert(md5.clone()) {
+                        bm25_hits.push(ScoredHit {
+                            file_id: hit.file_id,
+                            path: rec.path,
+                            bm25_score: Some(hit.score),
+                            semantic_score: None,
+                            rrf_score: None,
+                            from_history: false,
+                        });
+                    }
+                }
             }
+        }
+    }
+
+    // Safety net: RegexQuery on STRING fields can silently fail on Unicode
+    // paths, falling back to AllQuery which disables scope filtering.
+    if let Some(prefixes) = &path_prefixes {
+        if !prefixes.is_empty() {
+            bm25_hits.retain(|h| {
+                prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
+            });
         }
     }
 
@@ -768,8 +794,7 @@ async fn prepare_conversation_prompt(
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
     let mut path_prefixes: Vec<String> = Vec::new();
-    // 会话级统一范围（retrieval_scope）：目录/文件统一为路径前缀（跨轮累计）。
-    // 监控根绝对路径→dir_ids；相对子路径→path_prefixes（与 @目录 解析一致）。
+    let mut scope_file_resolved: Vec<(String, String)> = Vec::new();
     {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         for dir_path in session_retrieval_scope {
@@ -784,7 +809,21 @@ async fn prepare_conversation_prompt(
                     continue;
                 }
             }
-            // 否则按相对路径前缀过滤（子目录/文件夹/文件）
+            // 试文件路径精确匹配 → file_id（可靠的 TermQuery，不依赖 RegexQuery）
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, p) {
+                scope_file_resolved.push((rec.id, rec.path));
+                continue;
+            }
+            // LIKE 回退：路径片段匹配
+            if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2) {
+                if ids.len() == 1 {
+                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
+                        scope_file_resolved.push((rec.id, rec.path));
+                        continue;
+                    }
+                }
+            }
+            // 否则按相对路径前缀过滤（子目录/文件夹）
             path_prefixes.push(p.to_string());
         }
         drop(conn);
@@ -845,12 +884,20 @@ async fn prepare_conversation_prompt(
     let path_prefixes_opt = if path_prefixes.is_empty() { None } else { Some(path_prefixes) };
 
     // 解析 @mention 文件路径 → file_ids，传给搜索限定范围
-    let (mention_resolved, missing_mentions) = {
+    let (mut mention_resolved, missing_mentions) = {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         let (r, m) = resolve_mention_file_ids(&conn, &scope.mention_files);
         drop(conn);
         (r, m)
     };
+    // retrieval_scope 中的文件也作为直接注入（与 @mention 统一行为），
+    // 不再只做 BM25 过滤——用户引用的文件应每轮都注入 LLM prompt。
+    let mut seen_mention: std::collections::HashSet<String> = mention_resolved.iter().map(|(id, _)| id.clone()).collect();
+    for (fid, path) in &scope_file_resolved {
+        if seen_mention.insert(fid.clone()) {
+            mention_resolved.push((fid.clone(), path.clone()));
+        }
+    }
     let all_file_ids: Vec<String> = mention_resolved.iter().map(|(id, _)| id.clone()).collect();
     let mention_file_ids: Option<Vec<String>> = if all_file_ids.is_empty() { None } else { Some(all_file_ids) };
 
@@ -875,6 +922,10 @@ async fn prepare_conversation_prompt(
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut merged: Vec<ScoredHit> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // 已直接注入的 scope/mention 文件不重复注入（避免双重内容）
+    for (fid, _) in &mention_resolved {
+        seen.insert(fid.clone());
+    }
     // 新检索优先：追问要主导依据更新（否则旧来源累积顶满上限,
     // 新文档永远挤不进来, 退化为"只围绕第一轮文档回答"）。
     for hit in new_hits {
@@ -1261,7 +1312,7 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
                     per_turn_evidence: vec![],
                     per_turn_scopes: vec![],
                     retrieval_scope: vec![],
-                    strict_docs: false,
+        strict_docs: true,
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 let _ = write_history(data_dir, &migrated);
@@ -1372,8 +1423,18 @@ fn save_chat_session_impl(data_dir: &std::path::Path, session: ChatSession) -> R
     }
     let exists = h.sessions.iter_mut().find(|s| s.id == session.id);
     match exists {
-        Some(existing) => *existing = session,
-        None => h.sessions.push(session),
+        Some(existing) => {
+            if session.created_at == 0 {
+                session.created_at = existing.created_at;
+            }
+            *existing = session
+        }
+        None => {
+            if session.created_at == 0 {
+                session.created_at = now;
+            }
+            h.sessions.push(session)
+        }
     }
     write_history(data_dir, &h)
 }

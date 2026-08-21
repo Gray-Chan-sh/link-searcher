@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { smartSearch, conversationAsk, cancelAiRequest, smartSearchStream, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
+import { conversationAsk, cancelAiRequest, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
@@ -85,7 +85,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   }, [pendingMention, onMentionConsumed, insertMention])
 
   const patchSession = useCallback((patch: Partial<ChatSession>) => {
-    if (session) onSessionChange({ ...session, ...patch })
+    const cur = sessionRef.current ?? session
+    if (cur) onSessionChange({ ...cur, ...patch })
   }, [session, onSessionChange])
 
   useEffect(() => {
@@ -335,12 +336,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setStreaming({ sessionId: session.id, text: '' })
 
     try {
-      const hasScope = mentionChips.length > 0 || scope.conditions.length > 0 || !!pendingMention
-      if (sourceIds.length === 0 && !hasScope) {
-        await smartSearchStream(cleanQ, session.id)
-      } else {
-        await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false)
-      }
+      // ponytail: smart_search_stream bypasses scope/semantic/rewrite; always use conversation path
+      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false)
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
       if (latestReqIdRef.current !== reqId) return
@@ -364,30 +361,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       skipResumeRef.current = false
       return
     }
-    const q = session.pending_query
     const reqId = ++latestReqIdRef.current
     const base = session.messages
     ;(async () => {
       try {
-        if (sourceIds.length === 0) {
-          const res = await smartSearch(q)
-          if (latestReqIdRef.current !== reqId) return
-          patchSession({
-            messages: [...base, { role: 'assistant', content: res.answer.trim() ? res.answer : `❌ ${t('err_empty_response')}` }],
-            source_ids: res.source_ids,
-            source_files: res.source_files,
-            pending_query: null,
-            pending_started_at: null,
-          })
-        } else {
-          const answer = await conversationAsk(base, sourceIds, undefined, session?.retrieval_scope ?? [], session?.strict_docs ?? false)
-          if (latestReqIdRef.current !== reqId) return
-          patchSession({
-            messages: [...base, { role: 'assistant', content: answer.trim() ? answer : `❌ ${t('err_empty_response')}` }],
-            pending_query: null,
-            pending_started_at: null,
-          })
-        }
+        const answer = await conversationAsk(base, sourceIds.length > 0 ? sourceIds : [], undefined, session?.retrieval_scope ?? [], session?.strict_docs ?? false)
+        if (latestReqIdRef.current !== reqId) return
+        patchSession({
+          messages: [...base, { role: 'assistant', content: answer.trim() ? answer : `❌ ${t('err_empty_response')}` }],
+          pending_query: null,
+          pending_started_at: null,
+        })
       } catch (e) {
         if (latestReqIdRef.current !== reqId) return
         patchSession({

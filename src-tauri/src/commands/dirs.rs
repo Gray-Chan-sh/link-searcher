@@ -342,7 +342,7 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
                 if name.starts_with('.') { continue; }
                 let path = entry.path().to_string_lossy().to_string();
                 let is_file = !ft.is_dir();
-                let (indexed, status) = if is_file {
+                let (_, status) = if is_file {
                     if let Ok(set) = &indexed_set {
                         if set.contains(&path) { (true, Some("indexed".to_string())) }
                         else { (false, Some("unindexed".to_string())) }

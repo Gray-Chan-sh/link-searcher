@@ -148,6 +148,10 @@ export async function searchFilePaths(prefix: string, limit?: number): Promise<s
   return invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
 }
 
+export async function searchTreePrune(term: string): Promise<string[]> {
+  return invoke<string[]>('search_tree_prune', { term })
+}
+
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
 export async function listenAiStream(
   sessionId: string,
