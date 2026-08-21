@@ -23,6 +23,7 @@ use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_healt
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, search_file_paths, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
+use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
 use crate::scanner::watcher::FileWatcher;
@@ -143,6 +144,8 @@ get_dir_children,
             clear_logs,
             get_version,
             install_funasr,
+            install_bge,
+            check_bge_installed,
             get_config,
             update_config,
             add_provider,
