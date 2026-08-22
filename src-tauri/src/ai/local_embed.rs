@@ -1,7 +1,7 @@
 //! Local BGE embedding engine (tract-onnx + tokenizers).
 //!
-//! Loads `bge-small-zh-v1.5` for offline, privacy-first text embeddings
-//! without any remote API dependency.
+//! Loads a local BGE model (small 512-dim or large 1024-dim) for offline,
+//! privacy-first text embeddings without any remote API dependency.
 
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
@@ -18,25 +18,31 @@ struct LocalEmbedder {
 
 static INSTANCE: OnceLock<LocalEmbedder> = OnceLock::new();
 
+/// Extract the local model directory name from `active_embedding_model_id`.
+/// e.g. `"local:bge-small-zh-v1.5"` → `"bge-small-zh-v1.5"`.
+pub fn local_model_dir_name(active_id: &str) -> Option<&str> {
+    active_id.strip_prefix("local:")
+}
+
 /// Check if BGE model files exist on disk (does NOT load them).
-pub fn bge_model_ready(data_dir: &Path) -> bool {
-    let dir = data_dir.join("models").join("bge-small-zh-v1.5");
+pub fn bge_model_ready(data_dir: &Path, model_name: &str) -> bool {
+    let dir = data_dir.join("models").join(model_name);
     dir.join("model.onnx").is_file() && dir.join("tokenizer.json").is_file()
 }
 
 /// Load the BGE model and tokenizer into the global singleton.
 /// Idempotent — subsequent calls are no-ops.
-pub fn init_local_embedder(data_dir: &Path) -> Result<(), String> {
+pub fn init_local_embedder(data_dir: &Path, model_name: &str) -> Result<(), String> {
     if INSTANCE.get().is_some() {
         return Ok(());
     }
-    let embedder = build(data_dir)?;
+    let embedder = build(data_dir, model_name)?;
     let _ = INSTANCE.set(embedder);
     Ok(())
 }
 
-fn build(data_dir: &Path) -> Result<LocalEmbedder, String> {
-    let dir = data_dir.join("models").join("bge-small-zh-v1.5");
+fn build(data_dir: &Path, model_name: &str) -> Result<LocalEmbedder, String> {
+    let dir = data_dir.join("models").join(model_name);
     let onnx = dir.join("model.onnx");
     let tok_path = dir.join("tokenizer.json");
 
@@ -80,7 +86,6 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         return vec![];
     }
 
-    // Tokenize — lock tokenizer, release before model inference.
     let token_data = {
         let tok = e.tokenizer.lock().unwrap_or_else(|p| p.into_inner());
         let batch = match tok.encode_batch(texts.to_vec(), true) {
@@ -102,7 +107,6 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
             .collect::<Vec<_>>()
     };
 
-    // Build flat i64 buffers → [batch, MAX_SEQ_LEN] tensors.
     let n = texts.len();
     let mut ids_buf = vec![0i64; n * MAX_SEQ_LEN];
     let mut mask_buf = vec![0i64; n * MAX_SEQ_LEN];
@@ -131,7 +135,6 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         Err(_) => return vec![None; texts.len()],
     };
 
-    // Inference.
     let output = {
         let model = e.model.lock().unwrap_or_else(|p| p.into_inner());
         match model.run(tvec![ids_t.into(), mask_t.into(), type_t.into()]) {
@@ -143,7 +146,6 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         }
     };
 
-    // Extract CLS token (position 0) and L2-normalize.
     let arr = match output[0].to_array_view::<f32>() {
         Ok(a) => a,
         Err(_) => return vec![None; texts.len()],
