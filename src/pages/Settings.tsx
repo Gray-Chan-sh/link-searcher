@@ -42,7 +42,7 @@ export default function Settings() {
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [funasrInstalling, setFunasrInstalling] = useState(false)
-  const [bgeStatus, setBgeStatus] = useState<BgeStatus | null>(null)
+  const [bgeStatus, setBgeStatus] = useState<BgeStatus[] | null>(null)
   const [bgeInstalling, setBgeInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [caps, setCaps] = useState<AiCapabilities | null>(null)
@@ -154,8 +154,11 @@ export default function Settings() {
         .filter(m => m.enabled !== false && m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
         .map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} / ${m.id}` })),
     )
-    if (kind === 'embedding' && bgeStatus?.installed) {
-      return [{ value: 'local:bge-small-zh-v1.5', label: t('bge_install') }, ...remote]
+    if (kind === 'embedding' && bgeStatus) {
+      const localOpts = bgeStatus
+        .filter(s => s.installed)
+        .map(s => ({ value: `local:${s.model_dir.split('/').pop()}`, label: s.model_name }))
+      return [...localOpts, ...remote]
     }
     return remote
   }
@@ -693,7 +696,7 @@ export default function Settings() {
               availableLabel={t('ai_available')}
               notConfiguredLabel={t('ai_not_configured')}
             />
-            {bgeStatus && !bgeStatus.installed && (
+            {bgeStatus && !bgeStatus.some(s => s.installed) && (
               <button
                 onClick={() => {
                   setBgeInstalling(true)
