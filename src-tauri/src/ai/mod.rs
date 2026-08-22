@@ -116,7 +116,7 @@ pub fn embedding_enabled() -> bool {
     let is_local = crate::config::is_local_embedding_model(model_id);
     log::info!("[AI] embedding_enabled: model_id={model_id}, is_local={is_local}, data_dir={:?}", cfg.data_dir);
     if is_local {
-        let model_name = local_embed::local_model_dir_name(model_id).unwrap_or("bge-small-zh-v1.5");
+        let model_name = local_embed::local_model_dir_name(model_id).unwrap_or("bge-large-zh-v1.5");
         let ready = local_embed::bge_model_ready(&cfg.data_dir, model_name);
         log::info!("[AI] local model ready={ready}, model={model_name}");
         return ready;
@@ -183,7 +183,7 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     let cfg = crate::config::load_config();
     if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
-        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-small-zh-v1.5");
+        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
         if local_embed::bge_model_ready(&cfg.data_dir, model_name) {
             let _ = local_embed::init_local_embedder(&cfg.data_dir, model_name);
             return local_embed::embed_batch_local(texts);
@@ -252,7 +252,7 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
 pub fn embed(text: &str) -> Option<Vec<f32>> {
     let cfg = crate::config::load_config();
     if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
-        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-small-zh-v1.5");
+        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
         if local_embed::bge_model_ready(&cfg.data_dir, model_name) {
             let _ = local_embed::init_local_embedder(&cfg.data_dir, model_name);
             return local_embed::embed_query_local(text);
@@ -671,7 +671,7 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
 fn test_embedding() -> GatewayTest {
     let cfg = crate::config::load_config();
     if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
-        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-small-zh-v1.5");
+        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
         if !local_embed::bge_model_ready(&cfg.data_dir, model_name) {
             return GatewayTest { kind: "embedding", ok: false, detail: format!("{model_name} 模型未下载") };
         }
