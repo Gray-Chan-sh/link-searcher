@@ -14,6 +14,24 @@ import SearchBar from '../components/SearchBar'
 import ResultList from '../components/ResultList'
 import type { SearchHit } from '../api/search'
 
+function CopyAllButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      onClick={() => {
+        navigator.clipboard.writeText(text).then(() => {
+          setCopied(true)
+          setTimeout(() => setCopied(false), 1500)
+        }).catch(e => console.warn('复制失败:', e))
+      }}
+      className="shrink-0 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+      title={label}
+    >
+      {copied ? '✓' : label}
+    </button>
+  )
+}
+
 const LS_KEY_FILTER = 'ls_browse_filter'
 const LS_KEY_EXT = 'ls_browse_ext'
 const LS_KEY_SEARCH = 'ls_browse_search'
