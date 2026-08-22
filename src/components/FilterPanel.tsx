@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { DirConfig, DirTreeNode } from '../api/dirs'
 import { getDirTree } from '../api/dirs'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
@@ -12,6 +12,8 @@ interface FilterPanelProps {
   onDirPathsChange: (paths: string[]) => void
   onExtToggle: (ext: string) => void
   onClearFilters: () => void
+  width: number
+  onWidthChange: (w: number) => void
 }
 
 const COMMON_EXTS = ['pdf', 'docx', 'txt', 'md', 'html', 'csv', 'json', 'xml', 'jpg', 'png']
@@ -36,7 +38,33 @@ export default function FilterPanel({
   onDirPathsChange,
   onExtToggle,
   onClearFilters,
+  width,
+  onWidthChange,
 }: FilterPanelProps) {
+  const { t } = useI18n()
+  const [trees, setTrees] = useState<DirTreeNode[]>([])
+  const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
+  const draggingRef = useRef(false)
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    draggingRef.current = true
+    const startX = e.clientX
+    const startWidth = width
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!draggingRef.current) return
+      const delta = ev.clientX - startX
+      const newW = Math.max(160, Math.min(480, startWidth + delta))
+      onWidthChange(newW)
+    }
+    const onMouseUp = () => {
+      draggingRef.current = false
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
+    window.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('mouseup', onMouseUp)
+  }, [width, onWidthChange])
   const { t } = useI18n()
   const [trees, setTrees] = useState<DirTreeNode[]>([])
   const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
@@ -81,7 +109,12 @@ export default function FilterPanel({
   }
 
   return (
-    <div role="region" aria-label={t('filters')} className="w-56 shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto">
+    <div role="region" aria-label={t('filters')} style={{ width }} className="shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto relative">
+      {/* Drag handle */}
+      <div
+        onMouseDown={handleDragStart}
+        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400/40 transition-colors z-10"
+      />
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('filters')}</h3>
         {hasFilters && (
