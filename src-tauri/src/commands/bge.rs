@@ -13,7 +13,6 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 
 /// (model_name, display_name, dim)
 const LOCAL_MODELS: &[(&str, &str, u32)] = &[
-    ("bge-small-zh-v1.5", "BGE-Small (512维)", 512),
     ("bge-large-zh-v1.5", "BGE-Large (1024维)", 1024),
 ];
 
@@ -48,7 +47,7 @@ pub fn install_bge(state: State<'_, AppState>, app: AppHandle, model_name: Optio
     let name = model_name.unwrap_or_else(|| {
         let cfg = crate::config::load_config();
         crate::ai::local_embed::local_model_dir_name(&cfg.active_embedding_model_id)
-            .unwrap_or("bge-small-zh-v1.5")
+            .unwrap_or("bge-large-zh-v1.5")
             .to_string()
     });
     let model_dir = state.data_dir.join("models").join(&name);
