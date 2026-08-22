@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { searchFilePaths } from '../api/files'
+import { FileTextIcon, FolderIcon } from '../icons'
 
 interface MentionPickerProps {
   /** 当前在 @ 后面已输入的部分（不含 @ 符号） */
@@ -81,7 +82,7 @@ export default function MentionPicker({ query, position, onSelect, onClose }: Me
             onMouseDown={e => { e.preventDefault(); onSelect(path) }}
             onMouseEnter={() => setHighlight(i)}
           >
-            <span className="shrink-0">{isFile ? '📄' : '📁'}</span>
+            <span className="shrink-0">{isFile ? <FileTextIcon className="size-3 text-gray-400 dark:text-gray-500" /> : <FolderIcon className="size-3 text-amber-400 dark:text-amber-500" />}</span>
             <span className="truncate">{path}</span>
           </button>
         )

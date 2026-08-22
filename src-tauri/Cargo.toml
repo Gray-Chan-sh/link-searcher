@@ -70,6 +70,13 @@ ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] 
 # POC: pure-Rust legacy .doc (Word 97-2003) extraction; docx feature unneeded
 rwml = { version = "0.1", default-features = false }
 
+# Web API server (optional remote access — default off)
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+rcgen = "0.13"
+
 # MCP (Model Context Protocol) — debug-only AI agent integration
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 

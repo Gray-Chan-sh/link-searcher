@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
@@ -157,7 +158,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           : {}
         const userTurns = messagesRef.current.filter(m => m.role === 'user').length
         const perTurnPatch = p.source_ids.length > 0
-          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), { turn_index: userTurns - 1, file_ids: p.source_ids, items: p.evidence ?? [] }] }
+          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
+              turn_index: userTurns - 1,
+              file_ids: p.source_ids,
+              items: p.evidence ?? [],
+              trace_id: p.trace_id ?? '',
+              took_ms: p.took_ms,
+              llm_model: p.llm_model ?? '',
+              embedding_model: p.embedding_model ?? '',
+              search_query: p.search_query ?? '',
+              hits: p.hits ?? 0,
+            }] }
           : {}
         onSessionChange({
           ...cur,
@@ -435,7 +446,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                 : (
                   <>
                     <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
+                      remarkPlugins={[remarkGfm, remarkCjkFriendly]}
                       components={{
                         a: ({ href, children }) => {
                           if (href?.startsWith('#ref:')) {

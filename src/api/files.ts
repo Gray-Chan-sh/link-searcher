@@ -69,6 +69,18 @@ export interface PerTurnEvidence {
   turn_index: number
   file_ids: string[]
   items?: EvidenceItem[]
+  /** 本轮唯一追溯 ID（日志关联键） */
+  trace_id?: string
+  /** 本轮生成耗时（毫秒） */
+  took_ms?: number
+  /** 本轮使用的 LLM 模型 ID */
+  llm_model?: string
+  /** 本轮使用的 Embedding 模型 ID */
+  embedding_model?: string
+  /** 改写后的最终检索查询 */
+  search_query?: string
+  /** BM25 合并前命中数 */
+  hits?: number
 }
 
 export interface PerTurnScope {
@@ -134,6 +146,11 @@ export interface AiDonePayload {
   source_ids: string[]
   source_files: string[]
   evidence?: EvidenceItem[]
+  trace_id?: string
+  search_query?: string
+  hits?: number
+  llm_model?: string
+  embedding_model?: string
 }
 
 export async function smartSearchStream(query: string, sessionId: string): Promise<void> {

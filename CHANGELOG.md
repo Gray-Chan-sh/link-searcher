@@ -1,8 +1,63 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 8月5日，共 45+ commit，修复 80+ Bug，完成 35+ 功能改进
+> 2026年7月30日 — 8月22日，共 50+ commit，修复 85+ Bug，完成 40+ 功能改进
 
 ---
+
+## 2026-08-23（新功能 — 安全的远程 Web API：HTTPS RESTful 端点 + Bearer Token 认证）
+
+**动机**：路线图 P3 要求提供可选的远程 WebUI/API，让手机/平板/同事可通过 HTTPS 检索文档、预览文件、查看索引状态、触发扫描。默认关闭，需用户显式启用。
+
+**技术选型**：`axum` + `axum-server`（rustls TLS）直接 spawn 于 `tauri::async_runtime`，非 `tauri-plugin-axum`（后者走 Wry 自定义协议，非真实 TCP，不支持 LAN 访问）。状态共享：clone `AppHandle` 注入 axum State，handler 内 `app_handle.state::<AppState>()` 访问全部 Tauri 管理的状态。优雅关停：`CancellationToken` + `axum_server::Handle::shutdown()` 在 `RunEvent::Exit` 触发。
+
+**新增依赖**：`axum 0.8`、`axum-server 0.7`（tls-rustls）、`tower-http 0.6`、`tokio-util 0.7`、`rcgen 0.13`（自签名证书生成）
+
+**新增文件**（`src-tauri/src/webapi/`）：
+- `mod.rs` — 服务器启动/关停、Bearer Token 生成/加载、端口/绑定地址读取
+- `state.rs` — `ApiState`（AppHandle + auth_token + cancel_token）
+- `auth.rs` — Bearer Token 中间件（`axum::middleware::from_fn`）
+- `tls.rs` — `rcgen` 自签名证书生成 + 持久化到 `{data_dir}/tls/`
+- `routes.rs` — 20 个 RESTful 端点
+
+**RESTful 端点**（全部需 `Authorization: Bearer {token}`）：
+- 只读：`GET /api/search`、`GET /api/suggest`、`GET /api/files`、`GET /api/files/:id/preview`、`GET /api/index/status`、`GET /api/index/health`、`GET /api/dirs`、`GET /api/ai/capabilities`、`GET /api/version`、`GET /api/settings`
+- 写入：`POST /api/scan/trigger`、`POST /api/scan/cancel`、`POST /api/reindex`、`POST /api/chat/ask`（非流式 RAG 问答）
+- 会话：`GET/POST /api/chat/sessions`、`GET/DELETE /api/chat/sessions/:id`、`POST /api/chat/sessions/:id/export`
+
+**安全边界**：
+- 默认关闭（`web_api_enabled` 设置项，默认不存在=关闭）
+- 默认绑定 `127.0.0.1`（仅本机），可选 `0.0.0.0`（局域网）
+- 自签名 TLS 证书（首次启用时自动生成，持久化）
+- 随机 32 字符 Bearer Token（`uuid::Uuid::new_v4().simple()`，持久化到 app_settings）
+- 优雅关停：`CancellationToken` + `axum_server::Handle::shutdown()`
+
+**设置页 UI**（`src/pages/Settings.tsx`，系统标签页新增 "Web API" 区块）：
+- 启用/禁用开关
+- 端口输入（默认 8443）
+- Bearer Token 只读显示 + 重新生成按钮（`crypto.getRandomValues` 前端生成）
+- 绑定地址下拉（仅本机/局域网）
+- 启用时显示访问 URL + 重启提示
+
+**改动文件**：`src-tauri/Cargo.toml`、`src-tauri/src/lib.rs`（spawn + RunEvent::Exit + `pub mod webapi`）、`src-tauri/src/commands/settings.rs`（白名单加 4 个 web_api_* key）、`src-tauri/src/commands/ai.rs`（`read_history`/`write_history`/`create_chat_session_impl`/`export_chat_session_impl`/`export_chat_session_json_impl`/`bm25_relevant_hits`/`truncate_text` 改 pub）、`src-tauri/src/db/dir_config.rs`（DirConfig 加 Serialize）、`src-tauri/src/commands/ai.rs`（ChatHistoryFile/ScoredHit 改 pub）、`src/pages/Settings.tsx`
+
+## 2026-08-23（修复 — AI 聊天 Markdown 渲染：CJK 加粗不生效）
+
+**根因**：CommonMark 的 emphasis flanking 规则将 CJK 字符视为"单词字符"（同英文字母），当 `**` 紧邻中文字符时（如 `有效建立了**"..."**的`），`**` 不满足左/右侧 flanking 条件，被当字面文本输出而非加粗标记。这是 CommonMark spec 层面的已知缺陷（[#650](https://github.com/commonmark/commonmark-spec/issues/650)，2020 年开至今未修）。
+
+- **CJK 加粗渲染失败**：引入 `remark-cjk-friendly` 插件（官方 remark 插件目录收录，Vercel streamdown / Rspress / Cherry Studio 采用），在 micromark 层修复 CJK flanking 规则。对非 CJK 内容输出与 CommonMark 0.31.2 测试用例完全一致。改动 2 行：import + remarkPlugins 数组追加（`src/components/ChatPanel.tsx`、`package.json`）
+
+## 2026-08-22（增强 — AI 聊天全链路追溯：日志 + 导出 + 会话存储）
+
+**动机**：AI 聊天回答缺乏可追溯性——事后无法知道某轮回答使用了哪个模型、耗时多久、最终检索查询是什么、BM25 命中多少文档。`app.log` 和导出会话无法关联。
+
+**方案**：在 `PerTurnEvidence`、`TurnExport`、`AiDone`、`ChatExportJson` 四个结构体同步增加 6 个追溯字段，`conversation_ask_stream` 注入 `[AI_TRACE]` 结构化日志，前端 `onDone` 回调持久化字段到会话存储。
+
+- **新增字段 6 个**：`trace_id`（会话 ID#轮次，关联日志与导出）、`took_ms`（生成耗时）、`llm_model`（激活 LLM 模型 ID）、`embedding_model`（激活 Embedding 模型 ID）、`search_query`（改写后的最终检索查询）、`hits`（BM25 合并前命中数）。全部 `#[serde(default)]` — 旧会话无感兼容（`src-tauri/src/commands/ai.rs`）
+- **Markdown 导出增强**：文件头部新增「追溯信息」块（LLM/Embedding 模型、语义权重、会话 ID、时间）；每轮问下新增 Trace ID、耗时、模型、最终检索查询、命中数元数据（`src-tauri/src/commands/ai.rs`）
+- **JSON 导出升级**：`schema_version` 升至 2，`SessionExportMeta` 增加 `semantic_weight`/`llm_model`/`embedding_model`，`TurnExport` 增加 6 个追溯字段（`src-tauri/src/commands/ai.rs`）
+- **结构化日志**：`conversation_ask_stream` 在检索开始和结束各打一条 `[AI_TRACE]` 日志，含 `trace_id`、模型、strict 模式、hits、search_q、took_ms、answer_chars、sources 等完整上下文（`src-tauri/src/commands/ai.rs`）
+- **前端类型同步**：`PerTurnEvidence` 和 `AiDonePayload` 接口增加 6 个可选追溯字段（`src/api/files.ts`）
+- **前端持久化**：`ChatPanel.tsx` 的 `onDone` 回调将 `trace_id`/`took_ms`/`llm_model`/`embedding_model`/`search_query`/`hits` 写入 `per_turn_evidence`（`src/components/ChatPanel.tsx`）
 
 ## 2026-08-22（修复 — AI 聊天检索管线 7 项缺陷：scope/语义/改写/去重/ASR/时间戳）
 

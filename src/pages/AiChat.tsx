@@ -6,7 +6,7 @@ import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { writeTextFile } from '@tauri-apps/plugin-fs'
 import { save, ask } from '@tauri-apps/plugin-dialog'
-import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
+import { PlusIcon, TrashIcon, FolderIcon, FolderOpenIcon, FileTextIcon, ChevronDownIcon, LoadingSpinner } from '../icons'
 import ChatPanel from '../components/ChatPanel'
 
 type ResultNode = { name: string; path: string; isMatch: boolean; children: ResultNode[] }
@@ -41,7 +41,7 @@ export default function AiChat() {
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
   // 树状文件浏览器
   const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
-  const [treeExpanded, setTreeExpanded] = useState(true)
+  const [treeExpanded, setTreeExpanded] = useState(false)
   const [pendingMention, setPendingMention] = useState<string | null>(null)
   const [treeFilter, setTreeFilter] = useState('')
   const [searchResults, setSearchResults] = useState<string[]>([])
@@ -493,8 +493,8 @@ export default function AiChat() {
             onClick={() => setTreeExpanded(v => !v)}
             className="shrink-0 w-full px-3 py-2 flex items-center justify-between text-xs font-medium text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
           >
-            <span className="flex items-center gap-1.5"><FolderIcon className="size-4" /> <span className="text-sm">{t('file_tree')}</span></span>
-            <span className="text-[10px]">{treeExpanded ? '▾' : '▸'}</span>
+            <span className="flex items-center gap-1.5"><FolderIcon className="size-4 text-amber-400 dark:text-amber-500" /> <span className="text-sm">{t('file_tree')}</span></span>
+            <ChevronDownIcon className={`size-3 transition-transform ${treeExpanded ? '' : '-rotate-90'}`} />
           </button>
           {treeExpanded && (
             <div className="flex-1 flex flex-col min-h-0">
@@ -550,7 +550,7 @@ export default function AiChat() {
                           onContextMenu={n.isMatch ? (e) => { e.preventDefault(); handleAddToScope(n.path) } : undefined}
                           title={n.isMatch ? `${t('file_tree_file_hint')}${n.path}` : undefined}
                         >
-                          <span className="shrink-0 text-[10px]">{n.children.length > 0 || !n.name.includes('.') ? '📁' : '📄'}</span>
+                          <span className="shrink-0">{n.children.length > 0 || !n.name.includes('.') ? <FolderOpenIcon className="size-3 text-amber-400 dark:text-amber-500" /> : <FileTextIcon className="size-3 text-gray-400 dark:text-gray-500" />}</span>
                           <span className={`truncate flex-1 ${n.isMatch ? 'font-medium' : ''}`}>{n.name}</span>
                           {n.isMatch && <span className="shrink-0 text-[9px] text-gray-400">+ 范围</span>}
                         </div>
@@ -712,7 +712,7 @@ function TreeFileList({ node, basePath, onPick, onScope, filter }: {
               node.indexed === true ? 'bg-green-500' : node.indexed === false ? 'bg-gray-300 dark:bg-gray-600' : 'bg-transparent'
             }`} />
           )}
-          <span className="text-sm shrink-0">{isDir ? (open ? '📂' : (loading ? '⋯' : '📁')) : '📄'}</span>
+          {isDir ? (loading ? <LoadingSpinner className="size-3.5 shrink-0 text-gray-400" /> : open ? <FolderOpenIcon className="size-3.5 shrink-0 text-amber-400 dark:text-amber-500" /> : <FolderIcon className="size-3.5 shrink-0 text-amber-400 dark:text-amber-500" />) : <FileTextIcon className="size-3.5 shrink-0 text-gray-400 dark:text-gray-500" />}
           <span className="truncate text-xs">{node.name}</span>
           {showMatch && <span className="ml-1 text-[9px] text-yellow-600 dark:text-yellow-400 shrink-0">✓</span>}
           {!isDir && node.indexed === false && (
