@@ -986,7 +986,7 @@ async fn prepare_conversation_prompt(
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
                         mention_has_content = true;
-                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 20000)));
+                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 50000)));
                         evidence.push(EvidenceItem {
                             file_id: fid.clone(),
                             path: resolved_path.clone(),
@@ -1031,7 +1031,7 @@ async fn prepare_conversation_prompt(
     let source_ids_final = merged.iter().map(|h| h.file_id.clone()).collect();
     let source_files_final = merged.iter().map(|h| h.path.clone()).collect();
 
-    let context = truncate_text(&docs.join("\n\n---\n\n"), 24000);
+    let context = truncate_text(&docs.join("\n\n---\n\n"), 50000);
     // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
     if strict_docs {
         if !missing_mentions.is_empty() {
