@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use uuid::Uuid;
 
 /// A directory configuration record.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DirConfig {
     pub id: String,
     pub path: String,

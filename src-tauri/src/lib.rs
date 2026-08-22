@@ -10,6 +10,7 @@ pub mod logs;
 pub mod scanner;
 pub mod search;
 pub mod state;
+pub mod webapi;
 
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -323,6 +324,25 @@ get_dir_children,
 
             app.manage(app_state);
 
+            // Web API server (optional, default off)
+            {
+                let app_handle_for_api = app.handle().clone();
+                let app_state_ref = app_handle_for_api.state::<AppState>();
+                let web_api_enabled = if let Ok(conn) = app_state_ref.db.get() {
+                    conn.query_row::<String, _, _>(
+                        "SELECT value FROM app_settings WHERE key = 'web_api_enabled'",
+                        [],
+                        |r| r.get(0),
+                    ).unwrap_or_default() == "true"
+                } else {
+                    false
+                };
+                if web_api_enabled {
+                    log::info!("[STARTUP] Web API enabled, starting HTTPS server...");
+                    webapi::spawn_server(app.handle().clone());
+                }
+            }
+
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
@@ -489,9 +509,19 @@ get_dir_children,
 
             Ok(())
         })
-        .run(tauri::generate_context!());
+        .build(tauri::generate_context!());
+
     match result {
-        Ok(()) => {}
+        Ok(app) => {
+            app.run(|app_handle, event| {
+                if let tauri::RunEvent::Exit = event {
+                    if let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
+                        token.cancel();
+                        log::info!("[SHUTDOWN] Web API server shutdown signal sent");
+                    }
+                }
+            });
+        }
         Err(e) => {
             log::error!("Tauri runtime error: {e}");
             std::process::exit(1);

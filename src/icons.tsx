@@ -19,6 +19,15 @@ export function FolderIcon(props: Props) {
   )
 }
 
+export function FolderOpenIcon(props: Props) {
+  return (
+    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 1.5l.86 3A2 2 0 0 1 20.84 17H6.5a2 2 0 0 1-1.93-1.5L4 14Z" />
+      <path d="M2 20a2 2 0 0 0 2-2V8a2 2 0 0 1 2-2h7.9a2 2 0 0 1 1.69.9L16.4 8.1A2 2 0 0 0 18.07 9H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2Z" />
+    </svg>
+  )
+}
+
 export function ActivityIcon(props: Props) {
   return (
     <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

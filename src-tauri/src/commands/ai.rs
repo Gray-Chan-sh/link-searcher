@@ -169,14 +169,13 @@ pub struct EvidenceItem {
 
 /// Retrieval hit carrying its scores; semantic fields are `None` unless
 /// the RRF fusion path ran.
-struct ScoredHit {
-    file_id: String,
-    path: String,
-    bm25_score: Option<f64>,
-    semantic_score: Option<f64>,
-    rrf_score: Option<f64>,
-    /// Kept from earlier turns, not retrieved by the current query.
-    from_history: bool,
+pub struct ScoredHit {
+    pub file_id: String,
+    pub path: String,
+    pub bm25_score: Option<f64>,
+    pub semantic_score: Option<f64>,
+    pub rrf_score: Option<f64>,
+    pub from_history: bool,
 }
 
 #[derive(Serialize)]
@@ -204,6 +203,17 @@ struct AiDone {
     source_ids: Vec<String>,
     source_files: Vec<String>,
     evidence: Vec<EvidenceItem>,
+    /// Per-turn trace ID for correlating app.log entries with the session export.
+    #[serde(default)]
+    trace_id: String,
+    #[serde(default)]
+    search_query: String,
+    #[serde(default)]
+    hits: usize,
+    #[serde(default)]
+    llm_model: String,
+    #[serde(default)]
+    embedding_model: String,
 }
 
 /// BM25 retrieval + content assembly shared by one-shot and streaming
@@ -339,6 +349,7 @@ pub async fn smart_search_stream(
 
     let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
         prepare_smart_prompt(&state, &query)?;
+    let hits = evidence.len();
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -358,6 +369,11 @@ pub async fn smart_search_stream(
         source_ids,
         source_files,
         evidence,
+        trace_id: String::new(),
+        search_query: query,
+        hits,
+        llm_model: String::new(),
+        embedding_model: String::new(),
     });
     Ok(())
 }
@@ -629,7 +645,7 @@ fn semantic_fuse(
 /// `semantic` is true and the embedding gateway is configured, reranks the
 /// BM25 candidates via RRF fusion with embedding cosine scores (gracefully
 /// falls back to BM25-only on any failure).
-fn bm25_relevant_hits(
+pub fn bm25_relevant_hits(
     state: &tauri::State<'_, AppState>,
     query: &str,
     limit: usize,
@@ -735,6 +751,10 @@ struct PreparedConversation {
     source_ids: Vec<String>,
     source_files: Vec<String>,
     evidence: Vec<EvidenceItem>,
+    /// Final retrieval query (after rewrite) — recorded per turn for traceability.
+    search_query: String,
+    /// Number of BM25 hits before merge with @mention files.
+    hits: usize,
 }
 
 /// Resolve file paths to file IDs with exact + LIKE fallback.
@@ -1061,7 +1081,8 @@ async fn prepare_conversation_prompt(
     for (path, idx) in &mention_index {
         user_msg = user_msg.replace(&format!("@{path}"), &format!("[{}]", idx));
     }
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence })
+    let hits = merged.iter().filter(|h| !h.from_history).count();
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits })
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
@@ -1140,8 +1161,14 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, .. } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
+    let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
+    let cfg = crate::config::load_config();
+    log::info!(
+        "[AI_TRACE] turn_begin trace_id={trace_id} llm={} embedding={} strict={} hits={} search_q={}",
+        cfg.active_llm_model_id, cfg.active_embedding_model_id, strict_docs, hits, search_query
+    );
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -1153,6 +1180,12 @@ pub async fn conversation_ask_stream(
     .await
     .map_err(|e| format!("task panicked: {e}"))?;
 
+    log::info!(
+        "[AI_TRACE] turn_end trace_id={trace_id} took_ms={} cancelled={} answer_chars={} sources={}",
+        result.took_ms, result.cancelled,
+        result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
+        source_ids.len()
+    );
     let _ = app.emit("ai-done", AiDone {
         session_id,
         full_text: result.text.unwrap_or_default(),
@@ -1161,6 +1194,11 @@ pub async fn conversation_ask_stream(
         source_ids,
         source_files,
         evidence,
+        trace_id,
+        search_query,
+        hits,
+        llm_model: cfg.active_llm_model_id,
+        embedding_model: cfg.active_embedding_model_id,
     });
     Ok(())
 }
@@ -1171,7 +1209,7 @@ pub struct ChatMessage {
     pub content: String,
 }
 
-fn truncate_text(s: &str, max_chars: usize) -> String {
+pub fn truncate_text(s: &str, max_chars: usize) -> String {
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_chars {
         s.to_string()
@@ -1180,7 +1218,7 @@ fn truncate_text(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("chat_history.json")
 }
 
@@ -1188,12 +1226,30 @@ fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
 /// completes so the session history can show which documents backed each
 /// user/assistant exchange. `items` carries the traceable evidence
 /// (scores, rewrite info) for that turn.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PerTurnEvidence {
     pub turn_index: usize,
     pub file_ids: Vec<String>,
     #[serde(default)]
     pub items: Vec<EvidenceItem>,
+    /// Unique per-turn trace ID — correlates logs with this turn in the session JSON export.
+    #[serde(default)]
+    pub trace_id: String,
+    /// LLM generation time in ms.
+    #[serde(default)]
+    pub took_ms: u64,
+    /// Active LLM model ID at generation time.
+    #[serde(default)]
+    pub llm_model: String,
+    /// Active embedding model ID at retrieval time.
+    #[serde(default)]
+    pub embedding_model: String,
+    /// Final retrieval query string (after any LLM/rule-based rewrite).
+    #[serde(default)]
+    pub search_query: String,
+    /// Number of BM25 hits returned (before merge with @mention files).
+    #[serde(default)]
+    pub hits: usize,
 }
 
 /// 每轮最终的 @mention 生效集合（含继承解析后），持久化供 `@第N轮` 引用。
@@ -1269,15 +1325,15 @@ pub struct ChatSessionMeta {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-struct ChatHistoryFile {
-    sessions: Vec<ChatSession>,
+pub struct ChatHistoryFile {
+    pub sessions: Vec<ChatSession>,
 }
 
 fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
-fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
+pub fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
     let path = chat_history_path(data_dir);
     match std::fs::read_to_string(&path) {
         Ok(c) => {
@@ -1324,7 +1380,7 @@ fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
     }
 }
 
-fn write_history(data_dir: &std::path::Path, h: &ChatHistoryFile) -> Result<(), String> {
+pub fn write_history(data_dir: &std::path::Path, h: &ChatHistoryFile) -> Result<(), String> {
     let path = chat_history_path(data_dir);
     let json = serde_json::to_string_pretty(h).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| format!("写入聊天记录失败: {e}"))
@@ -1360,7 +1416,7 @@ pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String>
     create_chat_session_impl(&state.data_dir)
 }
 
-fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, String> {
+pub fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, String> {
     let now = now_ts();
     let session = ChatSession {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1469,7 +1525,7 @@ pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<Str
     export_chat_session_impl(&state.data_dir, &id)
 }
 
-fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+pub fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
@@ -1477,12 +1533,17 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
         .find(|s| s.id == id)
         .ok_or_else(|| "会话不存在".to_string())?;
 
+    let config = crate::config::load_config();
     let mut md = String::new();
     let now = now_ts();
     md.push_str(&format!("# {}\n\n", session.title));
-    md.push_str(&format!("> 会话 ID: `{}`\n", session.id));
-    md.push_str(&format!("> 创建时间: {}\n", session.created_at));
-    md.push_str(&format!("> 导出时间: {}\n\n", now));
+    md.push_str("## 追溯信息\n\n");
+    md.push_str(&format!("> - 会话 ID: `{}`\n", session.id));
+    md.push_str(&format!("> - 创建时间: {}\n", session.created_at));
+    md.push_str(&format!("> - 导出时间: {}\n", now));
+    md.push_str(&format!("> - LLM 模型: `{}`\n", config.active_llm_model_id));
+    md.push_str(&format!("> - Embedding 模型: `{}`\n", config.active_embedding_model_id));
+    md.push_str(&format!("> - 语义权重: {:.0}%\n\n", config.semantic_weight * 100.0));
 
     if session.strict_docs {
         md.push_str("> ⚙️ 严格模式（仅依据文档）：开启\n");
@@ -1494,12 +1555,13 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
         }
         md.push('\n');
     }
+    md.push('\n');
     // 按轮索引分组：user 消息和它的 evidence/scope
     let mut turn_idx = 0usize;
     for (i, m) in session.messages.iter().enumerate() {
         if m.role == "user" {
             turn_idx += 1;
-            md.push_str(&format!("---\n\n## 问 (第 {turn_idx} 轮)\n\n{}\n", m.content));
+            md.push_str(&format!("---\n\n## 第 {turn_idx} 轮\n\n### 问\n\n{}\n", m.content));
             // 本轮范围快照（跨轮累计合并后）
             if let Some(sc) = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1) {
                 md.push_str("**检索范围:**\n");
@@ -1512,12 +1574,33 @@ fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<Stri
                     }
                 }
             }
+            // 本轮追溯元数据
+            let per_turn = session.per_turn_evidence.iter().find(|e| e.turn_index == turn_idx - 1);
+            if let Some(ev) = per_turn {
+                if !ev.trace_id.is_empty() {
+                    md.push_str(&format!("- **Trace ID**: `{}`\n", ev.trace_id));
+                }
+                if ev.took_ms > 0 {
+                    md.push_str(&format!("- **生成耗时**: {}ms\n", ev.took_ms));
+                }
+                if !ev.llm_model.is_empty() {
+                    md.push_str(&format!("- **LLM 模型**: `{}`\n", ev.llm_model));
+                }
+                if !ev.embedding_model.is_empty() {
+                    md.push_str(&format!("- **Embedding 模型**: `{}`\n", ev.embedding_model));
+                }
+                if !ev.search_query.is_empty() {
+                    md.push_str(&format!("- **最终检索查询**: `{}`\n", ev.search_query));
+                }
+                if ev.hits > 0 {
+                    md.push_str(&format!("- **BM25 命中数**: {}\n", ev.hits));
+                }
+            }
             // 找下一条 assistant 消息
             if let Some(assistant_msg) = session.messages.get(i + 1).filter(|m| m.role == "assistant") {
-                md.push_str(&format!("\n## 答\n\n{}\n", assistant_msg.content));
+                md.push_str(&format!("\n### 答\n\n{}\n", assistant_msg.content));
                 // 本轮检索依据
-                let evidence = session.per_turn_evidence.iter().find(|e| e.turn_index == turn_idx - 1);
-                if let Some(ev) = evidence {
+                if let Some(ev) = per_turn {
                     if !ev.items.is_empty() {
                         md.push_str(&format!("\n**检索依据（{}）:**\n", ev.items.len()));
                         for (j, item) in ev.items.iter().enumerate() {
@@ -1549,6 +1632,12 @@ struct SessionExportMeta {
     created_at: i64,
     strict_docs: bool,
     retrieval_scope: Vec<String>,
+    /// 当前语义融合权重（0=纯关键词，1=纯语义）。
+    semantic_weight: f64,
+    /// 当前激活 LLM 模型 ID。
+    llm_model: String,
+    /// 当前激活 Embedding 模型 ID。
+    embedding_model: String,
 }
 
 #[derive(serde::Serialize)]
@@ -1558,6 +1647,18 @@ struct TurnExport {
     question: String,
     answer: Option<String>,
     evidence: Vec<EvidenceItem>,
+    /// 本轮唯一追溯 ID（日志关联键）。
+    trace_id: String,
+    /// 本轮生成耗时（毫秒）。
+    took_ms: u64,
+    /// 本轮使用的 LLM 模型 ID。
+    llm_model: String,
+    /// 本轮使用的 Embedding 模型 ID。
+    embedding_model: String,
+    /// 改写后的最终检索查询。
+    search_query: String,
+    /// BM25 合并前命中数。
+    hits: usize,
 }
 
 /// 导出会话为 JSON（分析友好）：空范围轮次 scope=[] ，无回答轮次 answer=null。
@@ -1566,7 +1667,7 @@ pub fn export_chat_session_json(state: State<'_, AppState>, id: String) -> Resul
     export_chat_session_json_impl(&state.data_dir, &id)
 }
 
-fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
@@ -1590,24 +1691,37 @@ fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result
                 .get(i + 1)
                 .filter(|m| m.role == "assistant")
                 .map(|m| m.content.clone());
-            let evidence = session
+            // Pull per‑turn traceability data (defaults to zero‑valued for legacy sessions).
+            let per_turn = session
                 .per_turn_evidence
                 .iter()
-                .find(|e| e.turn_index == turn_idx - 1)
-                .map(|e| e.items.clone())
-                .unwrap_or_default();
+                .find(|e| e.turn_index == turn_idx - 1);
+            let trace_id = per_turn.map(|e| e.trace_id.clone()).unwrap_or_default();
+            let took_ms = per_turn.map(|e| e.took_ms).unwrap_or(0);
+            let llm_model = per_turn.map(|e| e.llm_model.clone()).unwrap_or_default();
+            let embedding_model = per_turn.map(|e| e.embedding_model.clone()).unwrap_or_default();
+            let search_query = per_turn.map(|e| e.search_query.clone()).unwrap_or_default();
+            let hits = per_turn.map(|e| e.hits).unwrap_or(0);
+            let evidence = per_turn.map(|e| e.items.clone()).unwrap_or_default();
             turns.push(TurnExport {
                 turn_index: turn_idx,
                 scope,
                 question: m.content.clone(),
                 answer,
                 evidence,
+                trace_id,
+                took_ms,
+                llm_model,
+                embedding_model,
+                search_query,
+                hits,
             });
         }
     }
 
+    let config = crate::config::load_config();
     let export = ChatExportJson {
-        schema_version: 1,
+        schema_version: 2,
         exported_at: now_ts(),
         session: SessionExportMeta {
             id: session.id,
@@ -1615,6 +1729,9 @@ fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result
             created_at: session.created_at,
             strict_docs: session.strict_docs,
             retrieval_scope: session.retrieval_scope,
+            semantic_weight: config.semantic_weight,
+            llm_model: config.active_llm_model_id.clone(),
+            embedding_model: config.active_embedding_model_id.clone(),
         },
         turns,
     };
@@ -1740,6 +1857,12 @@ mod history_tests {
                     rewritten_query: Some("项目 背景".into()),
                     from_history: false,
                 }],
+                trace_id: "s1#t1".into(),
+                took_ms: 5200,
+                llm_model: "p1:qwen2.5-7b-instruct".into(),
+                embedding_model: "p1:bge-m3".into(),
+                search_query: "克虏伯 项目背景".into(),
+                hits: 3,
             }],
             per_turn_scopes: vec![PerTurnScope {
                 turn_index: 0,
@@ -1750,9 +1873,11 @@ mod history_tests {
         save_chat_session_impl(&dir, session).unwrap();
         let md = export_chat_session_impl(&dir, "s1").unwrap();
         assert!(md.contains("# 克虏伯项目"));
-        assert!(md.contains("## 问 (第 1 轮)"), "第一轮问题应导出: {md}");
+        assert!(md.contains("## 追溯信息"), "头部应有追溯信息块: {md}");
+        assert!(md.contains("LLM 模型"), "追溯块应含模型: {md}");
+        assert!(md.contains("## 第 1 轮"), "第一轮问题应导出: {md}");
         assert!(md.contains("项目背景"));
-        assert!(md.contains("## 答"));
+        assert!(md.contains("### 答"));
         assert!(md.contains("2015年启动"));
         assert!(md.contains("第 2 轮"), "第二轮问题应导出");
         assert!(md.contains("检索依据（1）"));
@@ -1761,6 +1886,10 @@ mod history_tests {
         assert!(md.contains("严格模式"));
         assert!(md.contains("📁 检索范围: `a.pdf`"), "导出应含统一检索范围: {md}");
         assert!(md.contains("**检索范围:**"), "每轮应有范围快照: {md}");
+        assert!(md.contains("`s1#t1`"), "应含 Trace ID: {md}");
+        assert!(md.contains("**生成耗时**: 5200ms"), "应含耗时: {md}");
+        assert!(md.contains("**最终检索查询**: `克虏伯 项目背景`"), "应含最终查询: {md}");
+        assert!(md.contains("**BM25 命中数**: 3"), "应含命中数: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1831,6 +1960,7 @@ mod history_tests {
                     rewritten_query: Some("万联发股权转让".into()),
                     from_history: false,
                 }],
+                ..Default::default()
             }],
             per_turn_scopes: vec![
                 PerTurnScope { turn_index: 0, scope: vec![] },
@@ -2049,6 +2179,7 @@ mod history_tests {
                     rewritten_query: Some("q".into()),
                     from_history: false,
                 }],
+                ..Default::default()
             }],
         };
         let json = serde_json::to_string(&s).unwrap();

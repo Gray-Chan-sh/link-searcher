@@ -14,6 +14,10 @@ const ALLOWED_KEYS: &[&str] = &[
     "auto_backup",
     "backup_interval",
     "auto_start",
+    "web_api_enabled",
+    "web_api_port",
+    "web_api_token",
+    "web_api_bind",
 ];
 
 #[tauri::command]
