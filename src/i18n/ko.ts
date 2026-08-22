@@ -140,6 +140,7 @@ const ko: Record<string, string> = {
     open: '열기',
     copy_path: '경로 복사',
     show_in_folder: '폴더에서 보기',
+        copy_all_text: '모든 텍스트 복사',
     export_text: '인식 텍스트 내보내기',
     no_text_to_export: '내보낼 텍스트가 없습니다',
     reindex: '수동 재인덱스',

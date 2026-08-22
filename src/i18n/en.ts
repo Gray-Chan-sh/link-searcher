@@ -140,6 +140,7 @@ const en: Record<string, string> = {
     open: 'Open',
     copy_path: 'Copy Path',
     show_in_folder: 'Show in Folder',
+        copy_all_text: 'Copy All Text',
     export_text: 'Export Extracted Text',
     no_text_to_export: 'No text content available to export',
     reindex: 'Manual Re-index',

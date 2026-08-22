@@ -652,6 +652,17 @@ return (
             {selectedFile && (
               <div className="mb-3 flex items-center justify-between gap-2">
                 <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={selectedFile}>{selectedFile}</span>
+                {preview.content && (
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(preview.content ?? '').catch(e => console.warn('复制失败:', e))
+                    }}
+                    className="shrink-0 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
+                    title={t('copy_all_text')}
+                  >
+                    {t('copy_all_text')}
+                  </button>
+                )}
                 {preview.file_type === 'image' && (
                   <span className="flex items-center gap-1 shrink-0">
                     {[0.5, 1, 1.5, 2].map(z => (

@@ -140,6 +140,7 @@ const ja: Record<string, string> = {
     open: '開く',
     copy_path: 'パスをコピー',
     show_in_folder: 'フォルダで表示',
+        copy_all_text: 'すべてのテキストをコピー',
     export_text: '認識テキストをエクスポート',
     no_text_to_export: 'エクスポート可能なテキストがありません',
     reindex: '手動再インデックス',
