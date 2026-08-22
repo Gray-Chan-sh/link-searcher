@@ -65,9 +65,6 @@ export default function FilterPanel({
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
   }, [width, onWidthChange])
-  const { t } = useI18n()
-  const [trees, setTrees] = useState<DirTreeNode[]>([])
-  const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
 
   useEffect(() => {
     getFileTypeStats()
