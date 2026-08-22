@@ -140,6 +140,7 @@ const zh: Record<string, string> = {
     open: '打开',
     copy_path: '复制路径',
     show_in_folder: '在文件夹中显示',
+        copy_all_text: '复制全部文字',
     export_text: '导出识别文字',
     no_text_to_export: '该文件没有可导出的文本内容',
     reindex: '手动索引',
