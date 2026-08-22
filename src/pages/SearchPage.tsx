@@ -23,6 +23,7 @@ export default function SearchPage() {
   const [selectedHit, setSelectedHit] = useState<SearchHit | null>(null)
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
+  const [filterWidth, setFilterWidth] = useState(224)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
@@ -118,6 +119,8 @@ useEffect(() => {
             search.setDirPaths([])
             search.setExtFilter([])
           }}
+          width={filterWidth}
+          onWidthChange={setFilterWidth}
         />
       )}
 
