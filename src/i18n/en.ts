@@ -400,6 +400,8 @@ const en: Record<string, string> = {
     backup_export_snapshot: 'Export this snapshot as ZIP',
     backup_export_snapshot_short: 'Export',
     backup_restore_from_backup: 'Restore from this snapshot',
+    backup_delete: 'Delete',
+    confirm_delete_backup: 'Delete snapshot {name}? This cannot be undone.',
     backup_keep_policy: 'Keeps the last {n} snapshots; older ones are merged to save space',
     confirm_restore_backup: 'Restore from snapshot {name}? Existing index and data will be overwritten.',
     backup_restore_completed: 'Restore completed. Restart the app to finish.',

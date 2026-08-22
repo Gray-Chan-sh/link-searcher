@@ -400,6 +400,8 @@ const ko: Record<string, string> = {
     backup_export_snapshot: '이 스냅샷을 ZIP으로 내보내기',
     backup_export_snapshot_short: '내보내기',
     backup_restore_from_backup: '이 스냅샷에서 복원',
+    backup_delete: '삭제',
+    confirm_delete_backup: '스냅샷 {name}을 삭제하시겠습니까? 되돌릴 수 없습니다.',
     backup_keep_policy: '최근 {n}개 스냅샷 자동 유지, 초과 시 병합하여 용량 절약',
     confirm_restore_backup: '스냅샷 {name}에서 복원하시겠습니까? 기존 인덱스와 데이터가 덮어쓰됩니다.',
     backup_restore_completed: '복원 완료. 앱을 재시작하세요.',

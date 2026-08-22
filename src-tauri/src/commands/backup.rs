@@ -834,6 +834,30 @@ pub async fn restore_backup(
     app.restart()
 }
 
+#[tauri::command]
+pub async fn delete_backup(state: State<'_, AppState>, backup_name: String) -> Result<(), String> {
+    if backup_name.trim().is_empty() {
+        return Err("backup_name 不能为空".to_string());
+    }
+    let backup_dir = state.data_dir.join("backups");
+    let snap_dir = backup_dir.join(&backup_name);
+    let mut chain = load_chain(&backup_dir)?;
+    let idx = chain.snapshots.iter().position(|s| s.id == backup_name)
+        .ok_or_else(|| format!("备份不存在: {backup_name}"))?;
+    chain.snapshots.remove(idx);
+    if chain.baseline_id == backup_name {
+        chain.baseline_id = chain.snapshots.first().map(|s| s.id.clone()).unwrap_or_default();
+    }
+    if snap_dir.is_dir() {
+        std::fs::remove_dir_all(&snap_dir)
+            .map_err(|e| format!("删除备份目录失败: {e}"))?;
+    }
+    save_chain(&backup_dir, &chain)?;
+    prune_orphan_dirs(&backup_dir, &chain);
+    log::info!("deleted backup: {backup_name}");
+    Ok(())
+}
+
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
     copy_dir_depth(src, dst, 0)
 }

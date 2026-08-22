@@ -45,6 +45,10 @@ export async function restoreBackup(backupName: string): Promise<void> {
     return invoke('restore_backup', { backupName })
 }
 
+export async function deleteBackup(backupName: string): Promise<void> {
+    return invoke('delete_backup', { backupName })
+}
+
 export async function restoreFromZip(zipPath: string, password?: string | null): Promise<void> {
     return invoke('restore_from_zip', { zipPath, password: password ?? null })
 }
