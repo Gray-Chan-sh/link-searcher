@@ -655,7 +655,10 @@ return (
                 {preview.content && (
                   <button
                     onClick={() => {
-                      navigator.clipboard.writeText(preview.content ?? '').catch(e => console.warn('复制失败:', e))
+                      navigator.clipboard.writeText(preview.content ?? '').then(() => {
+                        const btn = document.activeElement as HTMLButtonElement
+                        if (btn) { const orig = btn.textContent; btn.textContent = '✓'; setTimeout(() => { btn.textContent = orig }, 1500) }
+                      }).catch(e => console.warn('复制失败:', e))
                     }}
                     className="shrink-0 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
                     title={t('copy_all_text')}
