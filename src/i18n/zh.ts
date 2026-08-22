@@ -400,6 +400,8 @@ const zh: Record<string, string> = {
     backup_export_snapshot: '导出此快照为 ZIP',
     backup_export_snapshot_short: '导出',
     backup_restore_from_backup: '从此快照恢复',
+    backup_delete: '删除',
+    confirm_delete_backup: '确认删除快照 {name}？此操作不可撤销。',
     backup_keep_policy: '自动保留最近 {n} 个快照，超出时合并压缩',
     confirm_restore_backup: '确认从快照 {name} 恢复？现有索引和数据将被替换。',
     backup_restore_completed: '恢复已完成，请重新启动应用',

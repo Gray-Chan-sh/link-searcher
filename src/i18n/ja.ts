@@ -400,6 +400,8 @@ const ja: Record<string, string> = {
     backup_export_snapshot: 'このスナップショットを ZIP でエクスポート',
     backup_export_snapshot_short: '出力',
     backup_restore_from_backup: 'このスナップショットから復元',
+    backup_delete: '削除',
+    confirm_delete_backup: 'スナップショット {name} を削除しますか？この操作は元に戻せません。',
     backup_keep_policy: '直近 {n} 個のスナップショットを自動保持、超過分は結合して容量を節約します',
     confirm_restore_backup: 'スナップショット {name} から復元しますか？既存の索引とデータは上書きされます。',
     backup_restore_completed: '復元が完了しました。アプリを再起動してください。',

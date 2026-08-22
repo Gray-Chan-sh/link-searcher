@@ -14,7 +14,7 @@ pub mod state;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
-use crate::commands::backup::{export_backup, get_backup_status, get_dead_dirs, list_backups, remap_dir, remove_dir_with_files, restore_backup, restore_from_zip, trigger_backup};
+use crate::commands::backup::{delete_backup, export_backup, get_backup_status, get_dead_dirs, list_backups, remap_dir, remove_dir_with_files, restore_backup, restore_from_zip, trigger_backup};
 use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, export_chat_session_json, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
@@ -126,6 +126,7 @@ get_dir_children,
             export_backup,
             restore_from_zip,
             restore_backup,
+            delete_backup,
             get_dead_dirs,
             remap_dir,
             remove_dir_with_files,

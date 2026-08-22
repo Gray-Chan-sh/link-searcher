@@ -10,7 +10,7 @@ import { LoadingSpinner, PlusIcon } from '../icons'
 import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type BgeStatus, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
-import { triggerBackup, getBackupStatus, exportBackup, restoreBackup, listBackups, restoreFromZip, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
+import { triggerBackup, getBackupStatus, exportBackup, restoreBackup, listBackups, restoreFromZip, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -315,6 +315,18 @@ export default function Settings() {
     try {
       await restoreBackup(backupName)
       await message(t('backup_restore_completed'), { title: t('backup_restore'), kind: 'info' })
+    } catch (e) {
+      setLocalError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const handleDeleteBackup = async (backupName: string) => {
+    const confirmed = await ask(t('confirm_delete_backup', { name: backupName }), { title: t('backup_delete'), kind: 'warning' })
+    if (!confirmed) return
+    try {
+      await deleteBackup(backupName)
+      listBackups().then(setBackups).catch(() => {})
+      getBackupStatus().then(setBackupStatus).catch(() => {})
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e))
     }
@@ -1047,18 +1059,17 @@ export default function Settings() {
               <p className="text-gray-400 dark:text-gray-500">{t('loading')}</p>
             )}
           </div>
-          <button
-            onClick={handleBackupNow}
-            disabled={backingUp}
-            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
-          >
-            {backingUp && <LoadingSpinner className="size-3" />}
-            {backingUp ? t('backup_in_progress') : t('backup_now')}
-          </button>
-        </Section>
-
-        <Section title={t('backup_export_current')}>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 mt-3">
+            <button
+              onClick={handleBackupNow}
+              disabled={backingUp}
+              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
+            >
+              {backingUp && <LoadingSpinner className="size-3" />}
+              {backingUp ? t('backup_in_progress') : t('backup_now')}
+            </button>
+          </div>
+          <div className="flex items-center gap-3 mt-3">
             <input
               type="password"
               value={exportPassword}
@@ -1067,7 +1078,7 @@ export default function Settings() {
               className="flex-1 px-3 py-1.5 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
             />
             <button
-              onClick={handleExportBackup}
+              onClick={() => handleExportBackup()}
               disabled={backingUp || exporting}
               className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
             >
@@ -1076,46 +1087,14 @@ export default function Settings() {
             </button>
           </div>
           <p className="mt-1.5 text-xs text-gray-400 dark:text-gray-500">{t('backup_export_current_hint')}</p>
-        </Section>
-
-        {backups.length > 0 && (
-          <Section title={t('backup_list')}>
-            <div className="space-y-1.5">
-              {[...backups].reverse().map(snap => (
-                <div key={snap.id} className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700">
-                  <span className={`shrink-0 w-2 h-2 rounded-full ${snap.kind === 'baseline' || snap.kind === 'merged' ? 'bg-green-500' : 'bg-blue-400'}`} />
-                  <span className="font-mono text-gray-900 dark:text-gray-100 flex-1 truncate">{snap.id}</span>
-                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{new Date(snap.ts * 1000).toLocaleDateString()} {new Date(snap.ts * 1000).toLocaleTimeString()}</span>
-                  <span className="text-gray-400 dark:text-gray-500 shrink-0">{formatSize(snap.size)}</span>
-                  <button
-                    onClick={() => handleExportBackup(snap.id)}
-                    disabled={exporting}
-                    title={t('backup_export_snapshot')}
-                    className="px-2 py-0.5 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                  >
-                    {t('backup_export_snapshot_short')}
-                  </button>
-                  <button
-                    onClick={() => handleRestoreFromBackup(snap.id)}
-                    title={t('backup_restore_from_backup')}
-                    className="px-2 py-0.5 text-xs rounded bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
-                  >
-                    {t('backup_restore')}
-                  </button>
-                </div>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">{t('backup_keep_policy', { n: 10 })}</p>
-          </Section>
-        )}
-
-        <Section title={t('backup_restore')}>
-          <button
-            onClick={handleRestoreZip}
-            className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
-          >
-            {t('backup_restore_zip')}
-          </button>
+          <div className="mt-3">
+            <button
+              onClick={handleRestoreZip}
+              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/30 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+            >
+              {t('backup_restore_zip')}
+            </button>
+          </div>
         </Section>
 
         {deadDirs.length > 0 && (
@@ -1143,6 +1122,37 @@ export default function Settings() {
                 </div>
               ))}
             </div>
+          </Section>
+        )}
+
+        {backups.length > 0 && (
+          <Section title={t('backup_list')}>
+            <div className="space-y-1.5">
+              {[...backups].reverse().map(snap => (
+                <div key={snap.id} className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700">
+                  <span className={`shrink-0 w-2 h-2 rounded-full ${snap.kind === 'baseline' || snap.kind === 'merged' ? 'bg-green-500' : 'bg-blue-400'}`} />
+                  <span className="font-mono text-gray-900 dark:text-gray-100 flex-1 truncate">{snap.id}</span>
+                  <span className="text-gray-500 dark:text-gray-400 shrink-0">{new Date(snap.ts * 1000).toLocaleDateString()} {new Date(snap.ts * 1000).toLocaleTimeString()}</span>
+                  <span className="text-gray-400 dark:text-gray-500 shrink-0">{formatSize(snap.size)}</span>
+                  <button
+                    onClick={() => handleExportBackup(snap.id)}
+                    disabled={exporting}
+                    title={t('backup_export_snapshot')}
+                    className="px-2 py-0.5 text-xs rounded bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {t('backup_export_snapshot_short')}
+                  </button>
+                  <button
+                    onClick={() => handleDeleteBackup(snap.id)}
+                    title={t('backup_delete')}
+                    className="px-2 py-0.5 text-xs rounded bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+                  >
+                    {t('backup_delete')}
+                  </button>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-xs text-gray-400 dark:text-gray-500">{t('backup_keep_policy', { n: 10 })}</p>
           </Section>
         )}
         </div>
