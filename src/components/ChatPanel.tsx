@@ -434,7 +434,33 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                 ? m.content
                 : (
                   <>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm]}
+                      components={{
+                        a: ({ href, children }) => {
+                          if (href?.startsWith('#ref:')) {
+                            const idx = parseInt(href.slice(5), 10)
+                            const ev = evidenceFor(i)
+                            if (idx >= 0 && idx < ev.length && ev[idx].path) {
+                              return (
+                                <span
+                                  className="text-blue-600 dark:text-blue-400 cursor-pointer underline decoration-dotted hover:underline"
+                                  onClick={() => navigate('/browse?path=' + encodeURIComponent(ev[idx].path))}
+                                >{children}</span>
+                              )
+                            }
+                          }
+                          return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
+                        }
+                      }}
+                    >{m.content.replace(/\[(\d+)\]/g, (match, n) => {
+                      const idx = parseInt(n, 10) - 1
+                      const ev = evidenceFor(i)
+                      if (idx >= 0 && idx < ev.length && ev[idx].path) {
+                        return `[${n}](#ref:${idx})`
+                      }
+                      return match
+                    })}</ReactMarkdown>
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                         <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">

@@ -1044,7 +1044,7 @@ async fn prepare_conversation_prompt(
             return Err("未在与当前范围匹配的文档中找到依据".into());
         }
     }
-    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n\n材料：\n{}", context);
+    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n引用材料时在文件名后标注 [N]（N 为材料编号），便于用户查阅原文。\n\n材料：\n{}", context);
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");
