@@ -31,7 +31,10 @@ const MAPPINGS: Record<string, HttpSpec | ((args: InvokeArgs) => HttpSpec)> = {
   suggest: { method: 'GET', path: '/api/suggest' },
 
   // Files
-  list_files_db: { method: 'GET', path: '/api/files' },
+  list_files_db: { method: 'GET', path: '/api/files', transform: (data) => {
+    const d = data as Record<string, unknown>;
+    return { items: d.files ?? [], total: d.total ?? 0, page: d.page ?? 1, page_size: d.page_size ?? 50 };
+  }},
   get_file: (a) => ({ method: 'GET', path: `/api/files/${a.id}` }),
   get_duplicates: { method: 'GET', path: '/api/files', transform: () => [] },
   preview_file: (a) => ({ method: 'GET', path: `/api/files/${a.id}/preview` }),
@@ -39,7 +42,22 @@ const MAPPINGS: Record<string, HttpSpec | ((args: InvokeArgs) => HttpSpec)> = {
   preview_file_by_path: (a) => ({ method: 'GET', path: `/api/files/${a.path}/preview` }),
 
   // Index
-  get_index_status: { method: 'GET', path: '/api/index/status' },
+  get_index_status: { method: 'GET', path: '/api/index/status', transform: (data) => {
+    const d = data as Record<string, unknown>;
+    return {
+      total_files: d.total ?? 0,
+      indexed: d.indexed ?? 0,
+      pending: d.pending ?? 0,
+      errors: d.failed ?? 0,
+      ocred: 0,
+      total_images: 0,
+      last_scan: null,
+      is_scanning: !!d.is_scanning,
+      scan_delta: undefined,
+      running_tasks: [],
+      briefs: [],
+    };
+  }},
   check_index_health: { method: 'GET', path: '/api/index/health' },
   trigger_scan: { method: 'POST', path: '/api/scan/trigger' },
   cancel_scan: { method: 'POST', path: '/api/scan/cancel' },
@@ -50,7 +68,21 @@ const MAPPINGS: Record<string, HttpSpec | ((args: InvokeArgs) => HttpSpec)> = {
     method: 'GET', path: '/api/dirs',
     transform: (data) => (data as Record<string, unknown>)?.dirs ?? data ?? [],
   },
-  get_dir_tree: { method: 'GET', path: '/api/dirs' },
+  get_dir_tree: { method: 'GET', path: '/api/dirs', transform: (data) => {
+    const d = data as Record<string, unknown>;
+    const dirs = (d?.dirs ?? []) as Record<string, unknown>[];
+    return {
+      name: 'root',
+      path: '/',
+      is_dir: true,
+      children: dirs.map(dir => ({
+        name: String((dir.path as string)?.split('/')?.pop() || dir.alias || ''),
+        path: String(dir.path || ''),
+        is_dir: true,
+        children: [] as Record<string, unknown>[],
+      })),
+    };
+  }},
   get_dir_children: { method: 'GET', path: '/api/dirs' },
   add_dir: { method: 'POST', path: '/api/dirs' },
   remove_dir: { method: 'DELETE', path: '/api/dirs' },
