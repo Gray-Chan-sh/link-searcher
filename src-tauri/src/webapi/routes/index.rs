@@ -1,13 +1,14 @@
 use std::sync::atomic::Ordering;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
+    http::StatusCode,
     response::Json,
     routing::{get, post},
     Router,
 };
-use tauri::Emitter;
-use tauri::Manager;
+use serde::Deserialize;
+use tauri::{Emitter, Manager};
 
 use crate::db::tracker;
 use crate::state::AppState;
@@ -22,6 +23,26 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/scan/trigger", post(trigger_scan_handler))
         .route("/api/scan/cancel", post(cancel_scan_handler))
         .route("/api/reindex", post(reindex_handler))
+        .route("/api/index/rebuild", post(rebuild_handler))
+        .route("/api/index/reindex-batch", post(reindex_files_handler))
+        .route("/api/index/reextract", post(reextract_handler))
+        .route("/api/index/verify", post(verify_handler))
+        .route("/api/index/errors", get(errors_handler))
+        .route("/api/index/integrity", get(integrity_handler))
+        .route(
+            "/api/index/backfill-embeddings",
+            post(backfill_handler),
+        )
+}
+
+/// OS thread, not tokio::spawn: the command futures borrow an AppState owned
+/// by this thread's frame; an async generator cannot hold that borrow across
+/// its internal awaits.
+fn detach_task<F>(f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::spawn(f);
 }
 
 async fn index_status_handler(
@@ -225,4 +246,132 @@ async fn reindex_handler(
             error: e.to_string(),
         })?;
     Ok(Json(serde_json::json!({ "status": "reindexed" })))
+}
+
+async fn rebuild_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    crate::commands::index::rebuild_index(app_state, state.app_handle.clone())
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileIdsBody {
+    file_ids: Vec<String>,
+}
+
+async fn reindex_files_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<FileIdsBody>,
+) -> Result<Json<crate::commands::index::ReextractReport>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::reindex_files(app_state, body.file_ids)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LimitBody {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn reextract_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<LimitBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) = tauri::async_runtime::block_on(
+            crate::commands::index::reextract_missing_content(st, body.limit),
+        ) {
+            log::error!("[WEBAPI] reextract failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForceDeadBody {
+    #[serde(default)]
+    force_dead: bool,
+}
+
+async fn verify_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<ForceDeadBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) =
+            tauri::async_runtime::block_on(crate::commands::index::verify_index_content(st, body.force_dead))
+        {
+            log::error!("[WEBAPI] verify failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
+}
+
+#[derive(Deserialize)]
+struct LimitQuery {
+    limit: Option<usize>,
+}
+
+async fn errors_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Vec<tracker::IndexError>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    let errors = tracker::get_index_errors(&conn, q.limit.unwrap_or(50)).map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    Ok(Json(errors))
+}
+
+async fn integrity_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<crate::commands::index::IndexIntegrityReport>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::check_index_integrity(app_state)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
+}
+
+async fn backfill_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) =
+            tauri::async_runtime::block_on(crate::commands::index::backfill_embeddings(st))
+        {
+            log::error!("[WEBAPI] backfill-embeddings failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
 }
