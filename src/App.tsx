@@ -40,6 +40,22 @@ export default function App() {
   }, [])
 
   const needsToken = !isTauri() && !getToken()
+  const [authFailed, setAuthFailed] = useState(false)
+
+  useEffect(() => {
+    if (isTauri() || authFailed) return
+    const check = async () => {
+      try {
+        await import('./api/settings').then(m => m.getSettings())
+        setAuthFailed(false)
+      } catch (e) {
+        if (e instanceof Error && e.message.includes('Token')) {
+          setAuthFailed(true)
+        }
+      }
+    }
+    check()
+  }, [authFailed])
   const handleSaveToken = () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
@@ -192,17 +208,21 @@ export default function App() {
             />
             <div className="flex justify-end gap-2">
               <button onClick={() => setShowTokenDialog(false)} className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">取消</button>
-              <button onClick={handleSaveToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存并刷新</button>
+              <button onClick={() => { handleSaveToken(); setAuthFailed(false) }} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存并刷新</button>
             </div>
           </div>
         </div>
       )}
 
-      {needsToken && (
+      {(needsToken || authFailed) && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-xl max-w-sm w-full mx-4">
-            <h2 className="text-lg font-semibold mb-3 text-gray-900 dark:text-gray-100">请输入 Token</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">访问 Web API 需要认证 Token</p>
+            <h2 className="text-lg font-semibold mb-3 text-gray-900 dark:text-gray-100">
+              {authFailed ? 'Token 无效' : '请输入 Token'}
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">
+              {authFailed ? '当前 Token 已失效，请输入正确的 Token' : '访问 Web API 需要认证 Token'}
+            </p>
             <input
               type="text"
               value={tokenInput}
@@ -213,7 +233,7 @@ export default function App() {
               autoFocus
             />
             <div className="flex justify-end">
-              <button onClick={handleSaveToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
+              <button onClick={() => { handleSaveToken(); setAuthFailed(false) }} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
             </div>
           </div>
         </div>
