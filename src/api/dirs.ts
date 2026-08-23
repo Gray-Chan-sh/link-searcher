@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import * as client from './client'
 
 export interface DirConfig {
   id: string
@@ -14,15 +14,15 @@ export interface DirConfig {
 }
 
 export async function addDir(path: string, alias?: string, recursive?: boolean): Promise<DirConfig> {
-  return invoke<DirConfig>('add_dir', { path, alias, recursive })
+  return client.invoke<DirConfig>('add_dir', { path, alias, recursive })
 }
 
 export async function removeDir(id: string): Promise<void> {
-  return invoke('remove_dir', { id })
+  return client.invoke('remove_dir', { id })
 }
 
 export async function listDirs(): Promise<DirConfig[]> {
-  return invoke<DirConfig[]>('list_dirs')
+  return client.invoke<DirConfig[]>('list_dirs')
 }
 
 export interface DirTreeNode {
@@ -35,13 +35,13 @@ export interface DirTreeNode {
 }
 
 export async function getDirTree(dirId: string, includeFiles?: boolean): Promise<DirTreeNode> {
-  return invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false })
+  return client.invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false })
 }
 
 export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]> {
-  return invoke<DirTreeNode[]>('get_dir_children', { parentPath })
+  return client.invoke<DirTreeNode[]>('get_dir_children', { parentPath })
 }
 
 export async function updateDir(id: string, alias?: string, ocrLang?: string, excludePatterns?: string, includeExts?: string, recursive?: boolean, private_?: boolean): Promise<void> {
-  return invoke<void>('update_dir', { id, alias, ocrLang, excludePatterns, includeExts, recursive, private: private_ })
+  return client.invoke<void>('update_dir', { id, alias, ocrLang, excludePatterns, includeExts, recursive, private: private_ })
 }

@@ -16,6 +16,7 @@ use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 use crate::state::AppState;
 use crate::webapi::auth;
 use crate::webapi::state::ApiState;
+use crate::webapi::static_files;
 
 #[derive(Deserialize)]
 pub struct SearchQuery {
@@ -474,79 +475,7 @@ async fn chat_ask_handler(
     })))
 }
 
-/// Self-contained search page served at `/` — no external JS, no build step.
-const INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Link-Searcher</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#1a1a1a;padding:2rem}
-.container{max-width:720px;margin:0 auto}
-h1{font-size:1.4rem;margin-bottom:1rem;color:#2563eb}
-.token-row{display:flex;gap:.5rem;margin-bottom:1rem}
-input{padding:.6rem .8rem;border:1px solid #d0d0d0;border-radius:.4rem;font-size:.95rem;flex:1}
-input:focus{outline:none;border-color:#2563eb}
-.search-row{display:flex;gap:.5rem;margin-bottom:1.2rem}
-button{padding:.6rem 1.2rem;border:none;border-radius:.4rem;background:#2563eb;color:#fff;cursor:pointer;font-size:.95rem}
-button:hover{background:#1d4ed8}
-.status{font-size:.85rem;color:#666;margin-bottom:1rem}
-.results{display:flex;flex-direction:column;gap:.8rem}
-.hit{background:#fff;padding:1rem;border-radius:.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
-.hit .path{color:#2563eb;font-size:.9rem;word-break:break-all}
-.hit .name{font-weight:600;font-size:1rem}
-.hit .meta{color:#888;font-size:.8rem;margin-top:.3rem}
-.error{background:#fee2e2;color:#991b1b;padding:.8rem;border-radius:.4rem;font-size:.9rem}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>&#128269; Link-Searcher</h1>
-<div class="token-row"><input id="token" placeholder="Bearer Token" type="password"><button onclick="saveToken()">&#128190;</button></div>
-<div class="search-row"><input id="q" placeholder="搜索文档..." onkeydown="if(event.key==='Enter')doSearch()"><button onclick="doSearch()">搜索</button></div>
-<div class="status" id="status"></div>
-<div class="results" id="results"></div>
-</div>
-<script>
-let token=localStorage.getItem('ls_token')||'';
-document.getElementById('token').value=token;
-function saveToken(){token=document.getElementById('token').value.trim();localStorage.setItem('ls_token',token);loadStatus()}
-async function api(path){
-  const r=await fetch(path,{headers:{Authorization:'Bearer '+token}});
-  if(!r.ok){throw new Error('HTTP '+r.status+(r.status===401?' Token 无效':''))}
-  return r.json();
-}
-async function doSearch(){
-  const q=document.getElementById('q').value.trim();if(!q)return;
-  const el=document.getElementById('results');el.innerHTML='<p class="status">搜索中...</p>';
-  try{const d=await api('/api/search?q='+encodeURIComponent(q)+'&page_size=20');
-    document.getElementById('status').textContent=d.total+' 条结果，耗时 '+d.took_ms+'ms';
-    if(!d.hits.length){el.innerHTML='<p class="status">未找到结果</p>';return}
-    el.innerHTML=d.hits.map(h=>'<div class="hit"><span class="path">'+esc(h.path)+'</span><br><span class="name">'+esc(h.file_name||'')+'</span><div class="meta">'+fmtSize(h.file_size)+' · '+new Date(h.mtime/1000).toLocaleDateString()+' · 相关度 '+h.score.toFixed(1)+'</div></div>').join('');
-  }catch(e){el.innerHTML='';document.getElementById('status').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
-}
-async function loadStatus(){
-  try{const s=await api('/api/index/status');
-    document.getElementById('status').textContent='已索引 '+s.indexed+'/'+s.total+' · 失败 '+s.failed;
-  }catch(e){document.getElementById('status').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
-}
-function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-function fmtSize(n){return n>=1048576?(n/1048576).toFixed(1)+' MB':(n/1024).toFixed(0)+' KB'}
-loadStatus();
-</script>
-</body></html>"#;
-
-async fn index_handler() -> impl IntoResponse {
-    axum::response::Html(INDEX_HTML)
-}
-
 pub fn build_router(state: ApiState) -> Router {
-    let index_page = Router::new()
-        .route("/", get(index_handler))
-        .route("/index.html", get(index_handler));
-
     let read_routes = Router::new()
         .route("/api/search", get(search_handler))
         .route("/api/suggest", get(suggest_handler))
@@ -572,12 +501,11 @@ pub fn build_router(state: ApiState) -> Router {
         .route("/api/chat/sessions/{id}", delete(chat_session_delete_handler))
         .route("/api/chat/sessions/{id}/export", post(chat_session_export_handler));
 
-    index_page
-        .merge(
-            read_routes
-                .merge(write_routes)
-                .merge(chat_routes)
-                .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth::bearer_auth))
-        )
+    // API routes with auth + static SPA fallback (serves Vite dist)
+    read_routes
+        .merge(write_routes)
+        .merge(chat_routes)
+        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth::bearer_auth))
+        .fallback(static_files::serve_static)
         .with_state(state)
 }

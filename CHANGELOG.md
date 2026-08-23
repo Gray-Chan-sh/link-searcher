@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-08-23（新功能 — 前端统一：同一套 React 代码同时支持桌面和 Web）
+
+**动机**：用户要求 Web UI 和桌面 UI 统一——改一处代码，两边自动同步。
+
+**架构**：
+- `src/utils/platform.ts` — 环境检测 `isTauri()` + 平台抽象（`confirm`/`alert`/`saveFile`/`exportFile`/`openDirectory`/`resolveAssetUrlSync`），Tauri 下走原生 dialog/fs，浏览器下走 `window.confirm`/Blob download
+- `src/api/client.ts` — `client.invoke(command, args)` 自动路由到 Tauri IPC 或 HTTP fetch；`client.listen(event, handler)` 自动路由到 Tauri events 或 SSE
+- 83 个 invoke 命令中 ~30 个已映射到 HTTP 端点，未映射的返回 null 并打 console.warn
+
+**后端静态托管**：Web API 的 fallback 路由托管 Vite 构建产物（`dist/` 目录），SPA 路由回退到 `index.html`
+
+**改造范围**：
+- 8 个 api 文件：`invoke` → `client.invoke`
+- 11 个 pages/components：dialog → platform 抽象、invoke → client.invoke
+- PreviewPanel：`convertFileSrc` → `resolveAssetUrlSync`
+- App.tsx MCP 插件用 `isTauri()` 条件包装
+
 ## 2026-08-23（新功能 — Web API 浏览器搜索页面）
 
 - **浏览器访问 Web API**：`GET /` 返回自包含 HTML 搜索页面（零外部依赖、零构建步骤），含 Token 输入框（localStorage 持久化）、搜索框、结果列表（文件名/路径/大小/日期/相关度）、索引状态显示。页面不走 Bearer Token 认证层，API 调用由页面 JS 携带 Token 发起（`src-tauri/src/webapi/routes.rs`）

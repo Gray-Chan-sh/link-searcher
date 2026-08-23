@@ -1,11 +1,11 @@
-import { invoke } from '@tauri-apps/api/core'
+import * as client from './client'
 
 export async function getSettings(): Promise<Record<string, string>> {
-  return invoke<Record<string, string>>('get_settings')
+  return client.invoke<Record<string, string>>('get_settings')
 }
 
 export async function updateSettings(settings: Record<string, string>): Promise<void> {
-  return invoke('update_settings', { settings })
+  return client.invoke('update_settings', { settings })
 }
 
 export interface OcrEngineStatus {
@@ -24,15 +24,15 @@ export interface OcrTestResult {
 }
 
 export async function listOcrEngines(): Promise<OcrEngineStatus[]> {
-    return invoke<OcrEngineStatus[]>('list_ocr_engines')
+    return client.invoke<OcrEngineStatus[]>('list_ocr_engines')
 }
 
 export async function testOcrEngine(engineType: string): Promise<OcrTestResult> {
-    return invoke<OcrTestResult>('test_ocr_engine', { engineType })
+    return client.invoke<OcrTestResult>('test_ocr_engine', { engineType })
 }
 
 export async function checkTesseract(): Promise<boolean> {
-  return invoke<boolean>('check_tesseract')
+  return client.invoke<boolean>('check_tesseract')
 }
 
 export interface DependencyStatus {
@@ -43,11 +43,11 @@ export interface DependencyStatus {
 }
 
 export async function checkDependencies(): Promise<DependencyStatus[]> {
-    return invoke<DependencyStatus[]>('check_dependencies')
+    return client.invoke<DependencyStatus[]>('check_dependencies')
 }
 
 export async function getVersion(): Promise<{ hash: string; time: string }> {
-    return invoke<{ hash: string; time: string }>('get_version')
+    return client.invoke<{ hash: string; time: string }>('get_version')
 }
 
 export interface FunasrInstallResult {
@@ -56,7 +56,7 @@ export interface FunasrInstallResult {
 }
 
 export async function installFunasr(): Promise<void> {
-    return invoke('install_funasr')
+    return client.invoke('install_funasr')
 }
 
 export interface BgeStatus {
@@ -66,9 +66,9 @@ export interface BgeStatus {
 }
 
 export async function installBge(modelName?: string): Promise<void> {
-    return invoke('install_bge', { modelName: modelName ?? null })
+    return client.invoke('install_bge', { modelName: modelName ?? null })
 }
 
 export async function checkBgeInstalled(): Promise<BgeStatus[]> {
-    return invoke<BgeStatus[]>('check_bge_installed')
+    return client.invoke<BgeStatus[]>('check_bge_installed')
 }

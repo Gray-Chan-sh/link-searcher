@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import { setupPluginListeners } from 'tauri-plugin-mcp'
 import { Routes, Route, NavLink } from 'react-router-dom'
-import { ask } from '@tauri-apps/plugin-dialog'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
+import { confirm, isTauri } from './utils/platform'
 import { checkDependencies, installFunasr } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
@@ -54,9 +53,11 @@ export default function App() {
 
   // MCP plugin — bridge DOM events for AI agent interaction
   useEffect(() => {
-    setupPluginListeners().catch(() => {
-      // MCP plugin may not be available in production builds — safe to ignore
-    })
+    if (isTauri()) {
+      import('tauri-plugin-mcp').then(({ setupPluginListeners }) => {
+        setupPluginListeners().catch(() => {})
+      })
+    }
   }, [])
 
   useEffect(() => {
@@ -66,12 +67,7 @@ export default function App() {
     checkDependencies().then(async deps => {
       const funasr = deps.find(d => d.name.includes('FunASR'))
       if (!funasr || funasr.available) return
-      const confirmed = await ask(t('confirm_install_funasr'), {
-        title: t('funasr_install_prompt'),
-        kind: 'warning',
-        okLabel: t('install_now'),
-        cancelLabel: t('not_now'),
-      })
+      const confirmed = await confirm(t('confirm_install_funasr'), t('funasr_install_prompt'))
       if (confirmed) {
         await installFunasr().catch(e => console.error('FunASR install failed:', e))
       } else {

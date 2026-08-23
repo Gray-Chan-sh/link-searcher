@@ -1,7 +1,5 @@
 import { useEffect, useState } from 'react'
-import { ask } from '@tauri-apps/plugin-dialog'
-import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, type IndexError } from '../api/index'
@@ -94,10 +92,7 @@ export default function IndexStatus() {
   }, [status?.scan_delta])
 
 const handleRebuild = async () => {
-    const confirmed = await ask(
-        t('confirm_rebuild'),
-        { title: t('rebuild_index'), kind: 'warning' }
-    )
+    const confirmed = await confirm(t('confirm_rebuild'))
     if (!confirmed) return
     setRebuilding(true)
     await rebuild()
