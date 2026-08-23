@@ -9,7 +9,6 @@ export type InvokeArgs = Record<string, unknown>;
 function getHttpPath(command: string, args: InvokeArgs): { method: string; path: string; body?: unknown } | null {
   // Map Tauri command names to REST API endpoints
   const mappings: Record<string, { method: string; path: string; param?: string } | ((args: InvokeArgs) => { method: string; path: string; body?: unknown })> = {
-    // Read-only
     search: { method: 'GET', path: '/api/search' },
     suggest: { method: 'GET', path: '/api/suggest' },
     get_file: { method: 'GET', path: '/api/files' },
@@ -25,17 +24,14 @@ function getHttpPath(command: string, args: InvokeArgs): { method: string; path:
     get_version: { method: 'GET', path: '/api/version' },
     get_settings: { method: 'GET', path: '/api/settings' },
     list_chat_sessions: { method: 'GET', path: '/api/chat/sessions' },
-    // Write
     trigger_scan: { method: 'POST', path: '/api/scan/trigger' },
     cancel_scan: { method: 'POST', path: '/api/scan/cancel' },
-    reindex_file: { method: 'POST', path: '/api/reindex' },
-    // Chat
+    reindex_file: (a) => ({ method: 'POST', path: '/api/reindex', body: a }),
     create_chat_session: { method: 'POST', path: '/api/chat/sessions' },
     load_chat_session: (a) => ({ method: 'GET', path: `/api/chat/sessions/${a.id}` }),
     delete_chat_session: (a) => ({ method: 'DELETE', path: `/api/chat/sessions/${a.id}` }),
     export_chat_session: (a) => ({ method: 'POST', path: `/api/chat/sessions/${a.id}/export` }),
     export_chat_session_json: (a) => ({ method: 'POST', path: `/api/chat/sessions/${a.id}/export` }),
-    // AI
     ask_documents: { method: 'POST', path: '/api/chat/ask' },
   };
 
@@ -70,9 +66,10 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
   // Browser mode: route to HTTP
   const httpSpec = getHttpPath(command, args || {});
   if (!httpSpec) {
-    // Command not yet mapped — return a mock or throw
-    console.warn(`[client] No HTTP mapping for command "${command}", returning null`);
-    return null as T;
+    // Command not yet mapped — return empty results rather than null
+    // ponytail: map more commands to HTTP endpoints as needed
+    console.warn(`[client] No HTTP mapping for "${command}", returning empty fallback`);
+    return ([] as unknown) as T;
   }
 
   const url = getApiBase() + httpSpec.path;
