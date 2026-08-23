@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    response::Json,
+    response::{IntoResponse, Json},
     routing::{delete, get, post},
     Router,
 };
@@ -8,8 +8,9 @@ use serde::Deserialize;
 use tauri::Manager;
 
 use crate::commands::backup::{
-    delete_backup, get_backup_status, get_dead_dirs, list_backups, remap_dir,
-    remove_dir_with_files, trigger_backup, BackupInfo, BackupSnapshot, DeadDirInfo,
+    delete_backup, export_backup, get_backup_status, get_dead_dirs, list_backups, remap_dir,
+    remove_dir_with_files, trigger_backup, BackupExportResult, BackupInfo, BackupSnapshot,
+    DeadDirInfo,
 };
 use crate::state::AppState;
 use crate::webapi::state::ApiState;
@@ -23,6 +24,9 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/backup/list", get(list_backups_handler))
         .route("/api/backup/dead-dirs", get(dead_dirs_handler))
         .route("/api/backup/remap", post(remap_handler))
+        .route("/api/backup/export", post(export_handler))
+        .route("/api/backup/restore-zip", post(restore_zip_handler))
+        .route("/api/backup/restore", post(restore_handler))
         .route("/api/backup/dir/{dirId}", delete(remove_dir_with_files_handler))
         .route("/api/backup/{name}", delete(delete_backup_handler))
 }
@@ -108,4 +112,56 @@ async fn remove_dir_with_files_handler(
         .await
         .map(|_| Json(serde_json::json!({ "ok": true })))
         .map_err(|e| ApiError { error: e })
+}
+
+#[derive(Deserialize)]
+struct ExportBody {
+    #[serde(rename = "destPath")]
+    dest_path: String,
+    password: Option<String>,
+    #[serde(rename = "backupName")]
+    backup_name: Option<String>,
+}
+
+async fn export_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<ExportBody>,
+) -> Result<Json<BackupExportResult>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    export_backup(app_state, body.dest_path, body.password, body.backup_name)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError { error: e })
+}
+
+// ponytail: restore endpoints are 501 stubs — they call app.restart() which
+// needs an AppHandle-driven restart; wire through restore_from_zip /
+// restore_backup when the web API can survive the restart.
+async fn not_implemented(message: &str) -> axum::response::Response {
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
+}
+
+#[derive(Deserialize)]
+struct RestoreZipBody {
+    #[serde(rename = "zipPath")]
+    zip_path: String,
+    password: Option<String>,
+}
+
+async fn restore_zip_handler(axum::Json(_body): axum::Json<RestoreZipBody>) -> axum::response::Response {
+    not_implemented("restore-from-zip is not available via web API; use the desktop app").await
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    #[serde(rename = "backupName")]
+    backup_name: String,
+}
+
+async fn restore_handler(axum::Json(_body): axum::Json<RestoreBody>) -> axum::response::Response {
+    not_implemented("restore is not available via web API; use the desktop app").await
 }
