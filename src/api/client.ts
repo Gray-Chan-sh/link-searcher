@@ -145,6 +145,7 @@ const MAPPINGS: Record<string, Mapping> = {
   // ── Settings ──
   get_settings: { method: 'GET', path: '/api/settings' },
   update_settings: (a) => ({ method: 'PUT', path: '/api/settings', body: a }),
+  update_token: (a) => ({ method: 'POST', path: '/api/auth/token', body: a }),
   get_version: { method: 'GET', path: '/api/version' },
 
   // ── Config / providers ──

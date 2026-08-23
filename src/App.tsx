@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
-import { confirm, isTauri, getToken, setToken } from './utils/platform'
+import { confirm, alert, isTauri, getToken, setToken } from './utils/platform'
+import { invoke } from './api/client'
 import { checkDependencies, installFunasr } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
@@ -56,13 +57,18 @@ export default function App() {
     }
     check()
   }, [authFailed])
-  const handleSaveToken = () => {
+  const handleSaveToken = async () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
     setToken(trimmed)
-    const url = new URL(window.location.href)
-    url.searchParams.delete('token')
-    window.location.href = url.toString()
+    try {
+      await invoke('update_token', { token: trimmed })
+      setShowTokenDialog(false)
+      setAuthFailed(false)
+      window.location.reload()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Token 更新失败')
+    }
   }
 
   const navItems = [
