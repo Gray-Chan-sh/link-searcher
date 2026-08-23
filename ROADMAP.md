@@ -26,6 +26,7 @@
 - [x] **PdfExtractor trait impl 硬编码 `"eng"`**：`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 池）
 - [x] **LoBackgroundGuard 死代码清理**：struct 已删除
 - [ ] **Semgrep WARNING**：`unwrap`/`expect` 若干处应逐步消除
+- [ ] **sherpa-onnx-sys 构建依赖**：`cargo clean` 后 build.rs 需从 GitHub 下载预编译包（~30MB），国内网络无法直连。需开启 Clash 代理或配置 `SHERPA_ONNX_ARCHIVE_DIR` 指向本地缓存。方案：① 在 CI/CD 中预缓存预编译包到 `target/sherpa-onnx-prebuilt/`；② 或在 build.rs 中支持镜像源配置
 
 ---
 
