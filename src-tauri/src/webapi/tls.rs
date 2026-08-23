@@ -11,11 +11,47 @@ pub fn ensure_cert(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf), Str
         return Ok((cert_path, key_path));
     }
 
-    let key_pair = rcgen::KeyPair::generate().map_err(|e| format!("keygen: {e}"))?;
-    let params = rcgen::CertificateParams::new(vec![
+    let mut san_names = vec![
         "localhost".to_string(),
         "127.0.0.1".to_string(),
-    ]).map_err(|e| format!("cert params: {e}"))?;
+        "100.101.102.100".to_string(),
+    ];
+
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("192.168.255.255:80");
+        if let Ok(addr) = sock.local_addr() {
+            let ip = addr.ip().to_string();
+            if !san_names.contains(&ip) { san_names.push(ip); }
+        }
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("10.255.255.255:80");
+        if let Ok(addr) = sock.local_addr() {
+            let ip = addr.ip().to_string();
+            if !san_names.contains(&ip) { san_names.push(ip); }
+        }
+    }
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("172.16.0.1:80");
+        if let Ok(addr) = sock.local_addr() {
+            let ip = addr.ip().to_string();
+            if !san_names.contains(&ip) { san_names.push(ip); }
+        }
+    }
+    // Tailscale CGNAT range
+    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        let _ = sock.connect("100.64.0.1:80");
+        if let Ok(addr) = sock.local_addr() {
+            let ip = addr.ip().to_string();
+            if !san_names.contains(&ip) { san_names.push(ip); }
+        }
+    }
+
+    log::info!("[WEBAPI] generating TLS cert with SANs: {:?}", san_names);
+
+    let key_pair = rcgen::KeyPair::generate().map_err(|e| format!("keygen: {e}"))?;
+    let params = rcgen::CertificateParams::new(san_names)
+        .map_err(|e| format!("cert params: {e}"))?;
     let cert = params.self_signed(&key_pair).map_err(|e| format!("self_signed: {e}"))?;
 
     std::fs::write(&cert_path, cert.pem())
