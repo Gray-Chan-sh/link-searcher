@@ -29,12 +29,24 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('')
   const funasrCheckedRef = useRef(false)
 
+  useEffect(() => {
+    const urlToken = new URLSearchParams(window.location.search).get('token')
+    if (urlToken) {
+      setToken(urlToken)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('token')
+      window.history.replaceState({}, '', url.toString())
+    }
+  }, [])
+
   const needsToken = !isTauri() && !getToken()
   const handleSaveToken = () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
     setToken(trimmed)
-    window.location.reload()
+    const url = new URL(window.location.href)
+    url.searchParams.delete('token')
+    window.location.href = url.toString()
   }
 
   const navItems = [

@@ -18,12 +18,6 @@ export function getApiBase(): string {
 /** Get the saved Bearer token from localStorage or URL parameter. */
 export function getToken(): string {
   if (typeof window === 'undefined') return '';
-  // Check URL param first (?token=xxx)
-  const urlToken = new URLSearchParams(window.location.search).get('token');
-  if (urlToken) {
-    localStorage.setItem('ls_token', urlToken);
-    return urlToken;
-  }
   return localStorage.getItem('ls_token') || '';
 }
 
