@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum_server::tls_rustls::RustlsConfig;
-use tauri::Manager;
+use tauri::{Listener, Manager};
 use tokio_util::sync::CancellationToken;
 
 use crate::state::AppState;
@@ -26,6 +26,19 @@ pub const KEY_BIND: &str = "web_api_bind";
 
 const DEFAULT_PORT: u16 = 8443;
 
+/// Tauri events forwarded to web clients via `GET /api/events` (SSE).
+const BRIDGED_EVENTS: &[&str] = &[
+    "scan-progress",
+    "scan-completed",
+    "ai-chunk",
+    "ai-done",
+    "migration-progress",
+    "migration-warning",
+    "funasr-install-done",
+    "bge-install-done",
+    "restore-completed",
+];
+
 pub fn spawn_server(app_handle: tauri::AppHandle) {
     let token = generate_or_load_token(&app_handle);
     let port = load_port(&app_handle);
@@ -36,10 +49,20 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     let cancel_for_shutdown = cancel_token.clone();
     app_handle.manage(cancel_token);
 
+    let (event_tx, _) = tokio::sync::broadcast::channel::<(String, String)>(256);
+    for event_name in BRIDGED_EVENTS {
+        let tx = event_tx.clone();
+        app_handle.listen_any(*event_name, move |event| {
+            // No subscribers / lagged receiver: drop silently.
+            let _ = tx.send((event_name.to_string(), event.payload().to_string()));
+        });
+    }
+
     let api_state = ApiState {
         app_handle: app_handle.clone(),
         auth_token: Arc::new(token),
         cancel_token: Arc::new(cancel_for_api),
+        event_tx,
     };
 
     let app = routes::build_router(api_state);

@@ -1,12 +1,14 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
 use tauri::Manager;
 
+use crate::commands::files;
 use crate::db::tracker;
 use crate::state::AppState;
 use crate::webapi::state::ApiState;
@@ -28,6 +30,62 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/api/files", get(files_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
+        .route("/api/files/browse", get(files_browse_handler))
+        .route("/api/dir-entries", get(dir_entries_handler))
+        .route("/api/files/download", post(desktop_only_stub))
+        .route("/api/files/open", post(desktop_only_stub))
+        .route("/api/files/reveal", post(desktop_only_stub))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowseQuery {
+    pub dir_id: Option<String>,
+    pub status: Option<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+}
+
+async fn files_browse_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<BrowseQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let resp = files::list_files(
+        app_state,
+        params.dir_id,
+        params.status,
+        params.page,
+        params.page_size,
+    )
+    .await
+    .map_err(|e| ApiError { error: e })?;
+    serde_json::to_value(resp)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
+}
+
+#[derive(Deserialize)]
+pub struct DirEntriesQuery {
+    pub path: String,
+}
+
+async fn dir_entries_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<DirEntriesQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let entries = files::list_dir_entries(app_state, params.path)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    serde_json::to_value(entries)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
+}
+
+// ponytail: desktop-only (opener/Finder); wire commands::files fns when remote clients need them.
+async fn desktop_only_stub() -> (StatusCode, &'static str) {
+    (StatusCode::NOT_IMPLEMENTED, "Desktop-only feature")
 }
 
 async fn files_handler(

@@ -509,7 +509,14 @@ pub async fn search_tree_prune(
     state: State<'_, AppState>,
     term: String,
 ) -> Result<Vec<String>, String> {
-    let conn = state
+    search_tree_prune_impl(&state, term).await
+}
+
+pub async fn search_tree_prune_impl(
+    app_state: &AppState,
+    term: String,
+) -> Result<Vec<String>, String> {
+    let conn = app_state
         .db
         .get()
         .map_err(|e| format!("db connection failed: {e}"))?;
@@ -562,7 +569,15 @@ pub async fn search_file_paths(
     prefix: String,
     limit: usize,
 ) -> Result<Vec<String>, String> {
-    let conn = state
+    search_file_paths_impl(&state, prefix, limit).await
+}
+
+pub async fn search_file_paths_impl(
+    app_state: &AppState,
+    prefix: String,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    let conn = app_state
         .db
         .get()
         .map_err(|e| format!("db connection failed: {e}"))?;
@@ -582,7 +597,11 @@ pub async fn search_file_paths(
 
 #[tauri::command]
 pub async fn get_search_history(state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
-    let conn = state
+    get_search_history_impl(&state).await
+}
+
+pub async fn get_search_history_impl(app_state: &AppState) -> Result<Vec<HistoryEntry>, String> {
+    let conn = app_state
         .db
         .get()
         .map_err(|e| format!("db connection failed: {e}"))?;
@@ -605,7 +624,11 @@ created_at: e.created_at,
 /// Clear the entire search history (all entries, pinned included).
 #[tauri::command]
 pub async fn clear_search_history(state: State<'_, AppState>) -> Result<(), String> {
-    let conn = state
+    clear_search_history_impl(&state).await
+}
+
+pub async fn clear_search_history_impl(app_state: &AppState) -> Result<(), String> {
+    let conn = app_state
         .db
         .get()
         .map_err(|e| format!("db connection failed: {e}"))?;
@@ -621,9 +644,20 @@ pub async fn export_search_results(
     ext_filter: Option<Vec<String>>,
     format: String,
 ) -> Result<String, String> {
+    export_search_results_impl(&state, query, dir_ids, dir_paths, ext_filter, format).await
+}
+
+pub async fn export_search_results_impl(
+    app_state: &AppState,
+    query: String,
+    dir_ids: Option<Vec<String>>,
+    dir_paths: Option<Vec<String>>,
+    ext_filter: Option<Vec<String>>,
+    format: String,
+) -> Result<String, String> {
     // Resolve dir_paths to file_ids via SQLite path prefix matching.
     let file_ids = if let Some(paths) = &dir_paths {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
         let ids = resolve_dir_paths(&conn, paths)?;
         if ids.as_ref().is_some_and(|v| v.is_empty()) {
             return Ok(String::new());
@@ -639,7 +673,7 @@ pub async fn export_search_results(
     let ext_filter_opt = if ext_filter.is_empty() { None } else { Some(ext_filter) };
 
     let export_page_size = {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
         let max_results: usize = conn.query_row(
             "SELECT value FROM app_settings WHERE key = 'max_results'",
             [],
@@ -667,7 +701,7 @@ pub async fn export_search_results(
         semantic: false,
     };
 
-    let mgr = state
+    let mgr = app_state
         .index_manager
         .read()
         .map_err(|e| format!("index manager lock error: {e}"))?;
@@ -711,7 +745,13 @@ pub async fn export_search_results(
 }
 #[tauri::command]
 pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileTypeStat>, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    get_file_type_stats_impl(&state).await
+}
+
+pub async fn get_file_type_stats_impl(
+    app_state: &AppState,
+) -> Result<Vec<FileTypeStat>, String> {
+    let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
     let sql = "SELECT file_ext, COUNT(*) as cnt, COALESCE(SUM(CASE WHEN indexed IN (1,3) THEN 1 ELSE 0 END),0) as idx, COALESCE(SUM(CASE WHEN indexed=0 THEN 1 ELSE 0 END),0) as pnd, COALESCE(SUM(CASE WHEN indexed=2 THEN 1 ELSE 0 END),0) as fld FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
     let mut stmt = conn.prepare(sql).map_err(|e| format!("db prepare error: {e}"))?;
     let mut results = Vec::new();
@@ -742,8 +782,12 @@ pub async fn get_file_type_stats(state: State<'_, AppState>) -> Result<Vec<FileT
 /// types only (used by the Browse page type dropdown).
 #[tauri::command]
 pub async fn get_browse_file_types(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    get_browse_file_types_impl(&state).await
+}
+
+pub async fn get_browse_file_types_impl(app_state: &AppState) -> Result<Vec<String>, String> {
     let supported = crate::extractor::get_supported_extensions();
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
     let sql = "SELECT file_ext, COUNT(*) as cnt FROM file_tracking WHERE status='active' GROUP BY file_ext ORDER BY cnt DESC";
     let mut stmt = conn.prepare(sql).map_err(|e| format!("db prepare error: {e}"))?;
     let rows = stmt

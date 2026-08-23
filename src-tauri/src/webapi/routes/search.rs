@@ -1,12 +1,13 @@
 use axum::{
     extract::{Query, State},
     response::Json,
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
 use tauri::Manager;
 
+use crate::commands::search;
 use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
 use crate::state::AppState;
 use crate::webapi::state::ApiState;
@@ -32,6 +33,12 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/api/search", get(search_handler))
         .route("/api/suggest", get(suggest_handler))
+        .route("/api/search/paths", get(search_paths_handler))
+        .route("/api/search/tree-prune", get(tree_prune_handler))
+        .route("/api/search/history", get(history_handler).delete(clear_history_handler))
+        .route("/api/search/export", post(export_handler))
+        .route("/api/stats/file-types", get(file_type_stats_handler))
+        .route("/api/stats/browse-types", get(browse_types_handler))
 }
 
 async fn search_handler(
@@ -107,4 +114,104 @@ async fn suggest_handler(
             error: e.to_string(),
         })?;
     Ok(Json(suggestions))
+}
+
+#[derive(Deserialize)]
+pub struct PathsQuery {
+    pub prefix: String,
+    pub limit: usize,
+}
+
+async fn search_paths_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<PathsQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let paths = search::search_file_paths_impl(&app_state, params.prefix, params.limit)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(paths))
+}
+
+#[derive(Deserialize)]
+pub struct TreePruneQuery {
+    pub term: String,
+}
+
+async fn tree_prune_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<TreePruneQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let nodes = search::search_tree_prune_impl(&app_state, params.term)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(nodes))
+}
+
+async fn history_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<search::HistoryEntry>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let entries = search::get_search_history_impl(&app_state)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(entries))
+}
+
+async fn clear_history_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    search::clear_search_history_impl(&app_state)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct ExportBody {
+    pub query: String,
+    pub dir_ids: Option<Vec<String>>,
+    pub dir_paths: Option<Vec<String>>,
+    pub ext_filter: Option<Vec<String>>,
+    pub format: Option<String>,
+}
+
+async fn export_handler(
+    State(state): State<ApiState>,
+    Json(body): Json<ExportBody>,
+) -> Result<Json<String>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let content = search::export_search_results_impl(
+        &app_state,
+        body.query,
+        body.dir_ids,
+        body.dir_paths,
+        body.ext_filter,
+        body.format.unwrap_or_else(|| "csv".to_string()),
+    )
+    .await
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(content))
+}
+
+async fn file_type_stats_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<search::FileTypeStat>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let stats = search::get_file_type_stats_impl(&app_state)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(stats))
+}
+
+async fn browse_types_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let types = search::get_browse_file_types_impl(&app_state)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(types))
 }
