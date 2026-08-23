@@ -44,19 +44,16 @@ export default function App() {
   const [authFailed, setAuthFailed] = useState(false)
 
   useEffect(() => {
-    if (isTauri() || authFailed) return
-    const check = async () => {
-      try {
-        await import('./api/settings').then(m => m.getSettings())
-        setAuthFailed(false)
-      } catch (e) {
-        if (e instanceof Error && e.message.includes('Token')) {
-          setAuthFailed(true)
-        }
-      }
-    }
-    check()
-  }, [authFailed])
+    if (isTauri()) return
+    const onAuthFailed = () => setAuthFailed(true)
+    window.addEventListener('auth-failed', onAuthFailed)
+    if (!getToken()) return
+    import('./api/settings')
+      .then(m => m.getSettings())
+      .then(() => setAuthFailed(false))
+      .catch(() => setAuthFailed(true))
+    return () => window.removeEventListener('auth-failed', onAuthFailed)
+  }, [])
   const handleSaveToken = async () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
