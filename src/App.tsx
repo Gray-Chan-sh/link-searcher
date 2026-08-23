@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Routes, Route, NavLink } from 'react-router-dom'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
-import { confirm, isTauri } from './utils/platform'
+import { confirm, isTauri, getToken, setToken } from './utils/platform'
 import { checkDependencies, installFunasr } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
@@ -25,7 +25,17 @@ export default function App() {
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
   const [showOnboarding, setShowOnboarding] = useState(false)
+  const [showTokenDialog, setShowTokenDialog] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
   const funasrCheckedRef = useRef(false)
+
+  const needsToken = !isTauri() && !getToken()
+  const handleSaveToken = () => {
+    const trimmed = tokenInput.trim()
+    if (!trimmed) return
+    setToken(trimmed)
+    window.location.reload()
+  }
 
   const navItems = [
     { to: '/', label: t('search'), icon: SearchIcon },
@@ -124,6 +134,15 @@ export default function App() {
             {theme === 'system' && <MonitorIcon className="size-4 shrink-0" />}
             {themeLabel}
           </button>
+          {!isTauri() && (
+            <button
+              onClick={() => { setTokenInput(getToken()); setShowTokenDialog(true) }}
+              className="flex items-center gap-3 w-full px-3 py-2 rounded-lg text-sm font-medium text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-800/50 transition-colors"
+            >
+              <span className="text-base">🔑</span>
+              Token
+            </button>
+          )}
         </div>
       </aside>
 
@@ -144,6 +163,49 @@ export default function App() {
       </div>
 
       {showOnboarding && <OnboardingWizard onClose={handleOnboardingClose} />}
+
+      {showTokenDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowTokenDialog(false)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-xl max-w-sm w-full mx-4" onClick={e => e.stopPropagation()}>
+            <h2 className="text-lg font-semibold mb-3 text-gray-900 dark:text-gray-100">Bearer Token</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">修改 Token 后页面将自动刷新</p>
+            <input
+              type="text"
+              value={tokenInput}
+              onChange={e => setTokenInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSaveToken() }}
+              placeholder="输入新的 Token"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setShowTokenDialog(false)} className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">取消</button>
+              <button onClick={handleSaveToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">保存并刷新</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {needsToken && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-xl max-w-sm w-full mx-4">
+            <h2 className="text-lg font-semibold mb-3 text-gray-900 dark:text-gray-100">请输入 Token</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">访问 Web API 需要认证 Token</p>
+            <input
+              type="text"
+              value={tokenInput}
+              onChange={e => setTokenInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSaveToken() }}
+              placeholder="输入 Bearer Token"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end">
+              <button onClick={handleSaveToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
     </ErrorBoundary>
   )
