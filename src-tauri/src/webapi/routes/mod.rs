@@ -4,6 +4,9 @@ pub mod index;
 pub mod dirs;
 pub mod ai;
 pub mod settings;
+pub mod events;
+pub mod logs;
+pub mod tesseract;
 
 use axum::{
     http::StatusCode,
@@ -41,6 +44,9 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(dirs::router(state.clone()))
         .merge(ai::router(state.clone()))
         .merge(settings::router(state.clone()))
+        .merge(logs::router(state.clone()))
+        .merge(tesseract::router(state.clone()))
+        .merge(events::router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::bearer_auth,
