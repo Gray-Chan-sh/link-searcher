@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-08-24（增强 — Web API 完整功能对等：65 个 REST 端点 + client.ts 全量映射 + SSE 事件总线）
+
+**动机**：Web UI 和桌面 UI 功能完全一致——同一套 React 代码，改一处自动同步另一处。
+
+**架构**：
+- 后端拆分为按领域模块：`webapi/routes/{mod,search,files,index,dirs,config,settings,logs,backup,tesseract,ai}.rs`
+- SSE 事件总线（`/api/events`）桥接 9 个 Tauri 事件到 web 客户端
+- 前端 `listen()` 用 fetch + ReadableStream 解析 SSE 流
+
+**新增 65 个端点**（总计 89 个命令全映射）：
+- search: `GET /api/search/paths`、`GET /api/search/tree-prune`、搜索历史 CRUD、导出、统计
+- files: `GET /api/files/browse`、`GET /api/dir-entries`
+- index: 重建/批量重索引/重提取缺失/验证完整性/补齐语义向量/错误查询
+- dirs: 增删改目录、目录树、子目录
+- config: 配置 CRUD、Provider CRUD/刷新/测试、激活模型
+- settings: 设置更新
+- logs: 日志查看/清空/会话列表
+- backup: 触发/状态/列表/导出/删除/死目录/路径重映射
+- tesseract: OCR 引擎/依赖/文件类型支持
+- AI: 摘要/智能搜索/流式/RAG 对话/会话保存/网关测试
+- 桌面专属命令: 返回 501 Not Implemented
+
+**client.ts 改造**：
+- 替换 ~35 个占位映射为真实 HTTP 端点
+- 添加 `paramMap` 参数名转换（camelCase → snake_case）
+- 添加 `transform` 响应结构解包
+- 实现 `listen()` SSE 支（fetch + ReadableStream 解析 SSE 事件流）
+
 ## 2026-08-23（新功能 — 前端统一：同一套 React 代码同时支持桌面和 Web）
 
 **动机**：用户要求 Web UI 和桌面 UI 统一——改一处代码，两边自动同步。
