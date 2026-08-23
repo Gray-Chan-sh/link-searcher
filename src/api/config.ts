@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import * as client from './client'
 
 /** Wire values are PascalCase (serde unit-enum variant names), NOT lowercase. */
 export type ModelType = 'Embedding' | 'Llm' | 'Unknown'
@@ -59,7 +59,7 @@ export interface MigrationCompleted {
 }
 
 export async function getConfig(): Promise<ConfigInfo> {
-    return invoke<ConfigInfo>('get_config')
+    return client.invoke<ConfigInfo>('get_config')
 }
 
 export async function updateConfig(config: Partial<ConfigInfo>): Promise<void> {
@@ -67,39 +67,39 @@ export async function updateConfig(config: Partial<ConfigInfo>): Promise<void> {
         throw new Error('data_dir cannot be empty')
     }
     const current = await getConfig()
-    return invoke('update_config', {
+    return client.invoke('update_config', {
         newConfig: { ...current, ...config } as ConfigInfo,
     })
 }
 
 export async function migrateData(oldPath: string, newPath: string): Promise<string> {
-    return invoke<string>('migrate_data', { oldPath, newPath })
+    return client.invoke<string>('migrate_data', { oldPath, newPath })
 }
 
 export async function restartApp(): Promise<void> {
-    return invoke('restart_app')
+    return client.invoke('restart_app')
 }
 
 export async function addProvider(name: string, baseUrl: string, apiKey: string): Promise<ProviderOutcome> {
-    return invoke<ProviderOutcome>('add_provider', { name, baseUrl, apiKey })
+    return client.invoke<ProviderOutcome>('add_provider', { name, baseUrl, apiKey })
 }
 
 export async function updateProvider(id: string, name: string, baseUrl: string, apiKey: string): Promise<void> {
-    await invoke('update_provider', { id, name, baseUrl, apiKey })
+    await client.invoke('update_provider', { id, name, baseUrl, apiKey })
 }
 
 export async function deleteProvider(id: string): Promise<void> {
-    await invoke('delete_provider', { id })
+    await client.invoke('delete_provider', { id })
 }
 
 export async function refreshProviderModels(id: string): Promise<ModelInfo[]> {
-    return invoke<ModelInfo[]>('refresh_provider_models', { id })
+    return client.invoke<ModelInfo[]>('refresh_provider_models', { id })
 }
 
 export async function setActiveModel(kind: 'embedding' | 'llm', modelId: string): Promise<void> {
-    await invoke('set_active_model', { kind, modelId })
+    await client.invoke('set_active_model', { kind, modelId })
 }
 
 export async function testProvider(baseUrl: string, apiKey: string): Promise<ProviderTest> {
-    return invoke<ProviderTest>('test_provider', { baseUrl, apiKey })
+    return client.invoke<ProviderTest>('test_provider', { baseUrl, apiKey })
 }

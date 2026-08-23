@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
-import { convertFileSrc } from '@tauri-apps/api/core'
+import { resolveAssetUrlSync as resolveAssetUrl } from '../utils/platform'
 import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities } from '../api/files'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
@@ -297,7 +297,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
               </button>
             </div>
             <img
-              src={convertFileSrc(preview.image_path)}
+              src={resolveAssetUrl(preview.image_path)}
               alt=""
               className="max-w-full max-h-96 object-contain rounded transition-transform duration-200"
               style={{ transform: `scale(${scale})` }}

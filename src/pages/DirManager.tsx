@@ -4,7 +4,7 @@ import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
-import { ask } from '@tauri-apps/plugin-dialog'
+import { confirm } from '../utils/platform'
 
 export default function DirManager() {
   const { t } = useI18n()
@@ -93,7 +93,7 @@ export default function DirManager() {
               </div>
               <button
                 onClick={async () => {
-                  const confirmed = await ask(t('confirm_remove_dir'), { title: t('remove_dir_title'), kind: 'warning' })
+                  const confirmed = await confirm(t('confirm_remove_dir'), t('remove_dir_title'))
                   if (confirmed) {
                     removeDirectory(dir.id)
                   }

@@ -1,8 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { invoke } from '@tauri-apps/api/core'
-import { ask, save } from '@tauri-apps/plugin-dialog'
-import { writeTextFile } from '@tauri-apps/plugin-fs'
+import { invoke } from '../api/client'
+import { confirm, saveFile } from '../utils/platform'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, previewFile } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
@@ -782,8 +781,7 @@ return (
                     const text = await previewFile(fid)
                     if (!text.trim()) { alert(t('no_text_to_export')); return }
                     const name = contextMenu.item.file_name.replace(/\.[^.]+$/, '') + '.txt'
-                    const path = await save({ defaultPath: name, filters: [{ name: 'Text', extensions: ['txt'] }] })
-                    if (path) await writeTextFile(path, text)
+                    await saveFile(text, name)
                   } catch (e) { console.error('[Browse] export text failed:', e) }
                 }}
               >
@@ -798,7 +796,7 @@ return (
               // 重索引会覆盖已索引文件的现有数据：全部已索引时才需确认；未索引的直接重建。
               const targets = items.filter(i => ids.includes(i.file_id))
               if (targets.length === ids.length && targets.every(i => i.indexed === 1)) {
-                const ok = await ask(t('confirm_reindex'), { title: t('reindex'), kind: 'warning' })
+                const ok = await confirm(t('confirm_reindex'), t('reindex'))
                 if (!ok) { setContextMenu(null); return }
               }
               reindexFiles(ids).catch(e => console.error('[Browse] reindex failed:', e))

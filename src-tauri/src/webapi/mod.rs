@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod routes;
 pub mod state;
+pub mod static_files;
 pub mod tls;
 
 use std::net::SocketAddr;

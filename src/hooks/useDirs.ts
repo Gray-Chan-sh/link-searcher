@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { listDirs, addDir, removeDir, type DirConfig } from '../api/dirs'
 import { triggerScan } from '../api/index'
-import { open } from '@tauri-apps/plugin-dialog'
+import { openDirectory } from '../utils/platform'
 
 interface UseDirsReturn {
   dirs: DirConfig[]
@@ -32,9 +32,9 @@ export function useDirs(): UseDirsReturn {
 
   const addDirectory = useCallback(async () => {
     try {
-      const selected = await open({ directory: true, multiple: false, title: 'Select Directory' })
+      const selected = await openDirectory()
       if (selected) {
-        const path = typeof selected === 'string' ? selected : selected
+        const path = selected
         await addDir(path, undefined, true)
         await refresh()
         await triggerScan()

@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
-import { searchFilePaths, searchTreePrune } from '../api/files'
+import { searchTreePrune } from '../api/files'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
-import { writeTextFile } from '@tauri-apps/plugin-fs'
-import { save, ask } from '@tauri-apps/plugin-dialog'
+import { saveFile, confirm } from '../utils/platform'
 import { PlusIcon, TrashIcon, FolderIcon, FolderOpenIcon, FileTextIcon, ChevronDownIcon, LoadingSpinner } from '../icons'
 import ChatPanel from '../components/ChatPanel'
 
@@ -225,7 +224,7 @@ export default function AiChat() {
   }, [refreshList])
 
   const handleDelete = useCallback(async (id: string) => {
-    const confirmed = await ask(t('confirm_delete_session'), { title: t('delete'), kind: 'warning' })
+    const confirmed = await confirm(t('confirm_delete_session'), t('delete'))
     if (!confirmed) return
     try {
       await deleteChatSession(id)
@@ -242,20 +241,8 @@ export default function AiChat() {
   const handleExport = useCallback(async () => {
     if (!activeId) return
     try {
-      // 用户通过保存对话框选择格式：.json → 分析友好 JSON，.md → 可读 Markdown
-      const path = await save({
-        defaultPath: 'ai-chat.json',
-        filters: [
-          { name: 'JSON', extensions: ['json'] },
-          { name: 'Markdown', extensions: ['md'] },
-        ],
-      })
-      if (!path) return
-      const isJson = path.toLowerCase().endsWith('.json')
-      const content = isJson
-        ? await exportChatSessionJson(activeId)
-        : await exportChatSession(activeId)
-      await writeTextFile(path, content)
+      const content = await exportChatSessionJson(activeId)
+      await saveFile(content, 'ai-chat.json')
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
@@ -285,9 +272,9 @@ export default function AiChat() {
   // 批量删除：确认后逐项删除，最后退出批量模式
   const handleBatchDelete = useCallback(async () => {
     if (selectedIds.size === 0) return
-    const confirmed = await ask(
+    const confirmed = await confirm(
       t('confirm_delete_sessions', { n: selectedIds.size }),
-      { title: t('delete'), kind: 'warning' }
+      t('delete')
     )
     if (!confirmed) return
     const ids = [...selectedIds]
@@ -313,8 +300,7 @@ export default function AiChat() {
       }
       if (parts.length === 0) { alert(t('export_failed', { error: t('no_sessions_match') })); return }
       const combined = parts.join('\n\n---\n\n')
-      const path = await save({ defaultPath: 'ai-chats-batch.md', filters: [{ name: 'Markdown', extensions: ['md'] }] })
-      if (path) await writeTextFile(path, combined)
+      await saveFile(combined, 'ai-chats-batch.md')
     } catch (e) {
       alert(t('export_failed', { error: e instanceof Error ? e.message : String(e) }))
     }

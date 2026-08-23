@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
+import * as client from './client'
 
 export interface SearchHit {
   file_id: string
@@ -49,7 +49,7 @@ export async function search(
   sortOrder?: string,
   semantic?: boolean,
 ): Promise<SearchResponse> {
-  return invoke<SearchResponse>('search', {
+  return client.invoke<SearchResponse>('search', {
     query,
     page,
     pageSize,
@@ -63,15 +63,15 @@ export async function search(
 }
 
 export async function suggest(prefix: string): Promise<string[]> {
-  return invoke<string[]>('suggest', { prefix })
+  return client.invoke<string[]>('suggest', { prefix })
 }
 
 export async function getSearchHistory(): Promise<SearchHistoryEntry[]> {
-  return invoke<SearchHistoryEntry[]>('get_search_history')
+  return client.invoke<SearchHistoryEntry[]>('get_search_history')
 }
 
 export async function clearSearchHistory(): Promise<void> {
-  return invoke<void>('clear_search_history')
+  return client.invoke<void>('clear_search_history')
 }
 
 export async function exportSearchResults(
@@ -80,7 +80,7 @@ export async function exportSearchResults(
   extFilter?: string[],
   format?: string,
 ): Promise<string> {
-  return invoke<string>('export_search_results', {
+  return client.invoke<string>('export_search_results', {
     query,
     dirIds: dirIds ?? [],
     extFilter: extFilter ?? [],
@@ -89,5 +89,5 @@ export async function exportSearchResults(
 }
 
 export async function getFileTypeStats(): Promise<FileTypeStat[]> {
-  return invoke<FileTypeStat[]>('get_file_type_stats')
+  return client.invoke<FileTypeStat[]>('get_file_type_stats')
 }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { ask } from '@tauri-apps/plugin-dialog'
+import { confirm } from '../utils/platform'
 import { getLogs, clearLogs } from '../api/logs'
 import { useI18n } from '../i18n'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -87,7 +87,7 @@ export default function LogViewer() {
   }, [logs, autoScroll])
 
   const handleClear = async () => {
-    const confirmed = await ask(t('confirm_clear_logs'), { title: t('clear'), kind: 'warning' })
+    const confirmed = await confirm(t('confirm_clear_logs'), t('clear'))
     if (!confirmed) return
     try {
       await clearLogs()

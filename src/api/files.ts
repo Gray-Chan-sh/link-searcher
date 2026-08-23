@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import * as client from './client'
 
 export interface FileDetail {
   id: string
@@ -25,11 +24,11 @@ export interface SummaryResult {
 }
 
 export async function summarizeFile(fileId: string): Promise<SummaryResult> {
-  return invoke<SummaryResult>('summarize_file', { fileId })
+  return client.invoke<SummaryResult>('summarize_file', { fileId })
 }
 
 export async function askDocuments(fileIds: string[], question: string): Promise<string> {
-  return invoke<string>('ask_documents', { fileIds, question })
+  return client.invoke<string>('ask_documents', { fileIds, question })
 }
 
 export interface AiCapabilities {
@@ -38,7 +37,7 @@ export interface AiCapabilities {
 }
 
 export async function aiCapabilities(): Promise<AiCapabilities> {
-  return invoke<AiCapabilities>('ai_capabilities')
+  return client.invoke<AiCapabilities>('ai_capabilities')
 }
 
 export interface EvidenceItem {
@@ -108,7 +107,7 @@ export interface ChatSession {
 }
 
 export async function cancelAiRequest(): Promise<void> {
-  return invoke<void>('cancel_ai_request')
+  return client.invoke<void>('cancel_ai_request')
 }
 
 export interface ChatSessionMeta {
@@ -118,7 +117,7 @@ export interface ChatSessionMeta {
 }
 
 export async function smartSearch(query: string): Promise<SmartSearchResponse> {
-  return invoke<SmartSearchResponse>('smart_search', { query })
+  return client.invoke<SmartSearchResponse>('smart_search', { query })
 }
 
 export interface TurnScope {
@@ -134,7 +133,7 @@ export interface ScopeCondition {
 }
 
 export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean): Promise<string> {
-  return invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
+  return client.invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -154,19 +153,19 @@ export interface AiDonePayload {
 }
 
 export async function smartSearchStream(query: string, sessionId: string): Promise<void> {
-  return invoke<void>('smart_search_stream', { query, sessionId })
+  return client.invoke<void>('smart_search_stream', { query, sessionId })
 }
 
 export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean): Promise<void> {
-  return invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
+  return client.invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {
-  return invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
+  return client.invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
 }
 
 export async function searchTreePrune(term: string): Promise<string[]> {
-  return invoke<string[]>('search_tree_prune', { term })
+  return client.invoke<string[]>('search_tree_prune', { term })
 }
 
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
@@ -175,53 +174,53 @@ export async function listenAiStream(
   onChunk: (delta: string) => void,
   onDone: (p: AiDonePayload) => void,
 ): Promise<() => void> {
-  const unChunk = await listen<{ session_id: string; delta: string }>('ai-chunk', e => {
-    if (e.payload.session_id === sessionId) onChunk(e.payload.delta)
+  const unChunk = await client.listen<{ session_id: string; delta: string }>('ai-chunk', e => {
+    if (e.session_id === sessionId) onChunk(e.delta)
   })
-  const unDone = await listen<AiDonePayload>('ai-done', e => {
-    if (e.payload.session_id === sessionId) onDone(e.payload)
+  const unDone = await client.listen<AiDonePayload>('ai-done', e => {
+    if (e.session_id === sessionId) onDone(e)
   })
   return () => { unChunk(); unDone() }
 }
 
 export async function listChatSessions(): Promise<ChatSessionMeta[]> {
-  return invoke<ChatSessionMeta[]>('list_chat_sessions')
+  return client.invoke<ChatSessionMeta[]>('list_chat_sessions')
 }
 
 export async function createChatSession(): Promise<string> {
-  return invoke<string>('create_chat_session')
+  return client.invoke<string>('create_chat_session')
 }
 
 export async function deleteChatSession(id: string): Promise<void> {
-  return invoke<void>('delete_chat_session', { id })
+  return client.invoke<void>('delete_chat_session', { id })
 }
 
 export async function loadChatSession(id: string): Promise<ChatSession | null> {
-  return invoke<ChatSession | null>('load_chat_session', { id })
+  return client.invoke<ChatSession | null>('load_chat_session', { id })
 }
 
 export async function saveChatSession(session: ChatSession): Promise<void> {
-  return invoke<void>('save_chat_session', { session })
+  return client.invoke<void>('save_chat_session', { session })
 }
 
 export async function exportChatSession(id: string): Promise<string> {
-  return invoke<string>('export_chat_session', { id })
+  return client.invoke<string>('export_chat_session', { id })
 }
 
 export async function exportChatSessionJson(id: string): Promise<string> {
-  return invoke<string>('export_chat_session_json', { id })
+  return client.invoke<string>('export_chat_session_json', { id })
 }
 
 export async function getFile(id: string): Promise<FileDetail> {
-  return invoke<FileDetail>('get_file', { id })
+  return client.invoke<FileDetail>('get_file', { id })
 }
 
 export async function getDuplicates(): Promise<DuplicateGroup[]> {
-  return invoke<DuplicateGroup[]>('get_duplicates')
+  return client.invoke<DuplicateGroup[]>('get_duplicates')
 }
 
 export async function previewFile(id: string): Promise<string> {
-  return invoke<string>('preview_file', { id })
+  return client.invoke<string>('preview_file', { id })
 }
 
 export interface FilePreview {
@@ -234,15 +233,15 @@ export interface FilePreview {
 }
 
 export async function getFilePreview(id: string): Promise<FilePreview> {
-  return invoke<FilePreview>('get_file_preview', { id })
+  return client.invoke<FilePreview>('get_file_preview', { id })
 }
 
 export async function revealInFolder(id: string): Promise<void> {
-  return invoke('reveal_in_folder', { id })
+  return client.invoke('reveal_in_folder', { id })
 }
 
 export async function openFile(id: string): Promise<void> {
-  return invoke('open_file', { id })
+  return client.invoke('open_file', { id })
 }
 
 export interface FileItem {
@@ -276,9 +275,9 @@ export async function listFilesDb(params: {
   page?: number
   pageSize?: number
 }): Promise<FileListResponse> {
-  return invoke<FileListResponse>('list_files_db', params)
+  return client.invoke<FileListResponse>('list_files_db', params)
 }
 
 export async function getBrowseFileTypes(): Promise<string[]> {
-  return invoke<string[]>('get_browse_file_types')
+  return client.invoke<string[]>('get_browse_file_types')
 }

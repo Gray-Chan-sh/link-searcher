@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
-import { ask, open, message, save } from '@tauri-apps/plugin-dialog'
-import { listen } from '@tauri-apps/api/event'
+import { invoke, listen } from '../api/client'
+import { confirm, alert, openDirectory } from '../utils/platform'
 import { useSettings } from '../hooks/useSettings'
 import { usePersistentState } from '../hooks/usePersistentState'
 import { useTheme } from '../theme'
@@ -10,7 +9,7 @@ import { LoadingSpinner, PlusIcon } from '../icons'
 import { addProvider, deleteProvider, getConfig, migrateData, refreshProviderModels, restartApp, setActiveModel, testProvider, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning, type ModelType, type ProviderInfo } from '../api/config'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFunasr, listOcrEngines, testOcrEngine, updateSettings, type BgeStatus, type DependencyStatus, type OcrEngineStatus, type OcrTestResult, type FunasrInstallResult } from '../api/settings'
-import { triggerBackup, getBackupStatus, exportBackup, restoreBackup, listBackups, restoreFromZip, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
+import { triggerBackup, getBackupStatus, exportBackup, listBackups, restoreFromZip, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -83,23 +82,23 @@ export default function Settings() {
 
   useEffect(() => {
     const unlisteners: (() => void)[] = []
-    listen<MigrationProgress>('migration-progress', e => {
-      setMigrationProgress(e.payload.progress)
-      setMigrationStage(e.payload.stage)
+    listen<MigrationProgress>('migration-progress', payload => {
+      setMigrationProgress(payload.progress)
+      setMigrationStage(payload.stage)
     }).then(u => unlisteners.push(u))
-    listen<MigrationWarning>('migration-warning', e => {
-      void message(e.payload.message, { title: '迁移警告', kind: 'warning' })
+    listen<MigrationWarning>('migration-warning', payload => {
+      void alert(payload.message, '迁移警告')
     }).then(u => unlisteners.push(u))
-    listen<FunasrInstallResult>('funasr-install-done', async e => {
+    listen<FunasrInstallResult>('funasr-install-done', async payload => {
       setFunasrInstalling(false)
-      await message(e.payload.message, { title: 'FunASR', kind: e.payload.success ? 'info' : 'warning' })
+      await alert(payload.message, 'FunASR')
       checkDependencies().then(setDeps).catch(() => {})
     }).then(u => unlisteners.push(u))
-    listen<{ success: boolean; message: string }>('bge-install-done', async e => {
+    listen<{ success: boolean; message: string }>('bge-install-done', async payload => {
       setBgeInstalling(false)
       checkBgeInstalled().then(setBgeStatus).catch(() => {})
-      if (e.payload.message) {
-        await message(e.payload.message, { title: 'BGE', kind: e.payload.success ? 'info' : 'warning' })
+      if (payload.message) {
+        await alert(payload.message, 'BGE')
       }
     }).then(u => unlisteners.push(u))
     return () => {
@@ -222,7 +221,7 @@ export default function Settings() {
   }
 
   const handleDeleteProvider = async (p: ProviderInfo) => {
-    const confirmed = await ask(t('confirm_delete_provider', { name: p.name }), { title: t('delete'), kind: 'warning' })
+    const confirmed = await confirm(t('confirm_delete_provider', { name: p.name }), t('delete'))
     if (!confirmed) return
     try {
       await deleteProvider(p.id)
@@ -309,19 +308,8 @@ export default function Settings() {
     }
   }, [])
 
-  const handleRestoreFromBackup = async (backupName: string) => {
-    const confirmed = await ask(t('confirm_restore_backup', { name: backupName }), { title: t('backup_restore'), kind: 'warning' })
-    if (!confirmed) return
-    try {
-      await restoreBackup(backupName)
-      await message(t('backup_restore_completed'), { title: t('backup_restore'), kind: 'info' })
-    } catch (e) {
-      setLocalError(e instanceof Error ? e.message : String(e))
-    }
-  }
-
   const handleDeleteBackup = async (backupName: string) => {
-    const confirmed = await ask(t('confirm_delete_backup', { name: backupName }), { title: t('backup_delete'), kind: 'warning' })
+    const confirmed = await confirm(t('confirm_delete_backup', { name: backupName }), t('backup_delete'))
     if (!confirmed) return
     try {
       await deleteBackup(backupName)
@@ -334,12 +322,7 @@ export default function Settings() {
 
   const handleFunasrInstall = async () => {
     if (funasrInstalling) return
-    const confirmed = await ask(t('confirm_install_funasr'), {
-      title: t('funasr_install_prompt'),
-      kind: 'warning',
-      okLabel: t('install_now'),
-      cancelLabel: t('not_now'),
-    })
+    const confirmed = await confirm(t('confirm_install_funasr'), t('funasr_install_prompt'))
     if (!confirmed) return
     setFunasrInstalling(true)
     try {
@@ -365,7 +348,7 @@ export default function Settings() {
   }
 
   const handleChangeDataDir = async () => {
-    const selected = await open({ directory: true, multiple: false, title: t('data_directory') })
+    const selected = await openDirectory()
     if (!selected || !appConfig) return
     if (selected === appConfig.data_dir) return
 
@@ -378,12 +361,12 @@ export default function Settings() {
       await updateConfig({ data_dir: selected })
       setLocalError(null)
       setMigrating(false)
-      const restart = await ask(msg, { title: '迁移完成', kind: 'info' })
+      const restart = await confirm(msg, '迁移完成')
       if (restart) await restartApp()
     } catch (e: unknown) {
       const err = e instanceof Error ? e.message : String(e)
       setLocalError(`迁移失败: ${err}`)
-      await message(`迁移失败:\n${err}`, { title: '迁移失败', kind: 'error' })
+      await alert(`迁移失败:\n${err}`, '迁移失败')
     } finally {
       setMigrating(false)
       setMigrationStage(null)
@@ -411,17 +394,18 @@ export default function Settings() {
     if (exporting) return
     try {
       setExporting(true)
+      const { save } = await import('@tauri-apps/plugin-dialog')
       const dest = await save({
         filters: [{ name: 'ZIP', extensions: ['zip'] }],
         defaultPath: `link-searcher-backup-${backupName ?? new Date().toISOString().slice(0, 10)}.zip`,
         title: t('backup_export_zip'),
-      })
+      }) // ponytail: path-only save for backend exportBackup; upgrade platform.saveFile to return path when needed
       if (!dest) return
       const result = await exportBackup(dest as string, exportPassword || undefined, backupName || null)
       if (result.has_secrets) {
-        await message(t('backup_export_no_password_warning'), { title: t('backup_export_current'), kind: 'warning' })
+        await alert(t('backup_export_no_password_warning'), t('backup_export_current'))
       }
-      await message(t('backup_export_done', { path: result.dest_path }), { title: t('backup_export_current'), kind: 'info' })
+      await alert(t('backup_export_done', { path: result.dest_path }), t('backup_export_current'))
       listBackups().then(setBackups).catch(() => {})
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e))
@@ -432,12 +416,13 @@ export default function Settings() {
 
   const handleRestoreZip = async () => {
     try {
+      const { open } = await import('@tauri-apps/plugin-dialog')
       const file = await open({ directory: false, multiple: false, title: t('backup_restore_select'), filters: [{ name: 'ZIP', extensions: ['zip'] }] })
       if (!file) return
-      const confirmed = await ask(t('confirm_rebuild'), { title: t('backup_restore'), kind: 'warning' })
+      const confirmed = await confirm(t('confirm_rebuild'), t('backup_restore'))
       if (!confirmed) return
       await restoreFromZip(file as string, exportPassword || undefined)
-      const restart = await ask(t('backup_restore'), { title: t('backup_restore'), kind: 'info' })
+      const restart = await confirm(t('backup_restore'), t('backup_restore'))
       if (restart) await restartApp()
     } catch (e) {
       setLocalError(e instanceof Error ? e.message : String(e))
@@ -446,7 +431,7 @@ export default function Settings() {
 
   const handleRemapDir = async (dirId: string) => {
     try {
-      const newPath = await open({ directory: true, multiple: false, title: t('backup_remap_select') })
+      const newPath = await openDirectory()
       if (!newPath) return
       await remapDir(dirId, newPath as string)
       setDeadDirs(d => d.filter(x => x.id !== dirId))
@@ -456,7 +441,7 @@ export default function Settings() {
   }
 
   const handleRemoveDir = async (dirId: string) => {
-    const confirmed = await ask(t('confirm_remove_dir'), { title: t('backup_remove'), kind: 'warning' })
+    const confirmed = await confirm(t('confirm_remove_dir'), t('backup_remove'))
     if (!confirmed) return
     try {
       await removeDirWithFiles(dirId)
@@ -1136,7 +1121,7 @@ export default function Settings() {
             <div className="space-y-1.5">
               {[...backups].reverse().map(snap => (
                 <div key={snap.id} className="flex items-center gap-2 px-2 py-1.5 rounded text-xs bg-gray-50 dark:bg-gray-800/40 border border-gray-200 dark:border-gray-700">
-                  <span className={`shrink-0 w-2 h-2 rounded-full ${snap.kind === 'baseline' || snap.kind === 'merged' ? 'bg-green-500' : 'bg-blue-400'}`} />
+                  <span className={`shrink-0 w-2 h-2 rounded-full ${snap.kind === 'baseline' ? 'bg-green-500' : 'bg-blue-400'}`} />
                   <span className="font-mono text-gray-900 dark:text-gray-100 flex-1 truncate">{snap.id}</span>
                   <span className="text-gray-500 dark:text-gray-400 shrink-0">{new Date(snap.ts * 1000).toLocaleDateString()} {new Date(snap.ts * 1000).toLocaleTimeString()}</span>
                   <span className="text-gray-400 dark:text-gray-500 shrink-0">{formatSize(snap.size)}</span>

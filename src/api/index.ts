@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core'
-import { listen } from '@tauri-apps/api/event'
+import * as client from './client'
 
 export interface TaskBrief {
   task: string
@@ -22,7 +21,7 @@ export interface IndexStatus {
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
-  return invoke<IndexStatus>('get_index_status')
+  return client.invoke<IndexStatus>('get_index_status')
 }
 
 export interface BackfillReport {
@@ -32,7 +31,7 @@ export interface BackfillReport {
 }
 
 export async function backfillEmbeddings(): Promise<BackfillReport> {
-  return invoke<BackfillReport>('backfill_embeddings')
+  return client.invoke<BackfillReport>('backfill_embeddings')
 }
 
 export interface VerifyReport {
@@ -43,7 +42,7 @@ export interface VerifyReport {
 }
 
 export async function verifyIndexContent(forceDead: boolean): Promise<VerifyReport> {
-  return invoke<VerifyReport>('verify_index_content', { forceDead })
+  return client.invoke<VerifyReport>('verify_index_content', { forceDead })
 }
 
 export interface ReextractReport {
@@ -53,27 +52,27 @@ export interface ReextractReport {
 }
 
 export async function reextractMissingContent(limit?: number): Promise<ReextractReport> {
-  return invoke<ReextractReport>('reextract_missing_content', { limit: limit ?? 500 })
+  return client.invoke<ReextractReport>('reextract_missing_content', { limit: limit ?? 500 })
 }
 
 export async function triggerScan(dirId?: string): Promise<void> {
-  return invoke('trigger_scan', { dirId: dirId ?? null })
+  return client.invoke('trigger_scan', { dirId: dirId ?? null })
 }
 
 export async function rebuildIndex(): Promise<void> {
-  return invoke('rebuild_index')
+  return client.invoke('rebuild_index')
 }
 
 export async function reindexFile(fileId: string): Promise<void> {
-  return invoke('reindex_file', { fileId })
+  return client.invoke('reindex_file', { fileId })
 }
 
 export async function reindexFiles(ids: string[]): Promise<ReextractReport> {
-  return invoke<ReextractReport>('reindex_files', { fileIds: ids })
+  return client.invoke<ReextractReport>('reindex_files', { fileIds: ids })
 }
 
 export async function cancelScan(): Promise<void> {
-  return invoke('cancel_scan')
+  return client.invoke('cancel_scan')
 }
 
 export interface IndexError {
@@ -85,7 +84,7 @@ export interface IndexError {
 }
 
 export async function getIndexErrors(limit?: number): Promise<IndexError[]> {
-    return invoke<IndexError[]>('get_index_errors', { limit: limit ?? 50 })
+    return client.invoke<IndexError[]>('get_index_errors', { limit: limit ?? 50 })
 }
 
 export interface ScanProgress {
@@ -97,7 +96,7 @@ export interface ScanProgress {
 }
 
 export async function listenScanProgress(callback: (progress: ScanProgress) => void): Promise<() => void> {
-    return listen<ScanProgress>('scan-progress', (event) => {
-        callback(event.payload)
+    return client.listen<ScanProgress>('scan-progress', (event) => {
+        callback(event)
     })
 }

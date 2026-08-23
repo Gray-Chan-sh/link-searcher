@@ -13,8 +13,7 @@ import type { SearchHit } from '../api/search'
 import { exportSearchResults } from '../api/search'
 import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
-import { save } from '@tauri-apps/plugin-dialog'
-import { writeTextFile } from '@tauri-apps/plugin-fs'
+import { exportFile } from '../utils/platform'
 
 export default function SearchPage() {
   const { t } = useI18n()
@@ -46,22 +45,8 @@ export default function SearchPage() {
 
 const handleExport = async () => {
   try {
-    const savedPath = await save({
-      defaultPath: 'results.csv',
-      filters: [{ name: 'CSV', extensions: ['csv'] }],
-    })
-
-    if (!savedPath) {
-      setExportMsg(t('export_cancelled'))
-      timersRef.current.push(setTimeout(() => setExportMsg(null), 3000))
-      return
-    }
-
     const content = await exportSearchResults(search.query, search.dirIds, search.extFilter, 'csv')
-    await writeTextFile(savedPath, content)
-
-    setExportMsg(t('saved_to', { path: savedPath }))
-    timersRef.current.push(setTimeout(() => setExportMsg(null), 3000))
+    await exportFile(content, 'results.csv', 'text/csv')
   } catch (e) {
     setExportMsg(t('export_failed', { error: e instanceof Error ? e.message : t('unknown_error') }))
     timersRef.current.push(setTimeout(() => setExportMsg(null), 5000))
