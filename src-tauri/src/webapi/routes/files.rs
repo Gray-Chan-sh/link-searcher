@@ -29,12 +29,17 @@ pub struct FilesQuery {
 pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/api/files", get(files_handler))
+        .route("/api/files/{id}", get(get_file_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
         .route("/api/files/browse", get(files_browse_handler))
         .route("/api/dir-entries", get(dir_entries_handler))
         .route("/api/files/download", post(desktop_only_stub))
         .route("/api/files/open", post(desktop_only_stub))
         .route("/api/files/reveal", post(desktop_only_stub))
+}
+
+fn path_to_ext(path: &str) -> String {
+    path.rsplit('.').next().filter(|e| e.len() <= 6).unwrap_or("").to_string()
 }
 
 #[derive(Deserialize)]
@@ -169,12 +174,19 @@ async fn files_handler(
         .query_map(
             rusqlite::params_from_iter(data_params.iter().map(|p| p as &dyn rusqlite::ToSql)),
             |row| {
+                let path: String = row.get(1)?;
+                let file_name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                let file_ext = path.rsplit('.').next().filter(|e| e.len() <= 6).unwrap_or("").to_string();
+                let rel_path = path.clone();
                 Ok(serde_json::json!({
-                    "id": row.get::<_, String>(0)?,
-                    "path": row.get::<_, String>(1)?,
-                    "size": row.get::<_, u64>(2)?,
+                    "file_id": row.get::<_, String>(0)?,
+                    "file_name": file_name,
+                    "rel_path": rel_path,
+                    "file_ext": file_ext,
+                    "file_size": row.get::<_, u64>(2)?,
                     "mtime": row.get::<_, i64>(3)?,
                     "indexed": row.get::<_, i64>(4)?,
+                    "error_msg": serde_json::Value::Null,
                 }))
             },
         )
@@ -184,10 +196,33 @@ async fn files_handler(
     let files: Vec<serde_json::Value> = rows.filter_map(|r| r.ok()).collect();
 
     Ok(Json(serde_json::json!({
-        "files": files,
+        "items": files,
         "total": total,
         "page": p,
         "page_size": ps,
+    })))
+}
+
+async fn get_file_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+    let rec = tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| ApiError { error: e.to_string() })?
+        .ok_or_else(|| ApiError { error: "file not found".into() })?;
+    let file_name = rec.path.rsplit('/').next().unwrap_or(&rec.path).to_string();
+    let file_ext = rec.path.rsplit('.').next().filter(|e| e.len() <= 6).unwrap_or("").to_string();
+    Ok(Json(serde_json::json!({
+        "id": rec.id,
+        "path": rec.path,
+        "file_name": file_name,
+        "file_ext": file_ext,
+        "mtime": rec.mtime,
+        "file_size": rec.size,
+        "md5": rec.md5,
+        "indexed": rec.indexed == 1,
     })))
 }
 
@@ -214,11 +249,18 @@ async fn file_preview_handler(
         .as_ref()
         .and_then(|md5| tracker::get_content(&conn, md5).ok()?)
         .unwrap_or_default();
+    let content = text.chars().take(50000).collect::<String>();
+    let file_type = if path_to_ext(&rec.path).is_empty() { "unknown" }
+        else if ["jpg","jpeg","png","gif","bmp","webp","tiff"].contains(&path_to_ext(&rec.path).as_str()) { "image" }
+        else if path_to_ext(&rec.path) == "pdf" { "pdf" }
+        else if ["docx","doc","xlsx","xls","pptx","ppt","odt","ods","odp","rtf","epub"].contains(&path_to_ext(&rec.path).as_str()) { "office" }
+        else { "text" };
     Ok(Json(serde_json::json!({
-        "id": rec.id,
-        "path": rec.path,
-        "size": rec.size,
-        "mtime": rec.mtime,
-        "content": text.chars().take(50000).collect::<String>(),
+        "content": content,
+        "image_path": null,
+        "image_base64": null,
+        "file_type": file_type,
+        "char_count": content.chars().count(),
+        "ocr_used": false,
     })))
 }
