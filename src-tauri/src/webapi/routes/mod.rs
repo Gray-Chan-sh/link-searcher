@@ -7,6 +7,8 @@ pub mod settings;
 pub mod events;
 pub mod logs;
 pub mod tesseract;
+pub mod backup;
+pub mod config;
 
 use axum::{
     http::StatusCode,
@@ -46,6 +48,8 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(settings::router(state.clone()))
         .merge(logs::router(state.clone()))
         .merge(tesseract::router(state.clone()))
+        .merge(backup::router(state.clone()))
+        .merge(config::router(state.clone()))
         .merge(events::router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
