@@ -8,17 +8,19 @@ interface HttpSpec {
   path: string;
   body?: unknown;
   transform?: (data: unknown, args: InvokeArgs) => unknown;
+  paramMap?: Record<string, string>;
 }
 
-function buildQuery(args: InvokeArgs): string {
+function buildQuery(args: InvokeArgs, paramMap?: Record<string, string>): string {
   const parts: string[] = [];
   for (const [k, v] of Object.entries(args)) {
     if (v === undefined || v === null) continue;
     if (k === 'scope' || k === 'session' || typeof v === 'object') continue;
+    const mappedKey = paramMap?.[k] ?? k;
     if (Array.isArray(v)) {
-      if (v.length > 0) parts.push(`${k}=${v.join(',')}`);
+      if (v.length > 0) parts.push(`${mappedKey}=${v.join(',')}`);
     } else {
-      parts.push(`${k}=${encodeURIComponent(String(v))}`);
+      parts.push(`${mappedKey}=${encodeURIComponent(String(v))}`);
     }
   }
   return parts.length ? '?' + parts.join('&') : '';
@@ -27,7 +29,10 @@ function buildQuery(args: InvokeArgs): string {
 // Command → HTTP endpoint mapping with response transformation
 const MAPPINGS: Record<string, HttpSpec | ((args: InvokeArgs) => HttpSpec)> = {
   // Search
-  search: { method: 'GET', path: '/api/search' },
+  search: {
+    method: 'GET', path: '/api/search',
+    paramMap: { query: 'q', pageSize: 'page_size', dirIds: 'dir_ids', extFilter: 'ext_filter' },
+  },
   suggest: { method: 'GET', path: '/api/suggest' },
 
   // Files
@@ -169,7 +174,7 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
   }
 
   const spec = typeof entry === 'function' ? entry(args || {}) : entry;
-  const qs = spec.method === 'GET' || spec.method === 'DELETE' ? buildQuery(args || {}) : '';
+  const qs = spec.method === 'GET' || spec.method === 'DELETE' ? buildQuery(args || {}, spec.paramMap) : '';
   const url = getApiBase() + spec.path + qs;
 
   const headers: Record<string, string> = { Authorization: `Bearer ${getToken()}` };
