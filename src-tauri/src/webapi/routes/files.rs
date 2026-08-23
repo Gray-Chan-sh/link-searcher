@@ -29,6 +29,7 @@ pub struct FilesQuery {
 pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/api/files", get(files_handler))
+        .route("/api/files/preview-by-path", get(preview_by_path_handler))
         .route("/api/files/{id}", get(get_file_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
         .route("/api/files/browse", get(files_browse_handler))
@@ -40,6 +41,40 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
 
 fn path_to_ext(path: &str) -> String {
     path.rsplit('.').next().filter(|e| e.len() <= 6).unwrap_or("").to_string()
+}
+
+#[derive(Deserialize)]
+pub struct PreviewByPathQuery {
+    pub path: String,
+}
+
+async fn preview_by_path_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<PreviewByPathQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+    let rec = tracker::get_file_by_path(&conn, &params.path)
+        .map_err(|e| ApiError { error: e.to_string() })?
+        .ok_or_else(|| ApiError { error: "file not found".into() })?;
+    let text = rec.md5.as_ref()
+        .and_then(|md5| tracker::get_content(&conn, md5).ok()?)
+        .unwrap_or_default();
+    let content = text.chars().take(50000).collect::<String>();
+    let ext = path_to_ext(&rec.path);
+    let file_type = if ext.is_empty() { "unknown" }
+        else if ["jpg","jpeg","png","gif","bmp","webp","tiff"].contains(&ext.as_str()) { "image" }
+        else if ext == "pdf" { "pdf" }
+        else if ["docx","doc","xlsx","xls","pptx","ppt","odt","ods","odp","rtf","epub"].contains(&ext.as_str()) { "office" }
+        else { "text" };
+    Ok(Json(serde_json::json!({
+        "content": content,
+        "image_path": serde_json::Value::Null,
+        "image_base64": serde_json::Value::Null,
+        "file_type": file_type,
+        "char_count": content.chars().count(),
+        "ocr_used": false,
+    })))
 }
 
 #[derive(Deserialize)]
