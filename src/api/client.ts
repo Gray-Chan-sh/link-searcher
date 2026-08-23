@@ -222,11 +222,11 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
   });
 
   if (resp.status === 401) {
-    // Clear invalid token so the UI shows the token input dialog
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('ls_token');
+      localStorage.removeItem('ls_token')
+      window.dispatchEvent(new Event('auth-failed'))
     }
-    throw new Error('Token 无效，请重新输入');
+    throw new Error('Token 无效，请重新输入')
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
