@@ -138,5 +138,5 @@ fn load_bind(app_handle: &tauri::AppHandle) -> String {
             }
         }
     }
-    "127.0.0.1".to_string()
+    "0.0.0.0".to_string()
 }

@@ -1258,11 +1258,11 @@ export default function Settings() {
           </div>
           <SelectField
             label="绑定地址"
-            value={settings['web_api_bind'] ?? '127.0.0.1'}
+            value={settings['web_api_bind'] ?? '0.0.0.0'}
             onChange={v => handleFieldChange('web_api_bind', v)}
             options={[
-              { value: '127.0.0.1', label: '仅本机 (127.0.0.1)' },
               { value: '0.0.0.0', label: '局域网 (0.0.0.0)' },
+              { value: '127.0.0.1', label: '仅本机 (127.0.0.1)' },
             ]}
           />
         </Section>

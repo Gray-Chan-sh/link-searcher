@@ -46,6 +46,10 @@
 
 - **CJK 加粗渲染失败**：引入 `remark-cjk-friendly` 插件（官方 remark 插件目录收录，Vercel streamdown / Rspress / Cherry Studio 采用），在 micromark 层修复 CJK flanking 规则。对非 CJK 内容输出与 CommonMark 0.31.2 测试用例完全一致。改动 2 行：import + remarkPlugins 数组追加（`src/components/ChatPanel.tsx`、`package.json`）
 
+## 2026-08-23（修复 — Web API 默认绑定地址改为局域网）
+
+- **Web API 默认绑定 `127.0.0.1`**：改为默认绑定 `0.0.0.0`（局域网可访问），设置页选项顺序调整（`src-tauri/src/webapi/mod.rs`、`src/pages/Settings.tsx`）
+
 ## 2026-08-22（增强 — AI 聊天全链路追溯：日志 + 导出 + 会话存储）
 
 **动机**：AI 聊天回答缺乏可追溯性——事后无法知道某轮回答使用了哪个模型、耗时多久、最终检索查询是什么、BM25 命中多少文档。`app.log` 和导出会话无法关联。
