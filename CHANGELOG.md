@@ -4,6 +4,10 @@
 
 ---
 
+## 2026-08-23（新功能 — Web API 浏览器搜索页面）
+
+- **浏览器访问 Web API**：`GET /` 返回自包含 HTML 搜索页面（零外部依赖、零构建步骤），含 Token 输入框（localStorage 持久化）、搜索框、结果列表（文件名/路径/大小/日期/相关度）、索引状态显示。页面不走 Bearer Token 认证层，API 调用由页面 JS 携带 Token 发起（`src-tauri/src/webapi/routes.rs`）
+
 ## 2026-08-23（新功能 — 安全的远程 Web API：HTTPS RESTful 端点 + Bearer Token 认证）
 
 **动机**：路线图 P3 要求提供可选的远程 WebUI/API，让手机/平板/同事可通过 HTTPS 检索文档、预览文件、查看索引状态、触发扫描。默认关闭，需用户显式启用。
