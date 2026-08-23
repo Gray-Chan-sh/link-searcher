@@ -49,6 +49,10 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();
 
+    // Install rustls CryptoProvider before any TLS operations.
+    // Must be done synchronously before spawning the async task.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::async_runtime::spawn(async move {
         let (cert_path, key_path) = match tls::ensure_cert(&data_dir) {
             Ok(p) => p,
