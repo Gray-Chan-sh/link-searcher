@@ -11,6 +11,7 @@ interface HttpSpec {
   sse?: boolean;
   transform?: (data: unknown, args: InvokeArgs) => unknown;
   paramMap?: Record<string, string>;
+  dynamicPath?: (args: InvokeArgs) => string;
 }
 
 type Mapping = HttpSpec | ((args: InvokeArgs) => HttpSpec);
@@ -52,10 +53,7 @@ const MAPPINGS: Record<string, Mapping> = {
   get_browse_file_types: { method: 'GET', path: '/api/stats/browse-types' },
 
   // ── Files ──
-  list_files_db: { method: 'GET', path: '/api/files', transform: (data) => {
-    const d = data as Record<string, unknown>;
-    return { items: d.files ?? [], total: d.total ?? 0, page: d.page ?? 1, page_size: d.page_size ?? 50 };
-  }},
+  list_files_db: { method: 'GET', path: '/api/files' },
   list_files: { method: 'GET', path: '/api/files/browse' },
   list_dir_entries: { method: 'GET', path: '/api/dir-entries' },
   get_file: (a) => ({ method: 'GET', path: `/api/files/${a.id}` }),
