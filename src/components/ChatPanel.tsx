@@ -464,13 +464,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                           return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>
                         }
                       }}
-                    >{m.content.replace(/\[(\d+)\]/g, (match, n) => {
-                      const idx = parseInt(n, 10) - 1
+                    >{m.content.replace(/\[(\d+)\](\[(\d+)\])*/g, (match) => {
+                      const nums = match.match(/\d+/g) || []
                       const ev = evidenceFor(i)
-                      if (idx >= 0 && idx < ev.length && ev[idx].path) {
-                        return `[${n}](#ref:${idx})`
-                      }
-                      return match
+                      const links = nums.map(n => {
+                        const idx = parseInt(n, 10) - 1
+                        if (idx >= 0 && idx < ev.length && ev[idx].path) {
+                          return `[${n}](#ref:${idx})`
+                        }
+                        return `[${n}]`
+                      })
+                      return links.join('')
                     })}</ReactMarkdown>
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">

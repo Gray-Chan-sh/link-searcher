@@ -242,7 +242,8 @@ export default function AiChat() {
     if (!activeId) return
     try {
       const content = await exportChatSessionJson(activeId)
-      await saveFile(content, 'ai-chat.json')
+      const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_')
+      await saveFile(content, `${title}.json`)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
