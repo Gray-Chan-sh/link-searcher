@@ -1142,15 +1142,23 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
         return answer.to_string();
     }
 
+    // Protect code blocks (```...```) and inline code (`...`) from citation insertion
+    let code_block_re = regex::Regex::new(r"```[\s\S]*?```").unwrap();
+    let mut placeholders: Vec<String> = Vec::new();
+    let protected = code_block_re.replace_all(answer, |caps: &regex::Captures| {
+        let idx = placeholders.len();
+        placeholders.push(caps[0].to_string());
+        format!("\x00CODE{idx}\x00")
+    });
+
     // Split by Chinese + English sentence-ending punctuation
     let re = regex::Regex::new(r"([^。！？.!?\n]+[。！？.!?]?)").unwrap();
-    let mut sentences: Vec<String> = re.find_iter(answer).map(|m| m.as_str().to_string()).collect();
+    let sentences: Vec<String> = re.find_iter(&protected).map(|m| m.as_str().to_string()).collect();
 
     if sentences.is_empty() {
         return answer.to_string();
     }
 
-    // Pre-compute citation labels for each evidence item
     let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
 
     let mut result = String::new();
@@ -1163,6 +1171,13 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
             continue;
         }
 
+        // Skip protected code blocks
+        if trimmed.starts_with("\x00CODE") {
+            result.push_str(sent);
+            prev_cite = None;
+            continue;
+        }
+
         // Already has [N] — keep as-is
         if regex::Regex::new(r"\[\d+\]").unwrap().is_match(trimmed) {
             result.push_str(sent);
@@ -1170,7 +1185,6 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
             continue;
         }
 
-        // Match against evidence snippets
         let mut best: Option<usize> = None;
         let mut best_score = 0.0;
         for (n, snippet) in &labels {
@@ -1182,9 +1196,7 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
         }
 
         if let Some(n) = best {
-            // Merge with previous sentence if same source
             if prev_cite == Some(n) {
-                // Remove previous [N], add new combined [N] after this sentence
                 let pos = result.rfind(&format!("[{n}]")).unwrap_or(result.len());
                 result.replace_range(pos..pos + format!("[{n}]").len(), "");
                 result.push_str(sent);
@@ -1198,6 +1210,11 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
             result.push_str(sent);
             prev_cite = None;
         }
+    }
+
+    // Restore code blocks
+    for (idx, code) in placeholders.iter().enumerate() {
+        result = result.replace(&format!("\x00CODE{idx}\x00"), code);
     }
 
     result
