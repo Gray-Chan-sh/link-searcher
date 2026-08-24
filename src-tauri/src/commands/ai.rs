@@ -1142,7 +1142,6 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
         return answer.to_string();
     }
 
-    // Protect code blocks (```...```) and inline code (`...`) from citation insertion
     let code_block_re = regex::Regex::new(r"```[\s\S]*?```").unwrap();
     let mut placeholders: Vec<String> = Vec::new();
     let protected = code_block_re.replace_all(answer, |caps: &regex::Captures| {
@@ -1151,36 +1150,23 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
         format!("\x00CODE{idx}\x00")
     });
 
-    // Split by Chinese + English sentence-ending punctuation
-    let re = regex::Regex::new(r"([^。！？.!?\n]+[。！？.!?]?)").unwrap();
-    let sentences: Vec<String> = re.find_iter(&protected).map(|m| m.as_str().to_string()).collect();
-
-    if sentences.is_empty() {
-        return answer.to_string();
-    }
-
     let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
 
-    let mut result = String::new();
+    let sent_re = regex::Regex::new(r"[^。！？.!?\n]*[。！？.!?]").unwrap();
+    let mut result = String::with_capacity(protected.len() + 64);
+    let mut last_end = 0;
     let mut prev_cite: Option<usize> = None;
 
-    for sent in &sentences {
+    for m in sent_re.find_iter(&protected) {
+        let sent = m.as_str();
         let trimmed = sent.trim();
-        if trimmed.is_empty() {
-            result.push_str(sent);
-            continue;
-        }
 
-        // Skip protected code blocks
-        if trimmed.starts_with("\x00CODE") {
-            result.push_str(sent);
-            prev_cite = None;
-            continue;
-        }
+        result.push_str(&protected[last_end..m.start()]);
+        result.push_str(sent);
 
-        // Already has [N] — keep as-is
-        if regex::Regex::new(r"\[\d+\]").unwrap().is_match(trimmed) {
-            result.push_str(sent);
+        last_end = m.end();
+
+        if trimmed.is_empty() || trimmed.starts_with("\x00CODE") || regex::Regex::new(r"\[\d+\]").unwrap().is_match(trimmed) {
             prev_cite = None;
             continue;
         }
@@ -1199,20 +1185,15 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
             if prev_cite == Some(n) {
                 let pos = result.rfind(&format!("[{n}]")).unwrap_or(result.len());
                 result.replace_range(pos..pos + format!("[{n}]").len(), "");
-                result.push_str(sent);
-                result.push_str(&format!("[{n}]"));
-            } else {
-                result.push_str(sent);
-                result.push_str(&format!("[{n}]"));
             }
+            result.push_str(&format!("[{n}]"));
             prev_cite = Some(n);
         } else {
-            result.push_str(sent);
             prev_cite = None;
         }
     }
+    result.push_str(&protected[last_end..]);
 
-    // Restore code blocks
     for (idx, code) in placeholders.iter().enumerate() {
         result = result.replace(&format!("\x00CODE{idx}\x00"), code);
     }
@@ -2541,5 +2522,67 @@ mod auto_cite_tests {
         let result = auto_cite("违约金千分之五。每日计算。", &evidence);
         let count = result.matches("[1]").count();
         assert_eq!(count, 1, "consecutive same source should merge into one [1]: {}", result);
+    }
+}
+
+#[cfg(test)]
+mod auto_cite_md_tests {
+    use super::*;
+
+    fn ev(snippet: &str) -> EvidenceItem {
+        EvidenceItem {
+            file_id: "f1".into(), path: "合同.pdf".into(), snippet: snippet.into(),
+            bm25_score: None, semantic_score: None, rrf_score: None,
+            rewritten: false, rewritten_query: None, from_history: false,
+        }
+    }
+
+    #[test]
+    fn markdown_bold_preserved() {
+        let e = vec![ev("违约金千分之五每日")];
+        let input = "**合同分析**\n\n根据合同约定，违约金为每日千分之五。\n\n**结论**：略高。";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("**合同分析**"), "bold not preserved: {}", result);
+        assert!(result.contains("**结论**"), "bold not preserved: {}", result);
+    }
+
+    #[test]
+    fn markdown_table_preserved() {
+        let e = vec![ev("违约金千分之五")];
+        let input = "| 条款 | 内容 |\n|------|------|\n| 违约金 | 千分之五 |";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("|------|"), "table separator broken: {}", result);
+        assert!(result.contains("| 条款 |"), "table header broken: {}", result);
+    }
+
+    #[test]
+    fn markdown_code_block_preserved() {
+        let e = vec![ev("违约金千分之五")];
+        let input = "代码如下：\n```rust\nlet x = 1;\n```\n结束。";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("```rust"), "code block broken: {}", result);
+        assert!(result.contains("let x = 1;"), "code content broken: {}", result);
+    }
+
+    #[test]
+    fn markdown_list_preserved() {
+        let e = vec![ev("违约金千分之五")];
+        let input = "主要条款：\n1. 违约金按日计算\n2. 不影响继续履行";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("1. 违约金按日计算"), "list broken: {}", result);
+        assert!(result.contains("2. 不影响继续履行"), "list broken: {}", result);
+    }
+
+    #[test]
+    fn markdown_heading_preserved() {
+        let e = vec![ev("违约金千分之五")];
+        let input = "## 主要条款\n\n违约金为千分之五。";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("## 主要条款"), "heading broken: {}", result);
     }
 }
