@@ -361,9 +361,11 @@ pub async fn smart_search_stream(
     .await
     .map_err(|e| format!("task panicked: {e}"))?;
 
+    let raw_text = result.text.unwrap_or_default();
+    let cited_text = auto_cite(&raw_text, &evidence);
     let _ = app.emit("ai-done", AiDone {
         session_id,
-        full_text: result.text.unwrap_or_default(),
+        full_text: cited_text,
         took_ms: result.took_ms,
         cancelled: result.cancelled,
         source_ids,
@@ -1322,9 +1324,11 @@ pub async fn conversation_ask_stream(
         result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
         source_ids.len()
     );
+    let raw_text = result.text.unwrap_or_default();
+    let cited_text = auto_cite(&raw_text, &evidence);
     let _ = app.emit("ai-done", AiDone {
         session_id,
-        full_text: result.text.unwrap_or_default(),
+        full_text: cited_text,
         took_ms: result.took_ms,
         cancelled: result.cancelled,
         source_ids,
