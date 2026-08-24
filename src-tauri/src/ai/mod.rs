@@ -4,6 +4,7 @@
 //! `ai_api_base` disables the feature; every public entry point degrades
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
+pub mod skills;
 pub mod local_embed;
 
 use std::collections::HashMap;

@@ -380,8 +380,8 @@ pub async fn smart_search_stream(
 
 /// Outcome of a follow-up query rewrite: the query to actually retrieve
 /// with (may equal the original when no rewrite applied).
-struct RewriteOutcome {
-    query: String,
+pub struct RewriteOutcome {
+    pub query: String,
 }
 
 /// Query rewrite for follow-up questions: when `last_q` starts with a
@@ -390,7 +390,7 @@ struct RewriteOutcome {
 /// *previous* user message so BM25 sees the referents the pronoun points
 /// back to. The LLM branch (see [`llm_rewrite_query`]) replaces pronouns
 /// contextually when the gateway is available.
-fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
+pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
     const DEICTIC: &[&str] =
         &["它", "这个", "那个", "上述", "上文", "该", "那", "此", "刚才", "上面", "之前", "前面"];
     let q = last_q.trim();
@@ -473,7 +473,7 @@ fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
 /// Try an LLM query rewrite within a strict time budget. Returns `None`
 /// (and the caller falls back to the rule-based rewrite) on any failure:
 /// gateway disabled, timeout, empty/garbage output.
-async fn llm_rewrite_query(
+pub async fn llm_rewrite_query(
     last_q: &str,
     messages: &[ChatMessage],
 ) -> Option<String> {
@@ -762,7 +762,7 @@ struct PreparedConversation {
 /// For each path: exact get_file_by_path first, then LIKE fallback
 /// search_file_ids_by_path_fragment(path, 2). If exactly 1 LIKE match →
 /// adopt; if 0 or ≥2 → missing. Only handles file paths, not directories.
-fn resolve_mention_file_ids(
+pub fn resolve_mention_file_ids(
     conn: &rusqlite::Connection,
     paths: &[String],
 ) -> (Vec<(String, String)>, Vec<String>) {
@@ -1083,6 +1083,47 @@ async fn prepare_conversation_prompt(
     }
     let hits = merged.iter().filter(|h| !h.from_history).count();
     Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits })
+}
+
+/// Pipeline 版本的 prepare_conversation_prompt（使用 RAGPipeline）。
+/// 与原函数功能相同，但拆分为独立 Skill 模块，便于测试和维护。
+#[allow(dead_code)]
+async fn prepare_conversation_prompt_pipeline(
+    state: &tauri::State<'_, AppState>,
+    messages: &[ChatMessage],
+    source_ids: &[String],
+    scope: &TurnScope,
+    session_retrieval_scope: &[String],
+    strict_docs: bool,
+) -> Result<PreparedConversation, String> {
+    use crate::ai::skills::pipeline::{RAGPipeline, RAGContext};
+    use std::sync::Arc;
+
+    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let pipeline = RAGPipeline::new();
+    let db = state.db.clone();
+    let state_ptr: &'static tauri::State<'static, AppState> = unsafe { std::mem::transmute(state) };
+
+    let output = pipeline.execute(&RAGContext {
+        last_q,
+        messages: messages.to_vec(),
+        scope: scope.clone(),
+        session_retrieval_scope: session_retrieval_scope.to_vec(),
+        strict_docs,
+        source_ids: source_ids.to_vec(),
+        db: Arc::new(db),
+        state: Some(state_ptr),
+    }).await.map_err(|e| e.message)?;
+
+    Ok(PreparedConversation {
+        system: output.system,
+        user_msg: output.user_msg,
+        source_ids: output.source_ids,
+        source_files: output.source_files,
+        evidence: output.evidence,
+        search_query: String::new(),
+        hits: 0,
+    })
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
