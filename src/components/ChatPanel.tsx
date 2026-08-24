@@ -477,11 +477,16 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                         <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
                           🔍 {t('evidence')}（{evidenceFor(i).length}）
                         </summary>
-                        <ul className="mt-1 space-y-1">
-                          {evidenceFor(i).map((ev, j) => (
-                            <li key={`${ev.file_id}-${j}`} onClick={() => navigate('/browse?path=' + encodeURIComponent(ev.path))} className="cursor-pointer rounded bg-gray-50 dark:bg-gray-900/40 px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800">
-                              <div className="flex items-center gap-1 flex-wrap">
-                                <span className="font-medium text-gray-700 dark:text-gray-300 truncate max-w-[70%]">{ev.path}</span>
+<ul className="mt-1 space-y-1">
+                           {evidenceFor(i).map((ev, j) => (
+                             <li key={`${ev.file_id}-${j}`} className="group rounded bg-gray-50 dark:bg-gray-900/40 px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800">
+                               <div className="flex items-center gap-1 flex-wrap">
+                                 <button
+                                   onClick={(e) => { e.stopPropagation(); setMentionChips(prev => prev.some(c => c.path === ev.path) ? prev : [...prev, { isFile: !ev.path.endsWith('/'), path: ev.path }]) }}
+                                   className="shrink-0 text-xs text-blue-600 dark:text-blue-400 opacity-0 group-hover:opacity-100 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded px-1 transition-opacity"
+                                   title="引用此文件"
+                                 >+</button>
+                                 <span className="font-medium text-gray-700 dark:text-gray-300 truncate max-w-[65%]">{ev.path}</span>
                                 {ev.from_history && (
                                   <span className="px-1 rounded bg-gray-200 dark:bg-gray-700 text-gray-500 dark:text-gray-400">{t('evidence_from_history')}</span>
                                 )}
