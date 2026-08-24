@@ -32,6 +32,11 @@ impl CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
 /// Create a connection pool with WAL mode and foreign keys enabled on every
 /// connection via the customizer.
 pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
+    // Checkpoint WAL before creating pool — prevents startup failure
+    // when WAL is large from previous unclean shutdown (pkill/panic).
+    if let Ok(conn) = Connection::open(db_path) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
         .max_size(32)
