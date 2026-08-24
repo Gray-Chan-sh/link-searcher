@@ -1126,6 +1126,100 @@ async fn prepare_conversation_prompt_pipeline(
     })
 }
 
+/// Post-process LLM response: supplement [N] citations for sentences that
+/// match evidence snippets but weren't tagged by the LLM.
+///
+/// Algorithm:
+/// 1. Split by 。！？.!? into sentences
+/// 2. Skip sentences that already have [N]
+/// 3. For remaining sentences, compute keyword overlap with each evidence snippet
+/// 4. If overlap > threshold, add [N] to sentence end
+/// 5. Merge consecutive sentences that cite the same source
+pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
+    if evidence.is_empty() || answer.trim().is_empty() {
+        return answer.to_string();
+    }
+
+    // Split by Chinese + English sentence-ending punctuation
+    let re = regex::Regex::new(r"([^。！？.!?\n]+[。！？.!?]?)").unwrap();
+    let mut sentences: Vec<String> = re.find_iter(answer).map(|m| m.as_str().to_string()).collect();
+
+    if sentences.is_empty() {
+        return answer.to_string();
+    }
+
+    // Pre-compute citation labels for each evidence item
+    let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
+
+    let mut result = String::new();
+    let mut prev_cite: Option<usize> = None;
+
+    for sent in &sentences {
+        let trimmed = sent.trim();
+        if trimmed.is_empty() {
+            result.push_str(sent);
+            continue;
+        }
+
+        // Already has [N] — keep as-is
+        if regex::Regex::new(r"\[\d+\]").unwrap().is_match(trimmed) {
+            result.push_str(sent);
+            prev_cite = None;
+            continue;
+        }
+
+        // Match against evidence snippets
+        let mut best: Option<usize> = None;
+        let mut best_score = 0.0;
+        for (n, snippet) in &labels {
+            let score = keyword_overlap(sent, snippet);
+            if score > 0.15 && score > best_score {
+                best_score = score;
+                best = Some(*n);
+            }
+        }
+
+        if let Some(n) = best {
+            // Merge with previous sentence if same source
+            if prev_cite == Some(n) {
+                // Remove previous [N], add new combined [N] after this sentence
+                let pos = result.rfind(&format!("[{n}]")).unwrap_or(result.len());
+                result.replace_range(pos..pos + format!("[{n}]").len(), "");
+                result.push_str(sent);
+                result.push_str(&format!("[{n}]"));
+            } else {
+                result.push_str(sent);
+                result.push_str(&format!("[{n}]"));
+            }
+            prev_cite = Some(n);
+        } else {
+            result.push_str(sent);
+            prev_cite = None;
+        }
+    }
+
+    result
+}
+
+/// Jaccard-like keyword overlap score between two strings.
+fn keyword_overlap(a: &str, b: &str) -> f64 {
+    let a_words: std::collections::HashSet<String> = crate::search::schema::JIEBA
+        .cut(a, true)
+        .iter()
+        .map(|w| w.word.to_lowercase())
+        .filter(|w| w.chars().count() >= 2)
+        .collect();
+    let b_words: std::collections::HashSet<String> = crate::search::schema::JIEBA
+        .cut(b, true)
+        .iter()
+        .map(|w| w.word.to_lowercase())
+        .filter(|w| w.chars().count() >= 2)
+        .collect();
+    if a_words.is_empty() || b_words.is_empty() { return 0.0; }
+    let intersection = a_words.intersection(&b_words).count();
+    intersection as f64 / a_words.len().max(1) as f64
+}
+
 /// Multi-turn conversation: continue a chat using previously-selected
 /// source documents as the knowledge base. `messages` includes the full
 /// conversation history (alternating user/assistant roles).
@@ -1153,7 +1247,7 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, .. } =
+    let PreparedConversation { system, user_msg, evidence, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
@@ -1168,9 +1262,10 @@ pub async fn conversation_ask(
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
-    log::info!("[AI] conversation_ask: done, answer_chars={}", answer.chars().count());
+    let cited = auto_cite(&answer, &evidence);
+    log::info!("[AI] conversation_ask: done, answer_chars={} cited_chars={}", answer.chars().count(), cited.chars().count());
 
-    Ok(answer)
+    Ok(cited)
 }
 
 /// Streaming variant of [`conversation_ask`]: emits `ai-chunk`/`ai-done`.
@@ -2377,5 +2472,53 @@ mod mention_resolve_tests {
         assert!(!md.contains("检索范围"), "no per_turn_scopes should not render scope: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod auto_cite_tests {
+    use super::*;
+
+    fn ev(path: &str, snippet: &str) -> EvidenceItem {
+        EvidenceItem {
+            file_id: "f1".into(), path: path.into(), snippet: snippet.into(),
+            bm25_score: None, semantic_score: None, rrf_score: None,
+            rewritten: false, rewritten_query: None, from_history: false,
+        }
+    }
+
+    #[test]
+    fn no_evidence_returns_original() {
+        let result = auto_cite("这是一段回答。", &[]);
+        assert_eq!(result, "这是一段回答。");
+    }
+
+    #[test]
+    fn already_tagged_kept_as_is() {
+        let evidence = vec![ev("a.pdf", "违约金千分之五")];
+        let result = auto_cite("违约金为千分之五[1]。", &evidence);
+        assert!(result.contains("[1]"));
+    }
+
+    #[test]
+    fn untagged_sentence_gets_citation() {
+        let evidence = vec![ev("a.pdf", "合同约定违约金为每日千分之五")];
+        let result = auto_cite("合同约定违约金为每日千分之五。这是行业惯例。", &evidence);
+        assert!(result.contains("[1]"), "first sentence should be cited: {}", result);
+    }
+
+    #[test]
+    fn unmatched_sentence_no_citation() {
+        let evidence = vec![ev("a.pdf", "违约金千分之五")];
+        let result = auto_cite("今天是星期三。", &evidence);
+        assert!(!result.contains("[1]"), "unmatched sentence should not be cited: {}", result);
+    }
+
+    #[test]
+    fn consecutive_same_source_merged() {
+        let evidence = vec![ev("a.pdf", "违约金 千分之五 每日")];
+        let result = auto_cite("违约金千分之五。每日计算。", &evidence);
+        let count = result.matches("[1]").count();
+        assert_eq!(count, 1, "consecutive same source should merge into one [1]: {}", result);
     }
 }
