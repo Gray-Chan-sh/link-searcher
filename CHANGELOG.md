@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-08-25（功能 — AI 主题聚类 + sherpa-onnx 构建文档）
+
+**动机**：路线图 P3「RAG 内容分析」（摘要✓、跨文件关联✓，主题聚类缺失）+ P0「sherpa-onnx-sys 构建依赖」。
+
+- **新增 `ai_topic_clusters` IPC 命令**：取最近 N 个（默认 150，上限 400）活跃文档的 AI 摘要或内容前 200 字符，交 LLM 按 3-8 个主题分组，要求输出严格 JSON `[{topic, ids}]`；宽松解析（截取首 `[` 到末 `]`），编号映射回路径，空组/越界编号自动丢弃（`commands/ai.rs`）
+- **索引状态页新增「主题聚类」卡片**：LLM 未配置时显示不可用文案；可用时显示提示 + 「✦ 开始聚类」按钮，结果按主题分组渲染（📁 主题 + 文件数 + 路径列表），失败红字可重试。3 个新 i18n 键 × 4 语言（`pages/IndexStatus.tsx`、`api/files.ts`、`i18n/{zh,en,ja,ko}.ts`）
+- **lib.rs**：注册 `ai_topic_clusters`
+- **sherpa-onnx 构建依赖（P0 勘误）**：核实上游 `sherpa-onnx-sys` build.rs 原生支持 `SHERPA_ONNX_ARCHIVE_DIR`（本地压缩包缓存）与 `SHERPA_ONNX_LIB_DIR`（已解压库目录），无需改代码——README 快速开始补充国内网络构建说明
+
+**验证**：cargo test 202 lib 全绿、tsc 0、semgrep ERROR 0
+
+## 2026-08-25（功能 — 长文档分块检索：RAG 注入不再截断，改选 top-K 相关段落）
+
+**动机**：路线图 P3。RAG 注入每文件截断 50000 字符，281 个超长文档中的相关内容（如判决书中段的金额数字）被截掉。
+
+**方案**（按 `.omo/plans/doc-chunking.md` 实施 Phase 1+2）：索引时分块存储，注入时按词法相关性选块。
+
+**变更文件**：
+- `db/chunks.rs`（新增）：`chunk_text`（~1500 字符块 + 200 重叠，句号/换行边界优先切分，>10000 字符才分块）；`replace_chunks`/`get_chunks`/`delete_chunks` CRUD；`select_relevant_chunks`（确定性分词：ASCII 词元整存 + CJK 二字滑窗，词频打分选 top-K 后按阅读序返回）；`run_backfill_chunks`（每次最多 500 文档，幂等收敛）。含 6 个单元测试（阈值/边界对齐/评分排序/CRUD 往返/回填幂等）
+- `db/mod.rs`：新增 `doc_chunks` 表（**以 md5 为键**而非计划中的 file_id——内容按 md5 去重存储，同内容多路径共享一份块集，清理可挂接现有孤儿回收）；`cleanup_orphan_content` 扩展清理无引用的 doc_chunks 行
+- `indexer.rs`：`extract_and_index_single` 提取完成后，长文档自动分块写入；去重复用路径跳过已存在块集；内容缩到阈值以下时清除过期块
+- `commands/ai.rs`：新增 `chunked_or_truncated` 辅助——@mention 文件 >50K 字符且有块集时，注入 top-8 相关段落（带「第X-Y字」位置标记），否则回退截断；检索命中片段（2K）不变
+- `commands/index.rs` + `lib.rs`：扫描完成后后台线程跑 `run_backfill_chunks`，存量长文档无需重建索引即受益
+
+**验证**：cargo test 258 全绿（含 202 lib + 56 集成）、semgrep ERROR 0
+
+## 2026-08-25（性能 — 启动扫描 walk 中分批提交：每 250 文件就地 flush）
+
+**动机**：路线图 P1「启动扫描异步化」。三个扫描方法（full_scan/incremental_scan/startup_scan）都是先走完整个目录树再开始索引——大目录下走树期间零产出，且 jobs 全量驻留内存。
+
+- **新增 `flush_jobs` 辅助方法**：封装 `batch_index` 调用 + 结果归集，返回 `(indexed_ok, errors)`。内部用 `std::mem::take` 清空 jobs，避免重复分配（`scanner/mod.rs`）
+- **walk 内每 250 jobs 就地 flush**：三个扫描方法的遍历循环中，`jobs.len() >= FLUSH_EVERY` 时调 `flush_jobs`，与 `batch_index` 内部 CHUNK 对齐（250）。删除检测仍在走完树后进行，逻辑不变（`scanner/mod.rs`）
+- **最终 flush 用 `flush_jobs` 替换**：三处 post-walk 的 `batch_index` 调用改为 `flush_jobs`，取消检查已内置于 helper 中，消除重复（`scanner/mod.rs`）
+- **路线图勘误**：P1「IO 竞争缓解」经核实已实现（`DEFAULT_BATCH_IO_CONCURRENCY=8` + 专用限流 Rayon 池 + 并发峰值测试），从待办移除
+
+## 2026-08-25（增强 — 扫描会话日志 RAII 化 + CLI 补齐）
+
+**动机**：路线图 P2「索引会话日志」。4 处调用点重复相同的 SessionLog open/write/close 样板，且 CLI 路径（`link-searcher scan`/`watch`）完全缺失会话日志。
+
+- **新增 `SessionLogGuard` RAII struct**：构造时打开日志（失败则惰性降级为 no-op），drop 时自动 flush + sync；暴露 `write_line()` 方法。消除 4 处重复的 open/write/close 样板（`logs/session.rs`）
+- **4 处调用点迁移**：`trigger_scan`、`rebuild_index`（`commands/index.rs`）、`add_dir` 吸收后自动扫描（`commands/dirs.rs`）、启动扫描线程（`lib.rs`）全部改用 guard，错误提前 return 不再需要手动 close
+- **CLI 补齐会话日志**：`link-searcher scan [dir]` 每目录写一条结果行；`watch` 基线扫描写开始/完成行。GUI 日志页现在能看到 CLI 触发的扫描记录（`cli.rs`）
+- **跳过 progress 逐文件镜像**：scanner 的 `progress` 回调是 `impl Fn`（每文件触发一次），写入 session log 需 `&mut` 会破坏 Fn 约束，且 10 万文件会产生 10 万行——摘要行（开始/每目录结果/错误/完成）已足够
+- **路线图勘误**：P1「浏览页动态分页」与「Tantivy reader 刷新」经核实均已实现（Browse.tsx ResizeObserver + IndexManager reader.reload() 1s 节流），从待办移除
+
+## 2026-08-25（AI 推理追溯：append-only 事件日志）
+
+**新增 `ai_events` 表**：每轮 AI 对话的 RAG 管道执行过程记录为结构化事件序列（query_rewrite → scope_resolved → retrieval → context_assembled → llm_call → turn_complete），持久化到 SQLite，前端可展开查看推理过程。
+
+**变更文件**：
+- `db/ai_events.rs`（新增）：事件 CRUD（record_event / get_session_events / get_turn_events / cleanup_old_events）+ 3 个单元测试
+- `db/mod.rs`：新增 `ai_events` DDL（含 session+turn 复合索引）
+- `commands/ai.rs`：`prepare_conversation_prompt` 在 4 个管道节点埋点（改写/scope/检索/组装），`conversation_ask_stream` 在 LLM 调用前后追加 llm_call + turn_complete 事件并批量写入 DB；新增 `get_ai_events` / `get_turn_ai_events` IPC 命令
+- `lib.rs`：注册 2 个新 IPC 命令
+- `components/AiEventTimeline.tsx`（新增）：可折叠推理过程时间线组件
+- `components/ChatPanel.tsx`：每轮助手消息下方嵌入"🧠 推理过程"折叠面板
+- `api/files.ts`：新增 `getAiEvents` / `getTurnAiEvents` API 函数
+- `i18n/{zh,en,ja,ko}.ts`：新增 7 个多语言 key（ai_reasoning / ai_event_*）
+
+---
+
 ## 2026-08-24（增强 — Web API 完整功能对等：65 个 REST 端点 + client.ts 全量映射 + SSE 事件总线）
 
 **动机**：Web UI 和桌面 UI 功能完全一致——同一套 React 代码，改一处自动同步另一处。
