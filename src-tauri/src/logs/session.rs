@@ -1,10 +1,11 @@
 //! Session-scoped log files — one file per scan session under `data_dir/logs/`.
 //!
-//! Contract (shared with T7): `SessionLog::open` creates
-//! `{name}-{YYYYMMDD-HHmmss}.log` and returns the [`File`]; the owning thread
-//! calls [`SessionLog::write`] to append lines and [`SessionLog::close`] to
-//! flush + sync before handing the handle back. Each scan session is owned by
-//! exactly one thread, so no locking is needed.
+//! Contract: [`SessionLog::open`] creates `{name}-{YYYYMMDD-HHmmss}.log` and
+//! returns the [`File`]; the owning thread calls [`SessionLog::write`] to
+//! append lines and [`SessionLog::close`] to flush + sync.
+//!
+//! Prefer [`SessionLogGuard`] — an RAII wrapper that auto-closes on drop and
+//! exposes a [`write_line`] method for ergonomic one-liner calls.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
@@ -37,5 +38,39 @@ impl SessionLog {
         let mut f = file;
         let _ = f.flush();
         let _ = f.sync_all();
+    }
+}
+
+/// RAII guard for a scan session log file.
+///
+/// Opens the file on construction (log proceeds without it on failure) and
+/// flushes + syncs on drop. Exposes [`write_line`] for ergonomic appending.
+pub struct SessionLogGuard {
+    file: Option<File>,
+}
+
+impl SessionLogGuard {
+    /// Open a new session log file at `{dir}/{name}-{timestamp}.log`.
+    /// If the file cannot be created, the guard is inert (writes are no-ops).
+    pub fn open(dir: &Path, name: &str) -> Self {
+        let file = SessionLog::open(dir, name)
+            .map_err(|e| log::warn!("[SCAN] 无法创建会话日志: {e}"))
+            .ok();
+        Self { file }
+    }
+
+    /// Append a line to the session log (no-op if file could not be opened).
+    pub fn write_line(&mut self, line: &str) {
+        if let Some(ref mut f) = self.file {
+            let _ = SessionLog::write(f, line);
+        }
+    }
+}
+
+impl Drop for SessionLogGuard {
+    fn drop(&mut self) {
+        if let Some(f) = self.file.take() {
+            SessionLog::close(f);
+        }
     }
 }
