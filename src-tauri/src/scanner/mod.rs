@@ -23,6 +23,9 @@ use crate::indexer::{BatchJob, IndexerService};
 
 pub use watcher::{ChangeKind, FileChangeEvent, FileWatcher, WatcherCommand};
 
+/// Jobs accumulated during a walk before an in-place [`Scanner::flush_jobs`].
+const FLUSH_EVERY: usize = 250;
+
 /// Progress snapshot emitted during a scan.
 #[derive(Debug, Clone)]
 pub struct ScanProgress {
@@ -74,8 +77,40 @@ impl Scanner {
         Self { db, indexer, cancel_scan }
     }
 
+    /// Flush accumulated jobs through [`IndexerService::batch_index`],
+    /// returning `(indexed_ok, errors)`.
+    ///
+    /// Called mid-walk every 250 discovered jobs (and once at the end) so
+    /// extraction starts while the tree is still being traversed.
+    fn flush_jobs(
+        &self,
+        jobs: &mut Vec<BatchJob>,
+        progress: &impl Fn(ScanProgress),
+    ) -> Result<(u64, u64)> {
+        if jobs.is_empty() || self.cancel_scan.load(Ordering::Acquire) {
+            return Ok((0, 0));
+        }
+        let mut ok = 0u64;
+        let mut errs = 0u64;
+        for r in self.indexer.batch_index(std::mem::take(jobs), |done, total| {
+            progress(ScanProgress {
+                total,
+                processed: done,
+                errors: 0,
+                current_file: String::new(),
+                phase: "index",
+            });
+        })? {
+            if r.success { ok += 1 } else { errs += 1 }
+        }
+        Ok((ok, errs))
+    }
+
     /// Full scan of a single directory — walk every file, index
     /// new/changed files, and mark files absent from disk as deleted.
+    ///
+    /// Jobs are flushed in batches of 250 during the walk so indexing
+    /// starts while the directory tree is still being traversed.
     pub fn full_scan(
         &self,
         dir_id: &str,
@@ -193,6 +228,11 @@ impl Scanner {
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, size, None)?;
                 jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
+                if jobs.len() >= FLUSH_EVERY {
+                    let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+                    indexed += ok;
+                    errors += errs;
+                }
             }
 
             on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
@@ -206,23 +246,9 @@ impl Scanner {
             progress(ScanProgress { total, processed, errors, current_file: String::new(), phase: "scan" });
         }
 
-        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
-            for r in self.indexer.batch_index(jobs, |done, total| {
-                let _ = progress(ScanProgress {
-                    total,
-                    processed: done,
-                    errors: 0,
-                    current_file: String::new(),
-                    phase: "index",
-                });
-            })? {
-                if r.success {
-                    indexed += 1;
-                } else {
-                    errors += 1;
-                }
-            }
-        }
+        let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+        indexed += ok;
+        errors += errs;
 
         // Cancelled — skip the delete-detection pass, commit partial results.
         if self.cancel_scan.load(Ordering::Acquire) {
@@ -347,26 +373,17 @@ impl Scanner {
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, meta.len(), None)?;
                 jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
-            }
-        }
-
-        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
-            for r in self.indexer.batch_index(jobs, |done, total| {
-                let _ = progress(ScanProgress {
-                    total,
-                    processed: done,
-                    errors: 0,
-                    current_file: String::new(),
-                    phase: "index",
-                });
-            })? {
-                if r.success {
-                    indexed += 1;
-                } else {
-                    errors += 1;
+                if jobs.len() >= FLUSH_EVERY {
+                    let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+                    indexed += ok;
+                    errors += errs;
                 }
             }
         }
+
+        let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+        indexed += ok;
+        errors += errs;
 
         // Cancelled — skip the delete-detection pass, commit partial results.
         if self.cancel_scan.load(Ordering::Acquire) {
@@ -476,28 +493,19 @@ impl Scanner {
             if needs_index {
                 let file_id = tracker::upsert_file(&conn, &rel_path, dir_id, mtime, size, None)?;
                 jobs.push(BatchJob { file_id, file_path: path, rel_path: rel_path.clone(), dir_id: dir_id.to_string() });
+                if jobs.len() >= FLUSH_EVERY {
+                    let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+                    indexed += ok;
+                    errors += errs;
+                }
             }
 
             on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
         }
 
-        if !jobs.is_empty() && !self.cancel_scan.load(Ordering::Acquire) {
-            for r in self.indexer.batch_index(jobs, |done, total| {
-                let _ = progress(ScanProgress {
-                    total,
-                    processed: done,
-                    errors: 0,
-                    current_file: String::new(),
-                    phase: "index",
-                });
-            })? {
-                if r.success {
-                    indexed += 1;
-                } else {
-                    errors += 1;
-                }
-            }
-        }
+        let (ok, errs) = self.flush_jobs(&mut jobs, &progress)?;
+        indexed += ok;
+        errors += errs;
 
         // Cancelled — skip cleanup/move detection, commit partial results.
         if self.cancel_scan.load(Ordering::Acquire) {
