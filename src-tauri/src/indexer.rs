@@ -282,6 +282,23 @@ impl IndexerService {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
 
+        // Long-doc chunk storage for RAG retrieval (content-keyed by md5);
+        // dedup reuse keeps existing chunks, below-threshold clears stale ones.
+        if text.chars().count() > crate::db::chunks::CHUNK_THRESHOLD {
+            match crate::db::chunks::get_chunks(conn, &hash) {
+                Ok(existing) if existing.is_empty() => {
+                    let chunks = crate::db::chunks::chunk_text(&text);
+                    if let Err(e) = crate::db::chunks::replace_chunks(conn, &hash, &chunks) {
+                        log::warn!("[INDEX] doc_chunks write failed {}: {e}", job.file_id);
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("[INDEX] doc_chunks read failed {}: {e}", job.file_id),
+            }
+        } else if let Err(e) = crate::db::chunks::delete_chunks(conn, &hash) {
+            log::warn!("[INDEX] doc_chunks cleanup failed {}: {e}", job.file_id);
+        }
+
         // CRITICAL: mark_extracted must succeed for Phase 1 progress visibility.
         // If SQLite is busy (parallel writes), retry once.
         if let Err(e) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
