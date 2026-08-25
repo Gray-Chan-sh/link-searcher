@@ -40,6 +40,15 @@ export async function aiCapabilities(): Promise<AiCapabilities> {
   return client.invoke<AiCapabilities>('ai_capabilities')
 }
 
+export interface TopicCluster {
+  topic: string
+  files: string[]
+}
+
+export async function getTopicClusters(limit?: number): Promise<TopicCluster[]> {
+  return client.invoke<TopicCluster[]>('ai_topic_clusters', { limit })
+}
+
 export interface EvidenceItem {
   file_id: string
   path: string
@@ -280,4 +289,22 @@ export async function listFilesDb(params: {
 
 export async function getBrowseFileTypes(): Promise<string[]> {
   return client.invoke<string[]>('get_browse_file_types')
+}
+
+export interface AiEvent {
+  id: number
+  session_id: string
+  turn_number: number
+  event_seq: number
+  event_type: string
+  payload: Record<string, unknown>
+  created_at: number
+}
+
+export async function getAiEvents(sessionId: string): Promise<AiEvent[]> {
+  return client.invoke<AiEvent[]>('get_ai_events', { sessionId })
+}
+
+export async function getTurnAiEvents(sessionId: string, turnNumber: number): Promise<AiEvent[]> {
+  return client.invoke<AiEvent[]>('get_turn_ai_events', { sessionId, turnNumber })
 }
