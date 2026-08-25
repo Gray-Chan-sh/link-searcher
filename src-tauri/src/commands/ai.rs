@@ -91,6 +91,95 @@ pub async fn summarize_file(
     Ok(SummaryResult { file_id, summary, cached: false })
 }
 
+/// A group of documents sharing one content theme.
+#[derive(Debug, Clone, Serialize)]
+pub struct TopicCluster {
+    pub topic: String,
+    pub files: Vec<String>,
+}
+
+/// Cluster indexed documents into topics via LLM over summaries/snippets.
+#[tauri::command]
+pub async fn ai_topic_clusters(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<TopicCluster>, String> {
+    if !crate::ai::llm_enabled() {
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页填写 API Base URL")
+            .into());
+    }
+    let limit = limit.unwrap_or(150).min(400);
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let brief = "COALESCE(ds.summary, substr(ci.text_content, 1, 200))";
+    let sql = format!(
+        "SELECT f.path, {brief} FROM file_tracking f \
+         LEFT JOIN doc_summaries ds ON ds.file_id = f.id \
+         LEFT JOIN content_index ci ON ci.md5 = f.md5 \
+         WHERE f.status = 'active' AND {brief} IS NOT NULL AND trim({brief}) != '' \
+         ORDER BY f.updated_at DESC LIMIT ?1"
+    );
+    let items: Vec<(String, String)> = {
+        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            [limit as i64],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        ).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    drop(conn);
+
+    if items.is_empty() {
+        return Err("没有可分析的文档内容".into());
+    }
+
+    let mut listing = String::new();
+    for (i, (path, text)) in items.iter().enumerate() {
+        listing.push_str(&format!("[{}] {}: {}\n", i + 1, path, text.replace('\n', " ")));
+    }
+    listing.push_str("\n请把以上文档按内容主题分成 3-8 组，只输出 JSON 数组，不要输出任何其他文字：\n[{\"topic\":\"组名\",\"ids\":[\"编号\"]}]");
+    let system = "你是文档主题聚类助手。根据每个文档的路径与内容摘要将其分组。";
+    let raw = tokio::task::spawn_blocking(move || crate::ai::chat(system, &listing))
+        .await
+        .unwrap_or(None)
+        .ok_or_else(|| "AI 请求失败（检查 API 配置或网络）".to_string())?;
+
+    let Some(start) = raw.find('[') else {
+        return Err("AI 返回格式无法解析".into());
+    };
+    let Some(end) = raw.rfind(']') else {
+        return Err("AI 返回格式无法解析".into());
+    };
+    if end <= start {
+        return Err("AI 返回格式无法解析".into());
+    }
+    #[derive(serde::Deserialize)]
+    struct RawCluster {
+        topic: String,
+        ids: Vec<String>,
+    }
+    let clusters: Vec<RawCluster> = serde_json::from_str(&raw[start..=end])
+        .map_err(|_| "AI 返回的 JSON 无法解析".to_string())?;
+
+    let mut out = Vec::new();
+    for c in clusters {
+        let files = c
+            .ids
+            .iter()
+            .filter_map(|id| id.trim().parse::<usize>().ok())
+            .filter(|&n| n >= 1 && n <= items.len())
+            .map(|n| items[n - 1].0.clone())
+            .collect::<Vec<_>>();
+        if !files.is_empty() && !c.topic.trim().is_empty() {
+            out.push(TopicCluster { topic: c.topic.trim().to_string(), files });
+        }
+    }
+    if out.is_empty() {
+        return Err("未能从 AI 返回中解析出有效分组".into());
+    }
+    Ok(out)
+}
+
 /// Ask a question over one or more documents' extracted text (RAG).
 #[tauri::command]
 pub async fn ask_documents(
@@ -757,6 +846,9 @@ struct PreparedConversation {
     search_query: String,
     /// Number of BM25 hits before merge with @mention files.
     hits: usize,
+    /// Accumulated AI events for this turn's pipeline execution.
+    /// Caller should batch-insert into ai_events table.
+    events: Vec<(String, serde_json::Value)>,
 }
 
 /// Resolve file paths to file IDs with exact + LIKE fallback.
@@ -804,14 +896,22 @@ async fn prepare_conversation_prompt(
         "[AI] prepare_conversation_prompt: q={} mention_files={:?} mention_dirs={:?} conditions={:?} session_retrieval_scope={:?} strict_docs={}",
         last_q, scope.mention_files, scope.mention_dirs, scope.conditions, session_retrieval_scope, strict_docs
     );
+    let mut events: Vec<(String, serde_json::Value)> = Vec::new();
     // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
     let rule = rewrite_query(&last_q, messages);
+    let original_rule_query = rule.query.clone();
     let search_q = match llm_rewrite_query(&last_q, messages).await {
         Some(llm) if llm != rule.query => llm,
         _ => rule.query,
     };
     let rewritten = search_q != last_q.trim();
     log::info!("[AI] rewrite: original={last_q} search_q={search_q} rewritten={rewritten}");
+    events.push(("query_rewrite".into(), serde_json::json!({
+        "original": last_q,
+        "rewritten": search_q,
+        "was_rewritten": rewritten,
+        "rewrite_method": if rewritten { if search_q != original_rule_query { "llm" } else { "rule" } } else { "none" },
+    })));
 
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
@@ -927,6 +1027,14 @@ async fn prepare_conversation_prompt(
         "[AI] scope resolved: dir_ids={:?} path_prefixes={:?} file_ids={:?} ext={:?} date={:?}~{:?}",
         dir_ids_opt, path_prefixes_opt, mention_file_ids, ext_filter, date_from, date_to
     );
+    events.push(("scope_resolved".into(), serde_json::json!({
+        "dir_ids_count": dir_ids_opt.as_ref().map_or(0, |v| v.len()),
+        "path_prefixes": path_prefixes_opt.clone().unwrap_or_default(),
+        "mention_files_count": mention_file_ids.as_ref().map_or(0, |v| v.len()),
+        "ext_filter": ext_filter,
+        "date_from": date_from,
+        "date_to": date_to,
+    })));
 
     // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
     // 语义开启时对追问做 BM25+embedding RRF 融合重排。
@@ -939,6 +1047,8 @@ async fn prepare_conversation_prompt(
         )?
     };
     log::info!("[AI] retrieved hits: {} new_hits (from limited scope)", new_hits.len());
+    let bm25_count = new_hits.len();
+    let semantic_fused = new_hits.iter().any(|h| h.semantic_score.is_some());
 
     const MAX_SOURCES: usize = 15;
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -996,6 +1106,15 @@ async fn prepare_conversation_prompt(
         }
     }
 
+    let from_history_count = merged.iter().filter(|h| h.from_history).count();
+    events.push(("retrieval".into(), serde_json::json!({
+        "search_query": search_q,
+        "bm25_hits": bm25_count,
+        "semantic_fused": semantic_fused,
+        "merged_hits": merged.len(),
+        "from_history_count": from_history_count,
+    })));
+
     let mut docs: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
     // @mention 文件直用：按解析结果标 [N] 编号引用，优先于检索命中。
@@ -1008,7 +1127,7 @@ async fn prepare_conversation_prompt(
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
                         mention_has_content = true;
-                        docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 50000)));
+                        docs.push(format!("[{n}]（{resolved_path}）\n{}", chunked_or_truncated(&conn, md5, &text, &search_q)));
                         evidence.push(EvidenceItem {
                             file_id: fid.clone(),
                             path: resolved_path.clone(),
@@ -1084,7 +1203,13 @@ async fn prepare_conversation_prompt(
         user_msg = user_msg.replace(&format!("@{path}"), &format!("[{}]", idx));
     }
     let hits = merged.iter().filter(|h| !h.from_history).count();
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits })
+    events.push(("context_assembled".into(), serde_json::json!({
+        "material_count": docs.len(),
+        "total_chars": context.chars().count(),
+        "strict_docs": strict_docs,
+        "truncated_to": 50000,
+    })));
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events })
 }
 
 /// Pipeline 版本的 prepare_conversation_prompt（使用 RAGPipeline）。
@@ -1125,6 +1250,7 @@ async fn prepare_conversation_prompt_pipeline(
         evidence: output.evidence,
         search_query: String::new(),
         hits: 0,
+        events: vec![],
     })
 }
 
@@ -1297,14 +1423,21 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, mut events } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
     let cfg = crate::config::load_config();
+    let turn_number = messages.iter().filter(|m| m.role == "user").count().saturating_sub(1);
     log::info!(
         "[AI_TRACE] turn_begin trace_id={trace_id} llm={} embedding={} strict={} hits={} search_q={}",
         cfg.active_llm_model_id, cfg.active_embedding_model_id, strict_docs, hits, search_query
     );
+    events.push(("llm_call".into(), serde_json::json!({
+        "model_id": cfg.active_llm_model_id,
+        "system_prompt_chars": system.chars().count(),
+        "user_msg_chars": user_msg.chars().count(),
+        "streaming": true,
+    })));
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -1322,6 +1455,20 @@ pub async fn conversation_ask_stream(
         result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
         source_ids.len()
     );
+    events.push(("turn_complete".into(), serde_json::json!({
+        "took_ms": result.took_ms,
+        "cancelled": result.cancelled,
+        "answer_chars": result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
+        "source_count": source_ids.len(),
+        "evidence_count": evidence.len(),
+    })));
+    if let Ok(conn) = state.db.get() {
+        for (i, (event_type, payload)) in events.iter().enumerate() {
+            let _ = crate::db::ai_events::record_event(
+                &conn, &session_id, turn_number, (i + 1) as u32, event_type, payload,
+            );
+        }
+    }
     let raw_text = result.text.unwrap_or_default();
     let cited_text = auto_cite(&raw_text, &evidence);
     let _ = app.emit("ai-done", AiDone {
@@ -1354,6 +1501,30 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     } else {
         chars[..max_chars].iter().collect()
     }
+}
+
+/// Inject the full text (≤50 K chars) or, for longer documents, select the
+/// top-8 lexically-relevant chunks via jieba term overlap. Falls back to
+/// truncation when chunks are unavailable.
+fn chunked_or_truncated(conn: &rusqlite::Connection, md5: &str, text: &str, query: &str) -> String {
+    if text.chars().count() <= 50_000 {
+        return truncate_text(text, 50_000);
+    }
+    let chunks = match crate::db::chunks::get_chunks(conn, md5) {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[AI] doc_chunks read failed: {e}");
+            vec![]
+        }
+    };
+    if chunks.is_empty() {
+        return truncate_text(text, 50_000);
+    }
+    crate::db::chunks::select_relevant_chunks(&chunks, query, 8)
+        .iter()
+        .map(|c| format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text))
+        .collect::<Vec<_>>()
+        .join("\n···\n")
 }
 
 pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1875,6 +2046,57 @@ pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Re
     };
     serde_json::to_string_pretty(&export).map_err(|e| format!("JSON 序列化失败: {e}"))
 }
+
+#[derive(Serialize)]
+pub struct AiEventJson {
+    pub id: i64,
+    pub session_id: String,
+    pub turn_number: usize,
+    pub event_seq: u32,
+    pub event_type: String,
+    pub payload: serde_json::Value,
+    pub created_at: i64,
+}
+
+#[tauri::command]
+pub fn get_ai_events(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<AiEventJson>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let events = crate::db::ai_events::get_session_events(&conn, &session_id)
+        .map_err(|e| format!("{e}"))?;
+    Ok(events.into_iter().map(|e| AiEventJson {
+        id: e.id,
+        session_id: e.session_id,
+        turn_number: e.turn_number,
+        event_seq: e.event_seq,
+        event_type: e.event_type,
+        payload: e.payload,
+        created_at: e.created_at,
+    }).collect())
+}
+
+#[tauri::command]
+pub fn get_turn_ai_events(
+    state: State<'_, AppState>,
+    session_id: String,
+    turn_number: usize,
+) -> Result<Vec<AiEventJson>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let events = crate::db::ai_events::get_turn_events(&conn, &session_id, turn_number)
+        .map_err(|e| format!("{e}"))?;
+    Ok(events.into_iter().map(|e| AiEventJson {
+        id: e.id,
+        session_id: e.session_id,
+        turn_number: e.turn_number,
+        event_seq: e.event_seq,
+        event_type: e.event_type,
+        payload: e.payload,
+        created_at: e.created_at,
+    }).collect())
+}
+
 #[cfg(test)]
 mod history_tests {
     use super::*;
