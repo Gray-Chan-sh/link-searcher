@@ -143,25 +143,13 @@ pub async fn trigger_scan(
 
     tokio::task::spawn_blocking(move || {
         cancel_scan.store(false, Ordering::Release);
-        // Per-scan session log (optional — scan proceeds without it).
-        let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
-            .map_err(|e| log::warn!("[SCAN] 无法创建会话日志: {e}"))
-            .ok();
-        let mut sess = |line: String| {
-            if let Some(ref mut f) = slog {
-                let _ = crate::logs::session::SessionLog::write(f, &line);
-            }
-        };
+        let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
         let conn = match db_pool.get() {
             Ok(c) => c,
             Err(e) => {
                 log::error!("[SCAN] db connection failed: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
-                drop(sess);
-                if let Some(f) = slog {
-                    crate::logs::session::SessionLog::close(f);
-                }
                 return;
             }
         };
@@ -171,10 +159,6 @@ pub async fn trigger_scan(
                 log::error!("[SCAN] failed to list dirs: {e}");
                 is_scanning.store(false, Ordering::SeqCst);
                 cancel_scan.store(false, Ordering::SeqCst);
-                drop(sess);
-                if let Some(f) = slog {
-                    crate::logs::session::SessionLog::close(f);
-                }
                 return;
             }
         };
@@ -194,18 +178,14 @@ pub async fn trigger_scan(
 
         if targets.is_empty() {
             log::warn!("[SCAN] no directories configured");
-            sess("[SCAN] 无已配置目录".to_string());
+            slog.write_line("[SCAN] 无已配置目录");
             is_scanning.store(false, Ordering::SeqCst);
             cancel_scan.store(false, Ordering::SeqCst);
-            drop(sess);
-            if let Some(f) = slog {
-                crate::logs::session::SessionLog::close(f);
-            }
             return;
         }
 
         let full = dir_id.is_none();
-        sess(format!("[SCAN] 开始扫描 {} 个目录", targets.len()));
+        slog.write_line(&format!("[SCAN] 开始扫描 {} 个目录", targets.len()));
         for dir in &targets {
             if cancel_scan.load(Ordering::Acquire) {
                 log::info!("[SCAN] scan cancelled by user");
@@ -239,7 +219,7 @@ pub async fn trigger_scan(
                     let line = format!("[SCAN] {}: {} files, {} indexed, {} errors in {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
                     log::info!("{line}");
-                    sess(line);
+                    slog.write_line(&line);
                     added += r.added;
                     deleted += r.deleted;
                     modified += r.modified;
@@ -249,7 +229,7 @@ pub async fn trigger_scan(
                 Err(e) => {
                     let line = format!("[SCAN] {} failed: {e}", dir.id);
                     log::error!("{line}");
-                    sess(line);
+                    slog.write_line(&line);
                 }
             }
         }
@@ -267,11 +247,8 @@ pub async fn trigger_scan(
 
         is_scanning.store(false, Ordering::SeqCst);
         cancel_scan.store(false, Ordering::SeqCst);
-        sess("[SCAN] 扫描完成".to_string());
-        drop(sess);
-        if let Some(f) = slog {
-            crate::logs::session::SessionLog::close(f);
-        }
+        slog.write_line("[SCAN] 扫描完成");
+        drop(slog);
         let _ = app_clone.emit("scan-completed", serde_json::json!({}));
 
         // After a scan, backfill any files newly indexed without embeddings
@@ -281,6 +258,15 @@ pub async fn trigger_scan(
             let db_pool_bg = db_pool.clone();
             std::thread::spawn(move || {
                 let _ = run_backfill_embeddings(&db_pool_bg);
+            });
+        }
+
+        // Backfill doc_chunks for long documents indexed before chunking
+        // existed (idempotent, capped per run).
+        {
+            let db_pool_c = db_pool.clone();
+            std::thread::spawn(move || {
+                let _ = crate::db::chunks::run_backfill_chunks(&db_pool_c);
             });
         }
 
@@ -401,16 +387,8 @@ pub async fn rebuild_index(
         };
         drop(conn);
 
-        // Per-scan session log (optional — rebuild proceeds without it).
-        let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
-            .map_err(|e| log::warn!("[SCAN] 无法创建会话日志: {e}"))
-            .ok();
-        let mut sess = |line: String| {
-            if let Some(ref mut f) = slog {
-                let _ = crate::logs::session::SessionLog::write(f, &line);
-            }
-        };
-        sess(format!("[SCAN] 开始重建索引，扫描 {} 个目录", dirs.len()));
+        let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
+        slog.write_line(&format!("[SCAN] 开始重建索引，扫描 {} 个目录", dirs.len()));
 
         for dir in &dirs {
             if cancel_scan.load(Ordering::Acquire) {
@@ -431,7 +409,7 @@ pub async fn rebuild_index(
                     let line = format!("[SCAN] {}: {} files, {} indexed, {} errors, {}ms",
                         dir.id, r.total_files, r.indexed, r.errors, r.duration_ms);
                     log::info!("{line}");
-                    sess(line);
+                    slog.write_line(&line);
                     added += r.added;
                     deleted += r.deleted;
                     modified += r.modified;
@@ -441,7 +419,7 @@ pub async fn rebuild_index(
                 Err(e) => {
                     let line = format!("[SCAN] {} failed: {e}", dir.id);
                     log::error!("{line}");
-                    sess(line);
+                    slog.write_line(&line);
                 }
             }
         }
@@ -483,11 +461,8 @@ pub async fn rebuild_index(
         is_scanning.store(false, Ordering::SeqCst);
         is_rebuilding.store(false, Ordering::SeqCst);
         cancel_scan.store(false, Ordering::SeqCst);
-        sess("[SCAN] 索引重建完成".to_string());
-        drop(sess);
-        if let Some(f) = slog {
-            crate::logs::session::SessionLog::close(f);
-        }
+        slog.write_line("[SCAN] 索引重建完成");
+        drop(slog);
         let _ = app.emit("scan-completed", serde_json::json!({}));
     });
 

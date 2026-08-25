@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::commands::backup::{delete_backup, export_backup, get_backup_status, get_dead_dirs, list_backups, remap_dir, remove_dir_with_files, restore_backup, restore_from_zip, trigger_backup};
-use crate::commands::ai::{ai_capabilities, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, export_chat_session_json, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
+use crate::commands::ai::{ai_capabilities, ai_topic_clusters, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, export_chat_session_json, get_ai_events, get_turn_ai_events, list_chat_sessions, load_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
@@ -74,6 +74,7 @@ fn run_with_config(app_config: config::AppConfig) {
             search_file_paths,
             search_tree_prune,
             suggest,
+            ai_topic_clusters,
             summarize_file,
             ask_documents,
             smart_search,
@@ -87,6 +88,8 @@ fn run_with_config(app_config: config::AppConfig) {
             save_chat_session,
             export_chat_session,
             export_chat_session_json,
+            get_ai_events,
+            get_turn_ai_events,
             test_ai_gateway,
             ai_capabilities,
             cancel_ai_request,
@@ -394,15 +397,7 @@ get_dir_children,
             std::thread::spawn(move || {
                 use crate::extractor::pdf;
 
-                // Per-scan session log (optional — scan proceeds without it).
-                let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
-                    .map_err(|e| log::warn!("[STARTUP] 无法创建会话日志: {e}"))
-                    .ok();
-                let mut sess = |line: String| {
-                    if let Some(ref mut f) = slog {
-                        let _ = crate::logs::session::SessionLog::write(f, &line);
-                    }
-                };
+                let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
 
                 log::info!("[STARTUP] 检查系统依赖...");
 
@@ -434,7 +429,7 @@ get_dir_children,
                 }
 
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
-                sess(format!("[STARTUP] 开始扫描 {} 个目录", dirs.len()));
+                slog.write_line(&format!("[STARTUP] 开始扫描 {} 个目录", dirs.len()));
                 for dir in &dirs {
                     let result = scanner_ref.startup_scan(&dir.id, |prog| {
                         let _ = app_handle.emit("scan-progress", crate::commands::index::ScanEventPayload {
@@ -452,12 +447,12 @@ get_dir_children,
                                 dir.path, r.total_files, r.indexed, r.errors
                             );
                             log::info!("{line}");
-                            sess(line);
+                            slog.write_line(&line);
                         }
                         Err(e) => {
                             let line = format!("[STARTUP] {} 扫描失败: {e}", dir.path);
                             log::error!("{line}");
-                            sess(line);
+                            slog.write_line(&line);
                         }
                     }
                 }
@@ -483,12 +478,17 @@ get_dir_children,
                     log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold=100 MiB)");
                 }
 
-                // Close session log before signalling completion.
-                sess("[STARTUP] 启动扫描完成".to_string());
-                drop(sess);
-                if let Some(f) = slog {
-                    crate::logs::session::SessionLog::close(f);
+                // Backfill doc_chunks for long documents indexed before
+                // chunking existed (idempotent, capped per run).
+                {
+                    let pool_c = db_ref.clone();
+                    std::thread::spawn(move || {
+                        let _ = crate::db::chunks::run_backfill_chunks(&pool_c);
+                    });
                 }
+
+                slog.write_line("[STARTUP] 启动扫描完成");
+                drop(slog);
 
                 app_handle.emit("scan-completed", serde_json::json!({}))
                     .unwrap_or_else(|e| log::error!("[STARTUP] failed to emit scan-completed: {e}"));
