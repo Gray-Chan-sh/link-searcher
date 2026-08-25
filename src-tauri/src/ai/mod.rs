@@ -426,6 +426,10 @@ pub fn chat_stream(
             first_line = false;
             if !l.starts_with("data:") {
                 // Gateway ignored stream:true — read the rest as a plain body.
+                if ai_cancelled() {
+                    cancelled = true;
+                    break;
+                }
                 let mut rest = String::new();
                 let _ = buf_reader.read_to_string(&mut rest);
                 let mut body = line.clone();
