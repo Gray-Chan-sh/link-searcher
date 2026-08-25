@@ -3,7 +3,7 @@ import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, type IndexError } from '../api/index'
-import { getDuplicates, aiCapabilities, type DuplicateGroup } from '../api/files'
+import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
@@ -22,6 +22,10 @@ export default function IndexStatus() {
   const { status, loading, error, scan, rebuild } = useIndexStatus()
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
   const [dupesLoading, setDupesLoading] = useState(false)
+  const [llmCapable, setLlmCapable] = useState(false)
+  const [clusters, setClusters] = useState<TopicCluster[] | null>(null)
+  const [clusterLoading, setClusterLoading] = useState(false)
+  const [clusterError, setClusterError] = useState<string | null>(null)
   const [rebuilding, setRebuilding] = useState(false)
   const [forceDead, setForceDead] = useState(false)
   const [embedCapable, setEmbedCapable] = useState(false)
@@ -35,7 +39,7 @@ export default function IndexStatus() {
   const [scanPhase, setScanPhase] = useState<string | null>(null)
 
   useEffect(() => {
-    aiCapabilities().then(c => setEmbedCapable(c.embedding)).catch(() => {})
+    aiCapabilities().then(c => { setEmbedCapable(c.embedding); setLlmCapable(c.llm) }).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -46,6 +50,20 @@ export default function IndexStatus() {
   useEffect(() => {
     if (!status?.is_scanning) setScanPhase(null)
   }, [status?.is_scanning])
+
+  const runClustering = async () => {
+    if (clusterLoading) return
+    setClusterLoading(true)
+    setClusterError(null)
+    try {
+      setClusters(await getTopicClusters())
+    } catch (e) {
+      setClusters(null)
+      setClusterError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setClusterLoading(false)
+    }
+  }
 
   const handleScan = async () => {
     setScanError(null)
@@ -243,8 +261,46 @@ const handleRebuild = async () => {
             {rebuilding && <LoadingSpinner className="size-4" />}
             {t('rebuild_index')}
           </button>
-        </div>
-      </div>
+</div>
+
+            <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+              <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
+                {t('topic_clusters')}
+                {clusterLoading && <LoadingSpinner className="size-3 ml-2 inline" />}
+              </h3>
+              {!llmCapable ? (
+                <p className="text-xs text-gray-400 dark:text-gray-500">{t('ai_llm_unavailable')}</p>
+              ) : (
+                <div className="space-y-2">
+                  {clusters === null && !clusterError && (
+                    <p className="text-xs text-gray-500 dark:text-gray-400">{t('topic_clusters_hint')}</p>
+                  )}
+                  {clusters !== null && (
+                    <div className="space-y-2 max-h-64 overflow-y-auto">
+                      {clusters.map(c => (
+                        <div key={c.topic} className="text-xs">
+                          <span className="font-medium text-gray-900 dark:text-gray-100">📁 {c.topic}</span>
+                          <span className="text-gray-400 dark:text-gray-500 ml-1">({c.files.length})</span>
+                          <div className="text-gray-500 dark:text-gray-400 break-all">{c.files.join('、')}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {clusterError && (
+                    <p className="text-xs text-red-600 dark:text-red-400">{clusterError}</p>
+                  )}
+                  {!clusterLoading && (
+                    <button
+                      onClick={runClustering}
+                      className="px-3 py-1 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
+                    >
+                      {t('run_topic_clusters')}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
 
       {backfillMsg && (
         <div className="mb-4 px-4 py-3 text-sm text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
