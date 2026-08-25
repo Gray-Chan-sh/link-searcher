@@ -10,6 +10,7 @@ import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
 import MentionPicker from './MentionPicker'
+import AiEventTimeline from './AiEventTimeline'
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -157,19 +158,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           ? { source_ids: p.source_ids, source_files: p.source_files }
           : {}
         const userTurns = messagesRef.current.filter(m => m.role === 'user').length
-        const perTurnPatch = p.source_ids.length > 0
-          ? { per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
-              turn_index: userTurns - 1,
-              file_ids: p.source_ids,
-              items: p.evidence ?? [],
-              trace_id: p.trace_id ?? '',
-              took_ms: p.took_ms,
-              llm_model: p.llm_model ?? '',
-              embedding_model: p.embedding_model ?? '',
-              search_query: p.search_query ?? '',
-              hits: p.hits ?? 0,
-            }] }
-          : {}
+        const perTurnPatch = {
+          per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
+            turn_index: userTurns - 1,
+            file_ids: p.source_ids,
+            items: p.evidence ?? [],
+            trace_id: p.trace_id ?? '',
+            took_ms: p.took_ms,
+            llm_model: p.llm_model ?? '',
+            embedding_model: p.embedding_model ?? '',
+            search_query: p.search_query ?? '',
+            hits: p.hits ?? 0,
+          }]
+        }
         onSessionChange({
           ...cur,
           messages: [...messagesRef.current, { role: 'assistant', content: body + took }],
@@ -197,6 +198,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     const turn = userBefore - 1
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === turn)?.items ?? []
+  }
+  const turnNumberFor = (msgIndex: number) => {
+    return messages.slice(0, msgIndex).filter(m => m.role === 'user').length - 1
   }
   const fmtScore = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2))
 
@@ -510,6 +514,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                             </li>
                           ))}
                         </ul>
+                      </details>
+                    )}
+                    {session?.id && (
+                      <details className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
+                          🧠 {t('ai_reasoning')}
+                        </summary>
+                        <AiEventTimeline sessionId={session.id} turnNumber={turnNumberFor(i)} />
                       </details>
                     )}
                   </>
