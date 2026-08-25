@@ -135,15 +135,8 @@ pub async fn add_dir(
                 return;
             }
             cancel_scan.store(false, std::sync::atomic::Ordering::Release);
-            let mut slog = crate::logs::session::SessionLog::open(&logs_dir, "scan")
-                .map_err(|e| log::warn!("[DIRS] 无法创建会话日志: {e}"))
-                .ok();
-            let mut sess = |line: String| {
-                if let Some(ref mut f) = slog {
-                    let _ = crate::logs::session::SessionLog::write(f, &line);
-                }
-            };
-            sess("[DIRS] 吸收子目录后自动全量扫描".to_string());
+            let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
+            slog.write_line("[DIRS] 吸收子目录后自动全量扫描");
             let line = match scanner.full_scan(&dir_id, |_| {}) {
                 Ok(r) => format!(
                     "[DIRS] 吸收后扫描完成: {} files, {} indexed, {} errors",
@@ -152,12 +145,8 @@ pub async fn add_dir(
                 Err(e) => format!("[DIRS] 吸收后扫描失败: {e}"),
             };
             log::info!("{line}");
-            sess(line);
+            slog.write_line(&line);
             is_scanning.store(false, std::sync::atomic::Ordering::SeqCst);
-            drop(sess);
-            if let Some(f) = slog {
-                crate::logs::session::SessionLog::close(f);
-            }
         });
     }
 
