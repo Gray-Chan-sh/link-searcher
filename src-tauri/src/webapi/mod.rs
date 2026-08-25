@@ -68,7 +68,13 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     let app = routes::build_router(api_state);
 
     let data_dir = app_handle.state::<AppState>().data_dir.clone();
-    let addr: SocketAddr = format!("{bind}:{port}").parse().expect("invalid bind address");
+    let addr: SocketAddr = match format!("{bind}:{port}").parse() {
+        Ok(a) => a,
+        Err(e) => {
+            log::error!("[WEBAPI] invalid bind address '{bind}:{port}': {e}");
+            return;
+        }
+    };
 
     let handle = axum_server::Handle::new();
     let handle_clone = handle.clone();

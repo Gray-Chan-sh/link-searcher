@@ -25,7 +25,7 @@
 
 - [x] **PdfExtractor trait impl 硬编码 `"eng"`**：`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 池）
 - [x] **LoBackgroundGuard 死代码清理**：struct 已删除
-- [ ] **Semgrep WARNING**：`unwrap`/`expect` 若干处应逐步消除
+- [x] **Semgrep WARNING**：生产代码 `unwrap`/`expect` 已清零——4 处修复（3 处 nosemgrep 标注修正 + 1 处 webapi 地址解析改优雅降级）；测试代码 494 处保留（AGENTS.md 允许测试路径）（2026-08-25）
 - [x] **sherpa-onnx-sys 构建依赖**：已解决——上游 build.rs 原生支持 `SHERPA_ONNX_ARCHIVE_DIR`（本地压缩包）与 `SHERPA_ONNX_LIB_DIR`（解压库目录），无需改代码；README 已补充国内网络构建说明（2026-08-25 核实）
 
 ---
