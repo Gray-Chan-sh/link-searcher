@@ -1,5 +1,7 @@
 //! Database initialization, connection pool, and schema migrations for Link-Searcher.
 
+pub mod ai_events;
+pub mod chunks;
 pub mod dir_config;
 pub mod search_history;
 pub mod tracker;
@@ -262,6 +264,26 @@ const CREATE_TABLES_SQL: &str = "
         summary     TEXT NOT NULL,
         updated_at  INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS ai_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id  TEXT NOT NULL,
+        turn_number INTEGER NOT NULL,
+        event_seq   INTEGER NOT NULL,
+        event_type  TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ae_session ON ai_events(session_id, turn_number);
+
+    CREATE TABLE IF NOT EXISTS doc_chunks (
+        md5         TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        start_char  INTEGER NOT NULL,
+        end_char    INTEGER NOT NULL,
+        text        TEXT NOT NULL,
+        PRIMARY KEY (md5, chunk_index)
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any
@@ -273,6 +295,13 @@ pub fn cleanup_orphan_content(conn: &Connection) -> Result<u64> {
     )?;
     if deleted > 0 {
         log::info!("[DB] cleaned up {deleted} orphan content_index rows");
+    }
+    let deleted_chunks = conn.execute(
+        "DELETE FROM doc_chunks WHERE md5 NOT IN (SELECT DISTINCT md5 FROM file_tracking WHERE md5 IS NOT NULL)",
+        [],
+    )?;
+    if deleted_chunks > 0 {
+        log::info!("[DB] cleaned up {deleted_chunks} orphan doc_chunks rows");
     }
     Ok(deleted as u64)
 }
@@ -349,7 +378,7 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        for table in &["app_settings", "content_index", "dir_config", "file_tracking", "index_errors", "search_history"] {
+        for table in &["ai_events", "app_settings", "content_index", "dir_config", "file_tracking", "index_errors", "search_history"] {
             assert!(tables.contains(&table.to_string()), "missing table: {table}");
         }
     }
