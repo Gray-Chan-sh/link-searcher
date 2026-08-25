@@ -528,8 +528,9 @@ impl SearcherWrap {
 fn parse_filename_prefix(query: &str) -> (Option<String>, String) {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
+        // nosemgrep: rust-expect-panic — compile-time verified regex literal
         Regex::new(r#"(?i)(?:^|\s)filename:("([^"]+)"|(\S+))"#)
-            .expect("static filename regex is valid") // nosemgrep: rust-unwrap
+            .expect("static filename regex is valid")
     });
     let mut last_value: Option<String> = None;
     let mut segments: Vec<(usize, usize)> = Vec::new(); // (start, end) byte offsets of each match

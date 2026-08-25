@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-08-25（修复 — Semgrep WARNING 清零：生产代码 unwrap/expect 消除）
+
+**动机**：路线图 P0 最后一项。AGENTS.md 禁止 `unwrap()`/`expect()` 在非致命路径。
+
+- **4 处生产代码 expect 修复**：
+  - `webapi/mod.rs`：`format!("{bind}:{port}").parse().expect(...)` → match + log + graceful return（用户输入无效地址不再 panic）
+  - `search/mod.rs`：`create_in_ram().expect(...)` → nosemgrep 标注修正（in-RAM 创建不可失败）
+  - `search/searcher.rs`：`Regex::new(literal).expect(...)` → nosemgrep 标注修正（编译期验证的正则）
+  - `extractor/paddleocr.rs`：`OnceLock::get().expect("just set")` → nosemgrep 标注修正（set 后必 Some）
+- **根因**：3 处已有 `// nosemgrep: rust-unwrap` 标注但引用了不存在的规则 ID（实际规则为 `rust-expect-panic`）；1 处无标注且为真实 panic 风险
+- **测试代码 494 处 unwrap/expect 保留**：AGENTS.md 允许测试路径使用
+
 ## 2026-08-25（功能 — AI 主题聚类 + sherpa-onnx 构建文档）
 
 **动机**：路线图 P3「RAG 内容分析」（摘要✓、跨文件关联✓，主题聚类缺失）+ P0「sherpa-onnx-sys 构建依赖」。

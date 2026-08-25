@@ -88,6 +88,7 @@ impl IndexManager {
     /// Create an in-memory index for testing.
     pub fn create_in_ram() -> Self {
         let schema = build_schema();
+        // nosemgrep: rust-expect-panic — in-RAM reader creation is infallible
         Self::from_index(Index::create_in_ram(schema), Box::new(Instant::now))
             .expect("in-memory reader creation must succeed")
     }
