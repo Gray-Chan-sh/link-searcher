@@ -100,6 +100,8 @@ pub fn run_cli() -> Result<()> {
             };
             for (dir_id, dir_path) in &dirs {
                 eprintln!("\n[scan] scanning {} ...", dir_path.display());
+                let mut slog = crate::logs::session::SessionLogGuard::open(&data_dir.join("logs"), "scan");
+                slog.write_line(&format!("[CLI] 开始扫描 {}", dir_path.display()));
                 let result = bootstrap
                     .scanner
                     .full_scan(dir_id, |prog| {
@@ -109,9 +111,8 @@ pub fn run_cli() -> Result<()> {
                         );
                     })
                     .with_context(|| format!("scan failed for {}", dir_path.display()))?;
-                eprintln!();
-                println!(
-                    "{}: {} files, {} indexed (added {}, modified {}, deleted {}, errors {}) in {} ms",
+                let line = format!(
+                    "[CLI] {}: {} files, {} indexed (added {}, modified {}, deleted {}, errors {}) in {} ms",
                     dir_path.display(),
                     result.total_files,
                     result.indexed,
@@ -121,6 +122,10 @@ pub fn run_cli() -> Result<()> {
                     result.errors,
                     result.duration_ms,
                 );
+                slog.write_line(&line);
+                drop(slog);
+                eprintln!();
+                println!("{line}");
             }
         }
         Cli::Watch { dir } => {
@@ -141,6 +146,8 @@ pub fn run_cli() -> Result<()> {
 
             // Baseline scan first so existing files are tracked — mirrors the
             // GUI startup ordering (R3-11): StartWatch precedes the scan.
+            let mut slog = crate::logs::session::SessionLogGuard::open(&data_dir.join("logs"), "scan");
+            slog.write_line(&format!("[CLI] watch 基线扫描 {}", dir_path.display()));
             let result = bootstrap
                 .scanner
                 .startup_scan(&dir_id, |prog| {
@@ -150,6 +157,11 @@ pub fn run_cli() -> Result<()> {
                     );
                 })
                 .with_context(|| format!("baseline scan failed for {}", dir_path.display()))?;
+            slog.write_line(&format!(
+                "[CLI] watch 基线完成: {} files, {} indexed",
+                result.total_files, result.indexed
+            ));
+            drop(slog);
             eprintln!();
             println!(
                 "[watch] watching {} ({} files, {} indexed) — press Ctrl-C to stop",
