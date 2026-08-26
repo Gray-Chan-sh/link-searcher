@@ -66,16 +66,20 @@ pub fn chunk_text(text: &str) -> Vec<(usize, usize, String)> {
 
 /// Replace all stored chunks for `md5` (no-op delete when `chunks` empty).
 pub fn replace_chunks(conn: &Connection, md5: &str, chunks: &[(usize, usize, String)]) -> Result<()> {
-    conn.execute("DELETE FROM doc_chunks WHERE md5 = ?1", [md5])?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute("DELETE FROM doc_chunks WHERE md5 = ?1", [md5])?;
     if chunks.is_empty() {
+        tx.commit()?;
         return Ok(());
     }
-    let mut stmt = conn.prepare(
+    let mut stmt = tx.prepare(
         "INSERT INTO doc_chunks (md5, chunk_index, start_char, end_char, text) VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
     for (i, (s, e, t)) in chunks.iter().enumerate() {
         stmt.execute(params![md5, i as i64, *s as i64, *e as i64, t])?;
     }
+    drop(stmt);
+    tx.commit()?;
     Ok(())
 }
 
@@ -152,7 +156,7 @@ pub fn run_backfill_chunks(db: &Pool<SqliteConnectionManager>) -> Result<u64> {
     let conn = db.get()?;
     let md5s: Vec<String> = {
         let mut stmt = conn.prepare(
-            "SELECT ci.md5 FROM content_index ci WHERE length(ci.text_content) > ?1 \
+            "SELECT ci.md5 FROM content_index ci WHERE ci.char_count > ?1 \
              AND ci.md5 NOT IN (SELECT md5 FROM doc_chunks) LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![CHUNK_THRESHOLD as i64, MAX_PER_RUN as i64], |r| r.get(0))?;

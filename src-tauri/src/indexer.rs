@@ -405,6 +405,7 @@ impl IndexerService {
                 .as_mut()
                 .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
             let conn = self.db.get().context("failed to get DB connection")?;
+            let mut pending_idx: Vec<(String, String)> = Vec::with_capacity(chunk.len());
 
             for extraction in extracted {
                 if self.cancel_scan.load(Ordering::Acquire) {
@@ -444,40 +445,12 @@ impl IndexerService {
                             });
                             continue;
                         }
-
-if let Err(e) =
-                            crate::db::tracker::update_indexed(&conn, &file_id, Some(&data.hash))
-                        {
-                            let err = format!("update_indexed: {e}");
-                            log::error!("[INDEX] 更新 tracking 失败: {}: {}", data.file_name, err);
-                            // 回滚已写入的 Tantivy 文档：记录保持 pending，下轮重试时
-                            // 重新 add_document，不回滚则会产生重复文档（每次扫描 +1）。
-                            if let Err(rollback) = Indexer::delete_document(writer, &file_id) {
-                                log::error!("[INDEX] 回滚文档失败 {}: {rollback}", data.file_name);
-                            }
-                            results.push(BatchResult {
-                                file_id,
-                                success: false,
-                                error: Some(err),
-                            });
-                            continue;
-                        }
-
-                        log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
-                        success_count += 1;
-                        total_bytes += data.file_size;
-                        results.push(BatchResult {
-                            file_id,
-                            success: true,
-                            error: None,
-                        });
+                        pending_idx.push((file_id, data.hash));
                     }
                     Err((file_id, err)) => {
                         error_count += 1;
                         log::error!("[INDEX] 提取失败: {}", err);
                         if err == "scan cancelled" {
-                            // User-cancelled jobs are not real failures: leave
-                            // the record pending so the next scan retries it.
                             continue;
                         }
                         let etype = classify_error_str(&err, "");
@@ -492,6 +465,28 @@ if let Err(e) =
                             success: false,
                             error: Some(err),
                         });
+                    }
+                }
+            }
+
+            // Batch all tracking updates in one transaction.
+            if !pending_idx.is_empty() {
+                match crate::db::tracker::update_indexed_batch(&conn, &pending_idx) {
+                    Ok(()) => {
+                        for (file_id, _) in &pending_idx {
+                            results.push(BatchResult { file_id: file_id.clone(), success: true, error: None });
+                        }
+                        success_count += pending_idx.len() as u64;
+                    }
+                    Err(e) => {
+                        let err = format!("update_indexed_batch: {e}");
+                        log::error!("[INDEX] 批量更新 tracking 失败: {err}");
+                        for (file_id, _) in &pending_idx {
+                            if let Err(rollback) = Indexer::delete_document(writer, file_id) {
+                                log::error!("[INDEX] 回滚文档失败 {}: {rollback}", file_id);
+                            }
+                            results.push(BatchResult { file_id: file_id.clone(), success: false, error: Some(err.clone()) });
+                        }
                     }
                 }
             }
