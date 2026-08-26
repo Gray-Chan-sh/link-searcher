@@ -661,9 +661,9 @@ pub async fn reextract_missing_content(
         let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
         let mut stmt = conn
             .prepare(
-                "SELECT ft.id, ft.dir_id, ft.path, ft.md5, ft.indexed
+                "SELECT ft.id, ft.dir_id, ft.path, COALESCE(ft.md5, '') AS md5, ft.indexed
                  FROM file_tracking ft
-                 WHERE ft.status = 'active' AND ft.indexed IN (1, 2) AND ft.md5 IS NOT NULL
+                 WHERE ft.status = 'active' AND ft.indexed IN (1, 2)
                    AND NOT EXISTS (SELECT 1 FROM content_index c WHERE c.md5 = ft.md5)
                  LIMIT ?1",
             )
@@ -701,7 +701,9 @@ pub async fn reextract_missing_content(
                     continue;
                 }
             };
-            let _ = tracker::delete_content(&conn, &md5);
+            if !md5.is_empty() {
+                let _ = tracker::delete_content(&conn, &md5);
+            }
             drop(conn);
             // Must delete the stale Tantivy doc first — re-adding without it
             // leaves a duplicate document for the same file.
