@@ -199,6 +199,7 @@ const CREATE_TABLES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_ft_status ON file_tracking(status);
     CREATE INDEX IF NOT EXISTS idx_ft_md5 ON file_tracking(md5);
     CREATE INDEX IF NOT EXISTS idx_ft_mtime ON file_tracking(mtime);
+    CREATE INDEX IF NOT EXISTS idx_ft_pending ON file_tracking(updated_at) WHERE indexed IN (0, 2, 3);
 
     CREATE TABLE IF NOT EXISTS content_index (
         md5             TEXT PRIMARY KEY,

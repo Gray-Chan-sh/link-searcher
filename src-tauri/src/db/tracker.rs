@@ -356,6 +356,25 @@ pub fn update_indexed(conn: &Connection, file_id: &str, md5: Option<&str>) -> Re
     Ok(())
 }
 
+/// Bulk-update indexing status in a single transaction. `batch` is
+/// `(file_id, md5)` pairs. One commit instead of N autocommits.
+pub fn update_indexed_batch(conn: &Connection, batch: &[(String, String)]) -> Result<()> {
+    let tx = conn.unchecked_transaction().context("update_indexed_batch tx start failed")?;
+    {
+        let mut stmt = tx
+            .prepare(
+                "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, updated_at=?2 WHERE id=?3",
+            )
+            .context("update_indexed_batch prepare failed")?;
+        let now = chrono::Utc::now().timestamp();
+        for (file_id, md5) in batch {
+            stmt.execute(rusqlite::params![md5, now, file_id]).context("update_indexed_batch exec failed")?;
+        }
+    }
+    tx.commit().context("update_indexed_batch commit failed")?;
+    Ok(())
+}
+
 /// Mark a file as having content that verified empty even after a retry.
 /// Such files are skipped by future automatic verification (manual re-verify
 /// can still force them); any successful re-index clears the flag.
@@ -485,34 +504,26 @@ pub fn get_content_ocr_used(conn: &Connection, md5: &str) -> Result<bool> {
 }
 
 pub fn get_total_image_files(conn: &Connection) -> Result<u64> {
-    let exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
-    let mut count: i64 = 0;
-    for ext in &exts {
-        count += conn.query_row(
-            "SELECT COUNT(*) FROM file_tracking WHERE status = 'active' AND path LIKE ?1",
-            rusqlite::params![format!("%.{}", ext)],
-            |row| row.get(0),
-        ).unwrap_or(0);
-    }
-    Ok(count as u64)
+    conn.query_row(
+        "SELECT COUNT(*) FROM file_tracking WHERE status = 'active' AND file_ext IN ('png','jpg','jpeg','gif','bmp','webp','tiff')",
+        [],
+        |row| row.get(0),
+    )
+    .map(|c: i64| c as u64)
+    .map_err(Into::into)
 }
 
 pub fn get_ocred_count(conn: &Connection) -> Result<u64> {
-    let exts = ["png", "jpg", "jpeg", "gif", "bmp", "webp", "tiff"];
-    let mut count: i64 = 0;
-    for ext in &exts {
-        count += conn
-            .query_row(
-                "SELECT COUNT(DISTINCT ft.md5) FROM file_tracking ft \
-                 JOIN content_index ci ON ft.md5 = ci.md5 \
-                 WHERE ft.status = 'active' AND ft.path LIKE ?1 \
-                 AND length(ci.text_content) > 10",
-                rusqlite::params![format!("%.{}", ext)],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-    }
-    Ok(count as u64)
+    conn.query_row(
+        "SELECT COUNT(DISTINCT ft.md5) FROM file_tracking ft \
+         JOIN content_index ci ON ft.md5 = ci.md5 \
+         WHERE ft.status = 'active' AND ft.file_ext IN ('png','jpg','jpeg','gif','bmp','webp','tiff') \
+         AND ci.char_count > 10",
+        [],
+        |row| row.get(0),
+    )
+    .map(|c: i64| c as u64)
+    .map_err(Into::into)
 }
 
 // -- index_errors --
