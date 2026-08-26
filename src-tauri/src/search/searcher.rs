@@ -443,7 +443,7 @@ impl SearcherWrap {
                     .iter()
                     .map(|p| {
                         let escaped = regex::escape(p.trim_end_matches('/'));
-                        let pattern = format!("^{}.*", escaped);
+                        let pattern = format!("^{}", escaped);
                         let rq: Box<dyn tantivy::query::Query> = match RegexQuery::from_pattern(&pattern, path_field) {
                             Ok(q) => Box::new(q),
                             Err(e) => {
