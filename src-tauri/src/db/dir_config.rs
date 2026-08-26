@@ -102,7 +102,7 @@ pub fn get_dir(conn: &Connection, dir_id: &str) -> Result<Option<DirConfig>> {
     let mut rows = stmt
         .query_map(rusqlite::params![dir_id], row_to_dir_config)
         .context("failed to query dir config")?;
-    Ok(rows.next().transpose().context("failed to read dir config row")?)
+    rows.next().transpose().context("failed to read dir config row")
 }
 
 /// Update selected fields of a directory configuration.

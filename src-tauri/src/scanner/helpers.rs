@@ -50,11 +50,10 @@ pub fn is_excluded(path: &Path, exclude_patterns: &[glob::Pattern]) -> bool {
     if EXCLUDED_NAMES.contains(&name) {
         return true;
     }
-    if let Some(c) = name.chars().next() {
-        if EXCLUDED_PREFIXES.contains(&c) {
+    if let Some(c) = name.chars().next()
+        && EXCLUDED_PREFIXES.contains(&c) {
             return true;
         }
-    }
     if EXCLUDED_SUFFIXES.iter().any(|s| name.ends_with(s)) {
         return true;
     }

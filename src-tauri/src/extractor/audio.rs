@@ -15,14 +15,13 @@ fn find_ffmpeg_binary() -> Option<PathBuf> {
     if dev_path.exists() && Command::new(&dev_path).arg("-version").output().is_ok() {
         return Some(dev_path);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             let bundle_path = dir.join("ffmpeg");
             if bundle_path.exists() && Command::new(&bundle_path).arg("-version").output().is_ok() {
                 return Some(bundle_path);
             }
         }
-    }
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         let candidate = PathBuf::from(prefix).join("ffmpeg");
         if candidate.exists() && Command::new(&candidate).arg("-version").output().is_ok() {
@@ -64,8 +63,8 @@ fn funasr_candidates() -> Vec<PathBuf> {
     if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
         v.push(PathBuf::from(d));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent() {
             // Dev-machine builds: walk up from the .app to the checkout.
             let mut dir = Some(parent);
             while let Some(d) = dir {
@@ -78,7 +77,6 @@ fn funasr_candidates() -> Vec<PathBuf> {
             }
             v.push(parent.join(MODEL_SUBDIR));
         }
-    }
     if let Ok(cwd) = std::env::current_dir() {
         v.push(cwd.join(MODEL_SUBDIR));
     }
@@ -174,6 +172,12 @@ fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
 
 pub struct AudioExtractor;
 
+impl Default for AudioExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AudioExtractor {
     pub fn new() -> Self { Self }
 
@@ -181,7 +185,7 @@ impl AudioExtractor {
         let meta = std::fs::metadata(path).context("audio stat")?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
 
-        if !funasr_dir().is_some() {
+        if funasr_dir().is_none() {
             let probed = funasr_candidates()
                 .iter()
                 .map(|p| p.display().to_string())

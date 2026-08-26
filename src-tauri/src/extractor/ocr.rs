@@ -308,7 +308,7 @@ fn draw_h12_pattern(img: &mut image::RgbaImage) {
     for y in 20..80 {
         img.put_pixel(30, y, black);
         img.put_pixel(50, y, black);
-        if y >= 45 && y <= 55 {
+        if (45..=55).contains(&y) {
             for x in 30..50 {
                 img.put_pixel(x, y, black);
             }
@@ -319,7 +319,7 @@ fn draw_h12_pattern(img: &mut image::RgbaImage) {
     }
     for y in 20..80 {
         for x in 110..130 {
-            if y < 30 || y > 70 || (y >= 45 && y <= 55) {
+            if !(30..=70).contains(&y) || (45..=55).contains(&y) {
                 img.put_pixel(x, y, black);
             }
         }

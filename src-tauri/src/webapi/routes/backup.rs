@@ -148,8 +148,8 @@ async fn not_implemented(message: &str) -> axum::response::Response {
 #[derive(Deserialize)]
 struct RestoreZipBody {
     #[serde(rename = "zipPath")]
-    zip_path: String,
-    password: Option<String>,
+    _zip_path: String,
+    _password: Option<String>,
 }
 
 async fn restore_zip_handler(axum::Json(_body): axum::Json<RestoreZipBody>) -> axum::response::Response {
@@ -159,7 +159,7 @@ async fn restore_zip_handler(axum::Json(_body): axum::Json<RestoreZipBody>) -> a
 #[derive(Deserialize)]
 struct RestoreBody {
     #[serde(rename = "backupName")]
-    backup_name: String,
+    _backup_name: String,
 }
 
 async fn restore_handler(axum::Json(_body): axum::Json<RestoreBody>) -> axum::response::Response {

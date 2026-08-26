@@ -32,10 +32,9 @@ pub async fn bearer_auth(
             ).ok()
         })
     };
-    if let Some(db_token) = &db_token {
-        if header_token == db_token.as_str() {
+    if let Some(db_token) = &db_token
+        && header_token == db_token.as_str() {
             return Ok(next.run(req).await);
         }
-    }
     Err(StatusCode::UNAUTHORIZED)
 }

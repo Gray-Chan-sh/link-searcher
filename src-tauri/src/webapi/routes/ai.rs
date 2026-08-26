@@ -177,10 +177,10 @@ async fn chat_ask_handler(
     let mut docs: Vec<String> = Vec::new();
     let mut sources: Vec<String> = Vec::new();
     for hit in &hits {
-        if let Ok(Some(rec)) = tracker::get_file_by_id(&conn, &hit.file_id) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
+        if let Ok(Some(rec)) = tracker::get_file_by_id(&conn, &hit.file_id)
+            && let Some(md5) = &rec.md5
+                && let Ok(Some(text)) = tracker::get_content(&conn, md5)
+                    && !text.trim().is_empty() {
                         docs.push(format!(
                             "【{}】\n{}",
                             rec.path,
@@ -188,9 +188,6 @@ async fn chat_ask_handler(
                         ));
                         sources.push(rec.path.clone());
                     }
-                }
-            }
-        }
     }
     drop(conn);
 

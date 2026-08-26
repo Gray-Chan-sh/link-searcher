@@ -17,18 +17,15 @@ use crate::search::schema::build_schema;
 /// Field to sort search results by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum SortField {
+    #[default]
     Score,
     Date,
     Size,
     Name,
 }
 
-impl Default for SortField {
-    fn default() -> Self {
-        Self::Score
-    }
-}
 
 /// Cap for the number of results loaded into memory for name sorting.
 /// Beyond this cap, only the first 10_000 matching results are sorted by
@@ -346,13 +343,11 @@ impl SearcherWrap {
         let mut seen = std::collections::HashSet::new();
         for (_score, addr) in &top_docs {
             let doc: TantivyDocument = searcher.doc::<TantivyDocument>(*addr)?;
-            if let Some(val) = doc.get_first(file_name_field) {
-                if let Some(text) = val.as_str() {
-                    if seen.insert(text.to_string()) {
+            if let Some(val) = doc.get_first(file_name_field)
+                && let Some(text) = val.as_str()
+                    && seen.insert(text.to_string()) {
                         suggestions.push(text.to_string());
                     }
-                }
-            }
         }
 
         Ok(suggestions)
@@ -405,8 +400,8 @@ impl SearcherWrap {
         }
 
         // 2. dir_id filter (Must + Should: at least one dir_id must match).
-        if let Some(dir_ids) = &params.dir_ids {
-            if !dir_ids.is_empty() {
+        if let Some(dir_ids) = &params.dir_ids
+            && !dir_ids.is_empty() {
                 let dir_id_field = schema.get_field("dir_id")?;
                 let should_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = dir_ids
                     .iter()
@@ -421,11 +416,10 @@ impl SearcherWrap {
                 let dir_filter = BooleanQuery::new(should_queries);
                 subqueries.push((Occur::Must, Box::new(dir_filter)));
             }
-        }
 
         // 3. file_ext filter (Must + Should: OR logic).
-        if let Some(exts) = &params.ext_filter {
-            if !exts.is_empty() {
+        if let Some(exts) = &params.ext_filter
+            && !exts.is_empty() {
                 let ext_field = schema.get_field("file_ext")?;
                 let should_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = exts
                     .iter()
@@ -440,11 +434,10 @@ impl SearcherWrap {
                 let ext_filter = BooleanQuery::new(should_queries);
                 subqueries.push((Occur::Must, Box::new(ext_filter)));
             }
-        }
 
         // 3.5 Path prefix filter (Must + Should): path starts with any prefix.
-        if let Some(prefixes) = &params.path_prefixes {
-            if !prefixes.is_empty() {
+        if let Some(prefixes) = &params.path_prefixes
+            && !prefixes.is_empty() {
                 let path_field = schema.get_field("path")?;
                 let should_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = prefixes
                     .iter()
@@ -464,14 +457,13 @@ impl SearcherWrap {
                 let prefix_filter = BooleanQuery::new(should_queries);
                 subqueries.push((Occur::Must, Box::new(prefix_filter)));
             }
-        }
 
         // 4. Date range filter (Must).
         if params.date_from.is_some() || params.date_to.is_some() {
             let date_from = params
                 .date_from
-                .map(|d| DateTime::from_timestamp_micros(d));
-            let date_to = params.date_to.map(|d| DateTime::from_timestamp_micros(d));
+                .map(DateTime::from_timestamp_micros);
+            let date_to = params.date_to.map(DateTime::from_timestamp_micros);
             let range_query: Box<dyn tantivy::query::Query> = Box::new(RangeQuery::new_date_bounds(
                 "mtime".to_string(),
                 match date_from {
@@ -487,8 +479,8 @@ impl SearcherWrap {
         }
 
         // 5. file_id filter (Must + Should: OR logic for multiple file_ids).
-        if let Some(file_ids) = &params.file_ids {
-            if !file_ids.is_empty() {
+        if let Some(file_ids) = &params.file_ids
+            && !file_ids.is_empty() {
                 let file_id_field = schema.get_field("file_id")?;
                 let should_queries: Vec<(Occur, Box<dyn tantivy::query::Query>)> = file_ids
                     .iter()
@@ -503,7 +495,6 @@ impl SearcherWrap {
                 let file_id_filter = BooleanQuery::new(should_queries);
                 subqueries.push((Occur::Must, Box::new(file_id_filter)));
             }
-        }
 
         Ok(BooleanQuery::new(subqueries).box_clone())
     }

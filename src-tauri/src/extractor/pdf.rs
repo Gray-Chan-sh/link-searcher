@@ -23,14 +23,13 @@ fn find_poppler_binary(name: &str) -> Option<PathBuf> {
         return Some(dev_path);
     }
     // Release mode: look next to the executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             let bundle_path = dir.join(name);
             if bundle_path.exists() && Command::new(&bundle_path).arg("--version").output().is_ok() {
                 return Some(bundle_path);
             }
         }
-    }
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
         let candidate = PathBuf::from(prefix).join(name);
         if candidate.exists() && Command::new(&candidate).arg("--version").output().is_ok() {
@@ -183,6 +182,12 @@ fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType)
 /// Check whether most pages contain large embedded images (area ≥100K px²).
 /// Returns true for scanned PDFs with an image per page, false for text-based
 /// PDFs where the text layer is the actual content.
+impl Default for PdfExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PdfExtractor {
     pub fn new() -> Self {
         Self
@@ -254,8 +259,8 @@ impl PdfExtractor {
         let engine = engine.unwrap_or_else(default_engine);
 
         // Use pdf-inspector for accurate PDF classification
-        if merged.len() > 100 {
-            if let Ok(bytes) = std::fs::read(path) {
+        if merged.len() > 100
+            && let Ok(bytes) = std::fs::read(path) {
                 match pdf_inspector::classify_pdf_mem(&bytes) {
                     Ok(class) => {
                         let need_ocr = !class.pages_needing_ocr.is_empty()
@@ -273,7 +278,6 @@ impl PdfExtractor {
                     Err(e) => log::warn!("[PDF] {:?}: pdf-inspector classify: {e}", path.file_name()),
                 }
             }
-        }
 
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
@@ -284,12 +288,11 @@ impl PdfExtractor {
         }
         // lopdf can produce whitespace-only text on Quartz/CFF PDFs —
         // pdftotext handles these correctly
-        if is_garbled {
-            if let Some(text) = try_pdftotext_extract(path) {
+        if is_garbled
+            && let Some(text) = try_pdftotext_extract(path) {
                 log::info!("[PDF] {:?}: pdftotext recovered {} chars from garbled text", path.file_name(), text.len());
                 return Ok(text);
             }
-        }
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
@@ -384,7 +387,7 @@ fn normalize_for_watermark(text: &str) -> String {
     // Strip trailing page numbers like "1.", "12."
     while out.ends_with('.') {
         out.pop();
-        while out.chars().next_back().map_or(false, |c| c.is_ascii_digit()) {
+        while out.chars().next_back().is_some_and(|c| c.is_ascii_digit()) {
             out.pop();
         }
     }
@@ -640,7 +643,7 @@ fn extract_and_ocr_page_via_pdfimages(
     {
         let entry = entry?;
         let img_path = entry.path();
-        if img_path.extension().map_or(false, |e| e == "png") {
+        if img_path.extension().is_some_and(|e| e == "png") {
             match image::open(&img_path) {
                 Ok(img) => {
                     let area = (img.width() as u64) * (img.height() as u64);

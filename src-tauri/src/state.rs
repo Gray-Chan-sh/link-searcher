@@ -39,11 +39,10 @@ fn task_briefs() -> &'static Mutex<std::collections::VecDeque<TaskBrief>> {
 }
 
 pub fn track_task(task: &str) {
-    if let Ok(mut t) = task_registry().lock() {
-        if !t.iter().any(|x| x == task) {
+    if let Ok(mut t) = task_registry().lock()
+        && !t.iter().any(|x| x == task) {
             t.push(task.to_string());
         }
-    }
 }
 
 /// RAII guard: registers the task on creation, unregisters on drop — safe
@@ -97,6 +96,7 @@ pub fn task_brief_snapshot() -> Vec<TaskBrief> {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[derive(Default)]
 pub struct ScanDelta {
     pub added: u64,
     pub deleted: u64,
@@ -105,17 +105,6 @@ pub struct ScanDelta {
     pub duration_ms: u64,
 }
 
-impl Default for ScanDelta {
-    fn default() -> Self {
-        Self {
-            added: 0,
-            deleted: 0,
-            modified: 0,
-            errors: 0,
-            duration_ms: 0,
-        }
-    }
-}
 
 pub struct AppState {
     pub db: Pool<SqliteConnectionManager>,

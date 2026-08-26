@@ -191,7 +191,7 @@ impl IndexerService {
                 }
             }
             let mut ocr_used = false;
-            let ocr_lang = crate::db::dir_config::get_dir(&conn, &job.dir_id)
+            let ocr_lang = crate::db::dir_config::get_dir(conn, &job.dir_id)
                 .ok()
                 .flatten()
                 .and_then(|c| {
@@ -597,11 +597,10 @@ if let Err(e) =
             // Periodic auto-commit every N successful files (reuse held writer).
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
             let interval = self.commit_interval.load(Ordering::Relaxed);
-            if interval > 0 && count % interval == 0 {
-                if let Err(e) = Indexer::commit(w) {
+            if interval > 0 && count.is_multiple_of(interval)
+                && let Err(e) = Indexer::commit(w) {
                     log::error!("[INDEX] 定期提交失败: {e}");
                 }
-            }
 
             Ok(())
         })();
@@ -710,11 +709,10 @@ if let Err(e) =
     /// Drop the current writer and release resources. The next write operation
     /// will lazily create a new writer. Used after rebuilding the index.
     pub fn reset_writer(&self) {
-        if let Ok(mut guard) = self.writer.lock() {
-            if let Some(mut w) = guard.take() {
+        if let Ok(mut guard) = self.writer.lock()
+            && let Some(mut w) = guard.take() {
                 let _ = Indexer::commit(&mut w);
             }
-        }
     }
 }
 
@@ -746,11 +744,10 @@ fn classify_error(err: &anyhow::Error, ext: &str) -> &'static str {
 
 impl Drop for IndexerService {
     fn drop(&mut self) {
-        if let Ok(mut guard) = self.writer.lock() {
-            if let Some(w) = guard.as_mut() {
+        if let Ok(mut guard) = self.writer.lock()
+            && let Some(w) = guard.as_mut() {
                 let _ = Indexer::commit(w);
             }
-        }
     }
 }
 

@@ -839,11 +839,10 @@ fn run_verify_core(
             Ok(v) => v,
             Err(e) => return Err(format!("{e}")),
         };
-        if force_dead {
-            if let Ok(dead) = tracker::find_dead_files(&conn) {
+        if force_dead
+            && let Ok(dead) = tracker::find_dead_files(&conn) {
                 candidates.extend(dead);
             }
-        }
         let mut checked = 0u64;
         let mut recovered = 0u64;
         let mut dead = 0u64;

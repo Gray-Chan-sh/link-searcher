@@ -63,7 +63,7 @@ pub fn check_data_dir_overlap(data_dir: &Path, candidate: &Path) -> Result<(), S
 
 /// True when `candidate` is `base` itself or a descendant.
 pub fn is_within(base: &Path, candidate: &Path) -> bool {
-    canonicalize_or_abs(candidate).starts_with(&canonicalize_or_abs(base))
+    canonicalize_or_abs(candidate).starts_with(canonicalize_or_abs(base))
 }
 
 /// Reject a CLI `--data-dir` that overlaps any monitored directory persisted

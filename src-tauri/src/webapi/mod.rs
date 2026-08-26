@@ -126,11 +126,10 @@ fn generate_or_load_token(app_handle: &tauri::AppHandle) -> String {
             rusqlite::params![KEY_TOKEN],
             |r| r.get::<_, String>(0),
         );
-        if let Ok(token) = existing {
-            if !token.is_empty() {
+        if let Ok(token) = existing
+            && !token.is_empty() {
                 return token;
             }
-        }
         let token = uuid::Uuid::new_v4().simple().to_string();
         let _ = conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
@@ -145,32 +144,28 @@ fn generate_or_load_token(app_handle: &tauri::AppHandle) -> String {
 
 fn load_port(app_handle: &tauri::AppHandle) -> u16 {
     let app_state = app_handle.state::<AppState>();
-    if let Ok(conn) = app_state.db.get() {
-        if let Ok(port_str) = conn.query_row::<String, _, _>(
+    if let Ok(conn) = app_state.db.get()
+        && let Ok(port_str) = conn.query_row::<String, _, _>(
             "SELECT value FROM app_settings WHERE key = ?1",
             rusqlite::params![KEY_PORT],
             |r| r.get::<_, String>(0),
-        ) {
-            if let Ok(port) = port_str.parse::<u16>() {
+        )
+            && let Ok(port) = port_str.parse::<u16>() {
                 return port;
             }
-        }
-    }
     DEFAULT_PORT
 }
 
 fn load_bind(app_handle: &tauri::AppHandle) -> String {
     let app_state = app_handle.state::<AppState>();
-    if let Ok(conn) = app_state.db.get() {
-        if let Ok(bind) = conn.query_row::<String, _, _>(
+    if let Ok(conn) = app_state.db.get()
+        && let Ok(bind) = conn.query_row::<String, _, _>(
             "SELECT value FROM app_settings WHERE key = ?1",
             rusqlite::params![KEY_BIND],
             |r| r.get::<_, String>(0),
-        ) {
-            if !bind.is_empty() {
+        )
+            && !bind.is_empty() {
                 return bind;
             }
-        }
-    }
     "0.0.0.0".to_string()
 }

@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::ai::skills::{Skill, SkillError};
+use crate::ai::skills::{SkillError};
+#[cfg(test)]
+use crate::ai::skills::Skill;
 use crate::ai::skills::query_rewrite::{QueryRewriteSkill, QueryRewriteInput};
 use crate::ai::skills::scope_resolver::{ScopeResolverSkill, ScopeResolverInput};
 use crate::ai::skills::retrieval::{RetrievalSkill, RetrievalInput, OldSourceManager};
@@ -27,6 +29,12 @@ pub struct RAGContext {
     pub source_ids: Vec<String>,
     pub db: Arc<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>,
     pub state: Option<&'static tauri::State<'static, crate::state::AppState>>,
+}
+
+impl Default for RAGPipeline {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RAGPipeline {
