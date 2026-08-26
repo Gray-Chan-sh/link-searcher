@@ -64,7 +64,7 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         // Unknown format: try reading as plain text (capped — a 50GB video
         // or image file must not be read fully into memory).
         _ => {
-            let mut buf = Vec::with_capacity(10 * 1024 * 1024);
+            let mut buf = Vec::new();
             std::fs::File::open(path)
                 .and_then(|f| f.take(10 * 1024 * 1024).read_to_end(&mut buf))
                 .map_err(|e| anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}"))?;

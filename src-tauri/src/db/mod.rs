@@ -24,6 +24,9 @@ impl CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
         conn.execute_batch(
             "PRAGMA foreign_keys=ON;\
              PRAGMA journal_mode=WAL;\
+             PRAGMA synchronous=NORMAL;\
+             PRAGMA cache_size=-8000;\
+             PRAGMA temp_store=MEMORY;\
              PRAGMA wal_autocheckpoint=1000;\
              PRAGMA journal_size_limit=67108864;\
              PRAGMA busy_timeout=5000;",
@@ -41,7 +44,7 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     }
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
-        .max_size(32)
+        .max_size(12)
         .connection_timeout(std::time::Duration::from_secs(10))
         .connection_customizer(Box::new(PragmaCustomizer))
         .build(manager)
@@ -58,7 +61,9 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
 /// typically via [`get_pool`] with [`PragmaCustomizer`].
 pub fn init_db(conn: &Connection) -> Result<()> {
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
-    run_migrations(conn)
+    run_migrations(conn)?;
+    let _ = conn.execute_batch("PRAGMA optimize;");
+    Ok(())
 }
 
 /// Run all pending migrations. Exposed as `pub(crate)` for testing.
@@ -275,6 +280,7 @@ const CREATE_TABLES_SQL: &str = "
         created_at  INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_ae_session ON ai_events(session_id, turn_number);
+    CREATE INDEX IF NOT EXISTS idx_ae_created_at ON ai_events(created_at);
 
     CREATE TABLE IF NOT EXISTS doc_chunks (
         md5         TEXT NOT NULL,
