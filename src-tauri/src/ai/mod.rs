@@ -276,8 +276,8 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     let req = ChatReq {
         model: ep.model_id.clone(),
         messages: vec![
-            ChatMsg { role: "system".into(), content: system.into() },
-            ChatMsg { role: "user".into(), content: user.into() },
+            ChatMsg { role: "system".into(), content: system.into(), reasoning: None },
+            ChatMsg { role: "user".into(), content: user.into(), reasoning: None },
         ],
         temperature: 0.3,
         max_tokens: 4096,
@@ -308,7 +308,13 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
 
     match parsed {
         Ok(resp) => {
-            let content = resp.choices.into_iter().next().map(|c| c.message.content);
+            let content = resp.choices.into_iter().next().and_then(|c| {
+                if !c.message.content.is_empty() {
+                    Some(c.message.content)
+                } else {
+                    c.message.reasoning.filter(|r| !r.is_empty())
+                }
+            });
             log::info!(
                 "[AI] chat response: ok, content_chars={}",
                 content.as_deref().map(|c| c.chars().count()).unwrap_or(0)
@@ -354,8 +360,8 @@ pub fn chat_stream(
     let req_body = match serde_json::to_string(&ChatReq {
         model: ep.model_id.clone(),
         messages: vec![
-            ChatMsg { role: "system".into(), content: system.into() },
-            ChatMsg { role: "user".into(), content: user.into() },
+            ChatMsg { role: "system".into(), content: system.into(), reasoning: None },
+            ChatMsg { role: "user".into(), content: user.into(), reasoning: None },
         ],
         temperature: 0.3,
         max_tokens: 4096,
@@ -404,6 +410,8 @@ pub fn chat_stream(
     struct StreamDelta {
         #[serde(default)]
         content: Option<String>,
+        #[serde(default)]
+        reasoning: Option<String>,
     }
 
     let mut full = String::new();
@@ -436,7 +444,13 @@ pub fn chat_stream(
                 body.push_str(&rest);
                 let text = parse_chat_response(&body)
                     .ok()
-                    .and_then(|r| r.choices.into_iter().next().map(|c| c.message.content))
+                    .and_then(|r| r.choices.into_iter().next().and_then(|c| {
+                        if !c.message.content.is_empty() {
+                            Some(c.message.content)
+                        } else {
+                            c.message.reasoning.filter(|r| !r.is_empty())
+                        }
+                    }))
                     .unwrap_or_default();
                 if !text.is_empty() {
                     full = text.clone();
@@ -452,6 +466,11 @@ pub fn chat_stream(
             }
             if let Ok(sr) = serde_json::from_str::<StreamResp>(p) {
                 if let Some(d) = sr.choices.first().and_then(|c| c.delta.content.as_ref()) {
+                    if !d.is_empty() {
+                        full.push_str(d);
+                        on_delta(d);
+                    }
+                } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning.as_ref()) {
                     if !d.is_empty() {
                         full.push_str(d);
                         on_delta(d);
@@ -480,6 +499,8 @@ pub fn chat_stream(
 struct ChatMsg {
     role: String,
     content: String,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 #[derive(Serialize)]

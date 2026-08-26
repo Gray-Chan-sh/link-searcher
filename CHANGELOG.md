@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-08-26（修复 — AI 聊天无回应：reasoning 模型输出字段兼容）
+
+**动机**：用户报告 AI 聊天无论任何情况都无回应。根因：`coding` 模型（mimo-v2.5-free）将所有输出放在 `reasoning` 字段，而 `content` 始终为空。流式/非流式解析器只读取 `content`，导致完整响应被丢弃。
+
+- **`ai/mod.rs`**：`StreamDelta` 新增 `reasoning: Option<String>` 字段，流式解析路径在 `content` 为空时回退到 `reasoning`；`ChatMsg` 同步新增 `reasoning` 字段，非流式路径（`chat()` + streaming fallback）同样回退
+
 ## 2026-08-25（修复 — Semgrep WARNING 清零：生产代码 unwrap/expect 消除）
 
 **动机**：路线图 P0 最后一项。AGENTS.md 禁止 `unwrap()`/`expect()` 在非致命路径。
