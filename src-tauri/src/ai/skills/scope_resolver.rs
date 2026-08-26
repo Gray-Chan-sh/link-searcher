@@ -39,24 +39,21 @@ impl ScopeResolverSkill {
         for dir_path in &input.session_retrieval_scope {
             let p = dir_path.trim().trim_end_matches('/');
             if p.is_empty() { continue; }
-            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
-                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1")
+                && let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
                     dir_ids.push(r);
                     continue;
                 }
-            }
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, p) {
                 scope_file_resolved.push((rec.id, rec.path));
                 continue;
             }
-            if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2) {
-                if ids.len() == 1 {
-                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
+            if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2)
+                && ids.len() == 1
+                    && let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
                         scope_file_resolved.push((rec.id, rec.path));
                         continue;
                     }
-                }
-            }
             path_prefixes.push(p.to_string());
         }
         drop(conn);
@@ -71,12 +68,11 @@ impl ScopeResolverSkill {
         for dir_path in &input.scope.mention_dirs {
             let p = dir_path.trim_end_matches('/');
             if p.is_empty() { continue; }
-            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
-                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1")
+                && let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
                     dir_ids.push(r);
                     continue;
                 }
-            }
             path_prefixes.push(p.to_string());
         }
         drop(conn);

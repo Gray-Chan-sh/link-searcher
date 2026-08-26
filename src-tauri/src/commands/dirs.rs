@@ -318,9 +318,7 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))
             .map_err(|e| e.to_string())?;
         let mut set = std::collections::HashSet::new();
-        for row in rows {
-            if let Ok(path) = row { set.insert(path); }
-        }
+        for path in rows.flatten() { set.insert(path); }
         Ok(set)
     })();
 

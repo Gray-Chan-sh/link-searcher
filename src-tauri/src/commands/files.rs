@@ -323,7 +323,7 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
         let data = std::fs::read(&abs).map_err(|e| format!("failed to read {}: {e}", file_record.path))?;
 
         zip_writer
-            .start_file(name, options.clone())
+            .start_file(name, options)
             .map_err(|e| format!("zip error: {e}"))?;
         zip_writer
             .write_all(&data)

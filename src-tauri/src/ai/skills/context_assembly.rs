@@ -39,10 +39,10 @@ impl ContextAssemblySkill {
         // @mention 文件直用
         for (i, (fid, resolved_path)) in input.mention_resolved.iter().enumerate() {
             let n = i + 1;
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-                if let Some(md5) = &rec.md5 {
-                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                        if !text.trim().is_empty() {
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
+                && let Some(md5) = &rec.md5
+                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                        && !text.trim().is_empty() {
                             docs.push(format!("[{n}]（{resolved_path}）\n{}", truncate_text(&text, 50000)));
                             evidence.push(EvidenceItem {
                                 file_id: fid.clone(),
@@ -59,17 +59,14 @@ impl ContextAssemblySkill {
                             source_ids.push(fid.clone());
                             source_files.push(resolved_path.clone());
                         }
-                    }
-                }
-            }
         }
 
         // 检索命中
         for hit in &input.merged_hits {
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-                if let Some(md5) = &rec.md5 {
-                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                        if !text.trim().is_empty() {
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
+                && let Some(md5) = &rec.md5
+                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                        && !text.trim().is_empty() {
                             docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                             evidence.push(EvidenceItem {
                                 file_id: hit.file_id.clone(),
@@ -85,9 +82,6 @@ impl ContextAssemblySkill {
                             source_ids.push(hit.file_id.clone());
                             source_files.push(rec.path.clone());
                         }
-                    }
-                }
-            }
         }
         drop(conn);
 

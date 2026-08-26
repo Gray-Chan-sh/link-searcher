@@ -124,11 +124,10 @@ impl FileWatcher {
                         let path = watches_cmd.lock().ok().and_then(|mut w| {
                             w.remove(&dir_id)
                         });
-                        if let Some(p) = path {
-                            if let Err(e) = debouncer.unwatch(&p) {
+                        if let Some(p) = path
+                            && let Err(e) = debouncer.unwatch(&p) {
                                 log::warn!("Failed to unwatch directory {p:?}: {e}");
                             }
-                        }
                     }
                     Ok(WatcherCommand::Shutdown) | Err(_) => break,
                 }

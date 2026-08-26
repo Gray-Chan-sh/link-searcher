@@ -470,12 +470,11 @@ pub fn chat_stream(
                         full.push_str(d);
                         on_delta(d);
                     }
-                } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning.as_ref()) {
-                    if !d.is_empty() {
+                } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning.as_ref())
+                    && !d.is_empty() {
                         full.push_str(d);
                         on_delta(d);
                     }
-                }
             }
         }
         if ai_cancelled() {
@@ -533,7 +532,7 @@ fn parse_chat_response(body: &str) -> Result<ChatResp, String> {
     body.lines()
         .filter_map(|l| l.strip_prefix("data:").map(str::trim))
         .filter(|l| !l.is_empty() && *l != "[DONE]")
-        .last()
+        .next_back()
         .ok_or_else(|| "no SSE data payload in response".to_string())
         .and_then(|payload| {
             serde_json::from_str::<ChatResp>(payload).map_err(|e| e.to_string())
@@ -572,14 +571,13 @@ fn build_agent() -> ureq::Agent {
         .timeout_connect(std::time::Duration::from_secs(15))
         .timeout_read(std::time::Duration::from_secs(60 * 60));
     for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
-        if let Ok(p) = std::env::var(var) {
-            if !p.is_empty() {
+        if let Ok(p) = std::env::var(var)
+            && !p.is_empty() {
                 if let Ok(proxy) = ureq::Proxy::new(&p) {
                     builder = builder.proxy(proxy);
                 }
                 break;
             }
-        }
     }
     builder.build()
 }

@@ -386,8 +386,8 @@ fn semantic_rerank_worker(
 
     Ok(SearchResponse {
         total: bm25.total,
-        page: page,
-        page_size: page_size,
+        page,
+        page_size,
         took_ms: bm25.took_ms,
         hits: page_hits,
     })
@@ -433,7 +433,7 @@ fn semantic_snippet(content: &str, query: &str) -> String {
         if let Some(pos) = lower.find(&pl) {
             let start = content.char_indices()
                 .filter(|&(i,_)| i <= pos)
-                .last()
+                .next_back()
                 .map(|(i,_)| i)
                 .unwrap_or(pos);
             // Expand forward up to MAX_WORD chars but re-align to char boundary.
@@ -443,7 +443,7 @@ fn semantic_snippet(content: &str, query: &str) -> String {
                 .fold(start, |acc, c| acc + c.len_utf8());
             let end = end.min(content.len());
             let captured = content[start..end].to_string();
-            if best.as_ref().map_or(true, |(_, prev)| captured.len() > prev.len()) {
+            if best.as_ref().is_none_or(|(_, prev)| captured.len() > prev.len()) {
                 best = Some((pos, captured));
             }
         }
@@ -455,7 +455,7 @@ fn semantic_snippet(content: &str, query: &str) -> String {
 }
 
 /// Wrap `t` with highlight; used via closure to keep ownership simple.
-fn snippet_around<'a>(content: &'a str, needle: &str, wrap: impl Fn(&str) -> String) -> String {
+fn snippet_around(content: &str, needle: &str, wrap: impl Fn(&str) -> String) -> String {
     let pos = content.to_lowercase().find(&needle.to_lowercase());
     let Some(pos) = pos else { return head_snippet(content).replace(needle, &wrap(needle)) };
     const WINDOW: usize = 60;

@@ -30,7 +30,6 @@ use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_t
 use crate::scanner::watcher::FileWatcher;
 use crate::state::AppState;
 use crate::state::ScanDelta;
-use env_logger;
 
 use tauri::Emitter;
 use tauri::Manager;
@@ -172,12 +171,11 @@ get_dir_children,
 
             // Initialize file logger (append across restarts, rotate at 100 MB)
             let log_path = data_dir.join("app.log");
-            if let Ok(meta) = std::fs::metadata(&log_path) {
-                if meta.len() > 100 * 1024 * 1024 {
+            if let Ok(meta) = std::fs::metadata(&log_path)
+                && meta.len() > 100 * 1024 * 1024 {
                     let rotated = data_dir.join("app.log.1");
                     let _ = std::fs::rename(&log_path, &rotated);
                 }
-            }
             let log_file: Box<dyn std::io::Write + Send> =
                 match std::fs::OpenOptions::new()
                     .create(true)
@@ -498,8 +496,7 @@ get_dir_children,
             // Set window icon from embedded PNG bytes
             if let Some(window) = app.get_webview_window("main") {
                 let icon_bytes = include_bytes!("../icons/32x32.png");
-                let img = image::load_from_memory(icon_bytes)
-                    .and_then(|i| Ok(i.into_rgba8()));
+                let img = image::load_from_memory(icon_bytes).map(|i| i.into_rgba8());
                 if let Ok(img) = img {
                     let (w, h) = img.dimensions();
                     let rgba = img.into_raw();
@@ -514,12 +511,11 @@ get_dir_children,
     match result {
         Ok(app) => {
             app.run(|app_handle, event| {
-                if let tauri::RunEvent::Exit = event {
-                    if let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
+                if let tauri::RunEvent::Exit = event
+                    && let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
                         token.cancel();
                         log::info!("[SHUTDOWN] Web API server shutdown signal sent");
                     }
-                }
             });
         }
         Err(e) => {

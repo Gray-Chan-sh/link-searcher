@@ -554,11 +554,10 @@ fn zip_dir(source: &std::path::Path, dest: &str, password: Option<&str>) -> Resu
             .map_err(|e| format!("failed to read {entry:?}: {e}"))?;
         let mut options = zip::write::FileOptions::<()>::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        if let Some(pw) = password {
-            if !pw.is_empty() {
+        if let Some(pw) = password
+            && !pw.is_empty() {
                 options = options.with_aes_encryption(zip::AesMode::Aes256, pw);
             }
-        }
         zip_writer.start_file(&rel, options)
             .map_err(|e| format!("zip start_file failed: {e}"))?;
         use std::io::Write;

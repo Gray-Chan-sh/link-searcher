@@ -19,6 +19,12 @@ use super::Extractor;
 
 pub struct OfficeExtractor;
 
+impl Default for OfficeExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OfficeExtractor {
     pub fn new() -> Self {
         Self

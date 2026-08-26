@@ -37,6 +37,12 @@ fn read_capped<R: Read>(reader: R, cap: u64) -> std::io::Result<(Vec<u8>, bool)>
 
 pub struct ArchiveExtractor;
 
+impl Default for ArchiveExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArchiveExtractor {
     pub fn new() -> Self {
         Self
@@ -218,7 +224,7 @@ impl ArchiveExtractor {
                 }
             })
             .unwrap_or("decompressed");
-        let display_name = format!("{stem}");
+        let display_name = stem.to_string();
 
         let mut output = String::new();
         append_entry(&mut output, &display_name, &buf, lang)?;

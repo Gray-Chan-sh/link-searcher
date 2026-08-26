@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{State, Json},
-    response::Json as JsonResp,
-    routing::{get, post},
+    routing::get,
     Router,
 };
 use serde::Deserialize;

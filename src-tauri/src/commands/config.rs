@@ -224,15 +224,12 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
         "llm" => &mut config.active_llm_model_id,
         _ => return Err(format!("unknown kind: {kind}")),
     };
-    if !model_id.is_empty() && !model_id.starts_with("local:") {
-        if let Some((pid, mid)) = model_id.split_once(':') {
-            if let Some(p) = config.providers.iter_mut().find(|p| p.id == pid) {
-                if let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
+    if !model_id.is_empty() && !model_id.starts_with("local:")
+        && let Some((pid, mid)) = model_id.split_once(':')
+            && let Some(p) = config.providers.iter_mut().find(|p| p.id == pid)
+                && let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
                     m.enabled = true;
                 }
-            }
-        }
-    }
     *field = model_id;
     save_config(&config)
 }
@@ -333,26 +330,24 @@ pub async fn migrate_data(
         // SQLite via online Backup API — WAL-safe, unlike fs::copy of a live DB.
         emit("db", 15);
         let old_db = old.join("data.db");
-        if old_db.exists() {
-            if let Err(e) = backup_db(&old_db, &tmp.join("data.db")) {
+        if old_db.exists()
+            && let Err(e) = backup_db(&old_db, &tmp.join("data.db")) {
                 cleanup_tmp();
                 return Err(e);
             }
-        }
         emit("db", 30);
 
         let old_index = old.join(INDEX_DIR_NAME);
-        if old_index.exists() {
-            if let Err(e) = copy_dir_recursive(&old_index, &tmp.join(INDEX_DIR_NAME)) {
+        if old_index.exists()
+            && let Err(e) = copy_dir_recursive(&old_index, &tmp.join(INDEX_DIR_NAME)) {
                 cleanup_tmp();
                 return Err(e);
             }
-        }
         emit("index", 55);
 
         let old_log = old.join("app.log");
         if old_log.exists() {
-            let _ = std::fs::copy(&old_log, &tmp.join("app.log"));
+            let _ = std::fs::copy(&old_log, tmp.join("app.log"));
         }
         emit("log", 75);
 
@@ -366,12 +361,11 @@ pub async fn migrate_data(
         std::fs::create_dir_all(new).map_err(|e| format!("无法创建目标目录: {e}"))?;
         for name in ["data.db", INDEX_DIR_NAME, "app.log"] {
             let src = tmp.join(name);
-            if src.exists() {
-                if let Err(e) = std::fs::rename(&src, new.join(name)) {
+            if src.exists()
+                && let Err(e) = std::fs::rename(&src, new.join(name)) {
                     cleanup_tmp();
                     return Err(format!("移动 {name} 失败: {e}"));
                 }
-            }
         }
         let _ = std::fs::remove_dir_all(&tmp);
         emit("cleanup", 90);

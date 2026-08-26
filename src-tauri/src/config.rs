@@ -196,8 +196,8 @@ fn write_config_file(config: &AppConfig) -> Result<(), String> {
 pub fn load_config() -> AppConfig {
     let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_dir().join(CONFIG_FILE);
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
+    if let Ok(content) = std::fs::read_to_string(&path)
+        && let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
             if config.data_dir.as_os_str().is_empty() {
                 config.data_dir = default_data_dir();
             }
@@ -220,7 +220,6 @@ pub fn load_config() -> AppConfig {
             reconcile_enabled_active(&mut config);
             return config;
         }
-    }
     let config = AppConfig::default();
     let _ = write_config_file(&config);
     config
@@ -231,13 +230,11 @@ pub fn load_config() -> AppConfig {
 /// disabled; the active selection must stay visible in the enabled set.
 fn reconcile_enabled_active(config: &mut AppConfig) {
     for active in [&config.active_embedding_model_id, &config.active_llm_model_id] {
-        if let Some((pid, mid)) = active.split_once(':') {
-            if let Some(p) = config.providers.iter_mut().find(|p| p.id == pid) {
-                if let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
+        if let Some((pid, mid)) = active.split_once(':')
+            && let Some(p) = config.providers.iter_mut().find(|p| p.id == pid)
+                && let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
                     m.enabled = true;
                 }
-            }
-        }
     }
 }
 

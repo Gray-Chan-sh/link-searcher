@@ -62,7 +62,7 @@ impl EnginePool {
         }
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.engines.len();
         let guard = self.engines[idx].0.lock().unwrap_or_else(|e| e.into_inner());
-        f(&*guard)
+        f(&guard)
     }
 }
 
@@ -157,7 +157,7 @@ pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), 
             .join(" ");
         Ok((text, run.results.len()))
     })
-    .map_err(|e| format!("{e}"))
+    .map_err(|e| e.to_string())
 }
 
 /// Run a closure that holds the OCR engine lock, with a 120s timeout.
@@ -203,7 +203,7 @@ pub fn recognize_with_metrics_from_path(path: &Path) -> Result<String, String> {
             run.results.len(),
         ))
     })
-    .map_err(|e| format!("{e}"))
+    .map_err(|e| e.to_string())
 }
 
 pub fn recognize_from_image(image: &image::DynamicImage) -> Result<String> {

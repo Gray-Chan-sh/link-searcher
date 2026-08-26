@@ -158,18 +158,17 @@ pub fn get_file_type_support(state: State<'_, AppState>) -> Result<Vec<FileTypeI
             if let Ok(entries) = std::fs::read_dir(&dir.path) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    if p.extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case(ext)) {
+                    if p.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext)) {
                         count += 1;
                     }
-                    if p.is_dir() {
-                        if let Ok(sub) = std::fs::read_dir(&p) {
+                    if p.is_dir()
+                        && let Ok(sub) = std::fs::read_dir(&p) {
                             for sub_e in sub.flatten() {
-                                if sub_e.path().extension().and_then(|e| e.to_str()).map_or(false, |e| e.eq_ignore_ascii_case(ext)) {
+                                if sub_e.path().extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(ext)) {
                                     count += 1;
                                 }
                             }
                         }
-                    }
                 }
             }
         }

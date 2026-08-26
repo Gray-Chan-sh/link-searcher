@@ -12,7 +12,7 @@ pub const JIEBA_TOKENIZER_NAME: &str = "jieba";
 pub const SUGGEST_TOKENIZER_NAME: &str = "suggest";
 
 /// Global jieba instance, lazy-initialized with the built-in dictionary.
-pub static JIEBA: LazyLock<Jieba> = LazyLock::new(|| Jieba::new());
+pub static JIEBA: LazyLock<Jieba> = LazyLock::new(Jieba::new);
 
 /// Register custom tokenizers (jieba, suggest) on the index.
 ///

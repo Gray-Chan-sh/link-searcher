@@ -199,15 +199,12 @@ pub async fn ask_documents(
 
     let mut docs: Vec<String> = Vec::new();
     for fid in &file_ids {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
+            && let Some(md5) = &rec.md5
+                && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                    && !text.trim().is_empty() {
                         docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                     }
-                }
-            }
-        }
     }
     drop(conn);
 
@@ -331,10 +328,10 @@ fn prepare_smart_prompt(
         let mut sf: Vec<String> = Vec::new();
         let mut ev: Vec<EvidenceItem> = Vec::new();
         for hit in &hits {
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-                if let Some(md5) = &rec.md5 {
-                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                        if !text.trim().is_empty() {
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
+                && let Some(md5) = &rec.md5
+                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                        && !text.trim().is_empty() {
                             docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                             sids.push(hit.file_id.clone());
                             sf.push(rec.path.clone());
@@ -350,9 +347,6 @@ fn prepare_smart_prompt(
                                 from_history: false,
                             });
                         }
-                    }
-                }
-            }
         }
         drop(conn);
         (docs.join("\n\n---\n\n"), sids, sf, ev)
@@ -759,7 +753,7 @@ pub fn bm25_relevant_hits(
     // (RegexQuery on STRING fields can silently fail on Unicode paths).
     let fetch = if semantic && crate::ai::embedding_enabled() {
         limit.max(100)
-    } else if path_prefixes.as_ref().map_or(false, |p| !p.is_empty()) {
+    } else if path_prefixes.as_ref().is_some_and(|p| !p.is_empty()) {
         limit.max(50)
     } else {
         limit
@@ -778,7 +772,7 @@ pub fn bm25_relevant_hits(
     // specific files, retry with an empty query (match-all within scope) so
     // the user's scoped files are still returned even when query terms
     // don't match the indexed content (tokenization/extraction differences).
-    if result.hits.is_empty() && file_ids.as_ref().map_or(false, |ids| !ids.is_empty()) {
+    if result.hits.is_empty() && file_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
         let fallback_params = SearchParams {
             query: String::new(),
             dir_ids: dir_ids.clone(), file_ids: file_ids.clone(), ext_filter: ext_filter.clone(),
@@ -794,10 +788,10 @@ pub fn bm25_relevant_hits(
     let mut bm25_hits: Vec<ScoredHit> = Vec::new();
     let mut seen_md5: std::collections::HashSet<String> = std::collections::HashSet::new();
     for hit in result.hits {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-            if rec.status == "active" {
-                if let Some(md5) = &rec.md5 {
-                    if seen_md5.insert(md5.clone()) {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
+            && rec.status == "active"
+                && let Some(md5) = &rec.md5
+                    && seen_md5.insert(md5.clone()) {
                         bm25_hits.push(ScoredHit {
                             file_id: hit.file_id,
                             path: rec.path,
@@ -807,20 +801,16 @@ pub fn bm25_relevant_hits(
                             from_history: false,
                         });
                     }
-                }
-            }
-        }
     }
 
     // Safety net: RegexQuery on STRING fields can silently fail on Unicode
     // paths, falling back to AllQuery which disables scope filtering.
-    if let Some(prefixes) = &path_prefixes {
-        if !prefixes.is_empty() {
+    if let Some(prefixes) = &path_prefixes
+        && !prefixes.is_empty() {
             bm25_hits.retain(|h| {
                 prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
             });
         }
-    }
 
     if semantic && crate::ai::embedding_enabled() && !bm25_hits.is_empty() {
         let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
@@ -869,15 +859,14 @@ pub fn resolve_mention_file_ids(
             continue;
         }
         // LIKE fallback: limit 2 to detect ambiguity
-        if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(conn, path, 2) {
-            if ids.len() == 1 {
+        if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(conn, path, 2)
+            && ids.len() == 1 {
                 // Exactly one LIKE match → adopt
                 if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(conn, &ids[0]) {
                     resolved.push((rec.id, rec.path));
                     continue;
                 }
             }
-        }
         missing.push(path.clone());
     }
     (resolved, missing)
@@ -925,26 +914,23 @@ async fn prepare_conversation_prompt(
                 continue;
             }
             // 先试监控根精确匹配（绝对路径或别名）
-            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
-                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1")
+                && let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
                     dir_ids.push(r);
                     continue;
                 }
-            }
             // 试文件路径精确匹配 → file_id（可靠的 TermQuery，不依赖 RegexQuery）
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, p) {
                 scope_file_resolved.push((rec.id, rec.path));
                 continue;
             }
             // LIKE 回退：路径片段匹配
-            if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2) {
-                if ids.len() == 1 {
-                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
+            if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2)
+                && ids.len() == 1
+                    && let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
                         scope_file_resolved.push((rec.id, rec.path));
                         continue;
                     }
-                }
-            }
             // 否则按相对路径前缀过滤（子目录/文件夹）
             path_prefixes.push(p.to_string());
         }
@@ -964,12 +950,11 @@ async fn prepare_conversation_prompt(
                 continue;
             }
             // 先试监控根精确匹配（绝对路径或别名）
-            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1") {
-                if let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1")
+                && let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
                     dir_ids.push(r);
                     continue;
                 }
-            }
             // 否则按相对路径前缀过滤（子目录/文件夹）
             path_prefixes.push(p.to_string());
         }
@@ -1122,10 +1107,10 @@ async fn prepare_conversation_prompt(
     let mut mention_has_content = false;
     for (i, (fid, resolved_path)) in mention_resolved.iter().enumerate() {
         let n = i + 1; // [N] 从 1 开始
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
+            && let Some(md5) = &rec.md5
+                && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                    && !text.trim().is_empty() {
                         mention_has_content = true;
                         docs.push(format!("[{n}]（{resolved_path}）\n{}", chunked_or_truncated(&conn, md5, &text, &search_q)));
                         evidence.push(EvidenceItem {
@@ -1141,15 +1126,12 @@ async fn prepare_conversation_prompt(
                         });
                         mention_index.insert(resolved_path.clone(), n);
                     }
-                }
-            }
-        }
     }
     for hit in &merged {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
+            && let Some(md5) = &rec.md5
+                && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                    && !text.trim().is_empty() {
                         docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                         evidence.push(EvidenceItem {
                             file_id: hit.file_id.clone(),
@@ -1163,9 +1145,6 @@ async fn prepare_conversation_prompt(
                             from_history: hit.from_history,
                         });
                     }
-                }
-            }
-        }
     }
     drop(conn);
 
@@ -1813,11 +1792,10 @@ fn fmt_evidence_item(e: &EvidenceItem, index: usize) -> String {
         .collect();
     let score_str = if scores.is_empty() { String::new() } else { format!("（{}）", scores.join(" · ")) };
     let mut out = format!("{index}. 📄 `{}` {score_str}", e.path);
-    if e.rewritten {
-        if let Some(q) = &e.rewritten_query {
+    if e.rewritten
+        && let Some(q) = &e.rewritten_query {
             out.push_str(&format!("\n    ↳ 查询改写: `{q}`"));
         }
-    }
     if e.from_history {
         out.push_str("\n    ↳ 来自历史来源");
     }
@@ -1909,14 +1887,13 @@ pub fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<
             if let Some(assistant_msg) = session.messages.get(i + 1).filter(|m| m.role == "assistant") {
                 md.push_str(&format!("\n### 答\n\n{}\n", assistant_msg.content));
                 // 本轮检索依据
-                if let Some(ev) = per_turn {
-                    if !ev.items.is_empty() {
+                if let Some(ev) = per_turn
+                    && !ev.items.is_empty() {
                         md.push_str(&format!("\n**检索依据（{}）:**\n", ev.items.len()));
                         for (j, item) in ev.items.iter().enumerate() {
                             md.push_str(&format!("{}\n", fmt_evidence_item(item, j + 1)));
                         }
                     }
-                }
             }
         }
     }

@@ -237,7 +237,7 @@ impl Scanner {
 
             on_disk.push(DiskEntry { abs_path: path_str, rel_path, size, name });
 
-            if processed % 100 == 0 {
+            if processed.is_multiple_of(100) {
                 let elapsed = start.elapsed().as_secs_f64();
                 let rate = processed as f64 / elapsed.max(0.001);
                 let eta = (total - processed) as f64 / rate.max(0.001);
@@ -643,12 +643,11 @@ impl Scanner {
                 // (mtime bump, lock-file create/delete) would otherwise
                 // trigger an infinite re-index loop on broken docs.
                 let existing = tracker::get_file_by_path(&conn, &rel_path)?;
-                if let Some(rec) = &existing {
-                    if rec.indexed == 2 {
+                if let Some(rec) = &existing
+                    && rec.indexed == 2 {
                         // Failed — skip to avoid infinite re-index loop
                         return Ok(());
                     }
-                }
 
                 let file_id = tracker::upsert_file(&conn, &rel_path, &event.dir_id, mtime, size, None)?;
 
