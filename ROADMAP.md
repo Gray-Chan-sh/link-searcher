@@ -1,10 +1,16 @@
 # Link-Searcher 路线图
 
-> 最后更新：2026-08-25
+> 最后更新：2026-08-26
 
 ---
 
 ## ✅ 本轮已完成
+
+- [x] **索引优化 Wave 1**：SQLite `synchronous=NORMAL` + `cache_size=-8000` + `temp_store=MEMORY` + PRAGMA optimize + pool 32→12 + Tantivy writer 150MB/500 chunk + PaddleOCR pool auto-size + 移除死代码 `update_hotwords`
+- [x] **索引优化 Wave 2**：`replace_chunks` 事务化 + Phase-2 `update_indexed_batch` 批量事务 + `run_backfill_chunks` 改用 `char_count` 列 + 7×图片 COUNT 合并为单查询 + pending-files 部分索引
+- [x] **索引优化 Wave 3**：`pkill -f` → `child.kill()` 正确性修复（不再误杀系统中所有 pdftoppm/pdfimages 进程）
+- [x] **索引优化 Wave 4**：`build_schema()` 改用 `OnceLock` 缓存，消除每次 add/delete/search 调用的冗余构建
+- [x] **索引优化 Wave 5**：扫描进度实时显示（从事件读取 processed/total）、ResultList scroll rAF 节流、suggest 请求 ID 防竞态、retryFailed await 修复
 
 - [x] **AnyDoc 集成**：Office 格式和文字 PDF 统一用 anydoc，LO 降为备用
 - [x] **压缩包提取**：zip/tar/tar.gz/tgz/tar.bz2/tbz2/tar.xz/txz/gz/bz2/xz

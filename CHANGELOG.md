@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-08-26（性能 — 索引全链路优化 W1-W5：SQLite + 写路径 + 正确性 + Tantivy + 前端）
+
+**动机**：路线图 P1 性能优化。通过 5 波并行探索 + Plan Agent 任务图，对索引管线全链路进行系统性优化。
+
+**W1 — SQLite/pragmas/死代码**（`48e8ba1`）：
+- `db/mod.rs`：新增 `synchronous=NORMAL`（WAL 标准优化，跳过 WAL fsync）+ `cache_size=-8000` + `temp_store=MEMORY`；pool `max_size(32)` → `12`（匹配 IO 并发度）；`init_db` 迁移后运行 `PRAGMA optimize`；`CREATE_TABLES_SQL` 新增 `ai_events.created_at` 索引
+- `indexer.rs`：移除死代码 `update_hotwords` 调用（audio.rs 已标记 disabled，per-file jieba 分词+逐词 INSERT 是最大隐藏写 N+1）；Tantivy writer 预算 `50MB` → `150MB`；CHUNK `250` → `500`
+- `extractor/mod.rs` + `text.rs`：`Vec::with_capacity(10MB)` → `Vec::new()`（未知文件不再立即分配 10MB）
+- `paddleocr.rs`：EnginePool `2` → `clamp(available_parallelism, 1..8)`（与 OcrGate 对齐，不再有 6 个线程等待 2 个引擎 Mutex）
+
+**W2 — DB 写路径事务化**（`26b886e`）：
+- `replace_chunks`：DELETE + INSERT 包装在 `unchecked_transaction` 中，崩溃一致性修复
+- Phase-2 `update_indexed`：新增 `update_indexed_batch` 批量事务函数，每 chunk 250 文件从 N 次 autocommit → 1 次 commit
+- `run_backfill_chunks`：`length(text_content)` → `ci.char_count`（避免每次回填加载全部内容 blob）
+- `get_total_image_files` + `get_ocred_count`：7× 循环 LIKE 查询 → 单次 `file_ext IN (...)` 查询
+- `CREATE_TABLES_SQL`：新增 `idx_ft_pending` 部分索引（WHERE indexed IN (0,2,3)），加速核心索引队列查询
+
+**W3 — 正确性修复**（`b6eb826`）：
+- `pdf.rs`：`pkill -f pdftoppm/pdfimages` → 轮询 `child.try_wait()` + `child.kill()` 超时杀死特定子进程（修复系统级进程误杀 bug）
+
+**W4 — Tantivy 优化**（`b6eb826`）：
+- `search/indexer.rs`：`build_schema()` 改用 `static OnceLock<Schema>` 缓存（消除每次 add_document/delete_document 的冗余 Schema 构建）
+
+**W5 — 前端 UX**（`10d146d`）：
+- `IndexStatus.tsx`：从 `scan-progress` 事件实时读取 processed/total（而非 5s 轮询），进度条即时更新；`retryFailed` 未 await 修复
+- `ResultList.tsx`：scroll handler 添加 `requestAnimationFrame` 节流（消除每帧渲染）
+- `useSearch.ts`：`suggest()` 添加请求 ID 防竞态（快速输入时旧结果不再覆盖新结果）
+
+**W2c 跳过**：scanner walk upsert 批量事务（风险高，现有 `FLUSH_EVERY=250` + Phase-1 隔离已覆盖）
+
+**审计**：cargo test 202 全绿 + semgrep ERROR 0 + clippy 警告仅剩测试代码级
+
 ## 2026-08-26（修复 — AI 聊天无回应：reasoning 模型输出字段兼容）
 
 **动机**：用户报告 AI 聊天无论任何情况都无回应。根因：`coding` 模型（mimo-v2.5-free）将所有输出放在 `reasoning` 字段，而 `content` 始终为空。流式/非流式解析器只读取 `content`，导致完整响应被丢弃。
