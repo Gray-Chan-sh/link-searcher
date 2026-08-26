@@ -53,17 +53,25 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
     const container = containerRef.current
     if (!container) return
 
+    let raf = 0
     const handleScroll = () => {
-      const scrollTop = container.scrollTop
-      const clientHeight = container.clientHeight
-      const start = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN)
-      const end = Math.min(hits.length, Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + OVERSCAN)
-      setVisibleRange({ start, end })
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = 0
+        const scrollTop = container.scrollTop
+        const clientHeight = container.clientHeight
+        const start = Math.max(0, Math.floor(scrollTop / ITEM_HEIGHT) - OVERSCAN)
+        const end = Math.min(hits.length, Math.ceil((scrollTop + clientHeight) / ITEM_HEIGHT) + OVERSCAN)
+        setVisibleRange({ start, end })
+      })
     }
 
     handleScroll()
     container.addEventListener('scroll', handleScroll, { passive: true })
-    return () => container.removeEventListener('scroll', handleScroll)
+    return () => {
+      container.removeEventListener('scroll', handleScroll)
+      if (raf) cancelAnimationFrame(raf)
+    }
   }, [hits.length])
 
   if (hits.length === 0) return null

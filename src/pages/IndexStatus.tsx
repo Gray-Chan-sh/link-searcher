@@ -37,18 +37,22 @@ export default function IndexStatus() {
   const [retrying, setRetrying] = useState(false)
   const [lastDelta, setLastDelta] = useState<{ added: number; deleted: number; modified: number; errors: number } | null>(null)
   const [scanPhase, setScanPhase] = useState<string | null>(null)
+  const [scanCounts, setScanCounts] = useState<{ processed: number; total: number } | null>(null)
 
   useEffect(() => {
     aiCapabilities().then(c => { setEmbedCapable(c.embedding); setLlmCapable(c.llm) }).catch(() => {})
   }, [])
 
   useEffect(() => {
-    const unlisten = listenScanProgress(p => setScanPhase(p.phase ?? null))
+    const unlisten = listenScanProgress(p => {
+      setScanPhase(p.phase ?? null)
+      if (p.total > 0) setScanCounts({ processed: p.processed, total: p.total })
+    })
     return () => { unlisten.then(f => f()) }
   }, [])
 
   useEffect(() => {
-    if (!status?.is_scanning) setScanPhase(null)
+    if (!status?.is_scanning) { setScanPhase(null); setScanCounts(null) }
   }, [status?.is_scanning])
 
   const runClustering = async () => {
@@ -159,8 +163,11 @@ const handleRebuild = async () => {
 
   const retryFailed = async () => {
     setRetrying(true)
-    scan()
-    setRetrying(false)
+    try {
+      await scan()
+    } finally {
+      setRetrying(false)
+    }
   }
 
   const taskActive = (name: string) => (status?.running_tasks ?? []).includes(name)
@@ -187,9 +194,11 @@ const handleRebuild = async () => {
     }
   }
 
-  const progress = status && status.total_files > 0
-    ? Math.round((status.indexed / status.total_files) * 100)
-    : 0
+  const progress = scanCounts
+    ? Math.round((scanCounts.processed / scanCounts.total) * 100)
+    : (status && status.total_files > 0
+        ? Math.round((status.indexed / status.total_files) * 100)
+        : 0)
 
   return (
     <div className="h-full p-6 overflow-y-auto">

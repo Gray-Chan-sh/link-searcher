@@ -71,6 +71,7 @@ useEffect(() => {
 
 const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const suggestIdRef = useRef(0)
   const lastSubmittedRef = useRef('')
 
 
@@ -201,14 +202,18 @@ const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
       setSuggestions([])
       return
     }
+    const id = Date.now() + Math.random()
     debounceRef.current = setTimeout(async () => {
       try {
         const results = await suggest(prefix)
+        if (id !== suggestIdRef.current) return
         setSuggestions(results)
       } catch {
+        if (id !== suggestIdRef.current) return
         setSuggestions([])
       }
     }, 200)
+    suggestIdRef.current = id
   }, [])
 
   const toggleSemantic = useCallback((v: boolean) => {
