@@ -1,8 +1,16 @@
+use std::sync::OnceLock;
+
 use tantivy::schema::*;
 use tantivy::{doc, DateTime, IndexWriter};
 use tantivy::TantivyError;
 
 use crate::search::schema::build_schema;
+
+static SCHEMA: OnceLock<Schema> = OnceLock::new();
+
+fn schema() -> &'static Schema {
+    SCHEMA.get_or_init(build_schema)
+}
 
 /// High-level operations for writing documents into the tantivy index.
 pub struct Indexer;
@@ -28,7 +36,7 @@ impl Indexer {
         mtime: i64,
         file_size: u64,
     ) -> Result<(), TantivyError> {
-        let schema = build_schema();
+        let schema = schema();
 
         let file_id_field = schema.get_field("file_id").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let file_name_field = schema.get_field("file_name").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
@@ -67,7 +75,7 @@ impl Indexer {
         writer: &mut IndexWriter,
         file_id: &str,
     ) -> Result<(), TantivyError> {
-        let schema = build_schema();
+        let schema = schema();
         let file_id_field = schema.get_field("file_id")?;
         writer.delete_term(Term::from_field_text(file_id_field, file_id));
         Ok(())
@@ -80,7 +88,7 @@ impl Indexer {
         writer: &mut IndexWriter,
         dir_id: &str,
     ) -> Result<(), TantivyError> {
-        let schema = build_schema();
+        let schema = schema();
         let dir_id_field = schema.get_field("dir_id")?;
         writer.delete_term(Term::from_field_text(dir_id_field, dir_id));
         Ok(())
@@ -135,7 +143,7 @@ mod tests {
         let reader = index.reader().expect("reader");
         let searcher = reader.searcher();
 
-        let schema = build_schema();
+        let schema = schema();
         let content = schema.get_field("content").unwrap();
         let query_parser =
             tantivy::query::QueryParser::for_index(&index, vec![content]);
@@ -175,7 +183,7 @@ mod tests {
         let reader = index.reader().expect("reader");
         let searcher = reader.searcher();
 
-        let schema = build_schema();
+        let schema = schema();
         let content = schema.get_field("content").unwrap();
         let query_parser =
             tantivy::query::QueryParser::for_index(&index, vec![content]);
@@ -208,7 +216,7 @@ mod tests {
 
         // Confirm it's there.
         let reader = index.reader().expect("reader");
-        let schema = build_schema();
+        let schema = schema();
         let content = schema.get_field("content").unwrap();
         let searcher = reader.searcher();
         let query_parser =

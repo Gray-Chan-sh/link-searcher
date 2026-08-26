@@ -452,16 +452,23 @@ pub fn ocr_pdf_via_pdftoppm(
     cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || { let _ = tx.send(child.wait()); });
-    match rx.recv_timeout(Duration::from_secs(120)) {
-        Ok(Ok(status)) if status.success() => {}
-        Ok(Ok(_)) => return Err(anyhow::anyhow!("pdftoppm failed to render PDF")),
-        Ok(Err(e)) => return Err(anyhow::anyhow!("pdftoppm error: {e}")),
-        Err(_) => {
-            let _ = Command::new("pkill").arg("-f").arg("pdftoppm").status();
-            return Err(anyhow::anyhow!("pdftoppm timed out after 120s"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!("pdftoppm timed out after 120s"));
+            }
+            Err(e) => return Err(anyhow::anyhow!("pdftoppm error: {e}")),
         }
+    };
+    if !status.success() {
+        return Err(anyhow::anyhow!("pdftoppm failed to render PDF"));
     }
 
     let page_files: Vec<_> = (1..).map(|n| tmp_dir.path().join(format!("page-{n}.png")))
@@ -622,18 +629,23 @@ fn extract_and_ocr_page_via_pdfimages(
     let mut child = cmd
         .spawn()
         .context("failed to spawn pdfimages")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait());
-    });
-    match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(Ok(status)) if status.success() => {}
-        Ok(Ok(_)) => return Err(anyhow::anyhow!("pdfimages page {page_num} failed")),
-        Ok(Err(e)) => return Err(anyhow::anyhow!("pdfimages page {page_num}: {e}")),
-        Err(_) => {
-            let _ = Command::new("pkill").arg("-f").arg("pdfimages").status();
-            return Err(anyhow::anyhow!("pdfimages page {page_num} timed out after 30s"));
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow::anyhow!("pdfimages page {page_num} timed out after 30s"));
+            }
+            Err(e) => return Err(anyhow::anyhow!("pdfimages page {page_num}: {e}")),
         }
+    };
+    if !status.success() {
+        return Err(anyhow::anyhow!("pdfimages page {page_num} failed"));
     }
 
     let mut best_path: Option<PathBuf> = None;
