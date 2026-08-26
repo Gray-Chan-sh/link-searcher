@@ -110,7 +110,8 @@ where
     let pool = match POOL.get() {
         Some(pool) => pool,
         None => {
-            let pool = EnginePool::new(2)?;
+            let n = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(2).clamp(1, 8);
+            let pool = EnginePool::new(n)?;
             let _ = POOL.set(pool); // race loser's engines are dropped
             POOL.get().expect("just set") // nosemgrep: rust-expect-panic
         }

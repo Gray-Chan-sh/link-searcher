@@ -270,8 +270,6 @@ impl IndexerService {
             {
                 log::warn!("[INDEX] 存储提取内容失败: {e}");
             }
-            // Incrementally count hotwords for ASR/Wu dialect recognition
-            crate::db::tracker::update_hotwords(conn, &extracted);
             extracted
         };
 
@@ -361,7 +359,7 @@ impl IndexerService {
         // Chunked pipeline: instead of extracting ALL files then writing the
         // index once, process in chunks so committed chunks become searchable
         // while later chunks are still extracting (Phase-1 search visibility).
-        const CHUNK: usize = 250;
+        const CHUNK: usize = 500;
         let db = self.db.clone();
         let total = jobs.len() as u64;
         let started = Instant::now();
@@ -699,7 +697,7 @@ if let Err(e) =
                 .read()
                 .map_err(|e| anyhow::anyhow!("index manager lock poisoned: {e}"))?;
             let new_w = mgr
-                .writer(50_000_000)
+                .writer(150_000_000)
                 .map_err(|e| anyhow::anyhow!("failed to create index writer: {e}"))?;
             *guard = Some(new_w);
         }
