@@ -297,6 +297,8 @@ struct AiDone {
     #[serde(default)]
     hits: usize,
     #[serde(default)]
+    total_match_count: usize,
+    #[serde(default)]
     llm_model: String,
     #[serde(default)]
     embedding_model: String,
@@ -1480,6 +1482,7 @@ pub async fn conversation_ask_stream(
         trace_id,
         search_query,
         hits,
+        total_match_count,
         llm_model: cfg.active_llm_model_id,
         embedding_model: cfg.active_embedding_model_id,
     });
