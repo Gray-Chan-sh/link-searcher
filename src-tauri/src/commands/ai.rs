@@ -255,6 +255,7 @@ pub struct EvidenceItem {
 
 /// Retrieval hit carrying its scores; semantic fields are `None` unless
 /// the RRF fusion path ran.
+#[derive(Debug, Clone)]
 pub struct ScoredHit {
     pub file_id: String,
     pub path: String,
@@ -1148,24 +1149,54 @@ async fn prepare_conversation_prompt(
                         mention_index.insert(resolved_path.clone(), n);
                     }
     }
-    for hit in &all_hits {
-        if hit.from_history { continue; }
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
-            && let Some(md5) = &rec.md5
-                && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
-                    && !text.trim().is_empty() {
-                        evidence.push(EvidenceItem {
-                            file_id: hit.file_id.clone(),
-                            path: rec.path.clone(),
-                            snippet: truncate_text(&text, 200),
-                            bm25_score: hit.bm25_score,
-                            semantic_score: hit.semantic_score,
-                            rrf_score: hit.rrf_score,
-                            rewritten,
-                            rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
-                            from_history: hit.from_history,
-                        });
+    // 路径列表：所有匹配文件的路径（让 LLM 知道有哪些文件）
+    if !all_hits.is_empty() {
+        let path_lines: Vec<String> = all_hits.iter().enumerate()
+            .map(|(i, h)| format!("[{}] {}", i + 1, h.path))
+            .collect();
+        docs.push(format!("📋 匹配文件列表（共{}份）：\n{}", all_hits.len(), path_lines.join("\n")));
+    }
+
+    // 层1：@mention 文件完整注入（预算优先）
+    // 层2：top-K 文件按预算动态分配
+    // 层3：超出预算的文件 → batch_summarize
+    let mention_budget = CONTEXT_BUDGET / 3;
+    let mut content_budget = CONTEXT_BUDGET
+        .saturating_sub(SYSTEM_OVERHEAD)
+        .saturating_sub(ANSWER_RESERVE)
+        .saturating_sub(mention_budget);
+
+    // 层2：注入 top-K 非 mention 文件（预算感知）
+    let content_hits: Vec<&ScoredHit> = all_hits.iter()
+        .filter(|h| !h.from_history && !mention_index.values().any(|n| *n > 0))
+        .take(MAX_CONTENT_INJECT)
+        .collect();
+    for hit in &content_hits {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
+            if let Some(md5) = &rec.md5 {
+                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                    if !text.trim().is_empty() {
+                        let per_file = content_budget / content_hits.len().max(1);
+                        let injected = chunked_or_truncated_with_budget(&conn, md5, &text, &search_q, per_file);
+                        docs.push(format!("【{}】\n{}", rec.path, injected));
+                        content_budget = content_budget.saturating_sub(injected.chars().count());
                     }
+                }
+            }
+        }
+    }
+
+    // 层3：超出 top-K 的文件 → batch_summarize
+    let remaining_hits: Vec<ScoredHit> = all_hits.iter()
+        .filter(|h| !h.from_history && !mention_index.values().any(|n| *n > 0))
+        .skip(MAX_CONTENT_INJECT)
+        .cloned()
+        .collect();
+    if !remaining_hits.is_empty() {
+        let remaining_ids: Vec<String> = remaining_hits.iter().map(|h| h.file_id.clone()).collect();
+        if let Ok((summary, _)) = batch_summarize(state, &remaining_ids, &search_q).await {
+            docs.push(format!("📋 剩余{}份文档的摘要：\n{}", remaining_hits.len(), summary));
+        }
     }
     drop(conn);
 
@@ -1514,50 +1545,77 @@ pub async fn batch_summarize(
         return Ok((String::new(), Vec::new()));
     }
     const BATCH_SIZE: usize = 15;
-    let batches: Vec<&[String]> = file_ids.chunks(BATCH_SIZE).collect();
+    const MAX_CONCURRENCY: usize = 6;
+    let total_batches = (file_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
 
+    // Pre-fetch all file content in single DB pass
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let batch_contents: Vec<String> = batches.iter().map(|batch| {
-        let mut content = String::new();
-        for fid in *batch {
+    let mut all_batch_content: Vec<Vec<String>> = Vec::with_capacity(total_batches);
+    for chunk in file_ids.chunks(BATCH_SIZE) {
+        let mut batch = Vec::new();
+        for fid in chunk {
             if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
                 if let Some(md5) = &rec.md5 {
                     if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                        let brief = truncate_text(&text, 3000);
-                        content.push_str(&format!("【{}】\n{}\n\n", rec.path, brief));
+                        batch.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 3000)));
                     }
                 }
             }
         }
-        content
-    }).collect();
+        all_batch_content.push(batch);
+    }
     drop(conn);
 
-    let total = batches.len();
-    let mut summaries: Vec<String> = Vec::with_capacity(total);
     let system = "你是法律文档分析助手。请用简洁中文总结以下文档内容中与查询主题相关的关键信息，不超过500字。";
 
-    for (i, batch_content) in batch_contents.iter().enumerate() {
-        let user_msg = format!("查询主题：{}\n\n第{}批文档（共{}批）：\n{}", query, i + 1, total, batch_content);
-        match tokio::task::spawn_blocking({
-            let sys = system.to_string();
-            let usr = user_msg;
-            move || crate::ai::chat(&sys, &usr)
-        }).await {
-            Ok(Some(summary)) => summaries.push(summary),
-            Ok(None) => summaries.push(format!("（第{}批摘要生成失败）", i + 1)),
-            Err(e) => summaries.push(format!("（第{}批处理出错: {e}）", i + 1)),
+    // Parallel map phase with concurrency control
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let completed = std::sync::Arc::new(AtomicUsize::new(0));
+    let total = all_batch_content.len();
+    let mut summaries = vec![String::new(); total];
+    let mut handles = Vec::with_capacity(total);
+
+    for (i, batch) in all_batch_content.into_iter().enumerate() {
+        let sys = system.to_string();
+        let query_clone = query.to_string();
+        let batch_text = batch.join("\n\n");
+        let user_msg = format!("查询主题：{}\n\n第{}批文档（共{}批）：\n{}", &query_clone, i + 1, total, &batch_text);
+
+        let handle = tokio::task::spawn(async move {
+            let result = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user_msg)).await;
+            (i, result)
+        });
+        handles.push(handle);
+
+        if handles.len() >= MAX_CONCURRENCY {
+            let (result,) = tokio::join!(handles.remove(0));
+            completed.fetch_add(1, Ordering::Relaxed);
+            if let Ok((idx, Ok(Some(s)))) = result {
+                summaries[idx] = s;
+            }
+        }
+    }
+
+    for handle in handles {
+        let (idx, res) = handle.await.unwrap_or_else(|e| {
+            log::warn!("[AI] batch task join error: {e}");
+            (0, Ok(None))
+        });
+        completed.fetch_add(1, Ordering::Relaxed);
+        match res {
+            Ok(Some(s)) => summaries[idx] = s,
+            _ => summaries[idx] = format!("（第{}批摘要生成失败）", idx + 1),
         }
     }
 
     let combined = summaries.join("\n\n---\n\n");
-    if batches.len() == 1 {
+    if total == 1 {
         return Ok((combined, file_ids.to_vec()));
     }
 
+    // Reduce phase
     let reduce_system = "你是法律文档分析助手。以下是多组文档摘要，请将它们整合为一份连贯的综合分析。";
     let reduce_msg = format!("查询主题：{}\n\n各批摘要如下：\n{}", query, combined);
-
     let final_summary = match tokio::task::spawn_blocking(move || crate::ai::chat(reduce_system, &reduce_msg)).await {
         Ok(Some(s)) => s,
         _ => combined,
