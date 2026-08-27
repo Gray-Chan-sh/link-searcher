@@ -1168,7 +1168,7 @@ async fn prepare_conversation_prompt(
 
     // 层2：注入 top-K 非 mention 文件（预算感知）
     let content_hits: Vec<&ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.values().any(|n| *n > 0))
+        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
         .take(MAX_CONTENT_INJECT)
         .collect();
     for hit in &content_hits {
@@ -1188,7 +1188,7 @@ async fn prepare_conversation_prompt(
 
     // 层3：超出 top-K 的文件 → batch_summarize
     let remaining_hits: Vec<ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.values().any(|n| *n > 0))
+        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
         .skip(MAX_CONTENT_INJECT)
         .cloned()
         .collect();
