@@ -836,10 +836,17 @@ struct PreparedConversation {
     search_query: String,
     /// Number of BM25 hits before merge with @mention files.
     hits: usize,
+    total_match_count: usize,
     /// Accumulated AI events for this turn's pipeline execution.
     /// Caller should batch-insert into ai_events table.
     events: Vec<(String, serde_json::Value)>,
 }
+
+const CONTEXT_BUDGET: usize = 150_000;
+const SYSTEM_OVERHEAD: usize = 2_000;
+const ANSWER_RESERVE: usize = 8_000;
+const MAX_CONTENT_INJECT: usize = 30;
+const VECTOR_THRESHOLD: f32 = 0.65;
 
 /// Resolve file paths to file IDs with exact + LIKE fallback.
 /// Returns (resolved, missing) where resolved is (file_id, path) pairs.
@@ -1021,82 +1028,93 @@ async fn prepare_conversation_prompt(
         "date_to": date_to,
     })));
 
-    // 动态依据：保留仍有效的旧来源，并按追问问题检索命中补齐（去重, ≤15）。
-    // 语义开启时对追问做 BM25+embedding RRF 融合重排。
-    let new_hits = if last_q.trim().is_empty() {
-        Vec::new()
-    } else {
-        bm25_relevant_hits(
-            state, &search_q, 10, crate::ai::embedding_enabled(),
-            dir_ids_opt, ext_filter, date_from, date_to, path_prefixes_opt, mention_file_ids,
-        )?
-    };
-    log::info!("[AI] retrieved hits: {} new_hits (from limited scope)", new_hits.len());
-    let bm25_count = new_hits.len();
-    let semantic_fused = new_hits.iter().any(|h| h.semantic_score.is_some());
-
-    const MAX_SOURCES: usize = 15;
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut merged: Vec<ScoredHit> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    // 已直接注入的 scope/mention 文件不重复注入（避免双重内容）
+    // 动态依据：BM25 全量扫描 + 向量全量扫描 + SQL 路径匹配，三路合并去重。
+    let mut all_hits: Vec<ScoredHit> = Vec::new();
+    let mut all_seen = std::collections::HashSet::new();
     for (fid, _) in &mention_resolved {
-        seen.insert(fid.clone());
+        all_seen.insert(fid.clone());
     }
-    // 新检索优先：追问要主导依据更新（否则旧来源累积顶满上限,
-    // 新文档永远挤不进来, 退化为"只围绕第一轮文档回答"）。
-    for hit in new_hits {
-        if seen.insert(hit.file_id.clone()) {
-            merged.push(hit);
-        }
-    }
-    // 旧来源的保留信号：*对话中提到过的文件*最值得留（用户/助手引用过 =
-    // 实际在使用）；其次按最近加入倒序补槽。上限以内仅供上下文底垫。
-    // strict_docs 模式下跳过旧来源，仅使用 @mention 文件。
-    if !strict_docs {
-        let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-        let mentioned = |rec_path: &str| -> bool {
-            let stem = std::path::Path::new(rec_path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            let name = std::path::Path::new(rec_path).file_name().and_then(|s| s.to_str()).unwrap_or("").to_string();
-            (!stem.is_empty() && message_text.contains(stem.as_str())) || (!name.is_empty() && message_text.contains(name.as_str()))
+    if !last_q.trim().is_empty() {
+        // 1. BM25 全量（limit=文档总数，不限量）
+        let total_files = {
+            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
         };
-        // 旧来源只保留*对话中明确提到过的*（用户/助手引用过 = 实际在使用），
-        // 硬上限 3 份——防止陈旧来源把 15 槽位挤满、稀释本轮检索命中。
-        const MAX_OLD_SOURCES: usize = 3;
-        let mut old_count = 0usize;
+        let bm25_hits = bm25_relevant_hits(
+            state, &search_q, (total_files as usize).max(500), crate::ai::embedding_enabled(),
+            dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, path_prefixes_opt.clone(), mention_file_ids.clone(),
+        ).unwrap_or_default();
+        let bm25_count = bm25_hits.len();
+        for hit in bm25_hits {
+            if all_seen.insert(hit.file_id.clone()) { all_hits.push(hit); }
+        }
+        // 2. 向量全量扫描（语义兜底，阈值过滤）
+        if crate::ai::embedding_enabled() {
+            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            if let Ok(vec_hits) = crate::ai::vector_full_scan(&c, &search_q, VECTOR_THRESHOLD) {
+                let mut i = 0usize;
+                for (fid, sim) in vec_hits {
+                    if all_seen.insert(fid.clone()) {
+                        all_hits.push(ScoredHit {
+                            file_id: fid, path: String::new(), bm25_score: None,
+                            semantic_score: Some(sim as f64), rrf_score: None, from_history: false,
+                        });
+                    }
+                    i += 1;
+                    if i > 500 { break; }
+                }
+            }
+        }
+        // 3. SQL 路径匹配（无上限，精确命中）
+        let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &search_q) {
+            for (fid, _path) in path_hits {
+                if all_seen.insert(fid.clone()) {
+                    all_hits.push(ScoredHit {
+                        file_id: fid, path: String::new(), bm25_score: None,
+                        semantic_score: None, rrf_score: None, from_history: false,
+                    });
+                }
+            }
+        }
+        // 填充 path（延迟加载）
+        {
+            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            for hit in &mut all_hits {
+                if hit.path.is_empty() {
+                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&c, &hit.file_id) {
+                        hit.path = rec.path.clone();
+                    }
+                }
+            }
+        }
+        log::info!("[AI] three_way_scan: query={search_q} bm25={} vector+path={} total={}", bm25_count, all_hits.len() - bm25_count, all_hits.len());
+    }
+
+    const MAX_CONTENT_INJECT: usize = 30;
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+
+    // 旧来源保留：对话中明确提到过的文件优先补入
+    if !strict_docs && all_hits.len() < MAX_CONTENT_INJECT {
+        let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
         for fid in source_ids.iter().rev() {
-            if merged.len() >= MAX_SOURCES || old_count >= MAX_OLD_SOURCES {
-                break;
-            }
-            if seen.contains(fid) {
-                continue;
-            }
+            if all_hits.len() >= MAX_CONTENT_INJECT { break; }
+            if all_seen.contains(fid) { continue; }
             let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
-            if rec.status != "active" || rec.md5.is_none() {
-                continue;
+            if rec.status == "active" && rec.md5.is_some() {
+                let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if !stem.is_empty() && message_text.contains(stem.as_str()) {
+                    all_seen.insert(fid.clone());
+                    all_hits.push(ScoredHit { file_id: fid.clone(), path: rec.path.clone(), bm25_score: None, semantic_score: None, rrf_score: None, from_history: true });
+                }
             }
-            if !mentioned(&rec.path) {
-                continue;
-            }
-            seen.insert(fid.clone());
-            merged.push(ScoredHit {
-                file_id: fid.clone(),
-                path: rec.path.clone(),
-                bm25_score: None,
-                semantic_score: None,
-                rrf_score: None,
-                from_history: true,
-            });
-            old_count += 1;
         }
     }
 
-    let from_history_count = merged.iter().filter(|h| h.from_history).count();
+    let from_history_count = all_hits.iter().filter(|h| h.from_history).count();
     events.push(("retrieval".into(), serde_json::json!({
         "search_query": search_q,
-        "bm25_hits": bm25_count,
-        "semantic_fused": semantic_fused,
-        "merged_hits": merged.len(),
+        "total_matches": all_hits.len(),
         "from_history_count": from_history_count,
     })));
 
@@ -1127,12 +1145,12 @@ async fn prepare_conversation_prompt(
                         mention_index.insert(resolved_path.clone(), n);
                     }
     }
-    for hit in &merged {
+    for hit in &all_hits {
+        if hit.from_history { continue; }
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
             && let Some(md5) = &rec.md5
                 && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
                     && !text.trim().is_empty() {
-                        docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
                         evidence.push(EvidenceItem {
                             file_id: hit.file_id.clone(),
                             path: rec.path.clone(),
@@ -1148,8 +1166,8 @@ async fn prepare_conversation_prompt(
     }
     drop(conn);
 
-    let source_ids_final = merged.iter().map(|h| h.file_id.clone()).collect();
-    let source_files_final = merged.iter().map(|h| h.path.clone()).collect();
+    let source_ids_final = all_hits.iter().map(|h| h.file_id.clone()).collect();
+    let source_files_final = all_hits.iter().map(|h| h.path.clone()).collect();
 
     let context = truncate_text(&docs.join("\n\n---\n\n"), 50000);
     // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
@@ -1181,14 +1199,14 @@ async fn prepare_conversation_prompt(
     for (path, idx) in &mention_index {
         user_msg = user_msg.replace(&format!("@{path}"), &format!("[{}]", idx));
     }
-    let hits = merged.iter().filter(|h| !h.from_history).count();
+    let hits = all_hits.iter().filter(|h| !h.from_history).count();
     events.push(("context_assembled".into(), serde_json::json!({
         "material_count": docs.len(),
         "total_chars": context.chars().count(),
         "strict_docs": strict_docs,
         "truncated_to": 50000,
     })));
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events, total_match_count: all_hits.len() })
 }
 
 /// Pipeline 版本的 prepare_conversation_prompt（使用 RAGPipeline）。
@@ -1230,6 +1248,7 @@ async fn prepare_conversation_prompt_pipeline(
         search_query: String::new(),
         hits: 0,
         events: vec![],
+        total_match_count: 0,
     })
 }
 
@@ -1402,7 +1421,7 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, total_match_count, mut events } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
     let cfg = crate::config::load_config();
@@ -1482,6 +1501,67 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     }
 }
 
+pub async fn batch_summarize(
+    state: &tauri::State<'_, crate::state::AppState>,
+    file_ids: &[String],
+    query: &str,
+) -> Result<(String, Vec<String>), String> {
+    if file_ids.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    const BATCH_SIZE: usize = 15;
+    let batches: Vec<&[String]> = file_ids.chunks(BATCH_SIZE).collect();
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let batch_contents: Vec<String> = batches.iter().map(|batch| {
+        let mut content = String::new();
+        for fid in *batch {
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
+                if let Some(md5) = &rec.md5 {
+                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+                        let brief = truncate_text(&text, 3000);
+                        content.push_str(&format!("【{}】\n{}\n\n", rec.path, brief));
+                    }
+                }
+            }
+        }
+        content
+    }).collect();
+    drop(conn);
+
+    let total = batches.len();
+    let mut summaries: Vec<String> = Vec::with_capacity(total);
+    let system = "你是法律文档分析助手。请用简洁中文总结以下文档内容中与查询主题相关的关键信息，不超过500字。";
+
+    for (i, batch_content) in batch_contents.iter().enumerate() {
+        let user_msg = format!("查询主题：{}\n\n第{}批文档（共{}批）：\n{}", query, i + 1, total, batch_content);
+        match tokio::task::spawn_blocking({
+            let sys = system.to_string();
+            let usr = user_msg;
+            move || crate::ai::chat(&sys, &usr)
+        }).await {
+            Ok(Some(summary)) => summaries.push(summary),
+            Ok(None) => summaries.push(format!("（第{}批摘要生成失败）", i + 1)),
+            Err(e) => summaries.push(format!("（第{}批处理出错: {e}）", i + 1)),
+        }
+    }
+
+    let combined = summaries.join("\n\n---\n\n");
+    if batches.len() == 1 {
+        return Ok((combined, file_ids.to_vec()));
+    }
+
+    let reduce_system = "你是法律文档分析助手。以下是多组文档摘要，请将它们整合为一份连贯的综合分析。";
+    let reduce_msg = format!("查询主题：{}\n\n各批摘要如下：\n{}", query, combined);
+
+    let final_summary = match tokio::task::spawn_blocking(move || crate::ai::chat(reduce_system, &reduce_msg)).await {
+        Ok(Some(s)) => s,
+        _ => combined,
+    };
+
+    Ok((final_summary, file_ids.to_vec()))
+}
+
 /// Inject the full text (≤50 K chars) or, for longer documents, select the
 /// top-8 lexically-relevant chunks via jieba term overlap. Falls back to
 /// truncation when chunks are unavailable.
@@ -1504,6 +1584,32 @@ fn chunked_or_truncated(conn: &rusqlite::Connection, md5: &str, text: &str, quer
         .map(|c| format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text))
         .collect::<Vec<_>>()
         .join("\n···\n")
+}
+
+fn chunked_or_truncated_with_budget(conn: &rusqlite::Connection, md5: &str, text: &str, query: &str, char_budget: usize) -> String {
+    if char_budget == 0 { return String::new(); }
+    if text.chars().count() <= char_budget {
+        return truncate_text(text, char_budget);
+    }
+    let chunks = crate::db::chunks::get_chunks(conn, md5).unwrap_or_default();
+    if chunks.is_empty() {
+        return truncate_text(text, char_budget);
+    }
+    let relevant = crate::db::chunks::select_relevant_chunks(&chunks, query, chunks.len());
+    let mut packed: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for chunk in &relevant {
+        let chunk_chars = chunk.text.chars().count() + 20;
+        if used + chunk_chars > char_budget {
+            if packed.is_empty() {
+                packed.push(truncate_text(&chunk.text, char_budget));
+            }
+            break;
+        }
+        packed.push(format!("（第{}-{}字）\n{}", chunk.start_char, chunk.end_char, chunk.text));
+        used += chunk_chars;
+    }
+    packed.join("\n···\n")
 }
 
 pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {

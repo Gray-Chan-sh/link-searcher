@@ -263,6 +263,29 @@ pub fn embed(text: &str) -> Option<Vec<f32>> {
     embed_batch(&[text.to_string()]).into_iter().next().flatten()
 }
 
+/// Brute-force cosine scan over ALL stored embeddings.
+/// Returns every doc_id with similarity >= threshold, sorted descending.
+/// No top-K limit — returns all matching documents.
+pub fn vector_full_scan(
+    conn: &rusqlite::Connection,
+    query: &str,
+    threshold: f32,
+) -> Result<Vec<(String, f32)>, String> {
+    let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
+    let all_count = all.len();
+    let mut results: Vec<(String, f32)> = all
+        .into_iter()
+        .filter_map(|(fid, vec)| {
+            let sim = cosine(&query_emb, &vec);
+            if sim >= threshold { Some((fid, sim)) } else { None }
+        })
+        .collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    log::info!("[AI] vector_full_scan: query_chars={} all_emb={} above_threshold={} threshold={:.2}", query.chars().count(), all_count, results.len(), threshold);
+    Ok(results)
+}
+
 /// Send a chat-completion prompt to the configured LLM and return the reply
 /// text. `system` is the instruction, `user` the task/content. Returns `None`
 /// when unconfigured or the request fails (downgrade, never block).
