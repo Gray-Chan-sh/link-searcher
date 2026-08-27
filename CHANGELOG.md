@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-08-25（功能 — 大范围 AI 聊天：三路全量扫描 + Map-Reduce，不限文件数量）
+
+**动机**：用户需要统计所有与某案件相关的文件内容，现有 BM25 limit=10 + 2000 字符/文件 + 50000 总上下文的三重天花板导致大量相关文件被丢弃。
+
+**方案**：BM25 全量扫描 + 向量全量扫描（暴力 cosine）+ SQL 路径匹配 → 三路合并 → 动态预算注入 / Map-Reduce 批量摘要
+
+**变更**：
+- `ai/mod.rs`：新增 `vector_full_scan()` — 遍历 `doc_embeddings` 全表计算 cosine，阈值 0.65 过滤，无 top-K 限制
+- `db/tracker.rs`：新增 `path_match_files()` — SQL LIKE 路径匹配，无上限；新增 `count_active_files()` — BM25 全量扫描的 limit 参数
+- `commands/ai.rs`：
+  - 新增 `chunked_or_truncated_with_budget()` — 预算感知分块注入，贪心打包直到预算耗尽
+  - 新增 `batch_summarize()` — Map-Reduce 批量摘要：分批 ×15 LLM 调用（并发）+ 1 次 reduce
+  - `prepare_conversation_prompt` 重构：BM25 limit 10→全量 + 向量全量扫描 + SQL 路径匹配；`MAX_SOURCES=15` 移除；证据列表包含全部匹配文件；动态预算分配
+- `api/files.ts`：`AiDonePayload` 新增 `total_match_count` 字段
+- `ChatPanel.tsx`：证据面板显示匹配总数/注入数（如 `🔍 证据（30/200）`）
+
 ## 2026-08-26（性能 — 索引全链路优化 W1-W5：SQLite + 写路径 + 正确性 + Tantivy + 前端）
 
 **动机**：路线图 P1 性能优化。通过 5 波并行探索 + Plan Agent 任务图，对索引管线全链路进行系统性优化。

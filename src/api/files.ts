@@ -157,6 +157,7 @@ export interface AiDonePayload {
   trace_id?: string
   search_query?: string
   hits?: number
+  total_match_count?: number
   llm_model?: string
   embedding_model?: string
 }
