@@ -459,6 +459,7 @@ pub async fn smart_search_stream(
         trace_id: String::new(),
         search_query: query,
         hits,
+        total_match_count: 0,
         llm_model: String::new(),
         embedding_model: String::new(),
     });
