@@ -676,6 +676,29 @@ pub fn delete_embedding(conn: &Connection, file_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Find all active files whose path contains `keyword` (case-insensitive LIKE).
+/// Returns (file_id, path) pairs. No limit — returns every match.
+pub fn path_match_files(conn: &Connection, keyword: &str) -> Result<Vec<(String, String)>> {
+    let pattern = format!("%{keyword}%");
+    let mut stmt = conn.prepare(
+        "SELECT id, path FROM file_tracking WHERE status = 'active' AND path LIKE ?1"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+pub fn count_active_files(conn: &Connection) -> Result<u64> {
+    conn.query_row("SELECT COUNT(*) FROM file_tracking WHERE status = 'active'", [], |r| r.get::<_, i64>(0))
+        .map(|n| n as u64)
+        .context("count active files")
+}
+
 /// Number of stored embeddings (for the AI status panel).
 pub fn count_embeddings(conn: &Connection) -> Result<u64> {
     conn.query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get::<_, i64>(0))
