@@ -163,6 +163,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             turn_index: userTurns - 1,
             file_ids: p.source_ids,
             items: p.evidence ?? [],
+            total_match_count: p.total_match_count ?? 0,
             trace_id: p.trace_id ?? '',
             took_ms: p.took_ms,
             llm_model: p.llm_model ?? '',
@@ -483,7 +484,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                         <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
-                          🔍 {t('evidence')}（{evidenceFor(i).length}）
+                          🔍 {t('evidence')}（{evidenceFor(i).length}{(() => { const t = (session?.per_turn_evidence ?? []).find(e => e.turn_index === i); return t?.total_match_count && t.total_match_count > evidenceFor(i).length ? `/${t.total_match_count}` : '' })()}）
                         </summary>
 <ul className="mt-1 space-y-1">
                            {evidenceFor(i).map((ev, j) => (
