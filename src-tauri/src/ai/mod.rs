@@ -112,17 +112,24 @@ pub fn ai_enabled() -> bool {
 
 /// True when an embedding model is active (semantic search usable).
 pub fn embedding_enabled() -> bool {
+    use std::sync::OnceLock;
+    static LOGGED: OnceLock<()> = OnceLock::new();
     let cfg = crate::config::load_config();
     let model_id = &cfg.active_embedding_model_id;
     let is_local = crate::config::is_local_embedding_model(model_id);
-    log::info!("[AI] embedding_enabled: model_id={model_id}, is_local={is_local}, data_dir={:?}", cfg.data_dir);
     if is_local {
         let model_name = local_embed::local_model_dir_name(model_id).unwrap_or("bge-large-zh-v1.5");
         let ready = local_embed::bge_model_ready(&cfg.data_dir, model_name);
-        log::info!("[AI] local model ready={ready}, model={model_name}");
+        if LOGGED.set(()).is_ok() {
+            log::info!("[AI] embed: model={} local={} ready={}", model_id, is_local, ready);
+        }
         return ready;
     }
-    resolve_active_endpoint(&cfg, ModelType::Embedding).is_some()
+    let ok = resolve_active_endpoint(&cfg, ModelType::Embedding).is_some();
+    if LOGGED.set(()).is_ok() {
+        log::info!("[AI] embed: model={} local=false ok={}", model_id, ok);
+    }
+    ok
 }
 
 /// True when an LLM model is active (summary / RAG usable).
@@ -282,7 +289,7 @@ pub fn vector_full_scan(
         })
         .collect();
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    log::info!("[AI] vector_full_scan: query_chars={} all_emb={} above_threshold={} threshold={:.2}", query.chars().count(), all_count, results.len(), threshold);
+    log::info!("[AI]   vector: {} emb, {} above {:.2}", all_count, results.len(), threshold);
     Ok(results)
 }
 
@@ -299,8 +306,8 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     let req = ChatReq {
         model: ep.model_id.clone(),
         messages: vec![
-            ChatMsg { role: "system".into(), content: system.into(), reasoning: None },
-            ChatMsg { role: "user".into(), content: user.into(), reasoning: None },
+            ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
+            ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
         ],
         temperature: 0.3,
         max_tokens: 4096,
@@ -314,7 +321,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
         }
     };
     log::info!(
-        "[AI] chat request: model={} user_chars={}",
+        "[AI]   → LLM: model={} chars={}",
         ep.model_id,
         user.chars().count()
     );
@@ -336,10 +343,11 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
                     Some(c.message.content)
                 } else {
                     c.message.reasoning.filter(|r| !r.is_empty())
+                        .or_else(|| c.message.reasoning_content.filter(|r| !r.is_empty()))
                 }
             });
             log::info!(
-                "[AI] chat response: ok, content_chars={}",
+                "[AI]   ← LLM: {} chars",
                 content.as_deref().map(|c| c.chars().count()).unwrap_or(0)
             );
             content
@@ -366,7 +374,7 @@ pub struct ChatStreamOutcome {
 pub fn chat_stream(
     system: &str,
     user: &str,
-    on_delta: &mut dyn FnMut(&str),
+    on_delta: &mut dyn FnMut(&str, bool),
 ) -> ChatStreamOutcome {
     use std::io::{BufRead, Read};
     let started = std::time::Instant::now();
@@ -383,8 +391,8 @@ pub fn chat_stream(
     let req_body = match serde_json::to_string(&ChatReq {
         model: ep.model_id.clone(),
         messages: vec![
-            ChatMsg { role: "system".into(), content: system.into(), reasoning: None },
-            ChatMsg { role: "user".into(), content: user.into(), reasoning: None },
+            ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
+            ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
         ],
         temperature: 0.3,
         max_tokens: 4096,
@@ -435,6 +443,8 @@ pub fn chat_stream(
         content: Option<String>,
         #[serde(default)]
         reasoning: Option<String>,
+        #[serde(default)]
+        reasoning_content: Option<String>,
     }
 
     let mut full = String::new();
@@ -472,12 +482,13 @@ pub fn chat_stream(
                             Some(c.message.content)
                         } else {
                             c.message.reasoning.filter(|r| !r.is_empty())
+                                .or_else(|| c.message.reasoning_content.filter(|r| !r.is_empty()))
                         }
                     }))
                     .unwrap_or_default();
                 if !text.is_empty() {
                     full = text.clone();
-                    on_delta(&text);
+                    on_delta(&text, false);
                 }
                 break;
             }
@@ -491,13 +502,17 @@ pub fn chat_stream(
                 if let Some(d) = sr.choices.first().and_then(|c| c.delta.content.as_ref()) {
                     if !d.is_empty() {
                         full.push_str(d);
-                        on_delta(d);
+                        on_delta(d, false);
                     }
                 } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning.as_ref())
                     && !d.is_empty() {
                         full.push_str(d);
-                        on_delta(d);
-                    }
+                        on_delta(d, true);
+                    } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning_content.as_ref())
+                        && !d.is_empty() {
+                            full.push_str(d);
+                            on_delta(d, true);
+                        }
             }
         }
         if ai_cancelled() {
@@ -523,6 +538,8 @@ struct ChatMsg {
     content: String,
     #[serde(default)]
     reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -970,5 +987,15 @@ mod tests {
     #[test]
     fn parse_chat_response_rejects_garbage() {
         assert!(parse_chat_response("<html>gateway error</html>").is_err());
+    }
+
+    #[test]
+    fn parse_chat_response_reads_reasoning_content_field() {
+        // 网关返回 reasoning_content 而非 reasoning（如 opencode 网关）：
+        // content 为空时必须从 reasoning_content 提取正文。
+        let body = r#"{"choices":[{"message":{"role":"assistant","content":"","reasoning_content":"万城公司相关资料显示..."}}]}"#;
+        let resp = parse_chat_response(body).unwrap();
+        assert!(resp.choices[0].message.reasoning_content.is_some());
+        assert_eq!(resp.choices[0].message.reasoning_content.as_deref(), Some("万城公司相关资料显示..."));
     }
 }
