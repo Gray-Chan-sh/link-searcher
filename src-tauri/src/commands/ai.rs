@@ -279,6 +279,8 @@ pub struct SmartSearchResponse {
 struct AiChunk {
     session_id: String,
     delta: String,
+    #[serde(default)]
+    reasoning: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -290,7 +292,6 @@ struct AiDone {
     source_ids: Vec<String>,
     source_files: Vec<String>,
     evidence: Vec<EvidenceItem>,
-    /// Per-turn trace ID for correlating app.log entries with the session export.
     #[serde(default)]
     trace_id: String,
     #[serde(default)]
@@ -305,6 +306,17 @@ struct AiDone {
     embedding_model: String,
 }
 
+#[derive(Clone, Serialize)]
+struct AiProgress {
+    session_id: String,
+    phase: String,
+    message: String,
+    #[serde(default)]
+    current: usize,
+    #[serde(default)]
+    total: usize,
+}
+
 /// BM25 retrieval + content assembly shared by one-shot and streaming
 /// smart_search. Returns the prompt pair plus the source file lists.
 struct PreparedSmart {
@@ -316,7 +328,7 @@ struct PreparedSmart {
 }
 
 fn prepare_smart_prompt(
-    state: &tauri::State<'_, AppState>,
+    state: &AppState,
     query: &str,
 ) -> Result<PreparedSmart, String> {
     let hits = bm25_relevant_hits(
@@ -439,8 +451,8 @@ pub async fn smart_search_stream(
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let mut emit = |d: &str| {
-            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string() });
+        let mut emit = |d: &str, _is_reasoning: bool| {
+            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: false });
         };
         crate::ai::chat_stream(&system, &user_msg, &mut emit)
     })
@@ -734,8 +746,8 @@ fn semantic_fuse(
 /// `semantic` is true and the embedding gateway is configured, reranks the
 /// BM25 candidates via RRF fusion with embedding cosine scores (gracefully
 /// falls back to BM25-only on any failure).
-pub fn bm25_relevant_hits(
-    state: &tauri::State<'_, AppState>,
+pub(crate) fn bm25_relevant_hits(
+    state: &AppState,
     query: &str,
     limit: usize,
     semantic: bool,
@@ -769,7 +781,7 @@ pub fn bm25_relevant_hits(
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
     };
-    log::info!("[AI] bm25_relevant_hits: q={query} dir_ids={:?} path_prefixes={:?} file_ids={:?}", dir_ids, path_prefixes, file_ids);
+    log::info!("[AI]   bm25: q=\"{}\" dirs={} files={} limit={}", truncate_text(query, 30), dir_ids.as_ref().map_or(0, |v| v.len()), file_ids.as_ref().map_or(0, |v| v.len()), limit);
     let mut result = searcher.search(&params).map_err(|e| format!("{e}"))?;
 
     // Fallback: if BM25 returns zero hits but file_ids scope the search to
@@ -830,26 +842,25 @@ pub fn bm25_relevant_hits(
 /// Assembled conversation prompt + the (possibly updated) source file list
 /// backing it. Follow-up questions re-retrieve relevant documents so the
 /// answer (and the frontend source list) reflects the newest question.
-struct PreparedConversation {
-    system: String,
-    user_msg: String,
-    source_ids: Vec<String>,
-    source_files: Vec<String>,
-    evidence: Vec<EvidenceItem>,
+pub(crate) struct PreparedConversation {
+    pub(crate) system: String,
+    pub(crate) user_msg: String,
+    pub(crate) source_ids: Vec<String>,
+    pub(crate) source_files: Vec<String>,
+    pub(crate) evidence: Vec<EvidenceItem>,
     /// Final retrieval query (after rewrite) — recorded per turn for traceability.
-    search_query: String,
+    pub(crate) search_query: String,
     /// Number of BM25 hits before merge with @mention files.
-    hits: usize,
-    total_match_count: usize,
+    pub(crate) hits: usize,
+    pub(crate) total_match_count: usize,
     /// Accumulated AI events for this turn's pipeline execution.
     /// Caller should batch-insert into ai_events table.
-    events: Vec<(String, serde_json::Value)>,
+    pub(crate) events: Vec<(String, serde_json::Value)>,
 }
 
 const CONTEXT_BUDGET: usize = 150_000;
 const SYSTEM_OVERHEAD: usize = 2_000;
 const ANSWER_RESERVE: usize = 8_000;
-const MAX_CONTENT_INJECT: usize = 30;
 const VECTOR_THRESHOLD: f32 = 0.65;
 
 /// Resolve file paths to file IDs with exact + LIKE fallback.
@@ -883,29 +894,56 @@ pub fn resolve_mention_file_ids(
     (resolved, missing)
 }
 
-async fn prepare_conversation_prompt(
-    state: &tauri::State<'_, AppState>,
+pub(crate) async fn prepare_conversation_prompt(
+    state: &AppState,
     messages: &[ChatMessage],
     source_ids: &[String],
     scope: &TurnScope,
     session_retrieval_scope: &[String],
     strict_docs: bool,
+    full_recall: bool,
+    skip_llm_rewrite: bool,
+    app: Option<&tauri::AppHandle>,
+    session_id: &str,
 ) -> Result<PreparedConversation, String> {
+    let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
+        if let Some(a) = app {
+            let _ = a.emit("ai-progress", AiProgress {
+                session_id: session_id.to_string(),
+                phase: phase.to_string(),
+                message: message.to_string(),
+                current,
+                total,
+            });
+        }
+    };
+    macro_rules! check_cancel {
+        () => {
+            if crate::ai::ai_cancelled() {
+                return Err("请求已取消".into());
+            }
+        };
+    }
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    log::info!(
-        "[AI] prepare_conversation_prompt: q={} mention_files={:?} mention_dirs={:?} conditions={:?} session_retrieval_scope={:?} strict_docs={}",
-        last_q, scope.mention_files, scope.mention_dirs, scope.conditions, session_retrieval_scope, strict_docs
+    log::info!("[AI] ▶ prepare q=\"{}\" scope={} files strict={}",
+        truncate_text(&last_q, 40),
+        session_retrieval_scope.len(),
+        strict_docs,
     );
     let mut events: Vec<(String, serde_json::Value)> = Vec::new();
-    // 追问改写：规则改写兜底 + LLM 改写增强（超时/失败自动降级回规则）。
+    emit_progress("query_rewrite", "查询改写中...", 0, 0);
     let rule = rewrite_query(&last_q, messages);
     let original_rule_query = rule.query.clone();
-    let search_q = match llm_rewrite_query(&last_q, messages).await {
-        Some(llm) if llm != rule.query => llm,
-        _ => rule.query,
+    let search_q = if skip_llm_rewrite {
+        rule.query.clone()
+    } else {
+        match llm_rewrite_query(&last_q, messages).await {
+            Some(llm) if llm != rule.query => llm,
+            _ => rule.query.clone(),
+        }
     };
     let rewritten = search_q != last_q.trim();
-    log::info!("[AI] rewrite: original={last_q} search_q={search_q} rewritten={rewritten}");
+    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten);
     events.push(("query_rewrite".into(), serde_json::json!({
         "original": last_q,
         "rewritten": search_q,
@@ -921,9 +959,7 @@ async fn prepare_conversation_prompt(
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         for dir_path in session_retrieval_scope {
             let p = dir_path.trim().trim_end_matches('/');
-            if p.is_empty() {
-                continue;
-            }
+            if p.is_empty() { continue; }
             // 先试监控根精确匹配（绝对路径或别名）
             if let Ok(mut stmt) = conn.prepare("SELECT id FROM dir_config WHERE path = ?1 OR alias = ?1")
                 && let Ok(r) = stmt.query_row(rusqlite::params![p], |row| row.get::<_, String>(0)) {
@@ -939,6 +975,13 @@ async fn prepare_conversation_prompt(
             if let Ok(ids) = crate::db::tracker::search_file_ids_by_path_fragment(&conn, p, 2)
                 && ids.len() == 1
                     && let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &ids[0]) {
+                        scope_file_resolved.push((rec.id, rec.path));
+                        continue;
+                    }
+            // 文件扩展名检测：如果是文件路径（有扩展名），尝试精确匹配
+            if let Some(ext) = std::path::Path::new(p).extension()
+                && ext.to_string_lossy().len() > 0
+                    && let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, p) {
                         scope_file_resolved.push((rec.id, rec.path));
                         continue;
                     }
@@ -1020,8 +1063,14 @@ async fn prepare_conversation_prompt(
     let mention_file_ids: Option<Vec<String>> = if all_file_ids.is_empty() { None } else { Some(all_file_ids) };
 
     log::info!(
-        "[AI] scope resolved: dir_ids={:?} path_prefixes={:?} file_ids={:?} ext={:?} date={:?}~{:?}",
-        dir_ids_opt, path_prefixes_opt, mention_file_ids, ext_filter, date_from, date_to
+        "[AI]   scope: dirs={} prefixes={} files={} scope_files={} ext={:?} date={:?}~{:?}",
+        dir_ids_opt.as_ref().map_or(0, |v| v.len()),
+        path_prefixes_opt.as_ref().map_or(0, |v| v.len()),
+        mention_file_ids.as_ref().map_or(0, |v| v.len()),
+        scope_file_resolved.len(),
+        ext_filter,
+        date_from,
+        date_to,
     );
     events.push(("scope_resolved".into(), serde_json::json!({
         "dir_ids_count": dir_ids_opt.as_ref().map_or(0, |v| v.len()),
@@ -1039,7 +1088,8 @@ async fn prepare_conversation_prompt(
         all_seen.insert(fid.clone());
     }
     if !last_q.trim().is_empty() {
-        // 1. BM25 全量（limit=文档总数，不限量）
+        check_cancel!();
+        emit_progress("bm25", "BM25 检索中...", 0, 0);
         let total_files = {
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
             crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
@@ -1052,10 +1102,14 @@ async fn prepare_conversation_prompt(
         for hit in bm25_hits {
             if all_seen.insert(hit.file_id.clone()) { all_hits.push(hit); }
         }
-        // 2. 向量全量扫描（语义兜底，阈值过滤）
-        if crate::ai::embedding_enabled() {
+        emit_progress("bm25", &format!("BM25 完成，命中 {} 份", bm25_count), bm25_count, bm25_count);
+        let has_locked_scope = mention_file_ids.is_some() && mention_file_ids.as_ref().is_some_and(|ids| !ids.is_empty());
+        if crate::ai::embedding_enabled() && !has_locked_scope {
+            emit_progress("vector", "语义扫描中...", 0, 0);
+            log::info!("[AI]   about to call vector_full_scan");
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
             if let Ok(vec_hits) = crate::ai::vector_full_scan(&c, &search_q, VECTOR_THRESHOLD) {
+                log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
                 let mut i = 0usize;
                 for (fid, sim) in vec_hits {
                     if all_seen.insert(fid.clone()) {
@@ -1065,13 +1119,14 @@ async fn prepare_conversation_prompt(
                         });
                     }
                     i += 1;
-                    if i > 500 { break; }
+                    if !full_recall && i > 500 { break; }
                 }
             }
+            emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
         }
-        // 3. SQL 路径匹配（无上限，精确命中）
         let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
         if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &search_q) {
+            log::info!("[AI]   path_match_files returned {} hits", path_hits.len());
             for (fid, _path) in path_hits {
                 if all_seen.insert(fid.clone()) {
                     all_hits.push(ScoredHit {
@@ -1081,7 +1136,6 @@ async fn prepare_conversation_prompt(
                 }
             }
         }
-        // 填充 path（延迟加载）
         {
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
             for hit in &mut all_hits {
@@ -1092,7 +1146,8 @@ async fn prepare_conversation_prompt(
                 }
             }
         }
-        log::info!("[AI] three_way_scan: query={search_q} bm25={} vector+path={} total={}", bm25_count, all_hits.len() - bm25_count, all_hits.len());
+        emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());
+        log::info!("[AI]   scan: q=\"{}\" bm25={} extra={} total={}", truncate_text(&search_q, 30), bm25_count, all_hits.len().saturating_sub(bm25_count), all_hits.len());
     }
 
     const MAX_CONTENT_INJECT: usize = 30;
@@ -1124,11 +1179,12 @@ async fn prepare_conversation_prompt(
 
     let mut docs: Vec<String> = Vec::new();
     let mut evidence: Vec<EvidenceItem> = Vec::new();
-    // @mention 文件直用：按解析结果标 [N] 编号引用，优先于检索命中。
     let mut mention_index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut mention_has_content = false;
+
+    // Layer 0: Always load explicitly scoped files into context (independent of BM25).
     for (i, (fid, resolved_path)) in mention_resolved.iter().enumerate() {
-        let n = i + 1; // [N] 从 1 开始
+        let n = i + 1;
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
             && let Some(md5) = &rec.md5
                 && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
@@ -1149,52 +1205,62 @@ async fn prepare_conversation_prompt(
                         mention_index.insert(resolved_path.clone(), n);
                     }
     }
-    // 路径列表：所有匹配文件的路径（让 LLM 知道有哪些文件）
-    if !all_hits.is_empty() {
-        let path_lines: Vec<String> = all_hits.iter().enumerate()
-            .map(|(i, h)| format!("[{}] {}", i + 1, h.path))
-            .collect();
-        docs.push(format!("📋 匹配文件列表（共{}份）：\n{}", all_hits.len(), path_lines.join("\n")));
-    }
 
-    // 层1：@mention 文件完整注入（预算优先）
-    // 层2：top-K 文件按预算动态分配
-    // 层3：超出预算的文件 → batch_summarize
+    // Layer 1: Additional BM25 hits (not already in scope).
+    let inject_limit = if full_recall { all_hits.len().max(1) } else { MAX_CONTENT_INJECT };
+    let content_hits: Vec<&ScoredHit> = all_hits.iter()
+        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
+        .take(inject_limit)
+        .collect();
     let mention_budget = CONTEXT_BUDGET / 3;
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
         .saturating_sub(ANSWER_RESERVE)
         .saturating_sub(mention_budget);
-
-    // 层2：注入 top-K 非 mention 文件（预算感知）
-    let content_hits: Vec<&ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
-        .take(MAX_CONTENT_INJECT)
-        .collect();
+    emit_progress("injection", "注入文件内容中...", 0, content_hits.len());
+    log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
+    let mut injected_ids = std::collections::HashSet::new();
+    let mut inject_idx = 0usize;
     for hit in &content_hits {
+        if inject_idx % 10 == 0 { check_cancel!(); }
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
             if let Some(md5) = &rec.md5 {
                 if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                     if !text.trim().is_empty() {
-                        let per_file = content_budget / content_hits.len().max(1);
+                        let per_file = if full_recall {
+                            content_budget
+                        } else {
+                            content_budget / content_hits.len().max(1)
+                        };
                         let injected = chunked_or_truncated_with_budget(&conn, md5, &text, &search_q, per_file);
-                        docs.push(format!("【{}】\n{}", rec.path, injected));
-                        content_budget = content_budget.saturating_sub(injected.chars().count());
+                        if !injected.trim().is_empty() {
+                            docs.push(format!("【{}】\n{}", rec.path, injected));
+                            content_budget = content_budget.saturating_sub(injected.chars().count());
+                            injected_ids.insert(hit.file_id.clone());
+                        }
+                        if content_budget == 0 { break; }
                     }
                 }
             }
         }
+        inject_idx += 1;
+        if inject_idx % 10 == 0 || inject_idx == content_hits.len() {
+            emit_progress("injection", &format!("注入中 {}/{}", inject_idx, content_hits.len()), inject_idx, content_hits.len());
+        }
     }
 
-    // 层3：超出 top-K 的文件 → batch_summarize
+    // Layer 2: Remaining BM25 hits → batch_summarize
+    // 限制摘要规模：最多 60 份文档（4 批 × 15），避免大量命中时 LLM 调用失控。
+    const MAX_REMAINING_SUMMARY: usize = 60;
     let remaining_hits: Vec<ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
-        .skip(MAX_CONTENT_INJECT)
+        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && !injected_ids.contains(&h.file_id))
         .cloned()
+        .take(MAX_REMAINING_SUMMARY)
         .collect();
     if !remaining_hits.is_empty() {
+        check_cancel!();
         let remaining_ids: Vec<String> = remaining_hits.iter().map(|h| h.file_id.clone()).collect();
-        if let Ok((summary, _)) = batch_summarize(state, &remaining_ids, &search_q).await {
+        if let Ok((summary, _)) = batch_summarize(state, &remaining_ids, &search_q, app, session_id).await {
             docs.push(format!("📋 剩余{}份文档的摘要：\n{}", remaining_hits.len(), summary));
         }
     }
@@ -1203,16 +1269,21 @@ async fn prepare_conversation_prompt(
     let source_ids_final = all_hits.iter().map(|h| h.file_id.clone()).collect();
     let source_files_final = all_hits.iter().map(|h| h.path.clone()).collect();
 
-    let context = truncate_text(&docs.join("\n\n---\n\n"), 50000);
+    let max_context_chars = if full_recall { CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE } else { 50_000 };
+    let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
+    log::info!("[AI]   context assembled: strict={} docs_len={} context_chars={} mention_resolved={} mention_has_content={}", strict_docs, docs.len(), context.chars().count(), mention_resolved.len(), mention_has_content);
     // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
     if strict_docs {
         if !missing_mentions.is_empty() {
+            log::warn!("[AI] strict mode rejected: missing mentions={:?}", missing_mentions);
             return Err(format!("找不到引用文件: {}", missing_mentions.join(", ")));
         }
         if !mention_resolved.is_empty() && !mention_has_content {
+            log::warn!("[AI] strict mode rejected: mention_resolved has no content");
             return Err("引用文件无可用内容".into());
         }
         if context.trim().is_empty() {
+            log::warn!("[AI] strict mode rejected: empty context (all_hits={} docs={})", all_hits.len(), docs.len());
             return Err("未在与当前范围匹配的文档中找到依据".into());
         }
     }
@@ -1389,6 +1460,7 @@ pub async fn conversation_ask(
     scope: TurnScope,
     session_retrieval_scope: Vec<String>,
     strict_docs: bool,
+    full_recall: Option<bool>,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -1406,7 +1478,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, evidence, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
+        prepare_conversation_prompt(&*state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -1421,7 +1493,7 @@ pub async fn conversation_ask(
         return Err("请求已取消".into());
     }
     let cited = auto_cite(&answer, &evidence);
-    log::info!("[AI] conversation_ask: done, answer_chars={} cited_chars={}", answer.chars().count(), cited.chars().count());
+    log::info!("[AI]   done: {} chars", answer.chars().count());
 
     Ok(cited)
 }
@@ -1437,6 +1509,7 @@ pub async fn conversation_ask_stream(
     scope: TurnScope,
     session_retrieval_scope: Vec<String>,
     strict_docs: bool,
+    full_recall: Option<bool>,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -1447,7 +1520,7 @@ pub async fn conversation_ask_stream(
         return Err("对话不能为空".into());
     }
     log::info!(
-        "[AI] conversation_ask_stream: messages={} source_ids={}",
+        "[AI] ▶ stream: msgs={} sources={}",
         messages.len(),
         source_ids.len()
     );
@@ -1455,8 +1528,13 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
+    let prepared = prepare_conversation_prompt(&*state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id).await;
+    match &prepared {
+        Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
+        Err(e) => log::warn!("[AI]   prepare failed: {}", e),
+    }
     let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, total_match_count, mut events } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs).await?;
+        prepared?;
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
     let cfg = crate::config::load_config();
     let turn_number = messages.iter().filter(|m| m.role == "user").count().saturating_sub(1);
@@ -1470,16 +1548,25 @@ pub async fn conversation_ask_stream(
         "user_msg_chars": user_msg.chars().count(),
         "streaming": true,
     })));
+    let _ = app.emit("ai-progress", AiProgress {
+        session_id: session_id.clone(),
+        phase: "llm_call".to_string(),
+        message: "等待 AI 回答中...".to_string(),
+        current: 0,
+        total: 0,
+    });
     let session_clone = session_id.clone();
     let app_inner = app.clone();
+    log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
     let result = tokio::task::spawn_blocking(move || {
-        let mut emit = |d: &str| {
-            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string() });
+        let mut emit = |d: &str, is_reasoning: bool| {
+            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: is_reasoning });
         };
         crate::ai::chat_stream(&system, &user_msg, &mut emit)
     })
     .await
     .map_err(|e| format!("task panicked: {e}"))?;
+    log::info!("[AI]   chat_stream returned: chars={} cancelled={} took_ms={}", result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0), result.cancelled, result.took_ms);
 
     log::info!(
         "[AI_TRACE] turn_end trace_id={trace_id} took_ms={} cancelled={} answer_chars={} sources={}",
@@ -1536,10 +1623,12 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     }
 }
 
-pub async fn batch_summarize(
-    state: &tauri::State<'_, crate::state::AppState>,
+pub(crate) async fn batch_summarize(
+    state: &AppState,
     file_ids: &[String],
     query: &str,
+    app: Option<&tauri::AppHandle>,
+    session_id: &str,
 ) -> Result<(String, Vec<String>), String> {
     if file_ids.is_empty() {
         return Ok((String::new(), Vec::new()));
@@ -1548,7 +1637,18 @@ pub async fn batch_summarize(
     const MAX_CONCURRENCY: usize = 6;
     let total_batches = (file_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
 
-    // Pre-fetch all file content in single DB pass
+    let emit_progress = |completed: usize, total: usize| {
+        if let Some(a) = app {
+            let _ = a.emit("ai-progress", AiProgress {
+                session_id: session_id.to_string(),
+                phase: "summarizing".to_string(),
+                message: format!("摘要中... 第 {}/{} 批", completed, total),
+                current: completed,
+                total,
+            });
+        }
+    };
+
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut all_batch_content: Vec<Vec<String>> = Vec::with_capacity(total_batches);
     for chunk in file_ids.chunks(BATCH_SIZE) {
@@ -1568,12 +1668,13 @@ pub async fn batch_summarize(
 
     let system = "你是法律文档分析助手。请用简洁中文总结以下文档内容中与查询主题相关的关键信息，不超过500字。";
 
-    // Parallel map phase with concurrency control
     use std::sync::atomic::{AtomicUsize, Ordering};
     let completed = std::sync::Arc::new(AtomicUsize::new(0));
     let total = all_batch_content.len();
     let mut summaries = vec![String::new(); total];
     let mut handles = Vec::with_capacity(total);
+
+    emit_progress(0, total);
 
     for (i, batch) in all_batch_content.into_iter().enumerate() {
         let sys = system.to_string();
@@ -1589,9 +1690,13 @@ pub async fn batch_summarize(
 
         if handles.len() >= MAX_CONCURRENCY {
             let (result,) = tokio::join!(handles.remove(0));
-            completed.fetch_add(1, Ordering::Relaxed);
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             if let Ok((idx, Ok(Some(s)))) = result {
                 summaries[idx] = s;
+            }
+            emit_progress(done, total);
+            if crate::ai::ai_cancelled() {
+                return Err("请求已取消".into());
             }
         }
     }
@@ -1601,10 +1706,14 @@ pub async fn batch_summarize(
             log::warn!("[AI] batch task join error: {e}");
             (0, Ok(None))
         });
-        completed.fetch_add(1, Ordering::Relaxed);
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
         match res {
             Ok(Some(s)) => summaries[idx] = s,
             _ => summaries[idx] = format!("（第{}批摘要生成失败）", idx + 1),
+        }
+        emit_progress(done, total);
+        if crate::ai::ai_cancelled() {
+            return Err("请求已取消".into());
         }
     }
 

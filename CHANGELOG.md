@@ -1,6 +1,127 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 8月22日，共 50+ commit，修复 85+ Bug，完成 40+ 功能改进
+> 2026年7月30日 — 8月30日，共 50+ commit，修复 85+ Bug，完成 40+ 功能改进
+
+---
+
+## 2026-08-30（修复 — AI 对话无响应）
+
+**根因**：两个问题导致 AI 问答静默失败。
+
+1. **LLM 网关 API key 过期**：`192.168.1.50:20128` 拒绝了旧 key，`chat()`/`chat_stream()` 返回 `None`，前端收不到 `ai-done` 事件。
+2. **`batch_summarize` 无上限**：BM25 命中 2000+ 份时，`remaining_hits` 全部送去摘要，发起上百个并行 LLM 调用，耗时数分钟。
+
+**修复**：
+- `commands/ai.rs`：`remaining_hits` 增加 `.take(MAX_REMAINING_SUMMARY)`（上限 60 份），避免大量命中时 LLM 调用失控
+- `commands/ai.rs:1148`：`all_hits.len() - bm25_count` 改为 `saturating_sub`，修复 debug 模式下整数下溢 panic
+- `commands/ai.rs`：`prepare_conversation_prompt` 关键路径添加诊断日志（prepare 成功/失败、context 规模、chat_stream 进出）
+
+
+**动机**：法庭录音等对话类音频文件需要区分说话人（谁说了什么），方便检索和理解。
+
+**方案**：在现有 FunASR-Nano 语音识别之上，增加 sherpa-onnx 原生说话人分离管线：
+- **分段**：Pyannote segmentation（`seg.onnx` 5.7MB）检测说话切换点
+- **嵌入**：CAM++ 中文说话人嵌入（`emb.onnx` 27MB）提取每位说话人特征
+- **聚类**：FastClustering 自动聚类说话人
+- 对每个说话人片段独立转写，输出 `[说话人N] 文本` 格式
+
+**变更**：
+- `extractor/audio.rs`：新增 `SPEAKER_DIARIZER` 静态初始化器；`OfflineSpeakerDiarization` 管线（pyannote 分段 + CAM++ 嵌入）；`diarization_dir()` 解析自 `funasr_dir()/models/diarization`；逐说话人片段转写并标注 `[说话人N]`
+- `models/funasr/sherpa-onnx-funasr-nano-int8-2025-12-30/models/diarization/`：新增 `seg.onnx`（pyannote 分段）+ `emb.onnx`（CAM++ 中文），从 hf-mirror 下载
+- `tests/funasr_smoke.rs`：新增 `audio_extractor_long_audio` 测试验证 VAD 分段转写；修复 UTF-8 边界 panic
+- 音频大小限制从 30 分钟提升到完整长度（去掉 `-t 1800`）
+- 日志格式优化：时间戳缩写、模块名取最后一段、过滤 tantivy/tract 噪音、embed/vector 日志去重
+
+**验证**：3.3 分钟双人对话测试音频输出正确区分说话人 `[说话人3]喂[说话人1]哎彭老师啊...`
+
+---
+
+## 2026-08-28（功能 — 搜索页缩小范围 → AI 聊天一键引用）
+
+**动机**：搜索只管搜索/缩小范围，AI 聊天在独立页面。用户在搜索页反复子搜索缩小文件集，锁定后一键跳转 AI 聊天页，自动创建会话并以锁定文件为检索范围。
+
+**方案**：搜索页 Drawer 只做缩小（子搜索 + 勾选），底部按钮「锁定 N 篇，去聊天」将 paths 存入 sessionStorage 并 `navigate('/chat')`。AiChat 挂载时检查 sessionStorage，若有 pending paths 则自动 `createChatSession` + 设置 `retrieval_scope = paths` + `strict_docs = true`。
+
+**变更**：
+- `commands/search.rs`：新增 `search_file_ids_only`（全量 file_ids，不分页）+ `refine_search`（BM25 子集检索）
+- `lib.rs`：注册 `search_file_ids_only` + `refine_search`
+- `api/search.ts`：新增 `searchFileIdsOnly`、`RefineSearchResponse`、`refineSearch`
+- `api/client.ts`：新增 web 模式 HTTP 映射
+- `SearchAskPanel.tsx`：重写为纯缩小面板（无 AI 对话），Props 新增 `onLockAndAsk(paths)` 回调
+- `SearchPage.tsx`：按钮点击 → `searchFileIdsOnly` 获取全量 ID → 打开 Drawer；锁定后存 sessionStorage + `navigate('/chat')`
+- `AiChat.tsx`：新增 effect，挂载时读取 `ls_pending_chat_paths`，自动创建会话并设置 scope
+- 移除 `useSearchAsk.ts`、`ask_search_results_stream` 命令及相关死代码
+- `i18n/zh.ts` + `i18n/en.ts`：更新 `lock_and_ask` 文案为「去聊天」
+
+---
+
+## 2026-08-28（功能 — Web API 开发模式：代理到 Vite dev server）
+
+**动机**：通过 WebAPI（8443 端口）远程调试前端时，修改代码后需手动 `npm run build` 才能生效，无法热更新。
+
+**方案**：Settings → Web API 区域新增「开发模式」开关。开启后，WebAPI 的静态文件请求代理到 Vite dev server（`localhost:1420`），改代码后浏览器自动热更新。使用 `ureq`（已有依赖）+ `spawn_blocking` 做同步 HTTP 代理，不引入新依赖。
+
+**变更**：
+- `commands/settings.rs`：`ALLOWED_KEYS` 新增 `web_api_dev_mode`
+- `webapi/state.rs`：`ApiState` 新增 `dev_mode: bool` 字段
+- `webapi/mod.rs`：新增 `KEY_DEV_MODE` 常量 + `load_dev_mode()` 函数，`spawn_server` 读取并传入 `ApiState`
+- `webapi/static_files.rs`：`serve_static` 新增 `State<ApiState>` 参数，`dev_mode` 时代理到 `http://127.0.0.1:1420`，否则走原 `dist/` 逻辑
+- `Settings.tsx`：Web API 区域新增「开发模式」ToggleField
+
+---
+
+## 2026-08-28（功能 — 搜索页「基于结果提问」：先搜后问，严格锁定范围）
+
+**动机**：用户想先在搜索页看到结果、确认命中文件，再以这批文档为依据向 AI 提问，实现"先搜索、再生成"的 RAG 场景。
+
+**方案**：搜索结果区新增「✦ 基于结果提问」按钮，打开右侧 Drawer 面板；把当前搜索命中的 file_ids 作为初始 scope 锁死传入后端，所有后续追问均在该 scope 内执行 BM25/语义重排，不自动扩展范围（strict_docs=true）。每轮可换 query 缩小命中文档，evidence 仅含当轮命中子集，query 链实时展示在顶部 chip 中。
+
+**变更**：
+- `commands/ai.rs`：新增 `ask_search_results_stream` 命令，接收 `initial_file_ids`（搜索结果 file_ids）+ `question` + `session_id`，将 file_ids 解析为路径后构建锁定的 `TurnScope`，调用 `conversation_ask_stream` 并设 `strict_docs=true`
+- `lib.rs`：注册 `ask_search_results_stream`
+- `api/search.ts`：新增 `askSearchResultsStream` + `listenSearchAskStream` 封装
+- `api/client.ts`：新增 `ask_search_results_stream` 的 web 模式 HTTP 映射
+- `hooks/useSearchAsk.ts`：新建流式 hook，管理多轮对话状态、streaming delta、evidence、取消
+- `components/SearchAskPanel.tsx`：新建右侧 Drawer 组件，顶部 chip（🔒 严格依据 · query 链），消息气泡 + evidence 展开面板，输入框支持多轮追问
+- `pages/SearchPage.tsx`：搜索结果区新增「✦ 基于结果提问」按钮（仅 LLM 可用且有结果时启用）；开启后显示 SearchAskPanel 替代 PreviewPanel；关闭时恢复预览面板
+- `i18n/zh.ts` + `i18n/en.ts`：新增 `ask_from_search`、`strict_scope_locked`、`search_query_chain`、`close_ask_panel`
+
+---
+
+## 2026-08-28（功能 — AI 聊天检索阶段进度条：提问后到 LLM 回答前的进度可见）
+
+**动机**：用户提问后到 LLM 开始回答前的检索+注入+摘要阶段（全量召回时可能几十秒到几分钟）前端完全黑盒，用户无法判断是否卡死。
+
+**方案**：后端在 `prepare_conversation_prompt` 和 `batch_summarize` 各阶段 emit `ai-progress` Tauri 事件（phase/message/current/total），前端监听并在 loading 状态显示阶段文本 + 进度条。第一个 `ai-chunk` 到达时自动清空进度（进入 LLM 回答阶段）。
+
+**变更**：
+- `commands/ai.rs`：新增 `AiProgress` 事件结构（session_id/phase/message/current/total）；`prepare_conversation_prompt` 加 `app: Option<&tauri::AppHandle>` + `session_id: &str` 参数，在查询改写/BM25/向量扫描/路径匹配/内容注入/摘要各阶段 emit 进度；`batch_summarize` 同样加参数，每批完成后 emit 进度
+- `commands/ai.rs`：`conversation_ask_stream` 传 `Some(&app)` + `&session_id`；`conversation_ask` 传 `None` + `""`（非流式无进度）
+- `api/files.ts`：新增 `AiProgressPayload` 类型 + `listenAiProgress` 函数
+- `ChatPanel.tsx`：新增 `progress` 状态 + `ai-progress` 事件监听 effect；loading 状态渲染阶段文本 + 进度条（`████░░ N/total`）；`ai-chunk`/`ai-done` 到达时清空 progress
+- `commands/ai.rs`：`prepare_conversation_prompt` 加 `check_cancel!` 宏，在 BM25 前、注入循环每 10 文件、batch_summarize 前检查 `ai_cancelled()`；`batch_summarize` 每批 join 后检查——修复取消功能在检索/摘要阶段完全无效的问题
+- `ChatPanel.tsx`：恢复挂起请求 effect 加 10 分钟新鲜度判断——程序重启后残留的 `pending_query`/`pending_started_at` 超过阈值直接清除，避免"关闭重开后永久思考中"
+- `ChatPanel.tsx`：取消按钮去掉 `confirm()` 弹窗（取消是安全操作，无需二次确认）；保留已输出的部分流式文本并标注"已取消"；无流式文本时也插入"⏹ 已取消"提示消息；清除 progress 进度条；`handleCancel` 重置 `sendingRef.current = false`；`handleSend` catch 块在 reqId 检查前先重置 `sendingRef`——修复取消后无法再次发送的问题
+- `commands/ai.rs`：`conversation_ask_stream` 在 LLM 调用前 emit `ai-progress`（phase=`llm_call`，"等待 AI 回答中..."），填补检索完成到第一个 `ai-chunk` 到达之间的进度空白
+
+---
+
+## 2026-08-27（功能 — AI 聊天「全量召回」开关：检索不截断，回答不遗漏文件）
+
+**动机**：AI 聊天在大库下仍有三重召回瓶颈——向量扫描 500 条硬截断、`MAX_CONTENT_INJECT=30` 全文注入上限、注入预算均分导致高相关文件拿不到足够篇幅。部分文件被静默丢弃。
+
+**方案**：新增会话级「全量召回」开关（默认开启）。开启时检索不截断（向量全量+BM25 全量+路径匹配），注入改为"预算内从高相关到低相关递减分配、预算耗尽即停"，上下文截断上限从 50K 提至预算上限；未注入文件仍走 `batch_summarize` 摘要兜底，保证范围内所有文件都被 AI 看到。
+
+**变更**：
+- `commands/ai.rs`：`prepare_conversation_prompt` 新增 `full_recall` 参数；向量扫描 `if i>500 break` 改为 `!full_recall 时`才截断；`MAX_CONTENT_INJECT` 全量时改 `all_hits.len()`（由 `content_budget` 自然限制）；层2注入由"均分预算"改为 full_recall 时"递减预算"（`content_budget` 递减，耗尽即 `break`）；层3 `skip` 同步改为 `skip(inject_limit)`（防止已注入文件重复摘要）；`context` 最终截断上限 full_recall 时提至 `CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE`；删除死常量 `MAX_CONTENT_INJECT=30`
+- `commands/ai.rs`：`conversation_ask` / `conversation_ask_stream` IPC 新增 `full_recall: Option<bool>` 参数
+- `webapi/routes/ai.rs`：`AskBody` 新增 `full_recall` 字段，两个 handler 透传
+- `api/files.ts`：`ChatSession` 新增 `full_recall` 字段；`conversationAsk`/`conversationAskStream` 签名加 `fullRecall` 参数
+- `ChatPanel.tsx`：新增「全量召回」紫色 toggle（与「仅依据文档」同行），随会话持久化；两个 IPC 调用点传 `session.full_recall`
+- `AiChat.tsx`：新会话初始化加 `full_recall: true`
+- `i18n/`：四语言新增 `full_recall` 文案
+- `src-tauri/src/cli.rs`：新增 `Chat` CLI 子命令（`link-searcher chat <QUERY> --full-recall`），BM25 检索结果直接打印，验证全量召回生效（11K 库中"陈骥"命中 5482 vs 默认 89）；`main.rs` 转发 `--data-dir <path>` 到 CLI；`config.rs` 支持 `LINK_SEARCHER_DATA_DIR` 环境变量
+- `src-tauri/src/commands/ai.rs`：`prepare_conversation_prompt`/`bm25_relevant_hits`/`batch_summarize` 参数从 `&tauri::State` 改为 `&AppState`（CLI 可直接调用）；`PreparedConversation` 字段改为 `pub(crate)`
 
 ---
 
