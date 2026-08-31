@@ -230,7 +230,7 @@ pub struct FileIdsQuery {
 async fn file_ids_handler(
     State(state): State<ApiState>,
     Query(params): Query<FileIdsQuery>,
-) -> Result<Json<Vec<String>>, ApiError> {
+) -> Result<Json<Vec<search::IdWithPath>>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
     let ids = search::search_file_ids_only_impl(
         &app_state,

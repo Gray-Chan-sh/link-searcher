@@ -10,7 +10,7 @@ import PreviewPanel from '../components/PreviewPanel'
 import EmptyState from '../components/EmptyState'
 import { ResultListSkeleton } from '../components/Skeleton'
 import type { SearchHit } from '../api/search'
-import { exportSearchResults, searchFileIdsOnly, refineSearch } from '../api/search'
+import { exportSearchResults, searchFileIdsOnly, refineSearch, type IdWithPath } from '../api/search'
 import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
 import { exportFile } from '../utils/platform'
@@ -53,9 +53,9 @@ export default function SearchPage() {
   })
   const [refineQuery, setRefineQuery] = useState('')
   const [refineLoading, setRefineLoading] = useState(false)
-  const [allFileIds, setAllFileIds] = useState<string[]>(() => {
+  const [allFileRows, setAllFileRows] = useState<IdWithPath[]>(() => {
     const s = sessionStorage.getItem('ls_search_refine')
-    if (s) { try { const d = JSON.parse(s); return d.allFileIds ?? [] } catch {} }
+    if (s) { try { const d = JSON.parse(s); return d.allFileRows ?? [] } catch {} }
     return []
   })
   const refineInputRef = useRef<HTMLInputElement>(null)
@@ -65,9 +65,9 @@ export default function SearchPage() {
 
   useEffect(() => {
     sessionStorage.setItem('ls_search_refine', JSON.stringify({
-      history: refineHistory, index: refineIndex, allFileIds,
+      history: refineHistory, index: refineIndex, allFileRows,
     }))
-  }, [refineHistory, refineIndex, allFileIds])
+  }, [refineHistory, refineIndex, allFileRows])
 
   useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
   useEffect(() => () => timersRef.current.forEach(clearTimeout), [])
@@ -82,7 +82,7 @@ export default function SearchPage() {
       setRefineHistory([])
       setRefineIndex(0)
       setRefineQuery('')
-      setAllFileIds([])
+      setAllFileRows([])
     }
   }, [search.status, search.query])
 
@@ -107,13 +107,13 @@ export default function SearchPage() {
     if (search.hits.length === 0) return
     setRefineLoading(true)
     try {
-      const ids = await searchFileIdsOnly(
+      const rows = await searchFileIdsOnly(
         search.query, search.dirIds, search.dirPaths, search.extFilter, search.semantic,
       )
-      setAllFileIds(ids)
+      setAllFileRows(rows)
       setRefineHistory([{
         hits: search.hits,
-        selectedIds: new Set(search.hits.map(h => h.file_id)),
+        selectedIds: new Set(rows.map(r => r.file_id)),
         query: '',
         tookMs: search.tookMs,
       }])
@@ -128,7 +128,7 @@ export default function SearchPage() {
   const exitRefine = () => {
     setRefineHistory([])
     setRefineIndex(0)
-    setAllFileIds([])
+    setAllFileRows([])
     setRefineQuery('')
   }
 
@@ -173,7 +173,12 @@ export default function SearchPage() {
 
   const goToChat = () => {
     if (!currentRefine || currentRefine.selectedIds.size === 0) return
-    const paths = currentRefine.hits.filter(h => currentRefine.selectedIds.has(h.file_id)).map(h => h.path)
+    const byId = new Map(allFileRows.map(r => [r.file_id, r.path]))
+    const paths: string[] = []
+    for (const id of currentRefine.selectedIds) {
+      const p = byId.get(id)
+      if (p) paths.push(p)
+    }
     sessionStorage.setItem('ls_pending_chat_paths', JSON.stringify(paths))
     sessionStorage.setItem('ls_pending_chat_query', search.query)
     navigate('/chat')
@@ -229,7 +234,7 @@ export default function SearchPage() {
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 {isRefining ? (
                   <span>
-                    🔍 {allFileIds.length} 篇文档
+                    🔍 {allFileRows.length} 篇文档
                     {refineHistory.length > 1 && <span className="ml-1">({refineHistory.slice(0, refineIndex + 1).map(s => s.hits.length).join(' → ')})</span>}
                     {currentRefine?.query && <span className="ml-2 text-gray-400">「{currentRefine.query}」</span>}
                     <span className="ml-2 text-gray-400">第 {refineIndex + 1}/{refineHistory.length} 步</span>

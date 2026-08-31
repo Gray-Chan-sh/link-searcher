@@ -102,13 +102,18 @@ export default function AiChat() {
   useEffect(() => { refreshList() }, [refreshList])
 
   useEffect(() => {
-    const raw = sessionStorage.getItem('ls_pending_chat_paths')
-    if (!raw) return
+    const rawPaths = sessionStorage.getItem('ls_pending_chat_paths')
+    const rawQuery = sessionStorage.getItem('ls_pending_chat_query')
+    if (!rawPaths) return
     sessionStorage.removeItem('ls_pending_chat_paths')
-    sessionStorage.removeItem('ls_pending_chat_query')
+    if (rawQuery) sessionStorage.removeItem('ls_pending_chat_query')
     let paths: string[]
-    try { paths = JSON.parse(raw) } catch { return }
+    try { paths = JSON.parse(rawPaths) } catch { return }
     if (!Array.isArray(paths) || paths.length === 0) return
+    let pendingQuery: string | null = null
+    if (rawQuery) {
+      try { const q = JSON.parse(rawQuery); if (typeof q === 'string' && q.length > 0) pendingQuery = q } catch { /* ignore */ }
+    }
 
     createChatSession().then(id => {
       const session: ChatSession = {
@@ -117,7 +122,8 @@ export default function AiChat() {
         source_ids: [], source_files: paths,
         retrieval_scope: paths,
         strict_docs: true, full_recall: true,
-        pending_query: null, pending_started_at: null,
+        pending_query: pendingQuery,
+        pending_started_at: pendingQuery ? Date.now() : null,
       }
       saveChatSession(session).then(() => {
         setActiveId(id)
