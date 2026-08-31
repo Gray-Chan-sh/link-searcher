@@ -178,6 +178,11 @@ npm run tauri build
 |-----|------|
 | 桌面框架 | Tauri 2.x |
 | 前端 | React 19 + TypeScript + Tailwind CSS 4 |
+
+> 📚 **文档导航**
+> - [用户手册](docs/USER_MANUAL.md) — 面向使用者的 12 章手册
+> - [设计手册](docs/ARCHITECTURE.md) — 面向开发者，分模块讲解设计思想、架构与复现要点
+> - [搜索 UX 实现](docs/SEARCH_UX_IMPLEMENTATION.md)
 | 搜索引擎 | Tantivy 0.22 |
 | 数据库 | SQLite（rusqlite + r2d2 连接池） |
 | 中文分词 | jieba-rs |
