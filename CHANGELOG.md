@@ -22,6 +22,7 @@
 - **ChatPanel 每秒 re-render 整个面板**：`setInterval(() => setClockNow(Date.now()), 1000)` 让 756 行组件（消息流、chips、mention 状态）每秒全量 diff。提取为独立 `ElapsedTimer` 小组件，只有计时文本 re-render。
 - **TypeScript `noUncheckedIndexedAccess`**：`tsconfig.app.json` 开启，暴露 27 处 `arr[i]` 潜在 undefined（`ChatPanel`、`SearchPage`、`Browse`、`scopeParser` 等），全部加 `!` 或 guard 修复。
 - **Clippy 自动修复**：`cargo clippy --fix` 修 20+ 条（`div_ceil`、`is_empty`、`rfind`、`is_multiple_of`、`clamp`、`is_err`、`let...else → ?`），剩余 11 条为结构性警告（函数参数过多），留待后续重构。
+- **Settings.tsx 拆分（1493 行 → 311 行）**：按 tab 拆成 `src/components/settings/` 下 7 个文件（SettingsFields 通用组件 + GeneralTab/DocsTab/IndexTab/AiTab/BackupTab/SystemTab），state 与 handlers 拆到 3 个 hooks（useSettingsOcr/useSettingsBackup/useSettingsProviders）。主组件只保留 tab 切换与 props 分发，可读性与可维护性大幅提升。
 
 ---
 
