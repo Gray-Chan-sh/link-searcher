@@ -1,2 +1,5 @@
 *.onnx
+**/*.onnx
 Qwen3-0.6B/
+Qwen3-0.6B
+models/

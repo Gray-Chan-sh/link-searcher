@@ -21,7 +21,7 @@ use crate::commands::config::{add_provider, delete_provider, get_config, migrate
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan, verify_index_content};
-use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, search, search_file_paths, search_tree_prune, suggest};
+use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
@@ -73,6 +73,7 @@ fn run_with_config(app_config: config::AppConfig) {
             search_file_paths,
             search_tree_prune,
             suggest,
+            search_file_ids_only,
             ai_topic_clusters,
             summarize_file,
             ask_documents,
@@ -95,6 +96,7 @@ fn run_with_config(app_config: config::AppConfig) {
             get_search_history,
             clear_search_history,
             export_search_results,
+            refine_search,
             get_file_type_stats,
             get_browse_file_types,
             get_index_status,
@@ -194,18 +196,17 @@ get_dir_children,
             env_logger::Builder::from_env(
                 env_logger::Env::default().default_filter_or("info"),
             )
+            .filter_level(log::LevelFilter::Info)
+            .filter_module("tantivy", log::LevelFilter::Warn)
+            .filter_module("tract_linalg", log::LevelFilter::Warn)
+            .filter_module("tract_core", log::LevelFilter::Warn)
             .target(env_logger::Target::Pipe(log_file))
             .format(|buf, record| {
                 use std::io::Write;
-                let ts = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
-                writeln!(
-                    buf,
-                    "[{} {:<5} {}] {}",
-                    ts,
-                    record.level(),
-                    record.target(),
-                    record.args()
-                )
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                let module = record.module_path().unwrap_or("?");
+                let short = module.rsplit("::").next().unwrap_or(module);
+                writeln!(buf, "{} {:<5} [{}] {}", ts, record.level(), short, record.args())
             })
             .init();
             let version = env!("GIT_VERSION");
@@ -339,7 +340,7 @@ get_dir_children,
                     false
                 };
                 if web_api_enabled {
-                    log::info!("[STARTUP] Web API enabled, starting HTTPS server...");
+                    log::info!("[STARTUP] Web API: https://0.0.0.0:8443");
                     webapi::spawn_server(app.handle().clone());
                 }
             }
@@ -397,7 +398,7 @@ get_dir_children,
 
                 let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
 
-                log::info!("[STARTUP] 检查系统依赖...");
+                log::info!("[STARTUP] 检查依赖...");
 
                 let ocr_ok = crate::extractor::paddleocr::health_check().is_ok();
 
@@ -407,20 +408,20 @@ get_dir_children,
                 let ffmpeg_ok = crate::extractor::audio::ffmpeg_available();
 
                 log::info!(
-                    "[STARTUP] PaddleOCR={} pdftoppm={} FunASR={} ffmpeg={}",
-                    if ocr_ok { "OK" } else { "FAIL" },
-                    if pdf_ok { "OK" } else { "N/A" },
-                    if funasr_ok { "OK" } else { "MISSING" },
-                    if ffmpeg_ok { "OK" } else { "MISSING" },
+                    "[STARTUP] deps: OCR={} pdf={} FunASR={} ffmpeg={}",
+                    if ocr_ok { "ok" } else { "fail" },
+                    if pdf_ok { "ok" } else { "n/a" },
+                    if funasr_ok { "ok" } else { "no" },
+                    if ffmpeg_ok { "ok" } else { "no" },
                 );
 
-                if !ffmpeg_ok {
-                    log::info!("[STARTUP] ffmpeg 未找到，音频解码暂不可用（brew install ffmpeg）");
-                }
+                    if !ffmpeg_ok {
+                        log::info!("[STARTUP] ffmpeg not found");
+                    }
 
-                if !funasr_ok {
-                    log::info!("[STARTUP] FunASR 模型未下载，音频转写暂不可用（设置页可下载）");
-                }
+                    if !funasr_ok {
+                        log::info!("[STARTUP] FunASR model not downloaded");
+                    }
 
                 if !ocr_ok {
                     log::error!("[STARTUP] PaddleOCR 引擎不可用，图片 OCR 将无法工作");
@@ -485,7 +486,7 @@ get_dir_children,
                     });
                 }
 
-                slog.write_line("[STARTUP] 启动扫描完成");
+                log::info!("[STARTUP] scan: {} dirs done", dirs.len());
                 drop(slog);
 
                 app_handle.emit("scan-completed", serde_json::json!({}))

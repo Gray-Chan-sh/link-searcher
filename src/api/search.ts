@@ -91,3 +91,39 @@ export async function exportSearchResults(
 export async function getFileTypeStats(): Promise<FileTypeStat[]> {
   return client.invoke<FileTypeStat[]>('get_file_type_stats')
 }
+
+export async function searchFileIdsOnly(
+  query: string,
+  dirIds?: string[],
+  dirPaths?: string[],
+  extFilter?: string[],
+  semantic?: boolean,
+): Promise<string[]> {
+  return client.invoke<string[]>('search_file_ids_only', {
+    query,
+    dirIds: dirIds ?? [],
+    dirPaths: dirPaths ?? [],
+    extFilter: extFilter ?? [],
+    semantic: semantic ?? false,
+  })
+}
+
+export interface RefineSearchResponse {
+  total: number
+  hits: SearchHit[]
+  took_ms: number
+}
+
+export async function refineSearch(
+  query: string,
+  fileIds: string[],
+  page?: number,
+  pageSize?: number,
+): Promise<RefineSearchResponse> {
+  return client.invoke<RefineSearchResponse>('refine_search', {
+    query,
+    fileIds,
+    page: page ?? 1,
+    pageSize: pageSize ?? 200,
+  })
+}

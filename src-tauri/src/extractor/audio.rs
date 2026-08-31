@@ -54,6 +54,13 @@ const REQUIRED_FILES: [&str; 4] = [
     "Qwen3-0.6B/tokenizer.json",
 ];
 
+/// Speaker diarization model files (downloaded separately).
+const SEGMENTATION_MODEL_FILE: &str = "seg.onnx";
+const EMBEDDING_MODEL_FILE: &str = "emb.onnx";
+
+/// Speaker diarization pipeline: segmentation + embedding extraction + clustering.
+static SPEAKER_DIARIZER: OnceLock<Option<sherpa_onnx::OfflineSpeakerDiarization>> = OnceLock::new();
+
 /// Resolve the FunASR model directory across dev and bundled runs.
 ///
 /// Dev: `src-tauri/models/funasr`. Bundled: next to executable / data dir.
@@ -137,6 +144,48 @@ fn recognizer() -> Option<&'static sherpa_onnx::OfflineRecognizer> {
         .as_ref()
 }
 
+/// Speaker diarization model directory.
+fn diarization_dir() -> Option<PathBuf> {
+    funasr_dir().map(|d| d.join("models").join("diarization"))
+}
+
+fn diarization_model_present() -> bool {
+    let dir = match diarization_dir() {
+        Some(d) => d,
+        None => return false,
+    };
+    dir.join(SEGMENTATION_MODEL_FILE).is_file()
+        && dir.join(EMBEDDING_MODEL_FILE).is_file()
+}
+
+fn build_diarizer() -> Option<sherpa_onnx::OfflineSpeakerDiarization> {
+    let dir = diarization_dir()?;
+    let seg_path = dir.join(SEGMENTATION_MODEL_FILE).to_string_lossy().to_string();
+    let emb_path = dir.join(EMBEDDING_MODEL_FILE).to_string_lossy().to_string();
+    log::info!("[ASR] loading speaker diarization models (segmentation={}, embedding={})", seg_path, emb_path);
+    let config = sherpa_onnx::OfflineSpeakerDiarizationConfig {
+        segmentation: sherpa_onnx::OfflineSpeakerSegmentationModelConfig {
+            pyannote: sherpa_onnx::OfflineSpeakerSegmentationPyannoteModelConfig {
+                model: Some(seg_path),
+            },
+            num_threads: 1,
+            debug: false,
+            provider: Some("cpu".into()),
+        },
+        embedding: sherpa_onnx::SpeakerEmbeddingExtractorConfig {
+            model: Some(emb_path),
+            ..Default::default()
+        },
+        clustering: sherpa_onnx::FastClusteringConfig {
+            num_clusters: -1,  // auto-detect via threshold
+            threshold: 0.5,
+        },
+        min_duration_on: 0.3,
+        min_duration_off: 0.5,
+    };
+    sherpa_onnx::OfflineSpeakerDiarization::create(&config)
+}
+
 fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
     let dir = funasr_dir().ok_or_else(|| anyhow::anyhow!("FunASR model not found"))?;
     let f = |name: &str| dir.join(name).to_string_lossy().to_string();
@@ -208,11 +257,11 @@ impl AudioExtractor {
         // poll child with a timeout so a hung decode can't stall the scan.
         let mut child = Command::new(ffmpeg)
             .args(["-y", "-i"]).arg(path)
-            .args(["-t", "1800", "-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
+            .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
             .arg(&wav_path)
             .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
             .spawn().context("ffmpeg failed to run")?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
         let status = loop {
             match child.try_wait()? {
                 Some(st) => break st,
@@ -270,11 +319,41 @@ impl AudioExtractor {
         // chunks: Silero VAD when the model exists, fixed 28s hard-split
         // otherwise. Never feed a long file whole (OOM).
         let segments = recognize_segments(&samples);
-        let text = segments
-            .iter()
-            .filter_map(|seg| transcribe(rec, seg))
-            .collect::<Vec<_>>()
-            .join("");
+        let mut diarized_parts: Vec<String> = Vec::new();
+        let diarizer = SPEAKER_DIARIZER
+            .get_or_init(|| if diarization_model_present() { build_diarizer() } else { None })
+            .as_ref();
+        for seg in &segments {
+            if let Some(d) = diarizer {
+                if let Some(result) = d.process(seg) {
+                    for seg_item in result.sort_by_start_time() {
+                        let speaker_label = format!("[说话人{}]", seg_item.speaker);
+                        let start_sample = (seg_item.start * 16000.0).round() as usize;
+                        let end_sample = ((seg_item.end * 16000.0).round() as usize).min(seg.len());
+                        if start_sample < end_sample {
+                            if let Some(text) = transcribe(rec, &seg[start_sample..end_sample]) {
+                                if !text.trim().is_empty() {
+                                    diarized_parts.push(format!("{speaker_label}{text}"));
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    if let Some(text) = transcribe(rec, seg) {
+                        if !text.trim().is_empty() {
+                            diarized_parts.push(text);
+                        }
+                    }
+                }
+            } else {
+                if let Some(text) = transcribe(rec, seg) {
+                    if !text.trim().is_empty() {
+                        diarized_parts.push(text);
+                    }
+                }
+            }
+        }
+        let text = diarized_parts.join("\n");
 
         if text.trim().is_empty() {
             return Ok(format!(
@@ -391,5 +470,24 @@ mod tests {
         }
         // No assert on absence — this is an environment probe, not a
         // contract; the chain must simply not panic when ffmpeg is missing.
+    }
+
+    #[test]
+    fn diarization_models_resolve_from_funasr_dir() {
+        // 说话人分离模型必须能从 funasr_dir()/models/diarization 找到。
+        let funasr = funasr_dir().unwrap_or_else(|| {
+            panic!("FunASR model not found — check LINK_SEARCHER_DATA_DIR/models/funasr")
+        });
+        let diar = diarization_dir().expect("diarization_dir must resolve once funasr_dir exists");
+        let seg = diar.join(SEGMENTATION_MODEL_FILE);
+        let emb = diar.join(EMBEDDING_MODEL_FILE);
+        if !seg.is_file() || !emb.is_file() {
+            eprintln!("MISSING diarization models — expected at {diar:?}");
+            eprintln!("  seg: {}", seg.display());
+            eprintln!("  emb: {}", emb.display());
+            return; // soft-fail: models may not be downloaded in CI
+        }
+        assert!(diarization_model_present(), "diarization_model_present should be true");
+        assert!(build_diarizer().is_some(), "diarizer should initialize");
     }
 }

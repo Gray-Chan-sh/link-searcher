@@ -809,6 +809,135 @@ pub async fn get_browse_file_types_impl(app_state: &AppState) -> Result<Vec<Stri
     Ok(types)
 }
 
+pub async fn search_file_ids_only_impl(
+    app_state: &AppState,
+    query: String,
+    dir_ids: Option<Vec<String>>,
+    dir_paths: Option<Vec<String>>,
+    ext_filter: Option<Vec<String>>,
+    semantic: Option<bool>,
+) -> Result<Vec<String>, String> {
+    if app_state.is_rebuilding.load(Ordering::SeqCst) {
+        return Err("索引重建中，请稍后再试".to_string());
+    }
+    let file_ids = if let Some(paths) = &dir_paths {
+        let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let ids = resolve_dir_paths(&conn, paths)?;
+        if ids.as_ref().is_some_and(|v| v.is_empty()) {
+            return Ok(Vec::new());
+        }
+        ids
+    } else {
+        None
+    };
+
+    let params = SearchParams {
+        query: query.to_lowercase(),
+        dir_ids,
+        file_ids,
+        ext_filter,
+        date_from: None,
+        date_to: None,
+        path_prefixes: None,
+        sort: SortField::Score,
+        sort_order: "desc".to_string(),
+        page: 1,
+        page_size: 5000,
+        fuzzy: false,
+        semantic: semantic.unwrap_or(false),
+    };
+
+    let mgr = app_state.index_manager.read().map_err(|e| format!("{e}"))?;
+    let reader = mgr.reader().map_err(|e| format!("{e}"))?;
+    let searcher = crate::search::searcher::SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
+    drop(mgr);
+
+    let response = searcher.search(&params).map_err(|e| format!("{e}"))?;
+    Ok(response.hits.into_iter().map(|h| h.file_id).collect())
+}
+
+#[tauri::command]
+pub async fn search_file_ids_only(
+    state: State<'_, AppState>,
+    query: String,
+    dir_ids: Option<Vec<String>>,
+    dir_paths: Option<Vec<String>>,
+    ext_filter: Option<Vec<String>>,
+    semantic: Option<bool>,
+) -> Result<Vec<String>, String> {
+    search_file_ids_only_impl(&state, query, dir_ids, dir_paths, ext_filter, semantic).await
+}
+
+#[derive(Serialize)]
+pub struct RefineSearchResponse {
+    pub total: u64,
+    pub hits: Vec<SearchHit>,
+    pub took_ms: u64,
+}
+
+pub async fn refine_search_impl(
+    app_state: &AppState,
+    query: String,
+    file_ids: Vec<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<RefineSearchResponse, String> {
+    if app_state.is_rebuilding.load(Ordering::SeqCst) {
+        return Err("索引重建中，请稍后再试".to_string());
+    }
+    if file_ids.is_empty() {
+        return Ok(RefineSearchResponse { total: 0, hits: Vec::new(), took_ms: 0 });
+    }
+
+    let params = SearchParams {
+        query: query.to_lowercase(),
+        dir_ids: None,
+        file_ids: Some(file_ids),
+        ext_filter: None,
+        date_from: None,
+        date_to: None,
+        path_prefixes: None,
+        sort: SortField::Score,
+        sort_order: "desc".to_string(),
+        page: page.unwrap_or(1),
+        page_size: page_size.unwrap_or(200),
+        fuzzy: false,
+        semantic: false,
+    };
+
+    let mgr = app_state.index_manager.read().map_err(|e| format!("{e}"))?;
+    let reader = mgr.reader().map_err(|e| format!("{e}"))?;
+    let searcher = crate::search::searcher::SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
+    drop(mgr);
+
+    let response = searcher.search(&params).map_err(|e| format!("{e}"))?;
+    let total = response.total;
+    let took_ms = response.took_ms;
+
+    let conn = app_state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let mut hits: Vec<SearchHit> = Vec::new();
+    for hit in response.hits {
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
+            && rec.status == "active" {
+                hits.push(hit);
+            }
+    }
+    drop(conn);
+
+    Ok(RefineSearchResponse { total, hits, took_ms })
+}
+
+#[tauri::command]
+pub async fn refine_search(
+    state: State<'_, AppState>,
+    query: String,
+    file_ids: Vec<String>,
+    page: Option<usize>,
+    page_size: Option<usize>,
+) -> Result<RefineSearchResponse, String> {
+    refine_search_impl(&state, query, file_ids, page, page_size).await
+}
+
 
 #[cfg(test)]
 mod snippet_tests {

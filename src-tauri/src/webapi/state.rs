@@ -8,4 +8,6 @@ pub struct ApiState {
     pub cancel_token: Arc<tokio_util::sync::CancellationToken>,
     /// Bridged Tauri events: `(event_name, payload_json)`.
     pub event_tx: tokio::sync::broadcast::Sender<(String, String)>,
+    /// When true, proxy static files to Vite dev server (localhost:1420).
+    pub dev_mode: bool,
 }

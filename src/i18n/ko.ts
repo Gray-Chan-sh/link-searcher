@@ -128,6 +128,7 @@ const ko: Record<string, string> = {
     file_tree_file_hint: '클릭하여 파일 추가: ',
     fuzzy_hint: '모호 조건 (LLM 파싱, 편집 가능)',
     strict_docs: '문서만',
+    full_recall: '전체 재현',
     scope_range: '검색 범위',
     clear_scope: '범위 지우기',
     no_scope: '제한 없음 (전체 라이브러리)',

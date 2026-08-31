@@ -23,6 +23,7 @@ pub const KEY_ENABLED: &str = "web_api_enabled";
 pub const KEY_PORT: &str = "web_api_port";
 pub const KEY_TOKEN: &str = "web_api_token";
 pub const KEY_BIND: &str = "web_api_bind";
+pub const KEY_DEV_MODE: &str = "web_api_dev_mode";
 
 const DEFAULT_PORT: u16 = 8443;
 
@@ -43,6 +44,7 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     let token = generate_or_load_token(&app_handle);
     let port = load_port(&app_handle);
     let bind = load_bind(&app_handle);
+    let dev_mode = load_dev_mode(&app_handle);
 
     let cancel_token = CancellationToken::new();
     let cancel_for_api = cancel_token.clone();
@@ -53,6 +55,7 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     for event_name in BRIDGED_EVENTS {
         let tx = event_tx.clone();
         app_handle.listen_any(*event_name, move |event| {
+            log::info!("[WEBAPI-BRIDGE] forwarded event {} payload_chars={}", event_name, event.payload().len());
             // No subscribers / lagged receiver: drop silently.
             let _ = tx.send((event_name.to_string(), event.payload().to_string()));
         });
@@ -63,6 +66,7 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
         auth_token: Arc::new(token),
         cancel_token: Arc::new(cancel_for_api),
         event_tx,
+        dev_mode,
     };
 
     let app = routes::build_router(api_state);
@@ -168,4 +172,18 @@ fn load_bind(app_handle: &tauri::AppHandle) -> String {
                 return bind;
             }
     "0.0.0.0".to_string()
+}
+
+fn load_dev_mode(app_handle: &tauri::AppHandle) -> bool {
+    let app_state = app_handle.state::<AppState>();
+    if let Ok(conn) = app_state.db.get()
+        && let Ok(val) = conn.query_row::<String, _, _>(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            rusqlite::params![KEY_DEV_MODE],
+            |r| r.get::<_, String>(0),
+        )
+    {
+        return val == "true";
+    }
+    false
 }

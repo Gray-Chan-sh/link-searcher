@@ -5,7 +5,7 @@ import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { conversationAsk, cancelAiRequest, conversationAskStream, listenAiStream, openFile, type ChatMessage, type ChatSession } from '../api/files'
+import { cancelAiRequest, conversationAskStream, listenAiStream, listenAiProgress, openFile, type ChatMessage, type ChatSession, type AiProgressPayload } from '../api/files'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
@@ -39,16 +39,13 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // 输入中 /范围: 解析出的动作预览（'clear' | 'dir:xxx' | null），打字即反馈
   const [scopeActionPreview, setScopeActionPreview] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  // 流式输出缓冲：显示在"思考中"下方，done 后并入完整消息。
-  const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null)
+  const [streaming, setStreaming] = useState<{ sessionId: string; text: string; reasoning: string } | null>(null)
+  const [progress, setProgress] = useState<AiProgressPayload | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
   const latestReqIdRef = useRef(0)
   // 发送中防护：阻止 Enter + 按钮点击双重触发
   const sendingRef = useRef(false)
-  // 自发起防护：handleSend 设置 pending 后，恢复 effect 不应把自己刚发起
-  // 的请求当作"残留 pending"再重跑一次（否则每轮追问都会并发两个请求）。
-  const skipResumeRef = useRef(false)
   // 事件回调需要"最新"会话值（组件卸载/会话切换后仍可能收到迟到事件）。
   const sessionRef = useRef(session)
   const messagesRef = useRef<ChatMessage[]>([])
@@ -125,12 +122,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
   const handleCancel = useCallback(async () => {
     if (!loading) return
-    if (!confirm('确认取消当前回答？')) return
     cancelAiRequest().catch(() => {})
     latestReqIdRef.current += 1
+    sendingRef.current = false
+    const partialText = streaming && streaming.sessionId === session?.id && streaming.text.trim()
+      ? streaming.text + '\n\n⏹ 已取消'
+      : '⏹ 已取消'
+    patchSession({
+      pending_query: null,
+      pending_started_at: null,
+      messages: [...messages, { role: 'assistant', content: partialText }],
+    })
     setStreaming(null)
-    patchSession({ pending_query: null, pending_started_at: null, messages })
-  }, [loading, patchSession, messages])
+    setProgress(null)
+  }, [loading, patchSession, messages, streaming, session?.id])
 
   // 流式事件监听：增量文本实时显示；done 事件写回完整回答 + 响应耗时。
   useEffect(() => {
@@ -140,12 +145,29 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const sessId = session.id
     listenAiStream(
       sessId,
-      delta => setStreaming(s => ({ sessionId: sessId, text: (s?.sessionId === sessId ? s.text : '') + delta })),
+      (delta, isReasoning) => {
+        console.log('[AI-DEBUG] ai-chunk', { deltaLen: delta?.length, isReasoning })
+        setProgress(null)
+        if (isReasoning) {
+          setStreaming(s => ({
+            sessionId: sessId,
+            text: s?.sessionId === sessId ? s.text : '',
+            reasoning: (s?.sessionId === sessId ? s.reasoning : '') + delta,
+          }))
+        } else {
+          setStreaming(s => ({
+            sessionId: sessId,
+            text: (s?.sessionId === sessId ? s.text : '') + delta,
+            reasoning: s?.sessionId === sessId ? s.reasoning : '',
+          }))
+        }
+      },
       p => {
+        console.log('[AI-DEBUG] ai-done received', { sessionId: p.session_id, loadingRef: loadingRef.current, disposed, fullTextLen: p.full_text?.length, cancelled: p.cancelled })
         if (disposed) return
-        // pending 已被清除（取消/新请求）→ 迟到的完成事件直接丢弃。
-        if (!loadingRef.current) { setStreaming(null); return }
+        if (!loadingRef.current) { console.warn('[AI-DEBUG] ai-done dropped: loadingRef is false'); setStreaming(null); setProgress(null); return }
         setStreaming(null)
+        setProgress(null)
         if (p.cancelled) return
         const cur = sessionRef.current
         if (!cur) return
@@ -163,7 +185,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             turn_index: userTurns - 1,
             file_ids: p.source_ids,
             items: p.evidence ?? [],
-            total_match_count: p.total_match_count ?? 0,
             trace_id: p.trace_id ?? '',
             took_ms: p.took_ms,
             llm_model: p.llm_model ?? '',
@@ -184,6 +205,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     ).then(fn => { if (disposed) { fn(); return } unlisten = fn })
       .catch(e => console.error('[ChatPanel] listenAiStream failed:', e))
     return () => { disposed = true; unlisten?.() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id])
+
+  useEffect(() => {
+    if (!session?.id) return
+    let un: (() => void) | undefined
+    let disposed = false
+    listenAiProgress(session.id, p => {
+      if (disposed) return
+      setProgress(p)
+    }).then(fn => { if (disposed) { fn(); return } un = fn })
+      .catch(e => console.error('[ChatPanel] listenAiProgress failed:', e))
+    return () => { disposed = true; un?.(); setProgress(null) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id])
 
@@ -331,7 +365,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const searchMsg: ChatMessage = { role: 'user', content: cleanQ }
     const reqId = ++latestReqIdRef.current
     const startedAt = Date.now()
-    skipResumeRef.current = true
     const userTurnsCount = messages.filter(m => m.role === 'user').length
     // 跨轮累计：本轮 @引用路径并入会话持久范围（父吞子去冗余，直到手动删除）
     const mergedScope = mergeScopePrefixes([
@@ -349,13 +382,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         { turn_index: userTurnsCount, scope: mergedScope },
       ],
     })
-    setStreaming({ sessionId: session.id, text: '' })
+    setStreaming({ sessionId: session.id, text: '', reasoning: '' })
 
     try {
       // ponytail: smart_search_stream bypasses scope/semantic/rewrite; always use conversation path
-      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false)
+      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false, session.full_recall ?? false)
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
+      sendingRef.current = false
       if (latestReqIdRef.current !== reqId) return
       setStreaming(null)
       patchSession({
@@ -363,42 +397,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         pending_query: null,
         pending_started_at: null,
       })
+      return
     }
     sendingRef.current = false
   }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips, pendingMention, onMentionConsumed, insertMention])
 
-  // 恢复挂起的请求：切页/切会话后返回时看到残留 pending，直接重跑该
-  // 问题（若进程内原请求尚未结束，会重复消耗一次生成——可用性优先，
-  // 后续再以流式替代）。
+  // 依赖只能是 session.id：若含 pending_query，handleSend 一设置它就会立刻清掉
+  // 刚写的 pending_started_at，使 loadingRef 恒为 false，ai-done 被守卫丢弃。
   useEffect(() => {
     if (!session?.pending_query) return
-    // 本组件刚发起的请求（handleSend）不恢复——避免并发双请求。
-    if (skipResumeRef.current) {
-      skipResumeRef.current = false
-      return
-    }
-    const reqId = ++latestReqIdRef.current
-    const base = session.messages
-    ;(async () => {
-      try {
-        const answer = await conversationAsk(base, sourceIds.length > 0 ? sourceIds : [], undefined, session?.retrieval_scope ?? [], session?.strict_docs ?? false)
-        if (latestReqIdRef.current !== reqId) return
-        patchSession({
-          messages: [...base, { role: 'assistant', content: answer.trim() ? answer : `❌ ${t('err_empty_response')}` }],
-          pending_query: null,
-          pending_started_at: null,
-        })
-      } catch (e) {
-        if (latestReqIdRef.current !== reqId) return
-        patchSession({
-          messages: [...base, { role: 'assistant', content: `❌ ${errText(e)}` }],
-          pending_query: null,
-          pending_started_at: null,
-        })
-      }
-    })()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session?.id, session?.pending_query])
+    patchSession({ pending_query: null, pending_started_at: null })
+  }, [session?.id])
 
   // LLM 未配置时仍渲染历史会话（只读回放：来源栏 + 消息 + 证据面板），
   // 仅输入区替换为"AI 服务未配置"提示——会话审计不依赖网关在线。
@@ -484,7 +493,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                         <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
-                          🔍 {t('evidence')}（{evidenceFor(i).length}{(() => { const t = (session?.per_turn_evidence ?? []).find(e => e.turn_index === i); return t?.total_match_count && t.total_match_count > evidenceFor(i).length ? `/${t.total_match_count}` : '' })()}）
+                          🔍 {t('evidence')}（{evidenceFor(i).length}）
                         </summary>
 <ul className="mt-1 space-y-1">
                            {evidenceFor(i).map((ev, j) => (
@@ -534,7 +543,24 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         {loading && (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <LoadingSpinner className="size-3.5" />
-            <span>{t('thinking')} {elapsedText}</span>
+            {progress ? (
+              <span className="flex items-center gap-2">
+                <span>{progress.message}</span>
+                {progress.total > 0 && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className="text-xs tabular-nums text-gray-400">{progress.current}/{progress.total}</span>
+                    <span className="w-20 h-1.5 rounded-full bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                      <span
+                        className="block h-full rounded-full bg-blue-400 transition-all duration-300"
+                        style={{ width: `${progress.total > 0 ? Math.min(100, (progress.current / progress.total) * 100) : 0}%` }}
+                      />
+                    </span>
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span>{t('thinking')} {elapsedText}</span>
+            )}
             <button
               onClick={handleCancel}
               className="ml-1 px-1.5 py-0.5 text-xs text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/30 rounded transition-colors"
@@ -543,9 +569,23 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             </button>
           </div>
         )}
-        {streaming && streaming.sessionId === session?.id && streaming.text && (
-          <div className="text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap border-l-2 border-gray-200 dark:border-gray-700 pl-3">
-            {streaming.text}
+        {streaming && streaming.sessionId === session?.id && (
+          <div className="space-y-2">
+            {streaming.reasoning && (
+              <details open className="group">
+                <summary className="text-xs text-gray-400 dark:text-gray-500 cursor-pointer select-none hover:text-gray-600 dark:hover:text-gray-300 transition-colors">
+                  💭 思考中 ({streaming.reasoning.length} chars)...
+                </summary>
+                <div className="mt-1 text-xs text-gray-400 dark:text-gray-500 whitespace-pre-wrap border-l border-gray-200 dark:border-gray-700 pl-3 max-h-48 overflow-y-auto">
+                  {streaming.reasoning}
+                </div>
+              </details>
+            )}
+            {streaming.text && (
+              <div className="text-sm text-gray-600 dark:text-gray-300 whitespace-pre-wrap border-l-2 border-gray-200 dark:border-gray-700 pl-3">
+                {streaming.text}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -620,6 +660,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           >
             <span className={`size-1.5 rounded-full ${session?.strict_docs ? 'bg-green-500' : 'bg-gray-300 dark:bg-gray-600'}`} />
             {t('strict_docs')}
+          </button>
+          {/* 全量召回 toggle（检索与注入不截断） */}
+          <button
+            type="button"
+            onClick={() => session && onSessionChange({ ...session, full_recall: !session.full_recall })}
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded transition-colors ${
+              session?.full_recall
+                ? 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border border-purple-300 dark:border-purple-700'
+                : 'text-gray-500 dark:text-gray-400 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-800'
+            }`}
+          >
+            <span className={`size-1.5 rounded-full ${session?.full_recall ? 'bg-purple-500' : 'bg-gray-300 dark:bg-gray-600'}`} />
+            {t('full_recall')}
           </button>
         </div>
       )}

@@ -34,6 +34,23 @@ pub enum Cli {
     },
     /// Check index health
     Health,
+    /// Ask the AI a question over the indexed documents (full-recall chat)
+    Chat {
+        /// The question to ask
+        query: String,
+        /// Optional retrieval scope (comma-separated file paths or dirs)
+        #[arg(short, long, default_value = "")]
+        scope: String,
+        /// Enable full recall (retrieve and consider all matching files)
+        #[arg(long)]
+        full_recall: bool,
+        /// Only run retrieval, skip the LLM call (prints retrieval results only)
+        #[arg(long)]
+        no_llm: bool,
+        /// Dry run: 3-way scan + injection summary, skip LLM call
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 pub fn run_cli() -> Result<()> {
@@ -175,6 +192,113 @@ pub fn run_cli() -> Result<()> {
                 if let Err(e) = scanner.handle_event(event) {
                     eprintln!("[watch] error: {e}");
                 }
+            }
+        }
+        Cli::Chat { query, scope, full_recall, no_llm: _, dry_run } => {
+            let data_dir = config::load_config().data_dir;
+            let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+
+            let (watcher_tx, _) = std::sync::mpsc::channel();
+            let state = crate::state::AppState::new(
+                bootstrap.pool.clone(),
+                bootstrap.index_manager.clone(),
+                bootstrap.indexer.clone(),
+                bootstrap.scanner.clone(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                bootstrap.cancel_scan.clone(),
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                std::sync::Arc::new(std::sync::Mutex::new(crate::state::ScanDelta::default())),
+                data_dir.clone(),
+                data_dir.join(crate::config::INDEX_DIR_NAME),
+                data_dir.join("data.db"),
+                watcher_tx,
+                None,
+            );
+
+            let mention_files: Vec<String> = scope
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let turn_scope = crate::commands::ai::TurnScope {
+                mention_files,
+                mention_dirs: vec![],
+                inherit_from: vec![],
+                conditions: vec![],
+            };
+            let messages = vec![crate::commands::ai::ChatMessage {
+                role: "user".into(),
+                content: query.clone(),
+            }];
+
+            if dry_run {
+                let prepared = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .context("failed to create tokio runtime")?
+                .block_on(crate::commands::ai::prepare_conversation_prompt(
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, true, None, "",
+                ))
+                    .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
+                drop(prepared.events);
+
+                println!(
+                    "[三路检索] 命中 {} 份文件，注入 {} 条证据（full_recall={}）",
+                    prepared.total_match_count, prepared.evidence.len(), full_recall
+                );
+                for (i, ev) in prepared.evidence.iter().enumerate().take(20) {
+                    println!(
+                        "  [{:>3}] bm25={} sem={} path={}",
+                        i + 1,
+                        ev.bm25_score.map(|s| format!("{s:.2}")).unwrap_or("-".into()),
+                        ev.semantic_score.map(|s| format!("{s:.3}")).unwrap_or("-".into()),
+                        ev.path
+                    );
+                }
+                if prepared.evidence.len() > 20 {
+                    println!("  ... 共 {} 条证据，仅显示前 20 条", prepared.evidence.len());
+                }
+                println!(
+                    "[覆盖] 注入 {} 份全文 + {} 份摘要兜底 = {} 总覆盖（不遗漏）",
+                    prepared.evidence.len(),
+                    prepared.total_match_count.saturating_sub(prepared.evidence.len()),
+                    prepared.total_match_count
+                );
+                return Ok(());
+            }
+
+            let total_files = {
+                let c = bootstrap.pool.get().context("failed to get DB connection")?;
+                crate::db::tracker::count_active_files(&c).context("count_active_files failed")?
+            };
+            let limit = if full_recall { (total_files as usize).max(500) } else { 100 };
+            let bm25_hits = crate::commands::ai::bm25_relevant_hits(
+                &state,
+                &query.to_lowercase(),
+                limit,
+                false,
+                None, None, None, None, None, None,
+            )
+            .map_err(|e| anyhow::anyhow!("bm25_relevant_hits failed: {e}"))?;
+
+            println!(
+                "[BM25] 共 {} 份文件，命中 {} 条（full_recall={} limit={}）",
+                total_files,
+                bm25_hits.len(),
+                full_recall,
+                limit
+            );
+            for (i, hit) in bm25_hits.iter().enumerate().take(20) {
+                println!(
+                    "  [{:>3}] score={:.2} path={}",
+                    i + 1,
+                    hit.bm25_score.unwrap_or(0.0),
+                    hit.path
+                );
+            }
+            if bm25_hits.len() > 20 {
+                println!("  ... 仅显示前 20 条，共 {} 条命中", bm25_hits.len());
             }
         }
         Cli::Health => {

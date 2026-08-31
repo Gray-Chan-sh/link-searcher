@@ -101,6 +101,32 @@ export default function AiChat() {
 
   useEffect(() => { refreshList() }, [refreshList])
 
+  useEffect(() => {
+    const raw = sessionStorage.getItem('ls_pending_chat_paths')
+    if (!raw) return
+    sessionStorage.removeItem('ls_pending_chat_paths')
+    sessionStorage.removeItem('ls_pending_chat_query')
+    let paths: string[]
+    try { paths = JSON.parse(raw) } catch { return }
+    if (!Array.isArray(paths) || paths.length === 0) return
+
+    createChatSession().then(id => {
+      const session: ChatSession = {
+        id, title: '', created_at: 0, updated_at: 0,
+        messages: [],
+        source_ids: [], source_files: paths,
+        retrieval_scope: paths,
+        strict_docs: true, full_recall: true,
+        pending_query: null, pending_started_at: null,
+      }
+      saveChatSession(session).then(() => {
+        setActiveId(id)
+        setActiveSession(session)
+        refreshList()
+      }).catch(() => {})
+    }).catch(() => {})
+  }, [])
+
   // 加载目录树（懒加载：只加载根层，展开时按需加载子目录）
   useEffect(() => {
     listDirs().then(dirs => {
@@ -187,7 +213,7 @@ export default function AiChat() {
     if (sessions.length === 0) {
       createChatSession().then(id => {
         setActiveId(id)
-        setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true })
+setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: true })
         refreshList()
       }).catch(() => {})
     } else {
@@ -217,7 +243,7 @@ export default function AiChat() {
   const handleNewSession = useCallback(async () => {
     try {
       const id = await createChatSession()
-      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true })
+      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: true })
       setActiveId(id)
       refreshList()
     } catch { /* ignore */ }

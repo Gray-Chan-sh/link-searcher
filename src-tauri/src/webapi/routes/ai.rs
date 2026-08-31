@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     response::Json,
     response::sse::{Event, KeepAlive, Sse},
     routing::{delete, get, post, put},
@@ -47,6 +47,8 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/chat/sessions/{id}", put(save_chat_session_handler))
         .route("/api/ai/gateways/test", get(test_gateway_handler))
         .route("/api/ai/cancel", post(cancel_ai_request_handler))
+        .route("/api/ai/events", get(ai_events_handler))
+        .route("/api/ai/events/turn", get(turn_ai_events_handler))
 }
 
 async fn ai_capabilities_handler(
@@ -57,6 +59,39 @@ async fn ai_capabilities_handler(
         "embedding": caps.embedding,
         "llm": caps.llm,
     })))
+}
+
+#[derive(serde::Deserialize)]
+struct AiEventsQuery {
+    session_id: String,
+}
+
+async fn ai_events_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<AiEventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+    let events = crate::db::ai_events::get_session_events(&conn, &q.session_id)
+        .map_err(|e| ApiError { error: e.to_string() })?;
+    Ok(Json(serde_json::to_value(events).map_err(|e| ApiError { error: e.to_string() })?))
+}
+
+#[derive(serde::Deserialize)]
+struct TurnAiEventsQuery {
+    session_id: String,
+    turn_number: usize,
+}
+
+async fn turn_ai_events_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<TurnAiEventsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+    let events = crate::db::ai_events::get_turn_events(&conn, &q.session_id, q.turn_number)
+        .map_err(|e| ApiError { error: e.to_string() })?;
+    Ok(Json(serde_json::to_value(events).map_err(|e| ApiError { error: e.to_string() })?))
 }
 
 async fn chat_sessions_handler(
@@ -268,6 +303,8 @@ struct AskBody {
     session_retrieval_scope: Vec<String>,
     #[serde(default)]
     strict_docs: bool,
+    #[serde(default)]
+    full_recall: bool,
 }
 
 async fn conversation_ask_handler(
@@ -282,6 +319,7 @@ async fn conversation_ask_handler(
         body.scope,
         body.session_retrieval_scope,
         body.strict_docs,
+        Some(body.full_recall),
     )
     .await
     .map_err(|e| ApiError { error: e })?;
@@ -388,6 +426,7 @@ async fn conversation_ask_stream_handler(
             body.scope,
             body.session_retrieval_scope,
             body.strict_docs,
+            Some(body.full_recall),
         )
         .await
         {

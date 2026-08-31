@@ -198,7 +198,9 @@ pub fn load_config() -> AppConfig {
     let path = config_dir().join(CONFIG_FILE);
     if let Ok(content) = std::fs::read_to_string(&path)
         && let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
-            if config.data_dir.as_os_str().is_empty() {
+            if let Ok(override_dir) = std::env::var("LINK_SEARCHER_DATA_DIR") {
+                config.data_dir = override_dir.into();
+            } else if config.data_dir.as_os_str().is_empty() {
                 config.data_dir = default_data_dir();
             }
             // Migrate the legacy single-gateway config: if the user only ever

@@ -11,6 +11,15 @@ fn main() {
             eprintln!("link-searcher: {msg}");
             std::process::exit(1);
         }
+        // Forward --data-dir to CLI subcommands via env var
+        if args.len() > 2 && args[2] != "--data-dir" {
+                unsafe { std::env::set_var("LINK_SEARCHER_DATA_DIR", cli_data_dir.to_string_lossy().to_string()); }
+            link_searcher_lib::cli::run_cli().unwrap_or_else(|e| {
+                eprintln!("link-searcher: {e}");
+                std::process::exit(1);
+            });
+            return;
+        }
         link_searcher_lib::run_with_data_dir(cli_data_dir);
     } else if args.is_empty() {
         link_searcher_lib::run();

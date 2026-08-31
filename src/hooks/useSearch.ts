@@ -4,6 +4,7 @@ import { search, suggest, type SearchHit, type SearchResponse } from '../api/sea
 const LS_FILTER_DIR_KEY = 'ls_filter_dirs'
 const LS_FILTER_EXT_KEY = 'ls_filter_exts'
 const LS_FILTER_PATH_KEY = 'ls_filter_paths'
+const SS_SEARCH_SORT = 'ls_search_sort'
 
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
@@ -23,6 +24,21 @@ function saveToStorage(key: string, value: unknown) {
   }
 }
 
+function loadFromSessionStorage<T>(key: string, fallback: T): T {
+  try {
+    const item = sessionStorage.getItem(key)
+    return item ? JSON.parse(item) as T : fallback
+  } catch {
+    return fallback
+  }
+}
+
+function saveToSessionStorage(key: string, value: unknown) {
+  try {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  } catch {}
+}
+
 interface SearchState {
   status: 'idle' | 'loading' | 'success' | 'error'
   query: string
@@ -37,17 +53,12 @@ interface SearchState {
 const DEFAULT_PAGE_SIZE = 20
 
 export function useSearch() {
-  const [state, setState] = useState<SearchState>({
-    status: 'idle',
-    query: '',
-    page: 1,
-    pageSize: DEFAULT_PAGE_SIZE,
-    total: 0,
-    tookMs: 0,
-    hits: [],
-    error: null,
+  const [state, setState] = useState<SearchState>(() => {
+    const saved = loadFromSessionStorage<SearchState | null>('ls_search_state', null)
+    if (saved && saved.query) return { ...saved, status: saved.status === 'loading' ? 'idle' : saved.status }
+    return { status: 'idle', query: '', page: 1, pageSize: DEFAULT_PAGE_SIZE, total: 0, tookMs: 0, hits: [], error: null }
   })
-  const [sortField, setSortField] = useState<string>('score')
+  const [sortField, setSortField] = useState<string>(() => loadFromSessionStorage(SS_SEARCH_SORT, 'score'))
   const [sortOrder, setSortOrder] = useState<string>('desc')
   const [semantic, setSemantic] = useState<boolean>(() => loadFromStorage('ls_semantic', false))
   const semanticRef = useRef(semantic)
@@ -68,6 +79,14 @@ useEffect(() => {
 useEffect(() => {
   saveToStorage(LS_FILTER_PATH_KEY, dirPaths)
 }, [dirPaths])
+
+useEffect(() => {
+  saveToSessionStorage('ls_search_state', state)
+}, [state.query, state.page, state.total, state.tookMs, state.hits, state.status])
+
+useEffect(() => {
+  saveToSessionStorage(SS_SEARCH_SORT, sortField)
+}, [sortField])
 
 const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const abortRef = useRef<AbortController | null>(null)

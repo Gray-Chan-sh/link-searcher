@@ -35,6 +35,8 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/suggest", get(suggest_handler))
         .route("/api/search/paths", get(search_paths_handler))
         .route("/api/search/tree-prune", get(tree_prune_handler))
+        .route("/api/search/file-ids", get(file_ids_handler))
+        .route("/api/search/refine", post(refine_handler))
         .route("/api/search/history", get(history_handler).delete(clear_history_handler))
         .route("/api/search/export", post(export_handler))
         .route("/api/stats/file-types", get(file_type_stats_handler))
@@ -214,4 +216,60 @@ async fn browse_types_handler(
         .await
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(types))
+}
+
+#[derive(Deserialize)]
+pub struct FileIdsQuery {
+    pub q: String,
+    pub dir_ids: Option<Vec<String>>,
+    pub dir_paths: Option<Vec<String>>,
+    pub ext_filter: Option<Vec<String>>,
+    pub semantic: Option<bool>,
+}
+
+async fn file_ids_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<FileIdsQuery>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let ids = search::search_file_ids_only_impl(
+        &app_state,
+        params.q,
+        params.dir_ids,
+        params.dir_paths,
+        params.ext_filter,
+        params.semantic,
+    )
+    .await
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(ids))
+}
+
+#[derive(Deserialize)]
+pub struct RefineBody {
+    pub query: String,
+    pub file_ids: Vec<String>,
+    pub page: Option<usize>,
+    pub page_size: Option<usize>,
+}
+
+async fn refine_handler(
+    State(state): State<ApiState>,
+    Json(body): Json<RefineBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let result = search::refine_search_impl(
+        &app_state,
+        body.query,
+        body.file_ids,
+        body.page,
+        body.page_size,
+    )
+    .await
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({
+        "total": result.total,
+        "hits": result.hits,
+        "took_ms": result.took_ms,
+    })))
 }

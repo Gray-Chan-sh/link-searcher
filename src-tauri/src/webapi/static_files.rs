@@ -1,14 +1,56 @@
+use std::io::Read;
+
 use axum::{
+    extract::State,
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
 
-pub async fn serve_static(uri: Uri) -> Response {
+use crate::webapi::state::ApiState;
+
+const VITE_DEV_SERVER: &str = "http://127.0.0.1:1420";
+
+pub async fn serve_static(uri: Uri, State(state): State<ApiState>) -> Response {
     let path = uri.path().to_string();
     if path.starts_with("/api/") {
         return (StatusCode::NOT_FOUND, "Not Found").into_response();
     }
 
+    if state.dev_mode {
+        return proxy_to_vite(&path).await;
+    }
+
+    serve_from_dist(&path).await
+}
+
+async fn proxy_to_vite(path: &str) -> Response {
+    let url = format!("{VITE_DEV_SERVER}{path}");
+    let url_clone = url.clone();
+
+    match tokio::task::spawn_blocking(move || ureq::get(&url_clone).call()).await {
+        Ok(Ok(response)) => {
+            let status = StatusCode::from_u16(response.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let mime = mime_from_path(path);
+
+            let mut body = Vec::new();
+            if let Err(_) = response.into_reader().read_to_end(&mut body) {
+                return (StatusCode::BAD_GATEWAY, "Failed to read upstream body").into_response();
+            }
+
+            (status, [(header::CONTENT_TYPE, mime)], body).into_response()
+        }
+        Ok(Err(e)) => {
+            log::warn!("[WEBAPI-DEV] proxy to Vite failed for {path}: {e}");
+            (StatusCode::BAD_GATEWAY, format!("Vite dev server unreachable: {e}")).into_response()
+        }
+        Err(e) => {
+            log::error!("[WEBAPI-DEV] spawn_blocking error: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "Proxy task failed").into_response()
+        }
+    }
+}
+
+async fn serve_from_dist(path: &str) -> Response {
     let rel = path.trim_start_matches('/');
     let rel = if rel.is_empty() { "index.html" } else { rel };
     let file = dist_dir().join(rel);
@@ -23,7 +65,8 @@ pub async fn serve_static(uri: Uri) -> Response {
                 Ok(content) => (
                     [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
                     content,
-                ).into_response(),
+                )
+                    .into_response(),
                 Err(_) => (StatusCode::NOT_FOUND, "Not Found").into_response(),
             }
         }
@@ -45,6 +88,24 @@ fn dist_dir() -> std::path::PathBuf {
         }
     }
     std::path::PathBuf::from("../dist")
+}
+
+fn mime_from_path(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    match ext {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "application/javascript",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 fn mime_from_extension(path: &std::path::Path) -> &'static str {

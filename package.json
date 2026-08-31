@@ -9,7 +9,11 @@
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "dotenv -e .env -- tauri dev",
+    "tauri:dev:clean": "npm run clean && dotenv -e .env -- tauri dev",
+    "tauri:build": "tauri build",
+    "clean": "rm -rf src-tauri/target dist node_modules/.vite"
   },
   "dependencies": {
     "@tailwindcss/typography": "^0.5.20",
@@ -34,6 +38,7 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.3",
+    "dotenv-cli": "^11.0.0",
     "oxlint": "^1.71.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~6.0.2",

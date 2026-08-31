@@ -128,6 +128,7 @@ const ja: Record<string, string> = {
     file_tree_file_hint: 'クリックでファイル追加：',
     fuzzy_hint: '曖昧条件（LLM 解析、編集可能）',
     strict_docs: 'ドキュメントのみ',
+    full_recall: 'フルリコール',
     scope_range: '検索範囲',
     clear_scope: '範囲をクリア',
     no_scope: '制限なし（全ライブラリ）',
