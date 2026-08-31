@@ -11,6 +11,11 @@ export interface SearchHit {
   file_size: number
 }
 
+export interface IdWithPath {
+  file_id: string
+  path: string
+}
+
 export interface SearchResponse {
   total: number
   page: number
@@ -98,8 +103,8 @@ export async function searchFileIdsOnly(
   dirPaths?: string[],
   extFilter?: string[],
   semantic?: boolean,
-): Promise<string[]> {
-  return client.invoke<string[]>('search_file_ids_only', {
+): Promise<IdWithPath[]> {
+  return client.invoke<IdWithPath[]>('search_file_ids_only', {
     query,
     dirIds: dirIds ?? [],
     dirPaths: dirPaths ?? [],

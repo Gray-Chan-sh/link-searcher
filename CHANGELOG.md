@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-08-31（Bug 修复）
+
+- **「缩小范围」后「去聊天」只传 20 个文件**：搜索页 `goToChat`（`SearchPage.tsx:174-180`）从 `currentRefine.hits`（仅 20 条分页片）反查 path，丢掉了 `allFileIds` 中已选但不在当前页的 ID 的 path。**根因**：`enterRefine` 把全量 ID 存进 `allFileIds`（来自 `search_file_ids_only`，page_size=5000），但只有 ID 无 path；`goToChat` 拿不到 path 时只能回退到当前页 20 条 hits。**修复**：把 `search_file_ids_only` 的返回从 `Vec<String>` 升级为 `Vec<{file_id, path}>`（`search.rs` 新增 `IdWithPath`），前端 `allFileIds` → `allFileRows: IdWithPath[]`，`goToChat` 用 Map 按 ID 反查全量 path，30 个选中就传 30 个到 `ls_pending_chat_paths`。涉及 `src-tauri/src/commands/search.rs`、`src/api/search.ts`、`src/pages/SearchPage.tsx`，新增 1 个序列化单测锁定 wire shape。
+- **顺手修 `ls_pending_chat_query` 死代码**：`SearchPage.tsx` 一直把搜索 query 写入 sessionStorage 但 `AiChat.tsx` 只 `removeItem` 从不读取，导致新会话 `pending_query` 永远是 null。改为 `AiChat.tsx:104-134` 真正读出后赋给 `pending_query` + `pending_started_at`，让「从搜索跳到聊天」的首轮能携带原始搜索意图。
+- **AI 聊天导出文件名出现 `.*` 后缀**：`saveFile` 中 Tauri `extensions: ['*']` 硬编码导致 macOS NSSavePanel 追加后缀；改为从 `defaultName` 提取扩展名（与 `exportFile` 一致），`platform.ts`
+- **AI 回答中数字被标注打断（如 `32.[3][1]5万元`）**：`auto_cite` 句子分割正则把 `.`（小数点）误作句终符；移除 `.` 从断句字符集，中文文本以 `。！？` 为句终，`ai.rs` + 新增单元测试
+- **缩小范围后证据面板只显示部分文件**：Layer 1（BM25 命中文件）注入 prompt 时未同步向 `evidence` 数组添加条目，导致前端溯源面板不显示这些文件；修复后每份注入文件均生成对应 `EvidenceItem`，`ai.rs`
+
+---
+
 ## 2026-08-31（文档 — 设计手册重写为分模块教程）
 
 - **`docs/ARCHITECTURE.md`**：彻底重写为**分模块设计手册**，面向技术小白，著重说明思想、架构、目标。14 个章节覆盖：

@@ -17,6 +17,16 @@ pub struct HistoryEntry {
     pub created_at: i64,
 }
 
+/// Pair of (file_id, absolute path) for a single tracked file.
+/// Returned by `search_file_ids_only` so the frontend can resolve
+/// every selected id to its path in one round-trip (instead of
+/// falling back to a 20-item page slice that silently dropped extras).
+#[derive(Serialize, Clone)]
+pub struct IdWithPath {
+    pub file_id: String,
+    pub path: String,
+}
+
 #[derive(Serialize)]
 pub struct FileTypeStat {
     pub extension: String,
@@ -816,7 +826,7 @@ pub async fn search_file_ids_only_impl(
     dir_paths: Option<Vec<String>>,
     ext_filter: Option<Vec<String>>,
     semantic: Option<bool>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<IdWithPath>, String> {
     if app_state.is_rebuilding.load(Ordering::SeqCst) {
         return Err("索引重建中，请稍后再试".to_string());
     }
@@ -853,7 +863,11 @@ pub async fn search_file_ids_only_impl(
     drop(mgr);
 
     let response = searcher.search(&params).map_err(|e| format!("{e}"))?;
-    Ok(response.hits.into_iter().map(|h| h.file_id).collect())
+    Ok(response
+        .hits
+        .into_iter()
+        .map(|h| IdWithPath { file_id: h.file_id, path: h.path })
+        .collect())
 }
 
 #[tauri::command]
@@ -864,7 +878,7 @@ pub async fn search_file_ids_only(
     dir_paths: Option<Vec<String>>,
     ext_filter: Option<Vec<String>>,
     semantic: Option<bool>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<IdWithPath>, String> {
     search_file_ids_only_impl(&state, query, dir_ids, dir_paths, ext_filter, semantic).await
 }
 
@@ -993,6 +1007,20 @@ mod snippet_tests {
             "物业费纠纷",
         );
         assert!(s.contains("<em>"), "应高亮重叠词: {s}");
+    }
+
+    #[test]
+    fn id_with_path_serializes_to_expected_json_shape() {
+        // search_file_ids_only now returns Vec<IdWithPath> instead of Vec<String>
+        // so the frontend can resolve all selected ids to paths in one round-trip
+        // (fixes the "去聊天 only sends 20" bug). Lock the wire shape here.
+        use super::IdWithPath;
+        let row = IdWithPath {
+            file_id: "abc-123".to_string(),
+            path: "/Users/gray/Docs/合同.pdf".to_string(),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert_eq!(json, r#"{"file_id":"abc-123","path":"/Users/gray/Docs/合同.pdf"}"#);
     }
 }
 
