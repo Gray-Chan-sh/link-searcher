@@ -87,7 +87,9 @@ pub async fn summarize_file(
         .ok_or_else(|| "AI 请求失败（检查 API 配置或网络）".to_string())?;
 
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let _ = crate::db::tracker::upsert_summary(&conn, &file_id, &summary);
+    if let Err(e) = crate::db::tracker::upsert_summary(&conn, &file_id, &summary) {
+        log::warn!("[AI] upsert_summary failed for {file_id}: {e}");
+    }
     Ok(SummaryResult { file_id, summary, cached: false })
 }
 
@@ -342,26 +344,38 @@ fn prepare_smart_prompt(
         let mut sids: Vec<String> = Vec::new();
         let mut sf: Vec<String> = Vec::new();
         let mut ev: Vec<EvidenceItem> = Vec::new();
-        for hit in &hits {
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
-                && let Some(md5) = &rec.md5
-                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
-                        && !text.trim().is_empty() {
-                            docs.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 2000)));
-                            sids.push(hit.file_id.clone());
-                            sf.push(rec.path.clone());
-                            ev.push(EvidenceItem {
-                                file_id: hit.file_id.clone(),
-                                path: rec.path.clone(),
-                                snippet: truncate_text(&text, 200),
-                                bm25_score: hit.bm25_score,
-                                semantic_score: hit.semantic_score,
-                                rrf_score: hit.rrf_score,
-                                rewritten: false,
-                                rewritten_query: None,
-                                from_history: false,
-                            });
-                        }
+        // 批量取文件 + 内容，避免每 hit 一次 DB round trip（N+1）
+        let ids: Vec<String> = hits.iter().map(|h| h.file_id.clone()).collect();
+        let recs = crate::db::tracker::get_files_by_ids(&conn, &ids).unwrap_or_default();
+        let mut md5_to_text: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        {
+            let md5s: Vec<String> = recs.iter().flatten().filter_map(|r| r.md5.clone()).collect();
+            let contents = crate::db::tracker::get_contents(&conn, &md5s).unwrap_or_default();
+            for (m, c) in md5s.iter().zip(contents.iter()) {
+                if let Some(text) = c {
+                    md5_to_text.insert(m.clone(), text.clone());
+                }
+            }
+        }
+        for (hit, rec) in hits.iter().zip(recs.iter()) {
+            let Some(rec) = rec else { continue };
+            let Some(md5) = &rec.md5 else { continue };
+            let Some(text) = md5_to_text.get(md5) else { continue };
+            if text.trim().is_empty() { continue; }
+            docs.push(format!("【{}】\n{}", rec.path, truncate_text(text, 2000)));
+            sids.push(hit.file_id.clone());
+            sf.push(rec.path.clone());
+            ev.push(EvidenceItem {
+                file_id: hit.file_id.clone(),
+                path: rec.path.clone(),
+                snippet: truncate_text(text, 200),
+                bm25_score: hit.bm25_score,
+                semantic_score: hit.semantic_score,
+                rrf_score: hit.rrf_score,
+                rewritten: false,
+                rewritten_query: None,
+                from_history: false,
+            });
         }
         drop(conn);
         (docs.join("\n\n---\n\n"), sids, sf, ev)
@@ -804,20 +818,24 @@ pub(crate) fn bm25_relevant_hits(
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut bm25_hits: Vec<ScoredHit> = Vec::new();
     let mut seen_md5: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for hit in result.hits {
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id)
-            && rec.status == "active"
-                && let Some(md5) = &rec.md5
-                    && seen_md5.insert(md5.clone()) {
-                        bm25_hits.push(ScoredHit {
-                            file_id: hit.file_id,
-                            path: rec.path,
-                            bm25_score: Some(hit.score),
-                            semantic_score: None,
-                            rrf_score: None,
-                            from_history: false,
-                        });
-                    }
+    {
+        // 批量取文件记录，避免每 hit 一次 DB round trip（N+1）
+        let ids: Vec<String> = result.hits.iter().map(|h| h.file_id.clone()).collect();
+        let recs = crate::db::tracker::get_files_by_ids(&conn, &ids).unwrap_or_default();
+        for (hit, rec) in result.hits.iter().zip(recs.iter()) {
+            let Some(rec) = rec else { continue };
+            if rec.status != "active" { continue; }
+            let Some(md5) = &rec.md5 else { continue };
+            if !seen_md5.insert(md5.clone()) { continue; }
+            bm25_hits.push(ScoredHit {
+                file_id: hit.file_id.clone(),
+                path: rec.path.clone(),
+                bm25_score: Some(hit.score),
+                semantic_score: None,
+                rrf_score: None,
+                from_history: false,
+            });
+        }
     }
 
     // Safety net: RegexQuery on STRING fields can silently fail on Unicode
@@ -981,7 +999,7 @@ pub(crate) async fn prepare_conversation_prompt(
                     }
             // 文件扩展名检测：如果是文件路径（有扩展名），尝试精确匹配
             if let Some(ext) = std::path::Path::new(p).extension()
-                && ext.to_string_lossy().len() > 0
+                && !ext.to_string_lossy().is_empty()
                     && let Ok(Some(rec)) = crate::db::tracker::get_file_by_path(&conn, p) {
                         scope_file_resolved.push((rec.id, rec.path));
                         continue;
@@ -1139,11 +1157,19 @@ pub(crate) async fn prepare_conversation_prompt(
         }
         {
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            // 批量补全 path，避免每 hit 一次 DB round trip（N+1）
+            let missing_ids: Vec<String> = all_hits.iter()
+                .filter(|h| h.path.is_empty())
+                .map(|h| h.file_id.clone())
+                .collect();
+            let recs = crate::db::tracker::get_files_by_ids(&c, &missing_ids).unwrap_or_default();
+            let mut i = 0usize;
             for hit in &mut all_hits {
                 if hit.path.is_empty() {
-                    if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&c, &hit.file_id) {
+                    if let Some(Some(rec)) = recs.get(i) {
                         hit.path = rec.path.clone();
                     }
+                    i += 1;
                 }
             }
         }
@@ -1154,13 +1180,45 @@ pub(crate) async fn prepare_conversation_prompt(
     const MAX_CONTENT_INJECT: usize = 30;
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
+    // 预取本轮需要的所有文件记录（旧来源 + mention + 注入候选），
+    // 后续循环一律查内存 Map，避免每文件一次 DB round trip（N+1）。
+    let mut rec_by_id: std::collections::HashMap<String, crate::db::tracker::FileRecord> = std::collections::HashMap::new();
+    let mut md5_to_text: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    {
+        let mut need_ids: Vec<String> = Vec::new();
+        need_ids.extend(source_ids.iter().cloned());
+        need_ids.extend(mention_resolved.iter().map(|(fid, _)| fid.clone()));
+        need_ids.extend(all_hits.iter().map(|h| h.file_id.clone()));
+        // 去重
+        let mut seen = std::collections::HashSet::new();
+        need_ids.retain(|id| seen.insert(id.clone()));
+        let recs = crate::db::tracker::get_files_by_ids(&conn, &need_ids).unwrap_or_default();
+        let mut md5s: Vec<String> = Vec::new();
+        for (id, rec) in need_ids.iter().zip(recs.iter()) {
+            if let Some(rec) = rec {
+                rec_by_id.insert(id.clone(), rec.clone());
+                if let Some(md5) = &rec.md5 {
+                    md5s.push(md5.clone());
+                }
+            }
+        }
+        md5s.sort();
+        md5s.dedup();
+        let contents = crate::db::tracker::get_contents(&conn, &md5s).unwrap_or_default();
+        for (m, c) in md5s.iter().zip(contents.iter()) {
+            if let Some(text) = c {
+                md5_to_text.insert(m.clone(), text.clone());
+            }
+        }
+    }
+
     // 旧来源保留：对话中明确提到过的文件优先补入
     if !strict_docs && all_hits.len() < MAX_CONTENT_INJECT {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
         for fid in source_ids.iter().rev() {
             if all_hits.len() >= MAX_CONTENT_INJECT { break; }
             if all_seen.contains(fid) { continue; }
-            let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) else { continue };
+            let Some(rec) = rec_by_id.get(fid) else { continue };
             if rec.status == "active" && rec.md5.is_some() {
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 if !stem.is_empty() && message_text.contains(stem.as_str()) {
@@ -1186,16 +1244,16 @@ pub(crate) async fn prepare_conversation_prompt(
     // Layer 0: Always load explicitly scoped files into context (independent of BM25).
     for (i, (fid, resolved_path)) in mention_resolved.iter().enumerate() {
         let n = i + 1;
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
+        if let Some(rec) = rec_by_id.get(fid)
             && let Some(md5) = &rec.md5
-                && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5)
+                && let Some(text) = md5_to_text.get(md5)
                     && !text.trim().is_empty() {
                         mention_has_content = true;
-                        docs.push(format!("[{n}]（{resolved_path}）\n{}", chunked_or_truncated(&conn, md5, &text, &search_q)));
+                        docs.push(format!("[{n}]（{resolved_path}）\n{}", chunked_or_truncated(&conn, md5, text, &search_q)));
                         evidence.push(EvidenceItem {
                             file_id: fid.clone(),
                             path: resolved_path.clone(),
-                            snippet: truncate_text(&text, 200),
+                            snippet: truncate_text(text, 200),
                             bm25_score: None,
                             semantic_score: None,
                             rrf_score: None,
@@ -1223,17 +1281,17 @@ pub(crate) async fn prepare_conversation_prompt(
     let mut injected_ids = std::collections::HashSet::new();
     let mut inject_idx = 0usize;
     for hit in &content_hits {
-        if inject_idx % 10 == 0 { check_cancel!(); }
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, &hit.file_id) {
-            if let Some(md5) = &rec.md5 {
-                if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                    if !text.trim().is_empty() {
+        if inject_idx.is_multiple_of(10) { check_cancel!(); }
+        if let Some(rec) = rec_by_id.get(&hit.file_id)
+            && let Some(md5) = &rec.md5
+                && let Some(text) = md5_to_text.get(md5)
+                    && !text.trim().is_empty() {
                         let per_file = if full_recall {
                             content_budget
                         } else {
                             content_budget / content_hits.len().max(1)
                         };
-                        let injected = chunked_or_truncated_with_budget(&conn, md5, &text, &search_q, per_file);
+                        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file);
                         if !injected.trim().is_empty() {
                             docs.push(format!("【{}】\n{}", rec.path, injected));
                             content_budget = content_budget.saturating_sub(injected.chars().count());
@@ -1241,11 +1299,8 @@ pub(crate) async fn prepare_conversation_prompt(
                         }
                         if content_budget == 0 { break; }
                     }
-                }
-            }
-        }
         inject_idx += 1;
-        if inject_idx % 10 == 0 || inject_idx == content_hits.len() {
+        if inject_idx.is_multiple_of(10) || inject_idx == content_hits.len() {
             emit_progress("injection", &format!("注入中 {}/{}", inject_idx, content_hits.len()), inject_idx, content_hits.len());
         }
     }
@@ -1255,8 +1310,7 @@ pub(crate) async fn prepare_conversation_prompt(
     const MAX_REMAINING_SUMMARY: usize = 60;
     let remaining_hits: Vec<ScoredHit> = all_hits.iter()
         .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && !injected_ids.contains(&h.file_id))
-        .cloned()
-        .take(MAX_REMAINING_SUMMARY)
+        .take(MAX_REMAINING_SUMMARY).cloned()
         .collect();
     if !remaining_hits.is_empty() {
         check_cancel!();
@@ -1383,6 +1437,8 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
     let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
 
     let sent_re = regex::Regex::new(r"[^。！？.!?\n]*[。！？.!?]").unwrap();
+    // 已有引用的句子直接跳过，不再追加 [N]（避免 [3][1] 重叠）
+    let has_cite_re = regex::Regex::new(r"\[\d+\]").unwrap();
     let mut result = String::with_capacity(protected.len() + 64);
     let mut last_end = 0;
     let mut prev_cite: Option<usize> = None;
@@ -1396,7 +1452,7 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
 
         last_end = m.end();
 
-        if trimmed.is_empty() || trimmed.starts_with("\x00CODE") || regex::Regex::new(r"\[\d+\]").unwrap().is_match(trimmed) {
+        if trimmed.is_empty() || trimmed.starts_with("\x00CODE") || has_cite_re.is_match(trimmed) {
             prev_cite = None;
             continue;
         }
@@ -1479,7 +1535,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, evidence, .. } =
-        prepare_conversation_prompt(&*state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -1529,7 +1585,7 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
-    let prepared = prepare_conversation_prompt(&*state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id).await;
+    let prepared = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id).await;
     match &prepared {
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
@@ -1637,7 +1693,7 @@ pub(crate) async fn batch_summarize(
     }
     const BATCH_SIZE: usize = 15;
     const MAX_CONCURRENCY: usize = 6;
-    let total_batches = (file_ids.len() + BATCH_SIZE - 1) / BATCH_SIZE;
+    let total_batches = file_ids.len().div_ceil(BATCH_SIZE);
 
     let emit_progress = |completed: usize, total: usize| {
         if let Some(a) = app {
@@ -1656,13 +1712,11 @@ pub(crate) async fn batch_summarize(
     for chunk in file_ids.chunks(BATCH_SIZE) {
         let mut batch = Vec::new();
         for fid in chunk {
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-                if let Some(md5) = &rec.md5 {
-                    if let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
+            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
+                && let Some(md5) = &rec.md5
+                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
                         batch.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 3000)));
                     }
-                }
-            }
         }
         all_batch_content.push(batch);
     }

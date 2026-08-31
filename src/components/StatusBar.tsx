@@ -22,7 +22,7 @@ export default function StatusBar() {
     const briefs = status?.briefs ?? []
     if (briefs.length === 0) return
     const lastRead = parseInt(localStorage.getItem(LAST_READ_KEY) ?? '0', 10)
-    if (briefs[0].completed_at > lastRead) {
+    if (briefs[0]!.completed_at > lastRead) {
       setHasUnreadBrief(true)
     }
   }, [status?.briefs])
@@ -30,7 +30,7 @@ export default function StatusBar() {
   const handleBriefClick = () => {
     const briefs = status?.briefs ?? []
     if (briefs.length > 0) {
-      localStorage.setItem(LAST_READ_KEY, String(briefs[0].completed_at))
+      localStorage.setItem(LAST_READ_KEY, String(briefs[0]!.completed_at))
     }
     setHasUnreadBrief(false)
     // Jump to the log viewer paused on the brief's task lines.

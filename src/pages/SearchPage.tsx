@@ -161,14 +161,14 @@ export default function SearchPage() {
     if (!currentRefine) return
     const next = new Set(currentRefine.selectedIds)
     if (next.has(fileId)) next.delete(fileId); else next.add(fileId)
-    setRefineHistory(prev => { const c = [...prev]; c[refineIndex] = { ...c[refineIndex], selectedIds: next }; return c })
+    setRefineHistory(prev => { const c = [...prev]; c[refineIndex] = { ...c[refineIndex]!, selectedIds: next }; return c })
   }
 
   const toggleRefineSelectAll = () => {
     if (!currentRefine) return
     const all = currentRefine.selectedIds.size === currentRefine.hits.length
     const next = all ? new Set<string>() : new Set(currentRefine.hits.map(h => h.file_id))
-    setRefineHistory(prev => { const c = [...prev]; c[refineIndex] = { ...c[refineIndex], selectedIds: next }; return c })
+    setRefineHistory(prev => { const c = [...prev]; c[refineIndex] = { ...c[refineIndex]!, selectedIds: next }; return c })
   }
 
   const goToChat = () => {
@@ -190,9 +190,9 @@ export default function SearchPage() {
       if (active?.closest('[data-search-input]') || active?.closest('[data-refine-input]')) return
       const hits = isRefining && currentRefine ? currentRefine.hits : search.hits
       if (search.status !== 'success' || hits.length === 0) return
-      if (e.key === 'ArrowDown') { e.preventDefault(); const n = focusIndex + 1; if (n < hits.length) { setFocusIndex(n); setSelectedHit(hits[n]) } }
-      else if (e.key === 'ArrowUp') { e.preventDefault(); const p = focusIndex - 1; if (p >= 0) { setFocusIndex(p); setSelectedHit(hits[p]) } }
-      else if (e.key === 'Enter' && focusIndex >= 0) { e.preventDefault(); openFile(hits[focusIndex].file_id) }
+      if (e.key === 'ArrowDown') { e.preventDefault(); const n = focusIndex + 1; if (n < hits.length) { setFocusIndex(n); setSelectedHit(hits[n]!) } }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); const p = focusIndex - 1; if (p >= 0) { setFocusIndex(p); setSelectedHit(hits[p]!) } }
+      else if (e.key === 'Enter' && focusIndex >= 0) { e.preventDefault(); openFile(hits[focusIndex]!.file_id) }
     }
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)

@@ -160,7 +160,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       nextIdx = (matchIndex - 1 + marks.length) % marks.length
     }
     setMatchIndex(nextIdx)
-    marks[nextIdx].scrollIntoView({ behavior: 'smooth', block: 'center' })
+    marks[nextIdx]!.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }, [matchCount, matchIndex])
 
   if (!fileId) return null

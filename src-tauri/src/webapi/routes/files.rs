@@ -140,7 +140,7 @@ async fn files_handler(
             error: e.to_string(),
         })?;
 
-    let ps = params.page_size.unwrap_or(50).max(1).min(1000);
+    let ps = params.page_size.unwrap_or(50).clamp(1, 1000);
     let p = params.page.unwrap_or(1).max(1);
     let offset = (p - 1) * ps;
 

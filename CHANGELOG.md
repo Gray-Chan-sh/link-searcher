@@ -14,6 +14,17 @@
 
 ---
 
+## 2026-08-31（性能优化）
+
+- **AI 上下文注入 N+1 查询**：`prepare_conversation_prompt`（`ai.rs`）对每个 hit 逐条调 `get_file_by_id` + `get_content`，30 个文件 = 60+ 次 DB round trip。新增 `tracker.rs` 批量版 `get_files_by_ids` / `get_contents`（`IN (?,?...)` 单次查询），`ai.rs` 三处热循环（旧来源补入、Layer 0 mention 注入、Layer 1 BM25 注入）改为预取到内存 Map 后查表。`smart_search` 路径同改。
+- **`auto_cite` 正则编译在循环内**：`ai.rs:1399` 对每个句子 `Regex::new(r"\[\d+\]")`，500 句编译 500 次。提升到循环外，与 `code_block_re`、`sent_re` 同级。
+- **`summarize_file` 静默吞写库错误**：`let _ = upsert_summary(...)` 改为 `if let Err(e) = ... { log::warn!(...) }`，避免摘要写入失败时无任何日志。
+- **ChatPanel 每秒 re-render 整个面板**：`setInterval(() => setClockNow(Date.now()), 1000)` 让 756 行组件（消息流、chips、mention 状态）每秒全量 diff。提取为独立 `ElapsedTimer` 小组件，只有计时文本 re-render。
+- **TypeScript `noUncheckedIndexedAccess`**：`tsconfig.app.json` 开启，暴露 27 处 `arr[i]` 潜在 undefined（`ChatPanel`、`SearchPage`、`Browse`、`scopeParser` 等），全部加 `!` 或 guard 修复。
+- **Clippy 自动修复**：`cargo clippy --fix` 修 20+ 条（`div_ceil`、`is_empty`、`rfind`、`is_multiple_of`、`clamp`、`is_err`、`let...else → ?`），剩余 11 条为结构性警告（函数参数过多），留待后续重构。
+
+---
+
 ## 2026-08-31（文档 — 设计手册重写为分模块教程）
 
 - **`docs/ARCHITECTURE.md`**：彻底重写为**分模块设计手册**，面向技术小白，著重说明思想、架构、目标。14 个章节覆盖：

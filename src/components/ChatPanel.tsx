@@ -23,12 +23,26 @@ interface ChatPanelProps {
   onScopeAction?: (action: string) => void
 }
 
+// 请求进行中每秒走表，驱动 "mm:ss" 计时。独立小组件：只有计时文本 re-render，
+// 避免整个 ChatPanel 每 1s 全量 diff（消息流、chips、mention 状态都被卷入）。
+function ElapsedTimer({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    setNow(Date.now())
+    const it = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(it)
+  }, [startedAt])
+  const s = Math.max(0, Math.floor((now - startedAt) / 1000))
+  const mm = String(Math.floor(s / 60)).padStart(2, '0')
+  const ss = String(s % 60).padStart(2, '0')
+  return <span>{`${mm}:${ss}`}</span>
+}
+
 export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction }: ChatPanelProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const [input, setInput] = useState('')
   const [showSources, setShowSources] = useState(false)
-  const [clockNow, setClockNow] = useState(() => Date.now())
   // @mention 选择器状态
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionPos, setMentionPos] = useState<{ left: number; top: number } | null>(null)
@@ -91,22 +105,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [messages, loading])
-
-  // 请求进行中每秒走表，驱动 "mm:ss" 计时。
-  useEffect(() => {
-    if (!loading) return
-    setClockNow(Date.now())
-    const it = setInterval(() => setClockNow(Date.now()), 1000)
-    return () => clearInterval(it)
-  }, [loading])
-
-  const elapsedText = useMemo(() => {
-    if (!pendingStartedAt) return ''
-    const s = Math.max(0, Math.floor((clockNow - pendingStartedAt) / 1000))
-    const mm = String(Math.floor(s / 60)).padStart(2, '0')
-    const ss = String(s % 60).padStart(2, '0')
-    return `${mm}:${ss}`
-  }, [pendingStartedAt, clockNow])
 
   const errText = (e: unknown) => {
     const raw =
@@ -466,11 +464,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                           if (href?.startsWith('#ref:')) {
                             const idx = parseInt(href.slice(5), 10)
                             const ev = evidenceFor(i)
-                            if (idx >= 0 && idx < ev.length && ev[idx].path) {
+                            if (idx >= 0 && idx < ev.length && ev[idx]!.path) {
                               return (
                                 <span
                                   className="text-blue-600 dark:text-blue-400 cursor-pointer underline decoration-dotted hover:underline"
-                                  onClick={() => navigate('/browse?path=' + encodeURIComponent(ev[idx].path))}
+                                  onClick={() => navigate('/browse?path=' + encodeURIComponent(ev[idx]!.path))}
                                 >{children}</span>
                               )
                             }
@@ -483,7 +481,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                       const ev = evidenceFor(i)
                       const links = nums.map(n => {
                         const idx = parseInt(n, 10) - 1
-                        if (idx >= 0 && idx < ev.length && ev[idx].path) {
+                        if (idx >= 0 && idx < ev.length && ev[idx]!.path) {
                           return `[${n}](#ref:${idx})`
                         }
                         return `[${n}]`
@@ -559,7 +557,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                 )}
               </span>
             ) : (
-              <span>{t('thinking')} {elapsedText}</span>
+              <span>{t('thinking')} {pendingStartedAt ? <ElapsedTimer startedAt={pendingStartedAt} /> : null}</span>
             )}
             <button
               onClick={handleCancel}
@@ -726,7 +724,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               onKeyDown={e => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
                 if (e.key === 'Backspace' && !input && mentionChips.length > 0) {
-                  handleChipRemove(mentionChips[mentionChips.length - 1].path)
+                  handleChipRemove(mentionChips[mentionChips.length - 1]!.path)
                 }
               }}
               onDragOver={e => e.preventDefault()}

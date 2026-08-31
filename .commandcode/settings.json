@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(npx eslint src --ext .ts,.tsx 2 >& 1)",
+      "Shell(grep -n \"tsconfig\" tsconfig*.json 2>&1; cat tsconfig.app.json 2>&1 | head -50)",
+      "Shell(grep:*)",
+      "Shell(awk:*)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

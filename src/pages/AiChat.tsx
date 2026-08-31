@@ -223,7 +223,7 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
         refreshList()
       }).catch(() => {})
     } else {
-      const latest = sessions[0].id
+      const latest = sessions[0]!.id
       setActiveId(latest)
       loadSession(latest)
     }

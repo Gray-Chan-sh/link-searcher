@@ -441,9 +441,7 @@ fn semantic_snippet(content: &str, query: &str) -> String {
     for p in &prefixes {
         let pl = p.to_lowercase();
         if let Some(pos) = lower.find(&pl) {
-            let start = content.char_indices()
-                .filter(|&(i,_)| i <= pos)
-                .next_back()
+            let start = content.char_indices().rfind(|&(i,_)| i <= pos)
                 .map(|(i,_)| i)
                 .unwrap_or(pos);
             // Expand forward up to MAX_WORD chars but re-align to char boundary.
