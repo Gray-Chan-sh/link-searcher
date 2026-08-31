@@ -1209,6 +1209,11 @@ export default function Settings() {
               <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-900 rounded-lg text-sm text-amber-700 dark:text-amber-400">
                 ⚠️ 需要重启应用后才会启动 Web API 服务器
               </div>
+              <ToggleField
+                label="开发模式（代理到 Vite dev server，需先运行 npm run dev）"
+                checked={settings['web_api_dev_mode'] === 'true'}
+                onChange={v => handleFieldChange('web_api_dev_mode', v ? 'true' : 'false')}
+              />
               <div className="text-sm text-gray-700 dark:text-gray-300">
                 <span className="text-gray-500 dark:text-gray-400">访问地址：</span>
                 <span className="font-mono">https://127.0.0.1:{settings['web_api_port'] ?? '8443'}</span>

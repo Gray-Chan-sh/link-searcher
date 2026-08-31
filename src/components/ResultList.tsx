@@ -17,6 +17,8 @@ interface ResultListProps {
   hits: SearchHit[]
   selectedId: string | null
   onSelect: (hit: SearchHit) => void
+  checkboxIds?: Set<string>
+  onCheckboxToggle?: (fileId: string) => void
 }
 
 function highlightSnippet(snippet: string): React.ReactNode {
@@ -32,7 +34,7 @@ function highlightSnippet(snippet: string): React.ReactNode {
   })
 }
 
-export default function ResultList({ hits, selectedId, onSelect }: ResultListProps) {
+export default function ResultList({ hits, selectedId, onSelect, checkboxIds, onCheckboxToggle }: ResultListProps) {
   const { t } = useI18n()
   const containerRef = useRef<HTMLDivElement>(null)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 20 })
@@ -94,6 +96,12 @@ export default function ResultList({ hits, selectedId, onSelect }: ResultListPro
               style={{ top: actualIndex * ITEM_HEIGHT, height: ITEM_HEIGHT }}
             >
               <div className="flex items-center gap-2 mb-1">
+                {checkboxIds && onCheckboxToggle && (
+                  <input type="checkbox" checked={checkboxIds.has(hit.file_id)}
+                    onClick={e => e.stopPropagation()}
+                    onChange={() => onCheckboxToggle(hit.file_id)}
+                    className="shrink-0 rounded border-gray-300 dark:border-gray-600 text-blue-600 focus:ring-blue-500" />
+                )}
                 <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
                   {hit.file_name}
                 </span>

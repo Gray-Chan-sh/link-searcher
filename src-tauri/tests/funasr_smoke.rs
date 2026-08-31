@@ -110,5 +110,5 @@ fn audio_extractor_long_audio() {
         !body.contains("无识别结果"),
         "long audio should transcribe via VAD segments, got: {text:?}"
     );
-    eprintln!("[LONG] extract_audio (long) output head: {}", &text[..text.len().min(300)]);
+    eprintln!("[LONG] extract_audio (long) output head: {}", &text[..text.floor_char_boundary(text.len().min(300))]);
 }

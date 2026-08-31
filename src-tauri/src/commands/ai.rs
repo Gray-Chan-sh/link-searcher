@@ -460,6 +460,7 @@ pub async fn smart_search_stream(
     .map_err(|e| format!("task panicked: {e}"))?;
 
     let raw_text = result.text.unwrap_or_default();
+    log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
     let cited_text = auto_cite(&raw_text, &evidence);
     let _ = app.emit("ai-done", AiDone {
         session_id,
@@ -1587,11 +1588,12 @@ pub async fn conversation_ask_stream(
                 &conn, &session_id, turn_number, (i + 1) as u32, event_type, payload,
             );
         }
-    }
-    let raw_text = result.text.unwrap_or_default();
-    let cited_text = auto_cite(&raw_text, &evidence);
-    let _ = app.emit("ai-done", AiDone {
-        session_id,
+     }
+     let raw_text = result.text.unwrap_or_default();
+     log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
+     let cited_text = auto_cite(&raw_text, &evidence);
+     let _ = app.emit("ai-done", AiDone {
+         session_id,
         full_text: cited_text,
         took_ms: result.took_ms,
         cancelled: result.cancelled,

@@ -18,6 +18,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "web_api_port",
     "web_api_token",
     "web_api_bind",
+    "web_api_dev_mode",
 ];
 
 #[tauri::command]

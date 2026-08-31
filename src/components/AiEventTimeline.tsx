@@ -42,8 +42,8 @@ function formatPayload(type: string, payload: Record<string, unknown>): string {
       return parts.join(' · ') || '(all)'
     }
     case 'retrieval': {
-      const p = payload as { search_query?: string; bm25_hits?: number; semantic_fused?: boolean; merged_hits?: number; from_history_count?: number }
-      const parts = [`q="${p.search_query}"`, `bm25=${p.bm25_hits}`, `merged=${p.merged_hits}`]
+      const p = payload as { search_query?: string; total_matches?: number; merged_hits?: number; semantic_fused?: boolean; from_history_count?: number }
+      const parts = [`q="${p.search_query ?? ''}"`, `matched=${p.total_matches ?? p.merged_hits ?? 0}`]
       if (p.semantic_fused) parts.push('semantic')
       if (p.from_history_count) parts.push(`history=${p.from_history_count}`)
       return parts.join(' · ')

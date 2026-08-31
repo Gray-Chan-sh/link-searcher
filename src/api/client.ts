@@ -44,6 +44,15 @@ const MAPPINGS: Record<string, Mapping> = {
   search_tree_prune: { method: 'GET', path: '/api/search/tree-prune' },
   get_search_history: { method: 'GET', path: '/api/search/history' },
   clear_search_history: { method: 'DELETE', path: '/api/search/history' },
+  refine_search: (a) => ({
+    method: 'POST', path: '/api/search/refine',
+    paramMap: { query: 'q', pageSize: 'page_size' },
+    body: { query: a.query, file_ids: a.fileIds, page: a.page, page_size: a.pageSize },
+  }),
+  search_file_ids_only: () => ({
+    method: 'GET', path: '/api/search/file-ids',
+    paramMap: { query: 'q', dirIds: 'dir_ids', extFilter: 'ext_filter', dirPaths: 'dir_paths' },
+  }),
   // ExportBody on the wire is snake_case (no serde rename on the server).
   export_search_results: (a) => ({
     method: 'POST', path: '/api/search/export',
@@ -119,6 +128,8 @@ const MAPPINGS: Record<string, Mapping> = {
   conversation_ask_stream: (a) => ({ method: 'POST', path: '/api/ai/conversation/ask/stream', body: a, sse: true }),
   test_ai_gateway: { method: 'GET', path: '/api/ai/gateways/test' },
   cancel_ai_request: { method: 'POST', path: '/api/ai/cancel' },
+  get_ai_events: { method: 'GET', path: '/api/ai/events', paramMap: { sessionId: 'session_id' } },
+  get_turn_ai_events: { method: 'GET', path: '/api/ai/events/turn', paramMap: { sessionId: 'session_id', turnNumber: 'turn_number' } },
 
   // ── Chat sessions ──
   list_chat_sessions: {

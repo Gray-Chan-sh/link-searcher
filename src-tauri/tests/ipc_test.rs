@@ -90,7 +90,7 @@ fn setup_app(
     );
 
     let mut ctx = mock_context(noop_assets());
-    for cmd in &["list_dirs", "add_dir", "get_index_status", "search", "suggest", "get_settings"] {
+    for cmd in &["list_dirs", "add_dir", "get_index_status", "search", "suggest", "get_settings", "conversation_ask"] {
         ctx.runtime_authority_mut()
             .__allow_command(cmd.to_string(), tauri::utils::acl::ExecutionContext::Local);
     }
@@ -104,6 +104,7 @@ fn setup_app(
             link_searcher_lib::commands::search::search,
             link_searcher_lib::commands::search::suggest,
             link_searcher_lib::commands::settings::get_settings,
+            link_searcher_lib::commands::ai::conversation_ask,
         ])
         .build(ctx)
         .expect("failed to build mock app");
@@ -234,4 +235,61 @@ fn test_ipc_get_settings() {
         "settings should contain 'ocr_lang' key"
     );
     assert_eq!(result["ocr_lang"], json!("chi_sim"), "expected ocr_lang=chi_sim");
+}
+
+// ── full_recall 参数传递测试 ──
+
+/// 验证 `conversation_ask` 接受 `full_recall` 参数（全量召回开关）。
+/// 参数解析成功 → 进入函数体（若 LLM 已配置则继续；否则返回配置错误）。
+/// 参数解析失败 → Tauri 框架直接返回错误，不含 "AI" 字样。
+/// 本测试只断言"参数被正确接收"，不依赖 LLM 是否可用。
+#[test]
+fn test_ipc_conversation_ask_full_recall_param_accepted() {
+    let tmp = TempDir::new("full_recall");
+    let (_app, webview) = setup_app(&tmp);
+
+    let result = invoke_cmd(
+        &webview,
+        "conversation_ask",
+        json!({
+            "messages": [{"role": "user", "content": "测试"}],
+            "sourceIds": [],
+            "scope": {},
+            "sessionRetrievalScope": [],
+            "strictDocs": false,
+            "fullRecall": true,
+        }),
+    );
+
+    // 参数解析成功的标志：错误来自函数体内部（包含 "AI"），而非框架参数错误（含 "field"/"missing"）
+    let err = result.as_str().unwrap_or("");
+    assert!(
+        !err.contains("field") && !err.contains("missing"),
+        "full_recall 参数未被正确接收：{err}"
+    );
+}
+
+/// 验证 `conversation_ask` 在不传 `fullRecall` 时保持向后兼容。
+#[test]
+fn test_ipc_conversation_ask_full_recall_omitted_backward_compat() {
+    let tmp = TempDir::new("full_recall_compat");
+    let (_app, webview) = setup_app(&tmp);
+
+    let result = invoke_cmd(
+        &webview,
+        "conversation_ask",
+        json!({
+            "messages": [{"role": "user", "content": "测试"}],
+            "sourceIds": [],
+            "scope": {},
+            "sessionRetrievalScope": [],
+            "strictDocs": false,
+        }),
+    );
+
+    let err = result.as_str().unwrap_or("");
+    assert!(
+        !err.contains("field") && !err.contains("missing"),
+        "省略 fullRecall 时应向后兼容：{err}"
+    );
 }

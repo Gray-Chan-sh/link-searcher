@@ -113,6 +113,8 @@ export interface ChatSession {
   retrieval_scope?: string[]
   /** P2：严格模式——范围内无命中时拒绝回答 */
   strict_docs?: boolean
+  /** 全量召回：检索与注入不截断，尽可能覆盖范围内所有文件 */
+  full_recall?: boolean
 }
 
 export async function cancelAiRequest(): Promise<void> {
@@ -141,8 +143,8 @@ export interface ScopeCondition {
   parsed?: string | null
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean): Promise<string> {
-  return client.invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean): Promise<string> {
+  return client.invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -166,8 +168,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return client.invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean): Promise<void> {
-  return client.invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean): Promise<void> {
+  return client.invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {
@@ -181,16 +183,35 @@ export async function searchTreePrune(term: string): Promise<string[]> {
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
 export async function listenAiStream(
   sessionId: string,
-  onChunk: (delta: string) => void,
+  onChunk: (delta: string, isReasoning?: boolean) => void,
   onDone: (p: AiDonePayload) => void,
 ): Promise<() => void> {
-  const unChunk = await client.listen<{ session_id: string; delta: string }>('ai-chunk', e => {
-    if (e.session_id === sessionId) onChunk(e.delta)
+  const unChunk = await client.listen<{ session_id: string; delta: string; reasoning?: boolean }>('ai-chunk', e => {
+    if (e.session_id === sessionId) onChunk(e.delta, e.reasoning)
   })
   const unDone = await client.listen<AiDonePayload>('ai-done', e => {
     if (e.session_id === sessionId) onDone(e)
   })
   return () => { unChunk(); unDone() }
+}
+
+export interface AiProgressPayload {
+  session_id: string
+  phase: string
+  message: string
+  current: number
+  total: number
+}
+
+/** Listen for ai-progress events of one session. Returns an unlisten fn. */
+export async function listenAiProgress(
+  sessionId: string,
+  onProgress: (p: AiProgressPayload) => void,
+): Promise<() => void> {
+  const un = await client.listen<AiProgressPayload>('ai-progress', e => {
+    if (e.session_id === sessionId) onProgress(e)
+  })
+  return un
 }
 
 export async function listChatSessions(): Promise<ChatSessionMeta[]> {

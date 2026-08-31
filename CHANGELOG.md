@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-08-31（修复 — Web 模式「推理过程」面板无内容）
+
+**根因**：`ai_events` 表里推理时间线数据完整（query_rewrite → scope_resolved → retrieval → context_assembled → llm_call → turn_complete 6 类事件），但 **Web API 模式的查询链路缺失**：后端 Web API 层没有暴露 `ai_events` 的读取端点（只有 Tauri IPC 命令 `get_ai_events`/`get_turn_ai_events`），前端 `client.ts` 的 MAPPINGS 也没有这两条命令的 HTTP 映射。于是浏览器模式下调 `getTurnAiEvents()` 时，`client.invoke` 命中 `if (!entry)` 分支（`[client] No mapping for "get_turn_ai_events"`），直接返回空数组，`AiEventTimeline` 因 `events.length === 0` 而渲染空白。桌面（Tauri IPC）模式不受影响。
+
+**修复**：
+- `src-tauri/src/webapi/routes/ai.rs`：新增两个端点
+  - `GET /api/ai/events?session_id=…` → `get_session_events`（会话全部事件）
+  - `GET /api/ai/events/turn?session_id=…&turn_number=N` → `get_turn_events`（单轮事件）
+- `src/api/client.ts`：MAPPINGS 补充 `get_ai_events`、`get_turn_ai_events` → 上述端点
+
+**顺带修复（检索行显示 `bm25=undefined`）**：`src/components/AiEventTimeline.tsx` 的 `retrieval` 分支读的是 `bm25_hits`/`merged_hits`，但实际事件 payload 的键是 `total_matches`/`from_history_count`，字段错位导致显示 `bm25=undefined · merged=undefined`。改为读取 `total_matches`（带 `merged_hits` 兜底），显示为 `matched=N`。
+
+**验证**：`cargo check`、`tsc -b` 零错误；重启 debug 后端、重建 dist 后，浏览器中「概括那个压缩包的内容」会话的推理过程面板完整显示 6 条事件（查询改写/范围解析/检索/上下文组装/LLM 调用/轮次完成），检索行显示 `matched=0` 而非 `undefined`。
+
+---
+
+## 2026-08-31（修复 — WebUI 模式 AI 回复被前端丢弃）
+
+**根因**：`src/components/ChatPanel.tsx` 的「恢复挂起请求」effect 依赖数组里含有 `pending_query`。每次 `handleSend` 设置 `pending_query` 后，该 effect 立即把刚写入的 `pending_started_at` 清回 `null`，导致 `loadingRef.current` 恒为 `false`。4–5 秒后 `ai-done` 事件到达时，被其回调里的 `if (!loadingRef.current)` 守卫丢弃（`console.warn('ai-done dropped: loadingRef is false')`），AI 回复既不在 UI 渲染、也不落库，用户只看到问题发出却无任何回答/报错。
+
+**修复**：`ChatPanel.tsx` —— 将该 effect 依赖数组由 `[session?.id, session?.pending_query]` 改为 `[session?.id]`，使它在同会话内发送时不触发清空，仅切到另一会话（残留 pending）时才清理。保留了「切会话清残留」意图，同时恢复 `loadingRef` 在请求期间的 `true` 状态。
+
+**验证**：WebUI（Web API 模式）完整走「新建搜索 万城(1303条) → 🔍缩小范围 在结果内搜常宏案(→1份) → 去聊天 → 提问」：修复后 AI 回答正常渲染（含 `⏱耗时`、`🔍检索依据`、`🧠推理过程`），且 `per_turn_evidence` 正确写入 `chat_history.json`。修复前该流程回答既不渲染也不落库。
+
+> 本次未新增组件测试：ChatPanel 的 bug 属 effect 依赖时序问题，难以抽成纯函数，且项目现有测试体例为纯工具函数测试（`src/utils/__tests__/*`），故维持不引入 jsdom/testing-library 依赖。
+
+---
+
 ## 2026-08-30（修复 — AI 对话无响应）
 
 **根因**：两个问题导致 AI 问答静默失败。

@@ -65,6 +65,7 @@
 - [x] **音频 STT**：FunASR-Nano ONNX 推理，8 种音频格式，Python助手脚本
 - [x] **热词增量计数**：jieba 分词 + SQLite，ASR 识别精度增强
 - [x] **FunASR 零 Python 化（方案 B）**：sherpa-onnx crate（1.13.4）替代 Python venv 推理，下载预转 FunASR-Nano ONNX int8 模型（~842MB）；首次使用（模型未就绪）时自动下载，后台进度 + 完成后可立即索引（复用 install_funasr 事件模式）；部署不打包模型、不装 torch，删除 venv/install_funasr 逻辑
+- [ ] **提取内容质量检测**：对全部文件的正文提取结果做三类检查——①提取内容为空（md5 存在但无文本）②明显乱码（不可打印字符/替换符占比高、无有效中文/英文词）③明显水印文本（"证据"、"仅供"、"附件"等重复水印、极短内容如页码）。检测出的文件标记 quality_bad，支持批量重新提取。接近 P3 的完整性对账 + RAG 内容分析，但独立为可操作项
 
 ---
 
