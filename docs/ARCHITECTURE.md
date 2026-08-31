@@ -1,930 +1,769 @@
-# Link-Searcher 架构文档
+# Link-Searcher 设计手册
 
-> 面向开发者的完整技术文档。涵盖 AI RAG 管线、全文搜索、前端架构、数据库、事件系统、Web API、调试诊断。
+> 分模块讲解 Link-Searcher 的设计思想、架构决策与实现目标。
+> 面向希望理解"为什么这样设计"以及"如何复现一个类似程序"的开发者。
+> 每一模块说明：**它解决什么问题 → 为什么这样设计 → 核心架构 → 关键决策 → 边界与取舍**。
 
 ---
 
 ## 目录
 
-1. [技术栈](#技术栈)
-2. [项目结构总览](#项目结构总览)
-3. [数据库 Schema](#数据库-schema)
-4. [Tauri IPC 命令参考](#tauri-ipc-命令参考)
-5. [AI RAG 管线详解](#ai-rag-管线详解)
-6. [内容注入与截断策略](#内容注入与截断策略)
-7. [事件系统](#事件系统)
-8. [Web API 服务器](#web-api-服务器)
-9. [前端架构](#前端架构)
-10. [配置系统](#配置系统)
-11. [构建与部署](#构建与部署)
-12. [测试](#测试)
-13. [调试与诊断](#调试与诊断)
-14. [已知缺陷与设计约束](#已知缺陷与设计约束)
+- [一、总体设计思想](#一总体设计思想)
+- [二、模块一：全文搜索引擎（Tantivy + jieba）](#二模块一全文搜索引擎tantivy--jieba)
+- [三、模块二：文本提取管线（Extractor）](#三模块二文本提取管线extractor)
+- [四、模块三：目录扫描与文件监控（Scanner）](#四模块三目录扫描与文件监控scanner)
+- [五、模块四：AI 出口（LLM 网关调用）](#五模块四ai-出口llm-网关调用)
+- [六、模块五：语义向量检索（BGE 本地嵌入）](#六模块五语义向量检索bge-本地嵌入)
+- [七、模块六：AI 聊天与 RAG 管线](#七模块六ai-聊天与-rag-管线)
+- [八、模块七：会话与事件系统](#八模块七会话与事件系统)
+- [九、模块八：Web API 服务器（远程访问）](#九模块八web-api-服务器远程访问)
+- [十、模块九：数据存储（SQLite）](#十模块九数据存储sqlite)
+- [十一、模块十：前端架构](#十一模块十前端架构)
+- [十二、模块间数据流总览](#十二模块间数据流总览)
+- [十三、核心设计原则](#十三核心设计原则)
+- [十四、已知取舍与未来方向〕](#十四已知取舍与未来方向)
 
 ---
 
-## 技术栈
+## 一、总体设计思想
 
-| 层 | 技术 | 版本 |
-|-----|------|------|
-| 桌面框架 | Tauri 2.x | 2.x |
-| 前端 | React 19 + TypeScript + Tailwind CSS 4 | 19 / 4.x |
-| 全文搜索 | Tantivy + jieba-rs | 0.22 |
-| 向量检索 | BGE-large-zh-v1.5（tract ONNX） | v1.5 |
-| LLM 网关 | OpenAI 兼容 API | — |
-| 数据库 | SQLite（rusqlite + r2d2） | 3.x |
-| 异步运行时 | tokio（多线程） | 1.x |
-| 并行处理 | Rayon | 1.x |
-| HTTP 服务 | axum + axum-server（TLS） | 0.8 / 0.10 |
-| 构建工具 | Vite + Cargo | 6.x / 1.85+ |
+### 这个程序是什么
 
----
+Link-Searcher 是一个**本地全文搜索 + AI 文档问答**的桌面应用。核心使命可以概括为一句话：
 
-## 项目结构总览
+> **把你硬盘里的所有文档，变成一个"能全文检索、能直接提问"的私有知识库。**
+
+### 三个核心问题
+
+任何"本地文档智能搜索"程序都要回答三个问题：
+
+| 问题 | Link-Searcher 的回答 |
+|------|---------------------|
+| **1. 文件内容从哪来？** | 一个统一的**文本提取管线**，把 PDF/Word/图片/音频等 20+ 格式统一转成纯文本 |
+| **2. 怎么搜索？** | 全文搜索引擎（关键词）+ 语义向量引擎（意思）**双路融合** |
+| **3. 怎么回答？** | RAG 管线：检索相关文档 → 组装上下文 → 交给 LLM 回答 |
+
+### 设计的两条主线
+
+1. **性能优先**：索引和搜索要快（毫秒级），所以用 Tantivy（Rust 原生全文引擎）+ Rayon 并行。
+2. **隐私可选**：核心搜索完全本地，AI 是可选项。用本地 BGE 做语义搜索不出机器；用远程 LLM 才把内容发出去（用户知情）。
+
+### 为什么用 Rust + Tauri
+
+| 选择 | 原因 |
+|------|------|
+| Rust | 性能、内存安全、无 GC，适合文本处理与并发 |
+| Tauri | 用 Web 技术（React）写界面，但运行时是原生性能，比 Electron 轻量得多 |
+| SQLite | 零配置、单文件、稳定，够用且不过度设计 |
+
+### 复现路线图（七步）
 
 ```
-link-searcher/
-├── src/                          # React 前端（TypeScript）
-│   ├── main.tsx                  # 入口
-│   ├── App.tsx                   # 根组件（路由、主题、Token 管理）
-│   ├── api/
-│   │   ├── client.ts             # 统一 API 客户端（Tauri IPC / HTTP fetch）
-│   │   ├── files.ts              # 文件/会话/流式 API 封装
-│   │   └── search.ts             # 搜索 API
-│   ├── components/
-│   │   ├── ChatPanel.tsx         # AI 聊天面板（755 行，核心组件）
-│   │   ├── AiEventTimeline.tsx   # AI 推理过程时间线
-│   │   ├── AiEvidencePanel.tsx   # 检索依据面板
-│   │   ├── ResultList.tsx        # 搜索结果列表
-│   │   ├── PreviewPanel.tsx      # 文件预览
-│   │   └── ...
-│   ├── pages/
-│   │   ├── AiChat.tsx            # AI 聊天页（会话管理）
-│   │   ├── SearchPage.tsx        # 搜索页
-│   │   ├── Browse.tsx            # 浏览页
-│   │   └── ...
-│   ├── hooks/                    # 自定义 Hooks
-│   ├── i18n/                     # 国际化（zh/en/ja/ko）
-│   └── utils/
-│       └── platform.ts           # 平台检测（Tauri vs 浏览器）
-│
-├── src-tauri/                    # Rust 后端
-│   ├── Cargo.toml
-│   ├── src/
-│   │   ├── main.rs               # 入口：GUI 或 CLI 分发
-│   │   ├── lib.rs                # Tauri 启动 + Web API 启动
-│   │   ├── cli.rs                # 命令行接口
-│   │   ├── config.rs             # 配置管理（AI 端点、目录、语义权重）
-│   │   ├── state.rs              # AppState 全局状态
-│   │   ├── boot.rs               # 核心组件初始化
-│   │   ├── indexer.rs            # 批量索引（Rayon 并行 + Tantivy 串行写入）
-│   │   ├── search/               # Tantivy 搜索引擎
-│   │   │   ├── mod.rs            # IndexManager
-│   │   │   ├── schema.rs         # 字段定义 + tokenizer 注册
-│   │   │   ├── indexer.rs        # 文档增删改
-│   │   │   └── searcher.rs       # 搜索/建议/导出
-│   │   ├── db/                   # SQLite 数据库
-│   │   │   ├── tracker.rs        # 文件追踪 CRUD（file_tracking 表）
-│   │   │   ├── chunks.rs         # 分块存储（doc_chunks 表）
-│   │   │   ├── ai_events.rs      # AI 事件记录（ai_events 表）
-│   │   │   └── ...
-│   │   ├── extractor/            # 文本提取管线
-│   │   │   ├── mod.rs            # 格式路由
-│   │   │   ├── pdf.rs            # PDF 提取（lopdf + pdftoppm OCR）
-│   │   │   ├── office/           # Office 提取（rwml/calamine/anydoc）
-│   │   │   ├── image.rs          # 图片 OCR
-│   │   │   ├── audio.rs          # 音频转写（FunASR-Nano + 说话人分离）
-│   │   │   ├── ocr.rs            # OCR 引擎调度
-│   │   │   ├── paddleocr.rs      # PaddleOCR 内置引擎
-│   │   │   └── text.rs           # 纯文本提取
-│   │   ├── scanner/              # 目录扫描 + 文件监控
-│   │   │   ├── mod.rs            # 全量/增量/启动扫描
-│   │   │   ├── watcher.rs        # 实时文件监控（notify + 300ms 防抖）
-│   │   │   └── helpers.rs        # 排除规则 + 路径转换
-│   │   ├── ai/                   # AI 核心模块
-│   │   │   ├── mod.rs            # LLM 调用（chat/chat_stream/embed/vector_full_scan）
-│   │   │   ├── local_embed.rs    # 本地 BGE 嵌入引擎（tract ONNX + tokenizers）
-│   │   │   └── skills/           # RAG 管线 Skills
-│   │   │       ├── pipeline.rs         # RAGPipeline 编排器
-│   │   │       ├── query_rewrite.rs    # 查询改写
-│   │   │       ├── scope_resolver.rs   # 检索范围解析
-│   │   │       ├── retrieval.rs        # BM25 + 语义检索
-│   │   │       └── context_assembly.rs # 上下文组装
-│   │   ├── commands/             # Tauri IPC 命令
-│   │   │   ├── ai.rs             # AI 对话/问答/摘要（3066 行）
-│   │   │   ├── search.rs         # 搜索
-│   │   │   ├── files.rs          # 文件操作
-│   │   │   ├── index.rs          # 索引管理
-│   │   │   ├── config.rs         # 配置读写
-│   │   │   ├── settings.rs       # 设置管理
-│   │   │   ├── backup.rs         # 备份恢复
-│   │   │   ├── dirs.rs           # 目录管理
-│   │   │   ├── bge.rs            # BGE 模型下载
-│   │   │   ├── funasr.rs         # FunASR 模型下载
-│   │   │   └── tesseract.rs      # Tesseract OCR 管理
-│   │   ├── webapi/               # 可选 HTTPS Web API
-│   │   │   ├── mod.rs            # 服务器启动 + 事件桥（BRIDGED_EVENTS）
-│   │   │   ├── auth.rs           # Bearer token 认证中间件
-│   │   │   ├── state.rs          # ApiState
-│   │   │   ├── tls.rs            # 自签名 TLS 证书管理
-│   │   │   ├── static_files.rs   # 前端静态文件（dist/）
-│   │   │   └── routes/
-│   │   │       ├── mod.rs        # 路由注册
-│   │   │       ├── ai.rs         # AI 端点（对话/摘要/会话）
-│   │   │       ├── search.rs     # 搜索端点
-│   │   │       ├── files.rs      # 文件端点
-│   │   │       ├── events.rs     # SSE 事件桥（/api/events）
-│   │   │       └── ...
-│   │   └── logs/
-│   │       └── session.rs        # 日志会话管理
-│   ├── models/                   # PaddleOCR ONNX 模型
-│   ├── capabilities/             # Tauri 权限配置
-│   └── tests/                    # 集成测试
-│
-├── docs/                         # 文档
-│   ├── USER_MANUAL.md            # 用户手册入口
-│   ├── ARCHITECTURE.md           # 本文档
-│   ├── SEARCH_UX_IMPLEMENTATION.md
-│   └── 01-*.md ~ 12-*.md        # 手册章节
-│
-├── USER_MANUAL.md                # 用户手册入口
-├── README.md                     # 项目 README
-├── CHANGELOG.md                  # 变更日志
-├── AGENTS.md                     # Agent 开发规范
-├── ROADMAP.md                    # 路线图
-├── package.json                  # npm 依赖
-├── vite.config.ts                # Vite 配置
-└── tsconfig.json                 # TypeScript 配置
+第 1 步：打通文本提取（任意文件 → 纯文本）
+第 2 步：接入全文搜索索引（Tantivy）
+第 3 步：目录扫描 + 文件监控（增量更新）
+第 4 步：接入 LLM（chat / chat_stream）
+第 5 步：语义向量检索（BGE）
+第 6 步：组装 RAG 聊天（检索 + 上下文 + 回答）
+第 7 步：加 Web API + 共享前端
 ```
 
 ---
 
-## 数据库 Schema
+## 二、模块一：全文搜索引擎（Tantivy + jieba）
 
-### `file_tracking` — 文件追踪
+### 解决什么问题
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | TEXT PK | UUID |
-| `path` | TEXT UNIQUE | 相对路径（相对于监控目录根） |
-| `file_ext` | TEXT | 扩展名 |
-| `dir_id` | TEXT FK | 所属目录配置 |
-| `mtime` | INTEGER | 修改时间戳 |
-| `size` | INTEGER | 文件大小（字节） |
-| `md5` | TEXT | MD5 内容哈希（流式前 1MB） |
-| `status` | TEXT | `active` / `deleted` / `missing` |
-| `indexed` | INTEGER | 0=未索引, 1=已索引, 2=提取中, 3=已提取 |
-| `error_msg` | TEXT | 错误信息 |
-| `dead_content` | INTEGER | 0=正常, 1=内容已失效 |
-| `created_at` | INTEGER | 创建时间戳 |
-| `updated_at` | INTEGER | 更新时间戳 |
+用户输入关键词，要能在**几毫秒内**从几十万个文件中找出相关文件。这是整个软件的地基。
 
-索引：`idx_ft_dir_id`, `idx_ft_status`, `idx_ft_md5`, `idx_ft_mtime`, `idx_ft_pending(WHERE indexed IN (0,2,3))`
+### 为什么用 Tantivy 而非别家
 
-### `content_index` — 文本内容
+- **Lucene 系太多依赖**，Tantivy 是纯 Rust，一条 `cargo add` 就进来。
+- 差补：Tantivy 是"Rust 版的 Elasticsearch 核心"，自带索引、分片、查询语法（`AND`/`OR`/`NOT`/通配符）。
+- 中文搜索需要分词：jieba-rs（结巴分词）负责把"判决结果是什么"切成 `["判决", "结果", "什么"]`。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `md5` | TEXT PK | 文件 MD5 |
-| `text_content` | TEXT | 提取的文本内容 |
-| `char_count` | INTEGER | 字符数 |
-| `ocr_used` | INTEGER | 0=文本提取, 1=OCR 提取 |
-| `ocr_duration_ms` | INTEGER | OCR 耗时（毫秒） |
-| `indexed_at` | INTEGER | 索引时间 |
+### 核心架构
 
-### `doc_chunks` — 文档分块
+```
+┌─────────────────────────────────────────────────────────┐
+│  IndexManager（search/mod.rs）                           │
+│  持有 Reader（读） + Writer（写），启动时打开/创建索引      │
+└────────────────────────┬────────────────────────────────┘
+                         │
+        ┌────────────────┴────────────────┐
+        │                                 │
+┌───────▼────────┐                ┌───────▼────────┐
+│  Schema        │                │  Searcher       │
+│  （字段定义）    │                │  （查询逻辑）     │
+│  content: Text │                │  BM25 排序       │
+│  path: Text    │                │  模糊容错        │
+│  mtime: Int    │                │  搜索建议        │
+└───────┬────────┘                └───────┬────────┘
+        │                                 │
+        └──────────────┬──────────────────┘
+                       ▼
+              jieba 中文分词器
+              （注册到 schema 的 content 字段）
+```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `md5` | TEXT | 文件 MD5 |
-| `chunk_index` | INTEGER | 分块序号 |
-| `start_char` | INTEGER | 起始字符位置 |
-| `end_char` | INTEGER | 结束字符位置 |
-| `text` | TEXT | 分块文本 |
+### 关键设计决策
 
-主键：`(md5, chunk_index)`
+1. **字段最小化**：只索引 `content`（正文）+ `path`（文件名）。够了就不过度加字段，索引更小更快。
+2. **中文分词**：在 schema 里用 `TokenizerManager` 注册 `jieba`，这样查询和写入用同一套分词，保证命中率。
+3. **容错距离 1**：用户打错一个字也能匹配（模糊搜索）。
+4. **Reader 缓存**：搜索频繁，Reader 复用一个，避免反复打开磁盘索引。
 
-### `doc_embeddings` — 语义向量
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `file_id` | TEXT PK | 文件 ID |
-| `dim` | INTEGER | 向量维度 |
-| `vector` | BLOB | 序列化的 f32 向量 |
-| `updated_at` | INTEGER | 更新时间 |
-
-### `doc_summaries` — 文档摘要
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `file_id` | TEXT PK | 文件 ID |
-| `summary` | TEXT | LLM 生成的摘要 |
-| `updated_at` | INTEGER | 更新时间 |
-
-### `ai_events` — AI 推理事件
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | INTEGER PK | 自增 |
-| `session_id` | TEXT | 会话 ID |
-| `turn_number` | INTEGER | 轮次（0-based） |
-| `event_seq` | INTEGER | 事件序号 |
-| `event_type` | TEXT | `query_rewrite` / `scope_resolved` / `retrieval` / `context_assembled` / `llm_call` / `turn_complete` |
-| `payload_json` | TEXT | JSON 事件数据 |
-| `created_at` | INTEGER | 时间戳 |
-
-索引：`idx_ae_session(session_id, turn_number)`, `idx_ae_created_at`
-
-### `dir_config` — 目录配置
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | TEXT PK | UUID |
-| `path` | TEXT UNIQUE | 绝对路径 |
-| `alias` | TEXT | 别名 |
-| `ocr_lang` | TEXT | OCR 语言（默认 `eng`） |
-| `exclude_patterns` | TEXT | 排除 glob 规则 |
-| `include_exts` | TEXT | 白名单扩展名 |
-| `recursive` | INTEGER | 是否递归 |
-| `created_at` | INTEGER | 创建时间 |
-| `updated_at` | INTEGER | 更新时间 |
-
-### `app_settings` — 应用设置
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `key` | TEXT PK | 键 |
-| `value` | TEXT | 值 |
-
-常用键：`web_api_enabled`, `web_api_port`, `web_api_token`, `web_api_bind`, `web_api_dev_mode`
-
-### 其他表
-
-- `search_history`：搜索历史（支持置顶）
-- `index_errors`：索引错误记录（按类型分类）
-- `hotword_counts`：热词统计
-- `unsupported_ext_stats`：不支持的扩展名统计
-
----
-
-## Tauri IPC 命令参考
-
-所有命令注册在 `src-tauri/src/lib.rs` 的 `invoke_handler` 中。
-
-### AI 对话
-
-| 命令 | 签名 | 说明 |
-|------|------|------|
-| `conversation_ask_stream` | `(messages, source_ids, session_id, scope, sessionRetrievalScope, strict_docs, full_recall) → void` | 流式 AI 对话，emit `ai-chunk`/`ai-done` |
-| `conversation_ask` | `(同上) → String` | 非流式 AI 对话 |
-| `smart_search_stream` | `(query, session_id) → void` | 流式智能搜索 |
-| `smart_search` | `(query) → SmartSearchResponse` | 非流式智能搜索 |
-| `ask_documents` | `(file_ids, question) → String` | 基于选中文件回答 |
-| `cancel_ai_request` | `() → void` | 取消当前 AI 请求 |
-
-### AI 能力
-
-| 命令 | 签名 | 说明 |
-|------|------|------|
-| `ai_capabilities` | `() → AiCapabilities` | 返回 `{ embedding: bool, llm: bool }` |
-| `test_ai_gateway` | `() → Vec<GatewayTest>` | 测试网关连通性 |
-| `summarize_file` | `(file_id) → SummaryResult` | LLM 生成文档摘要 |
-| `ai_topic_clusters` | `(file_ids, question) → Vec<TopicCluster>` | 文档主题聚类 |
-| `batch_summarize` | `(file_ids, query) → (String, Vec<String>)` | 批量文档摘要 |
-
-### 会话管理
-
-| 命令 | 签名 | 说明 |
-|------|------|------|
-| `list_chat_sessions` | `() → Vec<ChatSessionMeta>` | 列出所有会话 |
-| `create_chat_session` | `() → String` | 创建新会话，返回 ID |
-| `load_chat_session` | `(id) → Option<ChatSession>` | 加载会话 |
-| `save_chat_session` | `(session) → void` | 保存会话 |
-| `delete_chat_session` | `(id) → void` | 删除会话 |
-| `export_chat_session` | `(id) → String` | 导出为 Markdown |
-| `get_ai_events` | `(session_id) → Vec` | 获取会话所有 AI 事件 |
-| `get_turn_ai_events` | `(session_id, turn_number) → Vec` | 获取单轮 AI 事件 |
-
-### 搜索
-
-| 命令 | 签名 | 说明 |
-|------|------|------|
-| `search` | `(params) → SearchResponse` | 全文搜索 |
-| `suggest` | `(query) → Vec<String>` | 搜索建议 |
-| `export_search_results` | `(query, dir_ids, ext_filter, format) → void` | 导出搜索结果 |
-| `get_search_history` | `() → Vec` | 搜索历史 |
-| `clear_search_history` | `() → void` | 清除搜索历史 |
-
-### 数据流事件
+### 复现要点
 
 ```rust
-// 后端 emit 事件
-AiProgress { session_id, phase, message, current, total }  // "ai-progress"
-AiChunk    { session_id, delta, reasoning }                 // "ai-chunk"
-AiDone     { session_id, full_text, took_ms, cancelled, source_ids, source_files, evidence, ... } // "ai-done"
+// 1. 定义 schema
+let mut schema = Schema::builder();
+schema.add_text_field("content", TEXT | STORED);  // 正文，参与分词
+schema.add_text_field("path", TEXT | STORED);      // 文件名
+schema.add_i64_field("mtime", INDEXED);            // 时间排序
+
+// 2. 注册中文分词
+let mut tok = TokenizerManager::default();
+tok.register("jieba", JiebaTokenizer::default());
+schema.register_tokenizer... // 让 content 字段用 jieba
+
+// 3. 写入
+let mut index = Index::create_in_dir(&dir, schema);
+let mut writer = index.writer(50_000_000)?;
+writer.add_document(doc);
+writer.commit();
+
+// 4. 查询
+let searcher = index.reader()?.searcher();
+let query = QueryParser::for_index(&index, vec![content, path])
+    .parse_query(&user_input)?;
+let top = searcher.search(&query, &TopDocs::with_limit(20))?;
 ```
 
-### 前端会话状态
+### 边界与取舍
 
-```typescript
-interface ChatSession {
-  id: string
-  title: string
-  messages: ChatMessage[]
-  source_ids: string[]
-  source_files: string[]
-  strict_docs: boolean
-  full_recall: boolean
-  retrieval_scope: string[]
-  pending_query: string | null
-  pending_started_at: number | null  // loading 状态驱动
-  per_turn_evidence: TurnEvidence[]
-  per_turn_scopes: TurnScope[]
-}
+- 只索引文本，**不索引二进制**（视频/图片等靠提取管线先转文本）。
+- 大文件（>100MB）做 MD5 时只读首尾 1MB，避免整文件读入内存。
+- 排序默认按相关性（BM25），可选按时间/大小。
 
 ---
 
-## AI RAG 管线详解
+## 三、模块二：文本提取管线（Extractor）
 
-### 整体流程
+### 解决什么问题
+
+搜索引擎只认文本。但硬盘里有 PDF、Word、Excel、PPT、图片、音频、压缩包……需要一个统一的"任意文件 → 纯文本"转换器。
+
+### 核心架构：格式路由
 
 ```
-用户输入 "判决结果是什么？"
+                    extractor/mod.rs（总路由）
+                           │
+        根据文件扩展名分发到对应提取器
+                           │
+   ┌────────┬────────┬─────┴─────┬────────┬────────┐
+   ▼        ▼        ▼          ▼        ▼        ▼
+  pdf.rs  office/  image.rs    audio.rs  text.rs  archive.rs
+           (Word/
+           Excel/PPT)
+```
+
+### 每个提取器的设计
+
+| 提取器 | 处理格式 | 核心工具 | 设计要点 |
+|--------|---------|---------|---------|
+| `pdf.rs` | PDF | lopdf | 能抽文本就直接抽；扫描件（不能抽文本的）走 OCR |
+| `office/` | .doc/.docx/.xls/.ppt | rwml / calamine / anydoc | **纯 Rust 解析，零外部依赖**（不给用户安装 Office 的负担） |
+| `image.rs` | 图片 | PaddleOCR | 图片不做别的，就是 OCR 识文字 |
+| `audio.rs` | 音频 | FunASR-Nano | 语音转文字 + 说话人分离（法庭录音场景） |
+| `text.rs` | 纯文本/代码 | 直接读 | 最直接，兜底格式 |
+| `archive.rs` | 压缩包 | zip/tar | 枚举条目，文本直接读，Office/PDF/图片走管线 |
+
+### 关键设计决策
+
+1. **一个输入，多个输出标**：提取结果除了文本，还会记录 `md5`（内容哈希）、`char_count`、`ocr_used`（是否用过 OCR）。
+2. **OCR 多引擎降级**：PaddleOCR → Apple Vision → Windows OCR → Tesseract，按可用性自动降级。
+3. **内容去重**：相同的 `md5` 只提取一次，后续文件直接复用，省时省资源。
+4. **仅存文本不存源文件**：数据库只存提取出的文本，不复制原文件，节省空间。
+
+### 复现要点
+
+```rust
+pub fn extract(path: &Path) -> ExtractResult {
+    match ext(path) {
+        "pdf" => extract_pdf(path),
+        "docx" | "docx" => extract_office(path),
+        "png" | "jpg" => extract_image_path(path),
+        "mp3" | "wav" => extract_audio(path),
+        _ => extract_text(path),  // 兜底
+    }
+}
+// 每个提取器返回文本 + 元数据，统一年纪
+```
+
+### 边界与取舍
+
+- 未知格式也尝试纯文本兜底，尽量不丢文件。
+- 支持格式清单是**白名单优先 + 黑名单排除**（`#`开头、`.`开头隐藏文件等天然排除）。
+
+---
+
+## 四、模块三：目录扫描与文件监控（Scanner）
+
+### 解决什么问题
+
+文件是**活的**——会被新增、修改、删除。索引必须跟着变，否则搜索到的是过期数据。
+
+### 两种更新策略
+
+1. **全量扫描**：启动或手动触发，遍历整个目录，比对 mtime。
+2. **增量扫描**：只处理 `mtime` 变化或未索引的文件，秒级完成。
+3. **实时监控**：`notify` 监听文件系统事件，300ms 防抖后增量更新。
+
+### 核心架构
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Scanner（scanner/mod.rs）                           │
+│  全量扫描 / 增量扫描 / 启动扫描                      │
+│  每扫描一个文件：                                   │
+│    ① 排除规则过滤（隐藏文件、临时文件、glob）         │
+│    ② 查 DB：mtime 变过吗？索引过吗？                 │
+│    ③ 需要 → 交给 Indexer 提取 + 索引                 │
+└─────────────────────────────────────────────────────┘
+            │                    ▲
+            ▼                    │
+┌─────────────────────┐   ┌─────────────────────┐
+│  FileWatcher         │   │  Indexer            │
+│  （notify 实时监听）   │   │  （Rayon 并行）      │
+│  → 事件防抖 300ms     │   │  提取 + 写索引       │
+│  → 触发增量扫描       │   │  每 100 文件提交     │
+└─────────────────────┘   └─────────────────────┘
+```
+
+### 关键设计决策
+
+1. **相对路径存储**：数据库存**相对路径**（相对监控根），这样换电脑/换系统路径一致，可跨平台共享索引。
+2. **MD5 内容哈希**：文件移位检测——内容相同但路径变了，通过 MD5 识别并更新路径，不必重新提取。
+3. **定期自动提交**：每 100 文件 commit 一次，防止崩溃丢全部进度。
+4. **文件移位识别**：不只是删+加，而是识别"这个文件搬家了"，保留原索引。
+
+### 复现要点
+
+```rust
+// 增量扫描核心
+for entry in walk(dir) {
+    if excluded(entry) { continue }
+    let rec = db.get_by_path(entry)?;
+    if rec.mtime == entry.mtime && rec.indexed == 1 {
+        continue // 没变，跳过
+    }
+    // 变了，重新提取索引
+    indexer.batch_index(vec![entry])
+}
+```
+
+### 边界与取舍
+
+- 大目录扫描有 3 秒超时保护。
+- 排除规则：`#/./~/tmp` 开头、`.git`/`__pycache__` 等精确名，用户可加自定义 glob。
+
+---
+
+## 五、模块四：AI 出口（LLM 网关调用）
+
+### 解决什么问题
+
+程序如何跟外部 LLM 通信。这是所有 AI 功能的共同底座。
+
+### 核心设计：OpenAI 兼容 + 双模式
+
+```
+┌────────────────────────────────────────────┐
+│  ai/mod.rs                                  │
+│  ├─ chat(system, user) → Option<String>    │  // 非流式，一句话问完
+│  ├─ chat_stream(system, user, on_delta)     │  // 流式，逐字回调
+│  ├─ embed(text) → Option<Vec<f32>>          │  // 文本转向量
+│  └─ resolve_active_endpoint(cfg, kind)      │  // 选当前启用的提供商
+└────────────────────────────────────────────┘
+```
+
+### 为什么 OpenAI 兼容协议
+
+绝大多数 LLM 服务（Ollama、OneAPI、vLLM、各种中转）都实现了 OpenAI 的 `/chat/completions` 接口。**只支持一种协议，就通吃所有模型**，不用为每个厂商写适配。
+
+### 关键设计决策
+
+1. **提供商抽象**：一个 `ProviderConfig` 记录 `base_url + api_key + 模型列表`。用户可在设置页添加多个，从中选一个做 embedding、一个做 LLM。
+2. **`llm_enabled()` 优雅降级**：没配置 LLM 时，`chat`/`chat_stream` 直接返回 `None`，前端隐藏 AI 功能，普通搜索不受影响。
+3. **流式优先**：`chat_stream` 逐字回调 `on_delta`，前端实时显示"打字机"效果；网关忽略 `stream:true` 时自动回退到非流式。
+4. **取消机制**：全局原子布尔 `AI_CANCEL`，流式读取每行检查一次，可随时终止。
+5. **熄屏降级**：LLM 是可选功能，配置错误或网关挂了，返回 `None` 而不是报错崩溃。
+
+### 复现要点
+
+```rust
+// 流式核心
+pub fn chat_stream(system, user, on_delta) -> ChatStreamOutcome {
+    let req = ChatReq { stream: true, messages: [...], ... };
+    let reader = http_post(base_url + "/chat/completions", &req.body)?;
+    for line in reader.lines() {
+        if ai_cancelled() { break }
+        if let Some(delta) = parse_sse_delta(&line) {
+            on_delta(delta, false);  // 逐字推给前端
+            full.push_str(delta);
+        }
+    }
+    ChatStreamOutcome { text: full, ... }
+}
+```
+
+### 边界与取舍
+
+- `content` 字段优先，`reasoning` 字段回退——有的模型把回答放 reasoning（如 deepseek-r1 类）。
+- 连接超时 15 秒，但**流式读取无全局超时**（已知缺陷）。
+
+---
+
+## 六、模块五：语义向量检索（BGE 本地嵌入）
+
+### 解决什么问题
+
+关键词搜索查"字面"，但用户往往想查"意思"。比如搜"欠费催缴"，语义上应该也命中"逾期未缴纳物业管理费"。这就是语义搜索。
+
+### 为什么用本地 BGE
+
+- **隐私**：默认的 embedding 模型 `bge-large-zh-v1.5` 直接在本地用 ONNX 推理，文档内容不出机器。
+- **中文优化**：BGE 是中文语义模型，效果优于通用英文模型。
+
+### 核心架构
+
+```
+┌──────────────────────────────────────────────┐
+│  ai/local_embed.rs                            │
+│  LocalEmbedder（全局单例）                     │
+│  ├─ init_local_embedder(dir, model)           │  // 加载 ONNX + tokenizer
+│  ├─ embed_batch_local(texts) → Vec<Option>    │  // 批量编码
+│  └─ embed_query_local(query) → Option<Vec>    │  // 单条查询编码
+└──────────────────────────────────────────────┘
         │
         ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Step 1: QueryRewrite（查询改写）                              │
-│  ┌─────────────────────────────────────────────────────────┐ │
-│  │ 规则改写（rewrite_query）                                  │ │
-│  │  - 指代消解：上一个问句的关键词 + 当前问句合并               │ │
-│  │  - 停止词过滤：去掉"它/这/那/的/了/吗"等                    │ │
-│  │  - 短问句继承父关键词："增量呢" → "营收 增量"               │ │
-│  ├─────────────────────────────────────────────────────────┤ │
-│  │ LLM 改写（llm_rewrite_query，可选）                         │ │
-│  │  - 调用 chat() 补全指代与省略                               │ │
-│  │  - 5 秒超时保护，失败回退到规则改写                          │ │
-│  │  - 验证：非空、不超过 80 字符、非原样                        │ │
-│  └─────────────────────────────────────────────────────────┘ │
-│  → search_q: "判决结果"                                        │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Step 2: ScopeResolver（范围解析）                             │
-│  输入：                                                        │
-│   - session_retrieval_scope: 跨轮累计范围                      │
-│   - TurnScope.mention_files: @mention 文件列表                │
-│   - TurnScope.mention_dirs: @mention 目录列表                  │
-│   - TurnScope.conditions: /ext: /date: /范围: 命令            │
-│  输出：                                                        │
-│   - dir_ids: 监控根目录 ID（数据库精确匹配）                     │
-│   - path_prefixes: 子目录路径前缀（LIKE 回退）                  │
-│   - mention_file_ids: 引用文件 ID（精确匹配）                   │
-│   - ext_filter / date_from / date_to                         │
-│   - mention_resolved / missing_mentions                       │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Step 3: Retrieval（三路检索合并）                             │
-│  ① BM25 全文检索（Tantivy）                                     │
-│     - 索引字段：content（正文）+ path（文件名）                   │
-│     - 支持 dir_ids / file_ids / ext / date / path_prefixes   │
-│  ② 语义向量全量扫描（vector_full_scan）                          │
-│     - embed(query) → BGE 向量                                   │
-│     - 遍历 doc_embeddings 全表，计算 cosine 相似度               │
-│     - 过滤 ≥ VECTOR_THRESHOLD(0.65) 的结果                      │
-│     - full_recall=false 时最多 500 条                            │
-│  ③ SQL 路径匹配（path_match_files）                              │
-│     - LIKE 模糊匹配文件名关键词                                    │
-│  三路合并去重：HashSet<file_id> → all_hits                       │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Step 4: ContextAssembly（三层上下文注入）                      │
-│  Layer 0: 引用文档全部注入（mention_budget = BUDGET/3）         │
-│  Layer 1: BM25 命中注入（full_recall决定 30 或全量）             │
-│  Layer 2: 剩余命中摘要（batch_summarize，最多 60 份）            │
-│  最终截断：truncate_text(docs, max_context_chars)              │
-│  → system prompt + user_msg                                   │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-                       ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Step 5: LLM 调用（chat_stream）                              │
-│  POST {base_url}/chat/completions                             │
-│  { model, messages, temperature: 0.3, max_tokens: 4096,      │
-│    stream: true }                                             │
-│  SSE 流式解析 → emit("ai-chunk") → emit("ai-done")            │
-│  降级：gateway 忽略 stream:true 时回退到非流式                   │
-│  取消：每行读取后检查 ai_cancelled()                             │
-└──────────────────────────────────────────────────────────────┘
+  tract-onnx（本地推理）+ tokenizers（分词）
 ```
 
-### 关键常量
+### 向量的意义
 
-| 常量 | 值 | 位置 | 说明 |
-|------|-----|------|------|
-| `CONTEXT_BUDGET` | 150,000 chars | `commands/ai.rs:862` | 总上下文预算 |
-| `SYSTEM_OVERHEAD` | 2,000 chars | `commands/ai.rs:863` | system prompt 模板开销 |
-| `ANSWER_RESERVE` | 8,000 chars | `commands/ai.rs:864` | 为 LLM 回答预留空间 |
-| `MAX_CONTENT_INJECT` | 30 | `commands/ai.rs:1154` | Layer 1 注入上限（关闭全量召回时） |
-| `MAX_REMAINING_SUMMARY` | 60 | `commands/ai.rs:1255` | Layer 2 摘要上限 |
-| `MAX_CONCURRENCY` | 6 | `commands/ai.rs:1639` | batch_summarize 并行 LLM 调用数 |
-| `BATCH_SIZE` | 15 | `commands/ai.rs:1638` | 摘要批处理大小 |
-| `VECTOR_THRESHOLD` | 0.65 | `commands/ai.rs:869` | 语义检索余弦相似度阈值 |
-| `MAX_SEQ_LEN` | 512 | `ai/local_embed.rs:11` | BGE tokenizer 最大序列长度 |
-| `QUERY_PREFIX` | `"为这个句子生成表示以用于检索相关文章："` | `ai/local_embed.rs:12` | BGE 提问前缀 |
-
-### 文件映射
-
-| 功能 | 主文件 | 行数 |
-|------|--------|------|
-| LLM 调用（chat/chat_stream/embed） | `ai/mod.rs` | 1001 |
-| RAG 管线编排（全部逻辑） | `commands/ai.rs` | 3066 |
-| 查询改写 | `ai/skills/query_rewrite.rs` | 67 |
-| 范围解析 | `ai/skills/scope_resolver.rs` | 154 |
-| 检索 | `ai/skills/retrieval.rs` | 132 |
-| 上下文组装 | `ai/skills/context_assembly.rs` | 132 |
-| RAG 管线编排器 | `ai/skills/pipeline.rs` | 121 |
-| 本地嵌入 | `ai/local_embed.rs` | 178 |
-| 前端聊天面板 | `components/ChatPanel.tsx` | 755 |
-| 前端 AI 聊天页 | `pages/AiChat.tsx` | 765 |
-
----
-
-## 内容注入与截断策略
-
-### 三步注入流程
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       CONTEXT_BUDGET: 150,000 chars                  │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────┐│
-│  │ SYSTEM_OVERHEAD (2,000) │ ANSWER_RESERVE (8,000)                ││
-│  └─────────────────────────────────────────────────────────────────┘│
-│                                                                     │
-│  ┌──────────────────────────────┐ ┌────────────────────────────────┐│
-│  │ Layer 0: 引用文档             │ │ Layer 1: BM25 命中              ││
-│  │ mention_budget = BUDGET / 3  │ │ content_budget = 剩余           ││
-│  │ 全部注入，chunked 截断        │ │ 30 份（或全量），每份按配额截断  ││
-│  └──────────────────────────────┘ └────────────────────────────────┘│
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────────┐│
-│  │ Layer 2: 剩余命中摘要 (batch_summarize)                          ││
-│  │ 最多 60 份，BATCH_SIZE=15, MAX_CONCURRENCY=6 并行 LLM 调用       ││
-│  └─────────────────────────────────────────────────────────────────┘│
-│                                                                     │
-│  最终截断：truncate_text(docs.join("\n\n---\n\n"), max_context_chars) │
-│    full_recall=true  → 140,000 chars                                │
-│    full_recall=false → 50,000 chars                                 │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-### full_recall 对注入的影响
-
-| 场景 | Layer 0 | Layer 1 | Layer 2 | 语义扫描 | 总长度 |
-|------|---------|---------|---------|---------|--------|
-| full_recall=false | 全量，50k 截断 | 30 份 | 60 份摘要 | ≤500 条 | 50k |
-| full_recall=true | 全量，50k 截断 | 全量 | 全量摘要 | 全量 | 140k |
-
-**引用文档走 Layer 0，不受 full_recall 影响**——即使引用 50 份文档，全部注入 Layer 0，但受 mention_budget 截断。
-
-### 内容遗漏的 6 种情况
-
-| # | 原因 | 条件 | 缓解方法 |
-|---|------|------|---------|
-| 1 | 引用文档总内容超 50k 截断 | 引用文档内容很大 | 减少引用，聚焦章节 |
-| 2 | Layer 1 只注入 30 份 | full_recall=false | 开启全量召回 |
-| 3 | 每份文档按配额截断 | 命中多，单份配额少 | 缩小范围或开启全量召回 |
-| 4 | 超出 60 份不做摘要 | 命中 > 90 | 缩小范围或开启全量召回 |
-| 5 | 总长度截断到 50k/140k | 始终存在 | 缩小范围，聚焦关键文档 |
-| 6 | 语义扫描 ≤500 条 | full_recall=false | 开启全量召回 |
-
----
-
-## 事件系统
-
-### 事件流向
-
-```
-Tauri Event Bus
-    │
-    ├─ emit("ai-progress") ───→ Tauri 前端 listen("ai-progress") → setProgress()
-    │                          （桌面窗口有，Web 模式无）
-    │
-    ├─ emit("ai-chunk") ───┬─→ Tauri 前端 listen("ai-chunk") → setStreaming()
-    │                      └─→ BRIDGED_EVENTS → event_tx.send() → /api/events SSE
-    │
-    └─ emit("ai-done") ────┬─→ Tauri 前端 listen("ai-done") → onSessionChange()
-                           └─→ BRIDGED_EVENTS → event_tx.send() → /api/events SSE
-```
-
-### BRIDGED_EVENTS（Web 事件桥）
+文本 → 一串数字（如 1024 维向量）。语义相近的文本，向量距离近。用**余弦相似度**（cosine similarity）衡量：
 
 ```rust
-// webapi/mod.rs
-const BRIDGED_EVENTS: &[&str] = &[
-    "scan-progress",       // 扫描进度
-    "scan-completed",      // 扫描完成
-    "ai-chunk",            // AI 流式增量
-    "ai-done",             // AI 回答完成
-    "migration-progress",  // 迁移进度
-    "migration-warning",   // 迁移警告
-    "funasr-install-done", // FunASR 安装完成
-    "bge-install-done",    // BGE 安装完成
-    "restore-completed",   // 恢复完成
-];
-// 注意：ai-progress 不在 BRIDGED_EVENTS 中！
+fn cosine(a: &[f32], b: &[f32]) -> f64 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    dot as f64  // 假设已归一化
+}
 ```
+
+### 语义检索怎么用（vector_full_scan）
+
+```rust
+// 对查询编码
+let q_vec = embed(query)?;
+// 遍历所有已存向量，算余弦，过滤阈值
+let results = all_embeddings.iter()
+    .filter(|(_, v)| cosine(&q_vec, v) >= 0.65)   // VECTOR_THRESHOLD
+    .collect();
+```
+
+### BM25 + 语义融合
+
+搜索结果**加权混合**：
+
+```
+最终分 = w × 语义分 + (1 - w) × BM25分
+默认 w = 0.3（语义 30% / 关键词 70%）
+```
+
+用户在设置页可调滑杆。这保证：关键词命中仍占主导（BM25 可靠），语义提供"寻意外"的补充。
+
+### 边界与取舍
+
+- `vector_full_scan` 是全表扫描，无索引，1 万+ 条向量要 10-30 秒（已知缺陷）。
+- 向量存 `doc_embeddings` 表（BLOB）。
+- 只在配置了 embedding 且语义开关打开时才启用，否则纯 BM25。
+
+---
+
+## 七、模块六：AI 聊天与 RAG 管线
+
+### 解决什么问题
+
+`会话式文档问答`：用户既能直接问"判决结果是什么？"，也能指定范围（`@某文件`、`/ext:pdf`、目录等），程序检索相关文档后让 LLM 基于材料回答，还能多轮追问。
+
+### RAG 是什么
+
+RAG = **R**etrieval-**A**ugmented **G**eneration（检索增强生成）。核心思想：
+
+> **不要问 LLM"记住的问题"，而是先把相关文档找出来塞给它，再让它基于这些材料回答。** 这样回答有据可依、不凭空捏造、可以标注来源。
+
+### RAG 管线五步
+
+```
+┌─────────────┐  ┌──────────────┐  ┌─────────────┐
+│ QueryRewrite │→│ ScopeResolver │→│ Retrieval   │
+│ 查询改写      │  │ 范围解析      │  │ 三路检索     │
+└─────────────┘  └──────────────┘  └──────┬──────┘
+                                          ▼
+┌─────────────┐  ┌─────────────┐  ┌──────────────┐
+│  LLM 调用    │←│ 拼 context  │←│ Layer0/1/2   │
+│  chat_stream │  │ 组装        │  │ 上下文注入    │
+└─────────────┘  └─────────────┘  └──────────────┘
+```
+
+#### 第 1 步 QueryRewrite（查询改写）
+- **为什么**：多轮对话里用户会说"它的风险呢？"这种省略句，必须补全成可检索的完整句。
+- **规则改写**：合并上一问的关键词 + 当前问句，去停止词。
+- **LLM 改写（可选）**：调用 LLM 补全指代；5 秒超时失败就回退规则。
+
+#### 第 2 步 ScopeResolver（范围解析）
+- **为什么**：用户可能限定在某个文件/目录/时间段内检索。
+- 解析输入里的 `@文件`、`@目录`、`/ext:pdf`、`/date:...`、`/范围:...`，输出一系列过滤条件（`dir_ids`、`path_prefixes`、`file_ids`、`ext_filter`、`date`）。
+
+#### 第 3 步 Retrieval（三路检索合并）
+- ① BM25 关键词命中
+- ② 语义向量命中
+- ③ SQL 路径匹配（文件名含关键词）
+- 三路合并去重，得到候选文件列表 `all_hits`。
+
+#### 第 4 步 ContextAssembly（上下文组装）
+- 把检索到的文件内容整理成 LLM 的 `system` 提示 + `user` 提问。
+- **三层注入**（见下一节），控制哪些内容进 LLM、进多少。
+
+#### 第 5 步 LLM 调用
+- `chat_stream` 流式生成，逐字 emit `ai-chunk`，完成后 emit `ai-done`。
+
+### 核心：上下文三层注入
+
+这是 RAG 里**最关键也是最复杂**的部分——决定 LLM 能看到什么。
+
+```
+Layer 0: 引用文档（@某文件）
+  → 用户明确指定的文件，全部注入，无条件
+  → 用 chunked_or_truncated 按与查询相关的分块截断
+
+Layer 1: BM25 命中补全
+  → 自动检索到的、未被引用的文件
+  → 默认最多 30 份全文，"全量召回"开启则全部
+  → 每份按"总预算/份数"分配字符
+
+Layer 2: 剩余命中摘要
+  → 超出 Layer 1 的命中，批量生成摘要（每份简述）
+  → 最多 60 份，并行 LLM 调用生成摘要
+```
+
+**设计理由**：LLM 上下文窗口有限，不能把几十万条命中全塞进去。分层设计保证：
+- 用户**明确要求看的**（Layer 0）最可靠，全进。
+- 自动检索的（Layer 1）按预算精选。
+- 其余的（Layer 2）用摘要兜底，不遗漏大方向。
+
+### "仅依据文档"严格模式（strict_docs）
+
+一个硬开关。开启后：
+- 引用文件必须在检索结果中出现（缺失/歧义/无内容报错）。
+- 范围内无命中时**拒绝回答**（返回"未找到依据"），而不是让 LLM 瞎编。
+- 旧对话的来源文件不混入本轮。
+
+**为什么**：用户引用了文件，就说明答案必须基于它；如果检索没找到，老实承认比编造好。
+
+### "全量召回"开关（full_recall）
+
+控制 Layer 1 是否注入全部 BM25 命中。见下表——它只影响**非引用文档**的自动注入量。
+
+### 内容截断的 6 种情况（为什么回答会遗漏）
+
+| # | 阶段 | 舍弃什么 | 条件 | 如何避免 |
+|---|------|---------|------|---------|
+| 1 | Layer 0 | 引用文档超 50k 字符截断 | 引用文档很大 | 减少引用 |
+| 2 | Layer 1 | 非引用只注入 30 份 | 全量召回关 | 开全量召回 |
+| 3 | Layer 1 | 每份按配额截断 | 命中多配额少 | 缩小范围 |
+| 4 | Layer 2 | 剩余只 60 份摘要 | 命中>90 | 缩小范围 |
+| 5 | 总长度 | 拼起来截到 50k/140k | 始终存在 | 聚焦 |
+| 6 | 语义 | 只取 500 条 | 全量召回关 | 开全量召回 |
+
+### 复现要点
+
+```rust
+// 管线主流程（伪代码）
+fn prepare_conversation_prompt(...) -> PreparedConversation {
+    let search_q = rewrite_query(last_q, messages);      // 改写
+    let scope = resolve_scope(&scope, dirs);             // 范围
+    let hits = three_way_scan(search_q, scope);          // 检索
+    let docs = layer0_mentions + layer1_bm25 + layer2_summaries; // 注入
+    let context = truncate(docs.join("\n\n---\n\n"), 50000);
+    PreparedConversation { system, user_msg, evidence, ... }
+}
+```
+
+### 边界与取舍
+
+- 内容截断**无位置感知**（从开头截），可能丢末尾结论——已知缺陷。
+- 上下文窗口（150k）硬编码，不随模型调整。
+- "全量召回"塞更多会挤占每文件篇幅，需要权衡。
+
+---
+
+## 八、模块七：会话与事件系统
+
+### 解决什么问题
+
+1. AI 聊天要有多轮对话，需要把会话（含历史、检索范围、每轮证据）持久化。
+2. 流式生成要实时推给前端，需要一套事件通知机制。
+3. 桌面（Tauri IPC）和浏览器（Web API）两种模式要共享前端。
+
+### 会话存储
+
+- 存 `chat_history.json`（一个 JSON 数组），每个会话含：标题、消息列表、来源文件、检索范围、每轮证据。
+- 前端 `loading` 由 `pending_started_at` 驱动：发送时写入，`ai-done` 到达清除。
+
+### 事件桥（Web 模式关键）
+
+桌面端靠 Tauri 自带的事件总线，浏览器端没有——所以做一个**事件桥**：
+
+```
+Tauri emit("ai-chunk")
+    │  listen_any 捕获
+    ▼
+event_tx.send(("ai-chunk", payload))
+    │  broadcast channel
+    ▼
+/api/events (SSE)  →  前端 fetch 实时收到
+```
+
+`BRIDGED_EVENTS` 白名单列出要桥接的事件（`ai-chunk`、`ai-done`、`scan-progress` 等）。**注意 `ai-progress` 不在清单里**（Web 模式看不到进度条）。
 
 ### 前端 loading 状态机
 
 ```
-[发送前] pending_started_at = null, loading = false
-  → 无 loading 指示器
+发送 → pending_started_at=now → loading=true → 显示"思考中"+取消
+ai-chunk → `setStreaming` → 流式文本
+ai-done → loading=false → 追加回答 → 保存会话
+取消 → cancel_ai_request() → 保留已输出 + "已取消"
+```
 
-[发送] patchSession({ pending_started_at: Date.now() })
-  → loading = true → 显示"思考中" + 取消按钮
+### 复现要点
 
-[ai-chunk] onChunk() → setStreaming(text: delta) → 流式文本显示
+```rust
+// 事件桥（webapi/mod.rs）
+let (event_tx, _) = broadcast::channel(256);
+for name in BRIDGED_EVENTS {
+    app_handle.listen_any(name, move |event| {
+        let _ = event_tx.send((name, event.payload()));
+    });
+}
+```
 
-[ai-progress] onProgress() → setProgress({ phase, message }) → 阶段文本（仅 Tauri）
+### 边界与取舍
 
-[ai-done] onDone()
-  → loading = false → 移除"思考中"
-  → 追加 assistant 消息 + saveChatSession()
+- 会话 JSON 无版本迁移（字段靠 serde default 兜底）——已知缺陷。
+- 前端 `ai-done` 回调检查 `loadingRef.current`，时序问题会导致回复被丢弃——已知缺陷。
 
-[取消] handleCancel()
-  → cancelAiRequest() → 保留已输出文本 + "已取消"
+---
+
+## 九、模块八：Web API 服务器（远程访问）
+
+### 解决什么问题
+
+桌面应用只能在本地用。加了 Web API 后，同一套前端代码也能在**浏览器**里跑（远程访问、移动设备访问），还能头一档尝鲜/演示。
+
+### 设计思路
+
+- **复用自己的代码**：后端命令逻辑完全复用（`conversation_ask_stream` 等），只是外层包一层 HTTP 路由 + Bearer token 认证。
+- **同一套前端**：前端 `isTauri()` 检测——Tauri 环境走 IPC，浏览器走 HTTP，UI 代码零改动。
+- **事件桥**：浏览器模式靠 `/api/events` SSE 接收 AI 流式事件（见模块七）。
+
+### 安全设计
+
+- **HTTPS + 自签名证书**（rcgen 生成），防明文。
+- **Bearer token 认证**：所有 `/api/*` 都要 `Authorization: Bearer <token>`。
+- 可配置端口、绑定地址。
+
+### 复现要点
+
+```rust
+// 一个 AI 端点（webapi/routes/ai.rs）
+async fn conversation_ask_stream_handler(State(state), Json(body)) -> Sse<...> {
+    // 前台立即返回 SSE 流（触发后台任务）
+    tauri::async_runtime::spawn(async move {
+        commands::ai::conversation_ask_stream(...).await;
+    });
+    Ok(sse_for_session(rx, session_id))  // 监听事件桥
+}
 ```
 
 ---
 
-## Web API 服务器
+## 十、模块九：数据存储（SQLite）
 
-### 启动条件
+### 设计哲学
 
-从 `app_settings` 表读取：`web_api_enabled=true`, `web_api_port=8443`, `web_api_bind=0.0.0.0`, `web_api_token=<uuid>`
+一个数据库文件 `data.db` 存所有关系型数据。**几张表各司其职**：
 
-### 认证
+| 表 | 存什么 | 为什么 |
+|----|--------|--------|
+| `file_tracking` | 每个文件的元数据（路径/mtime/size/md5/status/indexed） | 文件台账 |
+| `content_index` | 每个文件的提取文本（按 md5 关联） | 内容缓存 |
+| `doc_chunks` | 大文件分块 | 支持按块检索 |
+| `doc_embeddings` | 每文件的语义向量 | 语义检索 |
+| `doc_summaries` | 每文件的 LLM 摘要 | 摘要缓存 |
+| `dir_config` | 监控目录配置 | 目录管理 |
+| `search_history` | 搜索历史 | 历史记录 |
+| `index_errors` | 索引失败记录 | 可诊断 |
+| `app_settings` | 键值设置 | 通用设置 |
+| `ai_events` | AI 推理事件链 | 推理追溯 |
+
+### 关键设计决策
+
+1. **`indexed` 字段用整型枚举**：0=未索引，1=已索引，2=提取中，3=已提取。配合部分索引 `WHERE indexed IN (0,2,3)` 快速找待处理文件。
+2. **`md5` 是 key**：内容去重的核心——相同内容只存一份全文，多文件复用。
+3. **`status` 软删除**：文件删除标记 `deleted` 而非物理删行，便于追溯与恢复。
+4. **r2d2 连接池**：多线程访问 SQLite 需要池，避免死锁。
+
+### 复现要点
 
 ```rust
-// auth::bearer_auth 中间件
-// 请求头：Authorization: Bearer <token>
-// token 从 app_settings 读取，通过 POST /api/auth/token 更新
-// 浏览器模式：URL ?token=xxx 参数自动保存到 localStorage
+// 文件台账核心 SQL
+CREATE TABLE file_tracking (
+    id      TEXT PRIMARY KEY,
+    path    TEXT NOT NULL UNIQUE,   -- 相对路径
+    md5     TEXT,                   -- 内容哈希（去重键）
+    status  TEXT DEFAULT 'active',
+    indexed INTEGER DEFAULT 0,      -- 0/1/2/3
+    mtime   INTEGER,
+    size    INTEGER
+);
+-- 部分索引：快速找待处理
+CREATE INDEX idx_ft_pending ON file_tracking(updated_at)
+    WHERE indexed IN (0, 2, 3);
 ```
-
-### 路由注册
-
-```rust
-// routes/mod.rs
-build_router(api_state)
-  .merge(search::router(state))   // /api/search, /api/suggest, ...
-  .merge(ai::router(state))       // /api/ai/*, /api/chat/*
-  .merge(files::router(state))    // /api/files/*
-  .merge(events::router(state))   // /api/events
-  .merge(settings::router(state)) // /api/settings
-  .merge(logs::router(state))     // /api/logs
-  .merge(dirs::router(state))     // /api/dirs
-  .merge(config::router(state))   // /api/config
-  .merge(index::router(state))    // /api/index/*
-  .merge(backup::router(state))   // /api/backup/*
-  .merge(tesseract::router(state))// /api/ocr/*
-  .route_layer(auth::bearer_auth)  // 所有 /api/* 需认证
-  .merge(auth_free_routes)         // /api/auth/* 豁免
-  .fallback(static_files::serve_static) // 前端静态文件（dist/）
-```
-
-### 完整路由表
-
-#### AI 端点
-
-| 方法 | 路径 | 请求体 | 响应 | 说明 |
-|------|------|--------|------|------|
-| GET | `/api/ai/capabilities` | — | `{ embedding, llm }` | AI 能力探测 |
-| POST | `/api/ai/conversation/ask` | `{ messages, source_ids, ... }` | `{ answer }` | 非流式对话 |
-| POST | `/api/ai/conversation/ask/stream` | 同上 + `session_id` | SSE触发 | 流式对话 |
-| POST | `/api/ai/smart-search` | `{ query }` | `{ answer, evidence }` | 非流式搜索 |
-| POST | `/api/ai/smart-search/stream` | `{ query, session_id }` | SSE触发 | 流式搜索 |
-| POST | `/api/ai/summarize` | `{ file_id }` | `{ summary }` | 文档摘要 |
-| POST | `/api/chat/ask` | `{ file_ids, question }` | `{ answer }` | 文件问答 |
-| POST | `/api/ai/cancel` | — | 200 | 取消 |
-| GET | `/api/ai/gateways/test` | — | `[{ kind, ok }]` | 网关测试 |
-| GET | `/api/ai/events` | `?session_id=xxx` | `[{ ... }]` | 会话事件 |
-| GET | `/api/ai/events/turn` | `?session_id=xxx&turn_number=N` | `[{ ... }]` | 单轮事件 |
-
-#### 会话端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/chat/sessions` | 列出所有会话 |
-| POST | `/api/chat/sessions` | 创建新会话 |
-| GET | `/api/chat/sessions/{id}` | 加载会话 |
-| PUT | `/api/chat/sessions/{id}` | 保存会话 |
-| DELETE | `/api/chat/sessions/{id}` | 删除会话 |
-| POST | `/api/chat/sessions/{id}/export` | 导出 Markdown |
-
-#### 其他端点
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/events` | SSE 事件桥 |
-| GET | `/api/search` | 全文搜索 |
-| GET | `/api/settings` | 获取设置 |
-| GET | `/api/config` | 获取配置 |
-| GET | `/api/dirs` | 目录列表 |
-| GET | `/api/index/status` | 索引状态 |
-| GET | `/api/logs` | 日志 |
-| GET | `/api/stats/file-types` | 文件类型统计 |
-| GET | `/api/backup/status` | 备份状态 |
-| GET | `/api/ocr/dependencies` | OCR 依赖 |
-| GET | `/api/files/{id}/preview` | 文件预览 |
-| POST | `/api/auth/token` | 更新 token |
 
 ---
 
-## 前端架构
+## 十一、模块十：前端架构
 
-### 路由结构
+### 设计思想
+
+一套 React 代码，两种运行环境（桌面 / 浏览器），通过 `isTauri()` 检测自动切换 API 层。
+
+### 页面映射
+
+| 路由 | 页面 | 职责 |
+|------|------|------|
+| `/` | 搜索页 | 关键词/筛选/预览 |
+| `/#/chat` | AI 聊天页 | 会话 + 对话 |
+| `/#/browse` | 浏览页 | 表格浏览文件 |
+| `/#/directories` | 资料库 | 目录管理 |
+| `/#/index` | 索引状态 | 进度/统计 |
+| `/#/settings` | 设置 | 配置 |
+| `/#/logs` | 日志 | 查看日志 |
+
+### ChatPanel（最重要的组件）
+
+AI 聊天面板是前端最复杂的组件（755 行）：
 
 ```
-/                    → SearchPage    # 搜索页
-/#/chat              → AiChat        # AI 聊天页
-/#/browse            → Browse        # 浏览页
-/#/directories       → Directories   # 资料库
-/#/index             → IndexStatus   # 索引状态
-/#/logs              → Logs          # 日志
-/#/file-types        → FileTypes     # 文件类型
-/#/settings          → Settings      # 设置
-```
-
-### AI 聊天组件树
-
-```
-AiChat
-├── 会话列表（左侧）
-│   ├── 搜索框 + 筛选按钮（全部/今日/7天/更早）
-│   ├── 会话条目列表（点击切换）
-│   └── 文件树浏览器（懒加载，右键加入范围）
-│
-├── ChatPanel（右侧）
-│   ├── 标题栏（导出按钮）
-│   ├── 消息列表
-│   │   ├── 用户消息（Markdown 渲染）
-│   │   ├── 助手消息（Markdown 渲染 + 引用高亮）
-│   │   ├── 检索依据面板（AiEvidencePanel）
-│   │   ├── 推理过程时间线（AiEventTimeline）
-│   │   └── loading 指示器（思考中 + 取消按钮）
-│   ├── 范围条（chips：📄 文件 / 📁 目录，可 × 删除）
-│   ├── 开关栏（仅依据文档 / 全量召回）
-│   └── 输入框 + 发送按钮
-│
-└── 状态栏（文件数、已索引、错误、备份）
+ChatPanel
+├── 消息列表（用户/助手消息 + Markdown 渲染）
+├── 检索依据面板（AiEvidencePanel）
+├── 推理时间线（AiEventTimeline）
+├── loading 指示器 + 取消按钮
+├── 范围条（chips）
+├── 开关（仅依据文档 / 全量召回）
+└── 输入 + 发送
 ```
 
 ### 双模式 API 客户端
 
 ```typescript
-// client.ts
-export async function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
-  if (isTauri()) {
-    // 桌面模式：Tauri IPC
-    const { invoke: tauriInvoke } = await import('@tauri-apps/api/core')
-    return tauriInvoke<T>(cmd, args)
-  }
-  // 浏览器模式：HTTP fetch
-  const spec = MAPPINGS[cmd]
-  // ... fetch + transform + SSE 处理
+async function invoke<T>(cmd, args) {
+  if (isTauri()) return tauriInvoke(cmd, args)      // 桌面: IPC
+  const spec = MAPPINGS[cmd]                          // 浏览: HTTP
+  const resp = await fetch(apiBase + spec.path, ...)
+  if (spec.sse) { await resp.body.cancel(); return }  // SSE 触发
+  return resp.json()
 }
 ```
 
-### 平台检测
+### 会话状态管理
 
-```typescript
-// utils/platform.ts
-export function isTauri(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
-}
-export function getApiBase(): string {
-  return typeof window !== 'undefined' ? window.location.origin : ''
-}
-export function getToken(): string {
-  return localStorage.getItem('ls_token') || ''
-}
+- `AiChat` 持有 `activeSession` 状态。
+- `ChatPanel` 通过 `onSessionChange` 回调 + `patchSession` 局部更新。
+- 每次变更自动 `saveChatSession` 持久化。
+
+---
+
+## 十二、模块间数据流总览
+
+```
+                    ┌──────────────────────────────┐
+                    │         前端 (React)           │
+                    │  SearchPage / ChatPanel / ... │
+                    └──────────┬───────────────────┘
+                               │ isTauri() 自动切换
+                 ┌─────────────┴──────────────┐
+                 ▼                            ▼
+        ┌───────────────┐            ┌─────────────────┐
+        │ Tauri IPC     │            │ Web API (HTTP)  │
+        └───────┬───────┘            └────────┬────────┘
+                │                             │ 事件桥
+                ▼                             ▼
+        ┌──────────────────────────────────────────────┐
+        │              Rust 后端 (commands)              │
+        │  conversation_ask_stream / search / ...      │
+        └──────────┬──────────────┬─────────────────────┘
+                   │              │
+        ┌──────────▼──────┐  ┌────▼────────────────────┐
+        │  AI RAG 管线      │  │  搜索引擎 (Tantivy)      │
+        │  改写→范围→检索→  │  │  + 语义向量 (BGE)       │
+        │  注入→LLM        │  └───────────┬────────────┘
+        └──────────┬──────┘              │
+                   │                     │
+        ┌──────────▼──────────┐  ┌───────▼─────────┐
+        │  LLM 网关 (外部)      │  │  SQLite 数据库    │
+        │  chat/completions    │  │  file/content... │
+        └─────────────────────┘  └─────────────────┘
 ```
 
 ---
 
-## 配置系统
+## 十三、核心设计原则
 
-### 配置文件位置
-
-```
-桌面模式：~/Library/Application Support/.link-searcher/config.json
-覆盖模式：LINK_SEARCHER_DATA_DIR 环境变量
-```
-
-### 配置结构
-
-```json
-{
-  "data_dir": "/Volumes/Data/index",
-  "language": "zh",
-  "providers": [
-    {
-      "id": "95269265-fe6b-4212-a496-5ebe037c6a77",
-      "name": "9router",
-      "base_url": "http://192.168.1.50:20128/v1",
-      "api_key": "sk-xxx",
-      "models": [{ "id": "coding", "model_type": "Llm" }]
-    }
-  ],
-  "active_embedding_model_id": "local:bge-large-zh-v1.5",
-  "active_llm_model_id": "95269265-fe6b-4212-a496-5ebe037c6a77:coding",
-  "semantic_weight": 0.3
-}
-```
-
-- `active_embedding_model_id` 格式：`"local:bge-large-zh-v1.5"` 或 `"provider_id:model_id"`
-- `local:` 前缀的 embedding 模型使用本地 BGE ONNX 引擎
-- `active_llm_model_id` 格式：`"provider_id:model_id"`
+1. **性能优先**：全文搜索毫秒级，并行索引，增量更新。
+2. **隐私可选**：核心全本地，AI 是可选且用户知情。
+3. **优雅降级**：没配 LLM → AI 隐藏；LLM 挂了 → 返回 None 而非崩溃；语义没配 → 纯 BM25。
+4. **够用不过度设计**：能用 SQLite 就不上 Postgres，能用标准库就不用框架。
+5. **一套代码两处跑**：React 前端桌面/浏览器复用，后端命令 IPC/HTTP 复用。
+6. **内容诚实**：RAG 回答必须基于材料，"仅依据文档"宁可拒绝也不编造。
 
 ---
 
-## 构建与部署
+## 十四、已知取舍与未来方向
 
-```bash
-# 开发模式
-npm install && npm run tauri dev
+### 当前取舍（可接受）
 
-# 仅前端 Vite
-npm run dev
+| 取舍 | 原因 | 改进空间 |
+|------|------|---------|
+| 全表向量扫描慢 | 简单、无需向量库 | 换 HNSW 索引 |
+| 内容截断从开头 | 简单 | 分块重排（取最相关块） |
+| 上下文窗口硬编码 | 简单 | 按模型动态调整 |
+| Web 模式无进度条 | ai-progress 未桥接 | 补进 BRIDGED_EVENTS |
+| 单进程 Web API | 简单 | 独立进程 |
 
-# 仅编译后端
-cargo build --manifest-path src-tauri/Cargo.toml
+### 未来方向
 
-# 生产构建
-npm run tauri build
-# 产物：src-tauri/target/release/bundle/
-
-# CLI 模式
-./target/debug/link-searcher chat "判决结果是什么？" --dry-run
-
-# 指定数据目录
-LINK_SEARCHER_DATA_DIR=/Volumes/Data/index ./target/debug/link-searcher chat "测试"
-```
-
-### 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `LINK_SEARCHER_DATA_DIR` | 覆盖数据目录 |
-| `SHERPA_ONNX_ARCHIVE_DIR` | sherpa-onnx 预编译库路径 |
-| `SHERPA_ONNX_LIB_DIR` | sherpa-onnx 库解压路径 |
-
----
-
-## 测试
-
-```bash
-# Rust 测试
-cd src-tauri && cargo test
-
-# E2E 测试（37 个用例，覆盖 8 页面 + AI 流式）
-# 详见 docs/12-testing.md
-
-# 性能测试
-python3 scripts/gen_test_data.py /tmp/ls-test-1k 1000
-./scripts/perf_scan.sh /tmp/ls-test-1k 1k-files
-
-# 静态分析
-semgrep scan --config .semgrep/custom.yml --config p/owasp-top-ten --config p/secrets --severity ERROR
-```
-
----
-
-## 调试与诊断
-
-### 后端日志
-
-```bash
-# 实时监控
-tail -f /Volumes/Data/index/app.log
-
-# AI 请求完整流程
-grep "conversation_ask_stream\|chat_stream returned\|turn_end" app.log
-
-# 内容注入详情
-grep "injection:\|context assembled\|prepare ok\|prepare failed" app.log
-
-# LLM 调用
-grep "chat stream request\|← LLM\|→ LLM" app.log
-
-# 事件桥
-grep "WEBAPI-BRIDGE" app.log
-
-# 原始回答内容
-grep "raw answer" app.log
-```
-
-### 前端调试
-
-```javascript
-// ChatPanel.tsx 已埋入 AI-DEBUG 日志
-console.log('[AI-DEBUG] ai-chunk', { deltaLen, isReasoning })
-console.log('[AI-DEBUG] ai-done received', { sessionId, loadingRef, fullTextLen })
-console.warn('[AI-DEBUG] ai-done dropped: loadingRef is false')
-```
-
-### CLI 测试
-
-```bash
-link-searcher chat "问题" --no-llm    # 仅检索
-link-searcher chat "问题" --dry-run   # 完整管线不调 LLM
-link-searcher chat "问题" --full-recall --dry-run  # 全量召回
-link-searcher chat "问题" --scope "案件/xxx" --dry-run  # 指定范围
-```
-
-### 直接测试 LLM 网关
-
-```bash
-curl -s http://192.168.1.50:20128/v1/chat/completions \
-  -H "Authorization: Bearer <key>" \
-  -d '{"model":"coding","messages":[{"role":"user","content":"hi"}],"max_tokens":20}'
-```
-
-### 直接测试 Web API
-
-```bash
-# 非流式
-curl -sk https://127.0.0.1:8443/api/ai/conversation/ask \
-  -H "Authorization: Bearer 123456" \
-  -d '{"messages":[{"role":"user","content":"测试"}],"source_ids":[],"strict_docs":false}'
-
-# 流式 + 事件桥
-curl -sk "https://127.0.0.1:8443/api/events" -H "Authorization: Bearer 123456" &
-curl -sk -X POST "https://127.0.0.1:8443/api/ai/conversation/ask/stream" \
-  -H "Authorization: Bearer 123456" \
-  -d '{"messages":[{"role":"user","content":"测试"}],"source_ids":[],"sessionId":"test","strict_docs":false}'
-```
-
-### 查看数据库
-
-```bash
-# AI 事件
-sqlite3 /Volumes/Data/index/data.db \
-  "SELECT turn_number, event_seq, event_type, substr(payload_json,1,200)
-   FROM ai_events WHERE session_id='<id>' ORDER BY id;"
-
-# 会话内容
-cat /Volumes/Data/index/chat_history.json | python3 -m json.tool | head -100
-```
-
----
-
-## 已知缺陷与设计约束
-
-### 1. 内容截断无位置感知
-`truncate_text` 从开头截断，可能丢掉文档末尾的关键信息。无分块重排机制。
-
-### 2. `content_budget` 过度压缩
-命中多时每份文档配额极低（200 份时每份仅 700 chars），无法有效利用上下文。
-
-### 3. `ai-done` 被 `loadingRef` 拦截
-`ChatPanel.tsx:166` 检查 `loadingRef.current`，若时序问题被清 false，回复静默丢弃。
-
-### 4. `ai-progress` 不在 Web 事件桥中
-Web 模式下前端不显示进度条和阶段文本。
-
-### 5. `vector_full_scan` 全表扫描
-无索引，遍历 11684 条嵌入约需 10-30 秒。
-
-### 6. 上下文窗口不可配置
-`CONTEXT_BUDGET=150000` 硬编码。
-
-### 7. 查询改写不感知检索范围
-`llm_rewrite_query` 不接收 scope 信息，可能改写后丢失范围限定。
-
-### 8. 会话存储无版本迁移
-`chat_history.json` 无 schema 版本，依赖 serde `default` 兜底。
-
-### 9. 前端浏览器模式 token 竞态
-首次 API 请求无 token 导致 401。
-
-### 10. `chat_stream` 无超时控制
-SSE 流式读取无全局超时，网关挂起则永久阻塞。
-
-### 11. Web API 单进程
-`axum_server` 在 Tauri 主进程内运行，LLM 调用阻塞可能影响 GUI 响应。
-
-### 12. 语义检索仅用余弦相似度
-`vector_full_scan` 不带 top-K，返回所有 ≥threshold 的文档可能造成噪声。
+- 向量检索换 HNSW 索引（替代全表扫描）
+- 分块 + 重排序（更精准的内容注入）
+- 会话版本迁移机制
+- 流式读取超时控制
+- 多模型自动路由（RAG 不同步骤用不同模型）
 
 ---
 
 *最后更新：2026-08-31*
-```
