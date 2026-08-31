@@ -33,7 +33,7 @@ async fn proxy_to_vite(path: &str) -> Response {
             let mime = mime_from_path(path);
 
             let mut body = Vec::new();
-            if let Err(_) = response.into_reader().read_to_end(&mut body) {
+            if response.into_reader().read_to_end(&mut body).is_err() {
                 return (StatusCode::BAD_GATEWAY, "Failed to read upstream body").into_response();
             }
 

@@ -77,7 +77,7 @@ pub async fn list_files_db(
     }
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
 
-    let ps = page_size.unwrap_or(50).max(1).min(1000);
+    let ps = page_size.unwrap_or(50).clamp(1, 1000);
     let p = page.unwrap_or(1).max(1);
     let offset = (p - 1) * ps;
 

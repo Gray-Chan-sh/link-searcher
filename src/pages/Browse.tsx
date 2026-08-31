@@ -297,7 +297,7 @@ return () => clearTimeout(t)
       if (e.key === 'ArrowDown') {
         e.preventDefault()
         const next = Math.min(idx + 1, items.length - 1)
-        const item = items[next]
+        const item = items[next]!
         selectFile(item.rel_path)
         setSelectedIds(new Set([item.file_id]))
         setLastClickedIdx(next)
@@ -305,7 +305,7 @@ return () => clearTimeout(t)
       } else if (e.key === 'ArrowUp') {
         e.preventDefault()
         const prev = Math.max(idx - 1, 0)
-        const item = items[prev]
+        const item = items[prev]!
         selectFile(item.rel_path)
         setSelectedIds(new Set([item.file_id]))
         setLastClickedIdx(prev)

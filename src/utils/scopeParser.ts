@@ -47,7 +47,7 @@ export function parseScope(text: string): ParsedScope {
 
   // @mention：文件/目录（@上轮/@第N轮 已移除解析，作为普通文本保留）
   while ((m = MENTION_RE.exec(text)) !== null) {
-    const raw = m[1].trim()
+    const raw = m[1]!.trim()
     if (!raw) continue
     if (raw === '上轮' || /^第\d+轮$/.test(raw)) continue // 死代码移除后：非引用，保留原文
     if (isFileLike(raw)) {
@@ -60,7 +60,7 @@ export function parseScope(text: string): ParsedScope {
 
   // /ext:pdf
   while ((m = CMD_EXT_RE.exec(text)) !== null) {
-    const v = m[1].trim().toLowerCase()
+    const v = m[1]!.trim().toLowerCase()
     if (v && !scope.conditions.some(c => c.kind === 'ext' && c.value === v)) {
       scope.conditions.push({ kind: 'ext', value: v })
     }
@@ -69,7 +69,7 @@ export function parseScope(text: string): ParsedScope {
 
   // /date:2025-01-01~2025-12-31
   while ((m = CMD_DATE_RE.exec(text)) !== null) {
-    const v = m[1].trim()
+    const v = m[1]!.trim()
     if (v && !scope.conditions.some(c => c.kind === 'date' && c.value === v)) {
       scope.conditions.push({ kind: 'date', value: v })
     }
@@ -78,14 +78,14 @@ export function parseScope(text: string): ParsedScope {
 
   // /范围:全库 或 /范围:目录路径
   while ((m = CMD_SCOPE_RE.exec(text)) !== null) {
-    const v = m[1].trim()
+    const v = m[1]!.trim()
     if (v) scopeAction = v === '全库' ? 'clear' : `dir:${v}`
     clean = clean.replace(m[0], '')
   }
 
   // /模糊:自由文本（条件，待 LLM 解析，value 暂存原文）
   while ((m = CMD_FUZZY_RE.exec(text)) !== null) {
-    const v = m[1].trim()
+    const v = m[1]!.trim()
     if (v && !scope.conditions.some(c => c.kind === 'fuzzy' && c.value === v)) {
       scope.conditions.push({ kind: 'fuzzy', value: v })
     }

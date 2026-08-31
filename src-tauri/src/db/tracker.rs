@@ -195,6 +195,28 @@ pub fn get_file_by_id(conn: &Connection, file_id: &str) -> Result<Option<FileRec
     Ok(rows.next().transpose()?)
 }
 
+/// Batch `get_file_by_id`: one query for a list of ids, preserving input order.
+/// Falls back to per-id lookups when the id list is empty (query_map over empty
+/// params is not allowed by rusqlite).
+pub fn get_files_by_ids(conn: &Connection, ids: &[String]) -> Result<Vec<Option<FileRecord>>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len()).collect::<Vec<_>>().join(",");
+    let sql = format!("{SEL} WHERE id IN ({placeholders})");
+    let mut s = conn.prepare(&sql).context("prepare get_files_by_ids")?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        ids.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let rows = s
+        .query_map(param_refs.as_slice(), row_to_record)
+        .context("query get_files_by_ids")?;
+    let mut by_id: std::collections::HashMap<String, FileRecord> = std::collections::HashMap::new();
+    for rec in rows.flatten() {
+        by_id.insert(rec.id.clone(), rec);
+    }
+    Ok(ids.iter().map(|id| by_id.get(id).cloned()).collect())
+}
+
 pub fn get_file_by_path(conn: &Connection, path: &str) -> Result<Option<FileRecord>> {
     let mut s = conn.prepare(&format!("{SEL} WHERE path=?1")).context("prepare get_file_by_path")?;
     let mut rows = s.query_map(rusqlite::params![path], row_to_record)?;
@@ -481,6 +503,29 @@ pub fn get_content(conn: &Connection, md5: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare("SELECT text_content FROM content_index WHERE md5=?1")?;
     let mut rows = stmt.query_map(rusqlite::params![md5], |row| row.get::<_, String>(0))?;
     Ok(rows.next().transpose()?)
+}
+
+/// Batch `get_content`: one query for a list of md5s, returning entries in
+/// input order (None when a hash has no cached text).
+pub fn get_contents(conn: &Connection, md5s: &[String]) -> Result<Vec<Option<String>>> {
+    if md5s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", md5s.len()).collect::<Vec<_>>().join(",");
+    let sql = format!("SELECT md5, text_content FROM content_index WHERE md5 IN ({placeholders})");
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        md5s.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let rows = stmt
+        .query_map(param_refs.as_slice(), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("query get_contents")?;
+    let mut by_md5: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (md5, text) in rows.flatten() {
+        by_md5.insert(md5, text);
+    }
+    Ok(md5s.iter().map(|m| by_md5.get(m).cloned()).collect())
 }
 
 /// Delete content from the dedup cache so the next extraction for this hash

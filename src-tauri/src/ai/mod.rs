@@ -298,9 +298,7 @@ pub fn vector_full_scan(
 /// when unconfigured or the request fails (downgrade, never block).
 pub fn chat(system: &str, user: &str) -> Option<String> {
     let cfg = crate::config::load_config();
-    let Some(ep) = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm) else {
-        return None;
-    };
+    let ep = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm)?;
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
     let req = ChatReq {
@@ -570,9 +568,7 @@ fn parse_chat_response(body: &str) -> Result<ChatResp, String> {
         return Ok(r);
     }
     body.lines()
-        .filter_map(|l| l.strip_prefix("data:").map(str::trim))
-        .filter(|l| !l.is_empty() && *l != "[DONE]")
-        .next_back()
+        .filter_map(|l| l.strip_prefix("data:").map(str::trim)).rfind(|l| !l.is_empty() && *l != "[DONE]")
         .ok_or_else(|| "no SSE data payload in response".to_string())
         .and_then(|payload| {
             serde_json::from_str::<ChatResp>(payload).map_err(|e| e.to_string())

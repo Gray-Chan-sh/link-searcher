@@ -366,7 +366,7 @@ impl IndexerService {
         let mut results: Vec<BatchResult> = Vec::with_capacity(total as usize);
         let mut success_count = 0u64;
         let mut error_count = 0u64;
-        let mut total_bytes: u64 = 0;
+        let total_bytes: u64 = 0;
         let mut done = 0u64;
 
         for chunk in jobs.chunks(CHUNK) {

@@ -330,27 +330,23 @@ impl AudioExtractor {
                         let speaker_label = format!("[说话人{}]", seg_item.speaker);
                         let start_sample = (seg_item.start * 16000.0).round() as usize;
                         let end_sample = ((seg_item.end * 16000.0).round() as usize).min(seg.len());
-                        if start_sample < end_sample {
-                            if let Some(text) = transcribe(rec, &seg[start_sample..end_sample]) {
-                                if !text.trim().is_empty() {
+                        if start_sample < end_sample
+                            && let Some(text) = transcribe(rec, &seg[start_sample..end_sample])
+                                && !text.trim().is_empty() {
                                     diarized_parts.push(format!("{speaker_label}{text}"));
                                 }
-                            }
-                        }
                     }
                 } else {
-                    if let Some(text) = transcribe(rec, seg) {
-                        if !text.trim().is_empty() {
+                    if let Some(text) = transcribe(rec, seg)
+                        && !text.trim().is_empty() {
                             diarized_parts.push(text);
                         }
-                    }
                 }
             } else {
-                if let Some(text) = transcribe(rec, seg) {
-                    if !text.trim().is_empty() {
+                if let Some(text) = transcribe(rec, seg)
+                    && !text.trim().is_empty() {
                         diarized_parts.push(text);
                     }
-                }
             }
         }
         let text = diarized_parts.join("\n");
