@@ -796,14 +796,26 @@ pub fn get_files_by_md5(conn: &Connection, md5: &str) -> Result<Vec<String>> {
         .context("collect files by md5")
 }
 
-/// Find all active files whose path contains `keyword` (case-insensitive LIKE).
-/// Returns (file_id, path) pairs. No limit — returns every match.
-pub fn path_match_files(conn: &Connection, keyword: &str) -> Result<Vec<(String, String)>> {
-    let pattern = format!("%{keyword}%");
-    let mut stmt = conn.prepare(
-        "SELECT id, path FROM file_tracking WHERE status = 'active' AND path LIKE ?1"
-    )?;
-    let rows = stmt.query_map(rusqlite::params![pattern], |row| {
+/// Match active files whose relative path contains ANY of the given
+/// keywords (OR). An empty keyword list matches nothing.
+pub fn path_match_files(conn: &Connection, keywords: &[String]) -> Result<Vec<(String, String)>> {
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut sql = String::from(
+        "SELECT id, path FROM file_tracking WHERE status = 'active' AND (",
+    );
+    let mut params: Vec<String> = Vec::with_capacity(keywords.len());
+    for (i, kw) in keywords.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(" OR ");
+        }
+        sql.push_str(&format!("path LIKE ?{}", i + 1));
+        params.push(format!("%{kw}%"));
+    }
+    sql.push(')');
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut result = Vec::new();

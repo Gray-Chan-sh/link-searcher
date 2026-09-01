@@ -627,6 +627,62 @@ fn is_rewrite_stopword(w: &str) -> bool {
         | "对" | "于" | "一个" | "会" | "能" | "让")
 }
 
+/// 检索级停用词：问句中无区分度的泛词。它们会稀释 BM25/向量信号，
+/// 把"常宏"这类核心实体挤到检索排序后面。
+fn is_retrieval_stopword(w: &str) -> bool {
+    is_rewrite_stopword(w)
+        || matches!(w,
+            // 疑问/数量泛词
+            "多少" | "几个" | "哪些" | "什么" | "是否" | "有无" | "怎么" | "如何"
+            | "一共" | "总共" | "合计" | "数量" | "数目" | "份" | "个" | "几"
+            // 动作/主题泛词
+            | "涉及" | "相关" | "有关" | "关于" | "涉及到的" | "需要" | "知道" | "看看"
+            | "告诉" | "查询" | "搜索" | "查找" | "列出" | "列表" | "列举" | "汇总" | "整理"
+            // 领域泛词（检索全库时无区分度）
+            | "案件" | "案子" | "民事" | "民事案件" | "刑事案件" | "刑事" | "行政" | "行政诉讼"
+            | "诉讼" | "起诉" | "判决" | "裁定" | "案由"
+            | "文件" | "文档" | "资料" | "材料" | "内容" | "信息" | "情况" | "问题"
+            | "公司" | "单位" | "部门" | "人员" | "时间" | "日期" | "地点" | "会议纪要")
+}
+
+/// 从检索问句中提炼核心实体词（专有名词优先，如人名/地名/机构名），
+/// 用于 BM25/路径/向量三通道的精准检索。
+///
+/// 用 `TokenizeMode::Search` 而非词性标注：jieba 默认词典不收录人名
+/// （"常宏"会被 tag 拆成 常+宏 两个单字），而 Search 模式能保留
+/// "常宏"/"万城" 这类专有名词为整体词。
+///
+/// 例："涉及常宏的民事案件一共有多少，请列表" → ["常宏"]
+///      "万城的股东资格确认纠纷" → ["万城", "股东资格"]
+///      "上周会议纪要" → []（无实体，调用方回退完整问句）
+fn extract_retrieval_keywords(query: &str) -> Vec<String> {
+    const MAX_KEYWORDS: usize = 3;
+    let q = query.trim();
+    if q.chars().count() < 2 {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = Vec::new();
+    for t in crate::search::schema::JIEBA.tokenize(q, jieba_rs::TokenizeMode::Search, true) {
+        // jieba-rs 的 Token 直接带 word（&str），无需手动切片
+        let w = t.word.trim();
+        if w.is_empty() || w.chars().count() < 2 || is_retrieval_stopword(w) {
+            continue;
+        }
+        // 过滤纯数字/标点/字母（如 "41833" 案件号无路径匹配价值）
+        if w.chars().all(|c| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace()) {
+            continue;
+        }
+        if out.iter().any(|k: &String| k == w) {
+            continue;
+        }
+        out.push(w.to_string());
+        if out.len() >= MAX_KEYWORDS {
+            break;
+        }
+    }
+    out
+}
+
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     for t in crate::search::schema::JIEBA.cut(text, false) {
@@ -1120,6 +1176,16 @@ pub(crate) async fn prepare_conversation_prompt(
     for (fid, _) in &mention_resolved {
         all_seen.insert(fid.clone());
     }
+    // 从问句提炼核心实体词（如"常宏"），三通道共用：
+    // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
+    // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
+    let retrieval_kws = extract_retrieval_keywords(&search_q);
+    let bm25_query = if retrieval_kws.is_empty() {
+        search_q.clone()
+    } else {
+        retrieval_kws.join(" OR ")
+    };
+    log::info!("[AI]   retrieval_kws={:?} bm25_query=\"{}\"", retrieval_kws, truncate_text(&bm25_query, 60));
     if !last_q.trim().is_empty() {
         check_cancel!();
         emit_progress("bm25", "BM25 检索中...", 0, 0);
@@ -1128,7 +1194,7 @@ pub(crate) async fn prepare_conversation_prompt(
             crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
         };
         let bm25_hits = bm25_relevant_hits(
-            state, &search_q, (total_files as usize).max(500), crate::ai::embedding_enabled(),
+            state, &bm25_query, (total_files as usize).max(500), crate::ai::embedding_enabled(),
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, path_prefixes_opt.clone(), mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
@@ -1141,7 +1207,8 @@ pub(crate) async fn prepare_conversation_prompt(
             emit_progress("vector", "语义扫描中...", 0, 0);
             log::info!("[AI]   about to call vector_full_scan");
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            if let Ok(vec_hits) = crate::ai::vector_full_scan(&c, &search_q, VECTOR_THRESHOLD) {
+            let vec_query = if retrieval_kws.is_empty() { search_q.clone() } else { retrieval_kws.join(" ") };
+            if let Ok(vec_hits) = crate::ai::vector_full_scan(&c, &vec_query, VECTOR_THRESHOLD) {
                 log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
                 let mut i = 0usize;
                 for (fid, sim) in vec_hits {
@@ -1158,7 +1225,7 @@ pub(crate) async fn prepare_conversation_prompt(
             }
             // chunk 级向量通道：长文档细节（在 ~1500 字符块内）在此直接命中。
             // 命中块 → md5 → 活跃 file_id → 加入 all_hits（去重）。
-            if let Ok(chunk_hits) = crate::ai::chunk_vector_scan(&c, &search_q, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
+            if let Ok(chunk_hits) = crate::ai::chunk_vector_scan(&c, &vec_query, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
                 log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
                 let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
                 for (md5, idx, sim) in chunk_hits {
@@ -1180,8 +1247,18 @@ pub(crate) async fn prepare_conversation_prompt(
             emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
         }
         let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &search_q) {
-            log::info!("[AI]   path_match_files returned {} hits", path_hits.len());
+        let path_kws: Vec<String> = if retrieval_kws.is_empty() {
+            // 无实体词时退化为完整问句 OR 分词片段，尽量不丢召回
+            crate::search::schema::split_query_terms(&search_q)
+                .split_whitespace()
+                .map(|s| s.trim_matches(|c: char| c == '"' || c == '\'' || c == '(' || c == ')').to_string())
+                .filter(|s| !s.is_empty() && s != "OR")
+                .collect()
+        } else {
+            retrieval_kws.clone()
+        };
+        if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &path_kws) {
+            log::info!("[AI]   path_match_files returned {} hits (kws={:?})", path_hits.len(), path_kws);
             for (fid, _path) in path_hits {
                 if all_seen.insert(fid.clone()) {
                     all_hits.push(ScoredHit {
@@ -3176,5 +3253,49 @@ mod auto_cite_md_tests {
         let result = auto_cite(input, &e);
         eprintln!("OUTPUT: {}", result);
         assert!(result.contains("## 主要条款"), "heading broken: {}", result);
+    }
+}
+
+#[cfg(test)]
+mod retrieval_keyword_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_person_name_from_full_question() {
+        // 完整问句中"常宏"是核心实体，泛词（民事/案件/多少）必须被过滤
+        let kws = extract_retrieval_keywords("涉及常宏的民事案件一共有多少，请列表");
+        assert_eq!(kws, vec!["常宏"], "got: {kws:?}");
+    }
+
+    #[test]
+    fn extracts_company_and_topic() {
+        let kws = extract_retrieval_keywords("万城的股东资格确认纠纷");
+        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
+        assert!(kws.contains(&"股东".to_string()), "got: {kws:?}");
+    }
+
+    #[test]
+    fn keeps_topic_word_for_generic_question() {
+        // 无专有实体时保留主题词（"纪要"），调用方用该词检索
+        let kws = extract_retrieval_keywords("上周会议纪要");
+        assert!(kws.contains(&"纪要".to_string()), "got: {kws:?}");
+    }
+
+    #[test]
+    fn single_person_name_kept_whole() {
+        assert_eq!(extract_retrieval_keywords("常宏"), vec!["常宏"]);
+    }
+
+    #[test]
+    fn caps_at_three_keywords() {
+        let kws = extract_retrieval_keywords("常宏 郑坚敏 万城 违约金 比例 审计");
+        assert!(kws.len() <= 3, "got: {kws:?}");
+    }
+
+    #[test]
+    fn ignores_pure_numbers() {
+        let kws = extract_retrieval_keywords("41833号案件 常宏");
+        assert!(kws.iter().all(|k| k != "41833"), "got: {kws:?}");
+        assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
     }
 }
