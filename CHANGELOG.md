@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-09-01（检索修复）
+
+- **AI 聊天检索不到人名/实体（如"涉及常宏的民事案件"答"找不到"）**：完整问句直接进三路检索，核心实体被泛词淹没。**根因**：(1) `path_match_files` 用完整问句做 `LIKE %...%` → 必然 0 命中（本应命中 5559 份路径含"常宏"的文件）；(2) BM25 把问句分词为 `涉及 OR 常宏 OR 民事 OR 案件 OR 民事案件 OR 一共 OR 多少 OR 列表`，泛词稀释 BM25 分数，"常宏"文件被挤出注入前 30，前 30 全被"民事案件案由规定"等无关高分文档占据；(3) 向量通道同样用完整问句，11684 个向量 0 命中。**修复**：新增 `extract_retrieval_keywords`（jieba Search 模式分词 + 检索级停用词表），从问句提炼核心实体词（"常宏"），BM25/向量/路径三通道改用实体词检索——`path_match_files` 改为多关键词 OR 匹配；无实体时回退完整问句。涉及 `src-tauri/src/commands/ai.rs`、`src-tauri/src/db/tracker.rs`，新增 6 个单元测试。验证：修复前注入前 30 全无关文档 → 修复后前 30 全是"常宏"相关文件（起诉书/会见记录/判决书/质证意见），命中从 8007 收敛到 5954。
+
+---
+
 ## 2026-08-31（Bug 修复）
 
 - **「缩小范围」后「去聊天」只传 20 个文件**：搜索页 `goToChat`（`SearchPage.tsx:174-180`）从 `currentRefine.hits`（仅 20 条分页片）反查 path，丢掉了 `allFileIds` 中已选但不在当前页的 ID 的 path。**根因**：`enterRefine` 把全量 ID 存进 `allFileIds`（来自 `search_file_ids_only`，page_size=5000），但只有 ID 无 path；`goToChat` 拿不到 path 时只能回退到当前页 20 条 hits。**修复**：把 `search_file_ids_only` 的返回从 `Vec<String>` 升级为 `Vec<{file_id, path}>`（`search.rs` 新增 `IdWithPath`），前端 `allFileIds` → `allFileRows: IdWithPath[]`，`goToChat` 用 Map 按 ID 反查全量 path，30 个选中就传 30 个到 `ls_pending_chat_paths`。涉及 `src-tauri/src/commands/search.rs`、`src/api/search.ts`、`src/pages/SearchPage.tsx`，新增 1 个序列化单测锁定 wire shape。
