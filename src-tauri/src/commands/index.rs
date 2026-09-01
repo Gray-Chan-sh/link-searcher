@@ -285,7 +285,7 @@ pub async fn trigger_scan(
 /// Truncate the index-facing tables before a rebuild. Embeddings/summaries
 /// must go too, or stale rows would rank ghost docs in semantic search.
 fn clear_index_tables(conn: &rusqlite::Connection) {
-    for table in ["file_tracking", "content_index", "doc_embeddings", "doc_summaries"] {
+    for table in ["file_tracking", "content_index", "doc_embeddings", "doc_summaries", "chunk_embeddings"] {
         if let Err(e) = conn.execute(&format!("DELETE FROM {table}"), []) {
             log::warn!("[SCAN] failed to clear {table}: {e}");
         }
@@ -626,6 +626,112 @@ fn missing_embedding_rows(
         })
         .context("query missing-embedding rows")?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-embedding rows")
+}
+
+/// Long documents (md5s that have `doc_chunks` rows) that lack chunk
+/// embeddings, capped per run. Returns md5s only; chunks are loaded per-md5
+/// in the caller so the chunk set stays consistent with what is embedded.
+fn missing_chunk_embedding_md5s(
+    conn: &rusqlite::Connection,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT md5 FROM doc_chunks
+             WHERE md5 NOT IN (SELECT DISTINCT md5 FROM chunk_embeddings)
+             ORDER BY md5 LIMIT ?1",
+        )
+        .context("prepare missing-chunk-embedding query")?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit as i64], |row| row.get::<_, String>(0))
+        .context("query missing-chunk-embedding md5s")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-chunk-embedding md5s")
+}
+
+/// Backfill chunk-level embeddings for long documents: every `doc_chunks`
+/// text (≤1500 chars) gets its own vector, so semantic retrieval can hit
+/// detail-level content that a whole-file vector dilutes. Idempotent —
+/// repeated runs converge (only md5s with zero chunk embeddings are picked).
+fn run_backfill_chunk_embeddings(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+) -> Result<BackfillReport, String> {
+    if !crate::ai::embedding_enabled() {
+        return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
+    }
+    let _guard = crate::state::TaskGuard::new("backfill_chunks");
+    const MAX_PER_RUN: usize = 500;
+    const BATCH: usize = 64;
+
+    let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+    let md5s = missing_chunk_embedding_md5s(&conn, MAX_PER_RUN).map_err(|e| e.to_string())?;
+    let total = md5s.len();
+    if total == 0 {
+        return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
+    }
+
+    log::info!("[AI] chunk 向量回填开始: {total} 个长文档缺块向量");
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+    for md5 in &md5s {
+        let chunks = match crate::db::chunks::get_chunks(&conn, md5) {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[AI] get_chunks failed for {md5}: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+        if chunks.is_empty() {
+            continue;
+        }
+        for batch in chunks.chunks(BATCH) {
+            let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
+            let vecs = crate::ai::embed_batched(&texts, BATCH);
+            for (chunk, v) in batch.iter().zip(vecs) {
+                match v {
+                    Some(vec) => {
+                        if let Err(e) = crate::db::tracker::upsert_chunk_embedding(
+                            &conn, md5, chunk.chunk_index, &vec,
+                        ) {
+                            log::warn!("[AI] upsert_chunk_embedding failed {md5}#{}: {e}", chunk.chunk_index);
+                            failed += 1;
+                        }
+                    }
+                    None => failed += 1,
+                }
+            }
+        }
+        processed += 1;
+    }
+    log::info!("[AI] chunk 向量回填完成: {processed} 文档, {failed} 失败");
+    crate::state::push_task_brief(
+        "backfill_chunks",
+        format!("chunk 向量回填完成: {processed} 补齐, {failed} 失败"),
+    );
+    Ok(BackfillReport {
+        processed: processed as u64,
+        pending: (total - processed) as u64,
+        failed: failed as u64,
+    })
+}
+
+/// Public wrapper for background thread callers (startup / post-scan) that
+/// only care about "did it run without panicking".
+pub fn run_backfill_chunk_embeddings_public(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+) -> Result<(), String> {
+    run_backfill_chunk_embeddings(db).map(|_| ())
+}
+
+/// Tauri command: manually trigger chunk-embedding backfill.
+#[tauri::command]
+pub async fn backfill_chunk_embeddings(
+    state: State<'_, AppState>,
+) -> Result<BackfillReport, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || run_backfill_chunk_embeddings(&db))
+        .await
+        .map_err(|e| format!("backfill chunk task failed: {e}"))?
 }
 
 /// Summary of a [`backfill_embeddings`] run.

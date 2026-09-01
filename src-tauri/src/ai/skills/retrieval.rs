@@ -103,6 +103,8 @@ impl OldSourceManager {
                     semantic_score: None,
                     rrf_score: None,
                     from_history: true,
+                    from_chunk: false,
+                    hit_chunks: Vec::new(),
                 });
                 old_count += 1;
             }
@@ -119,7 +121,7 @@ mod tests {
         ScoredHit {
             file_id: id.into(), path: path.into(),
             bm25_score: Some(1.0), semantic_score: None, rrf_score: None,
-            from_history: false,
+            from_history: false, from_chunk: false, hit_chunks: Vec::new(),
         }
     }
 

@@ -291,6 +291,15 @@ const CREATE_TABLES_SQL: &str = "
         text        TEXT NOT NULL,
         PRIMARY KEY (md5, chunk_index)
     );
+
+    CREATE TABLE IF NOT EXISTS chunk_embeddings (
+        md5         TEXT NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        dim         INTEGER NOT NULL,
+        vector      BLOB NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        PRIMARY KEY (md5, chunk_index)
+    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any

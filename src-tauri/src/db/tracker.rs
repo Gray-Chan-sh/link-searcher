@@ -721,6 +721,81 @@ pub fn delete_embedding(conn: &Connection, file_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Store (or replace) a chunk embedding as a little-endian f32 blob, keyed by
+/// (md5, chunk_index). Long documents get one vector per chunk so semantic
+/// retrieval can hit detail-level content that a whole-file vector dilutes.
+pub fn upsert_chunk_embedding(
+    conn: &Connection,
+    md5: &str,
+    chunk_index: i64,
+    vector: &[f32],
+) -> Result<()> {
+    let mut bytes: Vec<u8> = Vec::with_capacity(vector.len() * 4);
+    for x in vector {
+        bytes.extend_from_slice(&x.to_le_bytes());
+    }
+    conn.execute(
+        "INSERT INTO chunk_embeddings (md5, chunk_index, dim, vector, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(md5, chunk_index) DO UPDATE SET
+             dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
+        rusqlite::params![md5, chunk_index, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
+    )?;
+    Ok(())
+}
+
+/// Load every chunk embedding as `(md5, chunk_index, Vec<f32>)`. Used by the
+/// chunk-vector scan to brute-force cosine over all chunk vectors.
+pub fn get_all_chunk_embeddings(
+    conn: &Connection,
+) -> Result<Vec<(String, usize, Vec<f32>)>> {
+    let mut s = conn.prepare(
+        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings",
+    )?;
+    let rows = s.query_map([], |row| {
+        let md5: String = row.get(0)?;
+        let chunk_index: usize = row.get(1)?;
+        let dim: usize = row.get(2)?;
+        let blob: Vec<u8> = row.get(3)?;
+        let mut v = Vec::with_capacity(dim);
+        for chunk in blob.chunks_exact(4) {
+            v.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok((md5, chunk_index, v))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
+/// Remove all chunk embeddings for an md5 (e.g. when content is re-indexed).
+pub fn delete_chunk_embeddings(conn: &Connection, md5: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM chunk_embeddings WHERE md5 = ?1",
+        rusqlite::params![md5],
+    )?;
+    Ok(())
+}
+
+/// Number of stored chunk embeddings (for progress reporting).
+pub fn count_chunk_embeddings(conn: &Connection) -> Result<u64> {
+    conn.query_row("SELECT COUNT(*) FROM chunk_embeddings", [], |r| r.get::<_, i64>(0))
+        .map(|n| n as u64)
+        .context("count chunk embeddings")
+}
+
+/// All active file ids sharing a content md5 (dedup duplicates).
+pub fn get_files_by_md5(conn: &Connection, md5: &str) -> Result<Vec<String>> {
+    let mut s = conn.prepare(
+        "SELECT id FROM file_tracking WHERE md5 = ?1 AND status = 'active'",
+    )?;
+    let rows = s.query_map(rusqlite::params![md5], |row| row.get::<_, String>(0))?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect files by md5")
+}
+
 /// Find all active files whose path contains `keyword` (case-insensitive LIKE).
 /// Returns (file_id, path) pairs. No limit — returns every match.
 pub fn path_match_files(conn: &Connection, keyword: &str) -> Result<Vec<(String, String)>> {
@@ -975,6 +1050,41 @@ mod tests {
 
         delete_embedding(&conn, "f1").unwrap();
         assert_eq!(count_embeddings(&conn).unwrap(), 1);
+    }
+
+    #[test]
+    fn test_chunk_embedding_roundtrip() {
+        let conn = db();
+        upsert_chunk_embedding(&conn, "m1", 0, &[0.5, -1.0, 2.0]).unwrap();
+        upsert_chunk_embedding(&conn, "m1", 1, &[1.0, 2.0]).unwrap();
+        upsert_chunk_embedding(&conn, "m2", 0, &[3.0]).unwrap();
+        let all = get_all_chunk_embeddings(&conn).unwrap();
+        assert_eq!(all.len(), 3);
+        let v = all.iter().find(|(m, i, _)| m == "m1" && *i == 0).unwrap();
+        assert_eq!(v.2, vec![0.5, -1.0, 2.0]);
+
+        // upsert replaces the same (md5, chunk_index) row.
+        upsert_chunk_embedding(&conn, "m1", 0, &[9.0]).unwrap();
+        let all = get_all_chunk_embeddings(&conn).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all.iter().find(|(m, i, _)| m == "m1" && *i == 0).unwrap().2, vec![9.0]);
+
+        // delete by md5 removes only that md5's chunks.
+        delete_chunk_embeddings(&conn, "m1").unwrap();
+        assert_eq!(count_chunk_embeddings(&conn).unwrap(), 1);
+        assert_eq!(get_all_chunk_embeddings(&conn).unwrap()[0].0, "m2");
+    }
+
+    #[test]
+    fn test_files_by_md5() {
+        let conn = db();
+        upsert_file(&conn, "/a.txt", "d1", 1000, 1, Some("shared")).unwrap();
+        let b = upsert_file(&conn, "/b.txt", "d1", 1000, 2, Some("shared")).unwrap();
+        upsert_file(&conn, "/c.txt", "d1", 1000, 3, Some("uniq")).unwrap();
+        let ids = get_files_by_md5(&conn, "shared").unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&b));
+        assert!(get_files_by_md5(&conn, "nope").unwrap().is_empty());
     }
 
     #[test]
