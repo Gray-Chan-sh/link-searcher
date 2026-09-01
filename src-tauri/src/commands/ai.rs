@@ -265,6 +265,11 @@ pub struct ScoredHit {
     pub semantic_score: Option<f64>,
     pub rrf_score: Option<f64>,
     pub from_history: bool,
+    /// Set when this hit came from the chunk-vector channel — the chunk
+    /// indices (with similarities) that matched. Used by the injection layer
+    /// to prioritize those exact chunks over lexical overlap.
+    pub from_chunk: bool,
+    pub hit_chunks: Vec<(usize, f32)>,
 }
 
 #[derive(Serialize)]
@@ -750,6 +755,8 @@ fn semantic_fuse(
                         semantic_score: Some(*c),
                         rrf_score: Some(*mix),
                         from_history: false,
+                        from_chunk: false,
+                        hit_chunks: Vec::new(),
                     })
             })
             .collect(),
@@ -834,6 +841,8 @@ pub(crate) fn bm25_relevant_hits(
                 semantic_score: None,
                 rrf_score: None,
                 from_history: false,
+                from_chunk: false,
+                hit_chunks: Vec::new(),
             });
         }
     }
@@ -881,6 +890,11 @@ const CONTEXT_BUDGET: usize = 150_000;
 const SYSTEM_OVERHEAD: usize = 2_000;
 const ANSWER_RESERVE: usize = 8_000;
 const VECTOR_THRESHOLD: f32 = 0.65;
+/// Chunk vectors are shorter/more focused than whole-file vectors, so the
+/// similarity distribution sits lower; initial estimate, tunable via
+/// `app_settings['chunk_vector_threshold']` in future.
+const CHUNK_VECTOR_THRESHOLD: f32 = 0.55;
+const CHUNK_VECTOR_TOP_K: usize = 500;
 
 /// Resolve file paths to file IDs with exact + LIKE fallback.
 /// Returns (resolved, missing) where resolved is (file_id, path) pairs.
@@ -1135,10 +1149,32 @@ pub(crate) async fn prepare_conversation_prompt(
                         all_hits.push(ScoredHit {
                             file_id: fid, path: String::new(), bm25_score: None,
                             semantic_score: Some(sim as f64), rrf_score: None, from_history: false,
+                            from_chunk: false, hit_chunks: Vec::new(),
                         });
                     }
                     i += 1;
                     if !full_recall && i > 500 { break; }
+                }
+            }
+            // chunk 级向量通道：长文档细节（在 ~1500 字符块内）在此直接命中。
+            // 命中块 → md5 → 活跃 file_id → 加入 all_hits（去重）。
+            if let Ok(chunk_hits) = crate::ai::chunk_vector_scan(&c, &search_q, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
+                log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
+                let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
+                for (md5, idx, sim) in chunk_hits {
+                    by_md5.entry(md5).or_default().push((idx, sim));
+                }
+                for (md5, chunks) in by_md5 {
+                    let Ok(file_ids) = crate::db::tracker::get_files_by_md5(&c, &md5) else { continue };
+                    for fid in file_ids {
+                        if !all_seen.insert(fid.clone()) { continue; }
+                        all_hits.push(ScoredHit {
+                            file_id: fid, path: String::new(), bm25_score: None,
+                            semantic_score: chunks.first().map(|(_, s)| *s as f64),
+                            rrf_score: None, from_history: false,
+                            from_chunk: true, hit_chunks: chunks.clone(),
+                        });
+                    }
                 }
             }
             emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
@@ -1151,6 +1187,7 @@ pub(crate) async fn prepare_conversation_prompt(
                     all_hits.push(ScoredHit {
                         file_id: fid, path: String::new(), bm25_score: None,
                         semantic_score: None, rrf_score: None, from_history: false,
+                        from_chunk: false, hit_chunks: Vec::new(),
                     });
                 }
             }
@@ -1223,7 +1260,7 @@ pub(crate) async fn prepare_conversation_prompt(
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 if !stem.is_empty() && message_text.contains(stem.as_str()) {
                     all_seen.insert(fid.clone());
-                    all_hits.push(ScoredHit { file_id: fid.clone(), path: rec.path.clone(), bm25_score: None, semantic_score: None, rrf_score: None, from_history: true });
+                    all_hits.push(ScoredHit { file_id: fid.clone(), path: rec.path.clone(), bm25_score: None, semantic_score: None, rrf_score: None, from_history: true, from_chunk: false, hit_chunks: Vec::new() });
                 }
             }
         }
@@ -1291,7 +1328,7 @@ pub(crate) async fn prepare_conversation_prompt(
                         } else {
                             content_budget / content_hits.len().max(1)
                         };
-                        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file);
+                        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
                         if !injected.trim().is_empty() {
                             docs.push(format!("【{}】\n{}", rec.path, injected));
                             content_budget = content_budget.saturating_sub(injected.chars().count());
@@ -1813,7 +1850,18 @@ fn chunked_or_truncated(conn: &rusqlite::Connection, md5: &str, text: &str, quer
         .join("\n···\n")
 }
 
-fn chunked_or_truncated_with_budget(conn: &rusqlite::Connection, md5: &str, text: &str, query: &str, char_budget: usize) -> String {
+/// Inject chunk text honoring a char budget. When the hit came from the
+/// chunk-vector channel (`hit_chunks` non-empty), those exact chunks are
+/// injected first (semantic evidence), then remaining budget is filled with
+/// lexically-relevant chunks. Falls back to truncation without chunks.
+fn chunked_or_truncated_with_budget(
+    conn: &rusqlite::Connection,
+    md5: &str,
+    text: &str,
+    query: &str,
+    char_budget: usize,
+    hit_chunks: &[(usize, f32)],
+) -> String {
     if char_budget == 0 { return String::new(); }
     if text.chars().count() <= char_budget {
         return truncate_text(text, char_budget);
@@ -1822,19 +1870,31 @@ fn chunked_or_truncated_with_budget(conn: &rusqlite::Connection, md5: &str, text
     if chunks.is_empty() {
         return truncate_text(text, char_budget);
     }
-    let relevant = crate::db::chunks::select_relevant_chunks(&chunks, query, chunks.len());
+    let hit_set: std::collections::HashSet<i64> =
+        hit_chunks.iter().map(|(idx, _)| *idx as i64).collect();
     let mut packed: Vec<String> = Vec::new();
     let mut used = 0usize;
-    for chunk in &relevant {
-        let chunk_chars = chunk.text.chars().count() + 20;
-        if used + chunk_chars > char_budget {
+    let push = |c: &crate::db::chunks::DocChunk, used: &mut usize, packed: &mut Vec<String>| {
+        let chunk_chars = c.text.chars().count() + 20;
+        if *used + chunk_chars > char_budget {
             if packed.is_empty() {
-                packed.push(truncate_text(&chunk.text, char_budget));
+                packed.push(truncate_text(&c.text, char_budget));
             }
-            break;
+            return false;
         }
-        packed.push(format!("（第{}-{}字）\n{}", chunk.start_char, chunk.end_char, chunk.text));
-        used += chunk_chars;
+        packed.push(format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text));
+        *used += chunk_chars;
+        true
+    };
+    // 1) 语义命中块优先（保持 chunk_index 阅读顺序）
+    for chunk in chunks.iter().filter(|c| hit_set.contains(&c.chunk_index)) {
+        if !push(chunk, &mut used, &mut packed) { return packed.join("\n···\n"); }
+    }
+    if used >= char_budget { return packed.join("\n···\n"); }
+    // 2) 剩余预算按词重叠补足
+    let relevant = crate::db::chunks::select_relevant_chunks(&chunks, query, chunks.len());
+    for chunk in relevant.iter().filter(|c| !hit_set.contains(&c.chunk_index)) {
+        if !push(chunk, &mut used, &mut packed) { break; }
     }
     packed.join("\n···\n")
 }

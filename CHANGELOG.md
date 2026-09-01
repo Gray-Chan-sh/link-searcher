@@ -23,6 +23,7 @@
 - **TypeScript `noUncheckedIndexedAccess`**：`tsconfig.app.json` 开启，暴露 27 处 `arr[i]` 潜在 undefined（`ChatPanel`、`SearchPage`、`Browse`、`scopeParser` 等），全部加 `!` 或 guard 修复。
 - **Clippy 自动修复**：`cargo clippy --fix` 修 20+ 条（`div_ceil`、`is_empty`、`rfind`、`is_multiple_of`、`clamp`、`is_err`、`let...else → ?`），剩余 11 条为结构性警告（函数参数过多），留待后续重构。
 - **Settings.tsx 拆分（1493 行 → 311 行）**：按 tab 拆成 `src/components/settings/` 下 7 个文件（SettingsFields 通用组件 + GeneralTab/DocsTab/IndexTab/AiTab/BackupTab/SystemTab），state 与 handlers 拆到 3 个 hooks（useSettingsOcr/useSettingsBackup/useSettingsProviders）。主组件只保留 tab 切换与 props 分发，可读性与可维护性大幅提升。
+- **Chunk 级语义检索（解决长文档细节召回）**：原文件级嵌入只嵌前 2000 字符，长文档细节（如"违约金 8%"在 8000 字符处）在向量中无信号，BM25 top-K 也常被挤掉。新增 `chunk_embeddings` 表（md5, chunk_index → 向量），长文档每 ~1500 字符块独立嵌入；检索升级为双通道（文件级 `vector_full_scan` + chunk 级 `chunk_vector_scan` 并集去重），命中块经 `ScoredHit.hit_chunks` 带入注入层优先注入。涉及 `db/mod.rs`（建表）、`db/tracker.rs`（CRUD + get_files_by_md5）、`commands/index.rs`（回填 + 命令 + 清理）、`ai/mod.rs`（chunk_vector_scan）、`commands/ai.rs`（双通道检索 + 注入块优先 + ScoredHit 扩展）、`lib.rs`（命令注册 + 启动触发）。新增 4 个单测（CRUD roundtrip / files_by_md5 / chunk_scan 过滤排序截断）。
 
 ---
 

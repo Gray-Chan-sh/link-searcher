@@ -625,6 +625,13 @@ impl IndexerService {
         if let Err(e) = crate::db::tracker::delete_embedding(&conn, file_id) {
             log::warn!("[INDEX] delete_embedding failed {}: {e}", file_id);
         }
+        // 同步清理该文件的 chunk 级嵌入（按 md5 键；若其他活跃文件共享
+        // 该 md5，其块向量会在下一次扫描回填时重建）。
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, file_id)
+            && let Some(md5) = &rec.md5
+            && let Err(e) = crate::db::tracker::delete_chunk_embeddings(&conn, md5) {
+                log::warn!("[INDEX] delete_chunk_embeddings failed {md5}: {e}");
+            }
 
         Ok(())
     }

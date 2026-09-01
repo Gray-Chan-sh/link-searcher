@@ -293,6 +293,45 @@ pub fn vector_full_scan(
     Ok(results)
 }
 
+/// Brute-force cosine scan over ALL stored chunk embeddings.
+/// Returns (md5, chunk_index, similarity) sorted descending, capped at
+/// `top_k` so long documents with many chunks can't flood the caller.
+/// Chunk vectors encode ~1500-char windows, so detail-level content that a
+/// whole-file vector dilutes is directly retrievable here.
+pub fn chunk_vector_scan(
+    conn: &rusqlite::Connection,
+    query: &str,
+    threshold: f32,
+    top_k: usize,
+) -> Result<Vec<(String, usize, f32)>, String> {
+    let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    let all = crate::db::tracker::get_all_chunk_embeddings(conn).map_err(|e| e.to_string())?;
+    let all_count = all.len();
+    let results = chunk_vector_scan_impl(&query_emb, &all, threshold, top_k);
+    log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (top {top_k})", all_count, results.len(), threshold);
+    Ok(results)
+}
+
+/// Pure scoring core of [`chunk_vector_scan`], split out for unit testing
+/// (no model / DB dependency).
+fn chunk_vector_scan_impl(
+    query_emb: &[f32],
+    rows: &[(String, usize, Vec<f32>)],
+    threshold: f32,
+    top_k: usize,
+) -> Vec<(String, usize, f32)> {
+    let mut results: Vec<(String, usize, f32)> = rows
+        .iter()
+        .filter_map(|(md5, idx, vec)| {
+            let sim = cosine(query_emb, vec);
+            if sim >= threshold { Some((md5.clone(), *idx, sim)) } else { None }
+        })
+        .collect();
+    results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(top_k);
+    results
+}
+
 /// Send a chat-completion prompt to the configured LLM and return the reply
 /// text. `system` is the instruction, `user` the task/content. Returns `None`
 /// when unconfigured or the request fails (downgrade, never block).
@@ -841,6 +880,28 @@ mod tests {
         let mut v = vec![3.0, 4.0];
         normalize(&mut v);
         assert!((v[0] * v[0] + v[1] * v[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn chunk_scan_filters_sorts_truncates() {
+        let q = vec![1.0, 0.0, 0.0];
+        let rows = vec![
+            ("m1".to_string(), 0usize, vec![1.0, 0.0, 0.0]),      // cos 1.0
+            ("m2".to_string(), 3usize, vec![0.9, 0.1, 0.0]),      // cos ~0.994
+            ("m3".to_string(), 1usize, vec![0.0, 1.0, 0.0]),      // cos 0.0 (below 0.5)
+            ("m4".to_string(), 2usize, vec![0.5, 0.5, 0.0]),      // cos ~0.707
+        ];
+        let out = chunk_vector_scan_impl(&q, &rows, 0.5, 10);
+        // 阈值过滤掉 m3，按相似度降序
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].0, "m1");
+        assert_eq!(out[1].0, "m2");
+        assert_eq!(out[2].0, "m4");
+        // top_k 截断
+        let out2 = chunk_vector_scan_impl(&q, &rows, 0.0, 2);
+        assert_eq!(out2.len(), 2);
+        assert_eq!(out2[0].0, "m1");
+        assert_eq!(out2[1].0, "m2");
     }
 
     #[test]
