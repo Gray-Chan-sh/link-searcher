@@ -278,9 +278,14 @@ pub fn vector_full_scan(
     query: &str,
     threshold: f32,
 ) -> Result<Vec<(String, f32)>, String> {
+    let t0 = std::time::Instant::now();
     let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    log::info!("[AI]   vector_full_scan: embed took {:?}", t0.elapsed());
+    let t1 = std::time::Instant::now();
     let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
+    log::info!("[AI]   vector_full_scan: load {} emb took {:?}", all.len(), t1.elapsed());
     let all_count = all.len();
+    let t2 = std::time::Instant::now();
     let mut results: Vec<(String, f32)> = all
         .into_iter()
         .filter_map(|(fid, vec)| {
@@ -288,6 +293,7 @@ pub fn vector_full_scan(
             if sim >= threshold { Some((fid, sim)) } else { None }
         })
         .collect();
+    log::info!("[AI]   vector_full_scan: cosine over {} took {:?}", all_count, t2.elapsed());
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     log::info!("[AI]   vector: {} emb, {} above {:.2}", all_count, results.len(), threshold);
     Ok(results)
@@ -1054,5 +1060,22 @@ mod tests {
         let resp = parse_chat_response(body).unwrap();
         assert!(resp.choices[0].message.reasoning_content.is_some());
         assert_eq!(resp.choices[0].message.reasoning_content.as_deref(), Some("万城公司相关资料显示..."));
+    }
+
+    /// 测量本地 BGE 模型加载与单次推理耗时（手动运行：cargo test -- --ignored）
+    #[test]
+    #[ignore]
+    fn bench_local_embed_latency() {
+        let cfg = crate::config::load_config();
+        let model = "bge-large-zh-v1.5";
+        let t0 = std::time::Instant::now();
+        crate::ai::local_embed::init_local_embedder(&cfg.data_dir, model).unwrap();
+        eprintln!("[BENCH] model load: {:?}", t0.elapsed());
+        let t1 = std::time::Instant::now();
+        let v = crate::ai::local_embed::embed_query_local("常宏");
+        eprintln!("[BENCH] first infer: {:?} dim={:?}", t1.elapsed(), v.map(|x| x.len()));
+        let t2 = std::time::Instant::now();
+        let v2 = crate::ai::local_embed::embed_query_local("民事案件");
+        eprintln!("[BENCH] second infer: {:?} dim={:?}", t2.elapsed(), v2.map(|x| x.len()));
     }
 }

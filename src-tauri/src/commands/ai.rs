@@ -1392,7 +1392,6 @@ pub(crate) async fn prepare_conversation_prompt(
         .saturating_sub(mention_budget);
     emit_progress("injection", "注入文件内容中...", 0, content_hits.len());
     log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
-    let mut injected_ids = std::collections::HashSet::new();
     let mut inject_idx = 0usize;
     for hit in &content_hits {
         if inject_idx.is_multiple_of(10) { check_cancel!(); }
@@ -1409,7 +1408,6 @@ pub(crate) async fn prepare_conversation_prompt(
                         if !injected.trim().is_empty() {
                             docs.push(format!("【{}】\n{}", rec.path, injected));
                             content_budget = content_budget.saturating_sub(injected.chars().count());
-                            injected_ids.insert(hit.file_id.clone());
                         }
                         if content_budget == 0 { break; }
                     }
@@ -1419,20 +1417,6 @@ pub(crate) async fn prepare_conversation_prompt(
         }
     }
 
-    // Layer 2: Remaining BM25 hits → batch_summarize
-    // 限制摘要规模：最多 60 份文档（4 批 × 15），避免大量命中时 LLM 调用失控。
-    const MAX_REMAINING_SUMMARY: usize = 60;
-    let remaining_hits: Vec<ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && !injected_ids.contains(&h.file_id))
-        .take(MAX_REMAINING_SUMMARY).cloned()
-        .collect();
-    if !remaining_hits.is_empty() {
-        check_cancel!();
-        let remaining_ids: Vec<String> = remaining_hits.iter().map(|h| h.file_id.clone()).collect();
-        if let Ok((summary, _)) = batch_summarize(state, &remaining_ids, &search_q, app, session_id).await {
-            docs.push(format!("📋 剩余{}份文档的摘要：\n{}", remaining_hits.len(), summary));
-        }
-    }
     drop(conn);
 
     let source_ids_final = all_hits.iter().map(|h| h.file_id.clone()).collect();
@@ -1793,114 +1777,6 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     } else {
         chars[..max_chars].iter().collect()
     }
-}
-
-pub(crate) async fn batch_summarize(
-    state: &AppState,
-    file_ids: &[String],
-    query: &str,
-    app: Option<&tauri::AppHandle>,
-    session_id: &str,
-) -> Result<(String, Vec<String>), String> {
-    if file_ids.is_empty() {
-        return Ok((String::new(), Vec::new()));
-    }
-    const BATCH_SIZE: usize = 15;
-    const MAX_CONCURRENCY: usize = 6;
-    let total_batches = file_ids.len().div_ceil(BATCH_SIZE);
-
-    let emit_progress = |completed: usize, total: usize| {
-        if let Some(a) = app {
-            let _ = a.emit("ai-progress", AiProgress {
-                session_id: session_id.to_string(),
-                phase: "summarizing".to_string(),
-                message: format!("摘要中... 第 {}/{} 批", completed, total),
-                current: completed,
-                total,
-            });
-        }
-    };
-
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut all_batch_content: Vec<Vec<String>> = Vec::with_capacity(total_batches);
-    for chunk in file_ids.chunks(BATCH_SIZE) {
-        let mut batch = Vec::new();
-        for fid in chunk {
-            if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid)
-                && let Some(md5) = &rec.md5
-                    && let Ok(Some(text)) = crate::db::tracker::get_content(&conn, md5) {
-                        batch.push(format!("【{}】\n{}", rec.path, truncate_text(&text, 3000)));
-                    }
-        }
-        all_batch_content.push(batch);
-    }
-    drop(conn);
-
-    let system = "你是法律文档分析助手。请用简洁中文总结以下文档内容中与查询主题相关的关键信息，不超过500字。";
-
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let completed = std::sync::Arc::new(AtomicUsize::new(0));
-    let total = all_batch_content.len();
-    let mut summaries = vec![String::new(); total];
-    let mut handles = Vec::with_capacity(total);
-
-    emit_progress(0, total);
-
-    for (i, batch) in all_batch_content.into_iter().enumerate() {
-        let sys = system.to_string();
-        let query_clone = query.to_string();
-        let batch_text = batch.join("\n\n");
-        let user_msg = format!("查询主题：{}\n\n第{}批文档（共{}批）：\n{}", &query_clone, i + 1, total, &batch_text);
-
-        let handle = tokio::task::spawn(async move {
-            let result = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user_msg)).await;
-            (i, result)
-        });
-        handles.push(handle);
-
-        if handles.len() >= MAX_CONCURRENCY {
-            let (result,) = tokio::join!(handles.remove(0));
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if let Ok((idx, Ok(Some(s)))) = result {
-                summaries[idx] = s;
-            }
-            emit_progress(done, total);
-            if crate::ai::ai_cancelled() {
-                return Err("请求已取消".into());
-            }
-        }
-    }
-
-    for handle in handles {
-        let (idx, res) = handle.await.unwrap_or_else(|e| {
-            log::warn!("[AI] batch task join error: {e}");
-            (0, Ok(None))
-        });
-        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-        match res {
-            Ok(Some(s)) => summaries[idx] = s,
-            _ => summaries[idx] = format!("（第{}批摘要生成失败）", idx + 1),
-        }
-        emit_progress(done, total);
-        if crate::ai::ai_cancelled() {
-            return Err("请求已取消".into());
-        }
-    }
-
-    let combined = summaries.join("\n\n---\n\n");
-    if total == 1 {
-        return Ok((combined, file_ids.to_vec()));
-    }
-
-    // Reduce phase
-    let reduce_system = "你是法律文档分析助手。以下是多组文档摘要，请将它们整合为一份连贯的综合分析。";
-    let reduce_msg = format!("查询主题：{}\n\n各批摘要如下：\n{}", query, combined);
-    let final_summary = match tokio::task::spawn_blocking(move || crate::ai::chat(reduce_system, &reduce_msg)).await {
-        Ok(Some(s)) => s,
-        _ => combined,
-    };
-
-    Ok((final_summary, file_ids.to_vec()))
 }
 
 /// Inject the full text (≤50 K chars) or, for longer documents, select the
