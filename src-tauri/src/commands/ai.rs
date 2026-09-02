@@ -1292,6 +1292,26 @@ pub(crate) async fn prepare_conversation_prompt(
                 }
             }
         }
+        // 统一排序：三通道命中按混合分（weighted_mix）降序排列，而非按通道
+        // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
+        // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。
+        if all_hits.len() > 1 {
+            let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
+            let max_bm25 = all_hits.iter()
+                .filter_map(|h| h.bm25_score)
+                .fold(0.0_f64, f64::max);
+            let max_sem = all_hits.iter()
+                .filter_map(|h| h.semantic_score)
+                .fold(0.0_f64, f64::max);
+            all_hits.sort_by(|a, b| {
+                let score = |h: &ScoredHit| -> f64 {
+                    let b = h.bm25_score.map(|s| if max_bm25 > 0.0 { s / max_bm25 } else { 0.0 }).unwrap_or(0.0);
+                    let s = h.semantic_score.map(|x| if max_sem > 0.0 { x / max_sem } else { 0.0 }).unwrap_or(0.0);
+                    if b > 0.0 || s > 0.0 { weight * s + (1.0 - weight) * b } else { 0.0 }
+                };
+                score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());
         log::info!("[AI]   scan: q=\"{}\" bm25={} extra={} total={}", truncate_text(&search_q, 30), bm25_count, all_hits.len().saturating_sub(bm25_count), all_hits.len());
     }
@@ -1361,27 +1381,44 @@ pub(crate) async fn prepare_conversation_prompt(
     let mut mention_has_content = false;
 
     // Layer 0: Always load explicitly scoped files into context (independent of BM25).
-    for (i, (fid, resolved_path)) in mention_resolved.iter().enumerate() {
+    // 均摊预算：所有引用文件共享 CONTEXT_BUDGET/3，每个文件按份数分配，
+    // 避免"前面的文件占满预算、后面的引用文件被最终截断静默丢弃"。
+    let mention_total_budget = CONTEXT_BUDGET / 3;
+    let mention_files_with_content: Vec<(String, String, String, String)> = mention_resolved
+        .iter()
+        .filter_map(|(fid, resolved_path)| {
+            let rec = rec_by_id.get(fid)?;
+            let md5 = rec.md5.as_ref()?;
+            let text = md5_to_text.get(md5)?;
+            if text.trim().is_empty() { return None; }
+            Some((fid.clone(), resolved_path.clone(), md5.clone(), text.clone()))
+        })
+        .collect();
+    let per_mention_file = mention_total_budget / mention_files_with_content.len().max(1);
+    let mut mention_budget_used = 0usize;
+    for (i, (fid, resolved_path, md5, text)) in mention_files_with_content.iter().enumerate() {
         let n = i + 1;
-        if let Some(rec) = rec_by_id.get(fid)
-            && let Some(md5) = &rec.md5
-                && let Some(text) = md5_to_text.get(md5)
-                    && !text.trim().is_empty() {
-                        mention_has_content = true;
-                        docs.push(format!("[{n}]（{resolved_path}）\n{}", chunked_or_truncated(&conn, md5, text, &search_q)));
-                        evidence.push(EvidenceItem {
-                            file_id: fid.clone(),
-                            path: resolved_path.clone(),
-                            snippet: truncate_text(text, 200),
-                            bm25_score: None,
-                            semantic_score: None,
-                            rrf_score: None,
-                            rewritten,
-                            rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
-                            from_history: false,
-                        });
-                        mention_index.insert(resolved_path.clone(), n);
-                    }
+        mention_has_content = true;
+        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_mention_file, &[]);
+        if !injected.trim().is_empty() {
+            docs.push(format!("[{n}]（{resolved_path}）\n{injected}"));
+            mention_budget_used = mention_budget_used.saturating_add(injected.chars().count());
+            mention_index.insert(resolved_path.clone(), n);
+            evidence.push(EvidenceItem {
+                file_id: fid.clone(),
+                path: resolved_path.clone(),
+                snippet: truncate_text(text, 200),
+                bm25_score: None,
+                semantic_score: None,
+                rrf_score: None,
+                rewritten,
+                rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
+                from_history: false,
+            });
+        }
+    }
+    if !mention_files_with_content.is_empty() {
+        log::info!("[AI]   Layer0 mentions: {} files, {:.1}k/{}k budget used", mention_files_with_content.len(), mention_budget_used as f64 / 1000.0, mention_total_budget as f64 / 1000.0);
     }
 
     // Layer 1: Additional BM25 hits (not already in scope).
@@ -1390,11 +1427,9 @@ pub(crate) async fn prepare_conversation_prompt(
         .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
         .take(inject_limit)
         .collect();
-    let mention_budget = CONTEXT_BUDGET / 3;
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
-        .saturating_sub(ANSWER_RESERVE)
-        .saturating_sub(mention_budget);
+        .saturating_sub(ANSWER_RESERVE);
     emit_progress("injection", "注入文件内容中...", 0, content_hits.len());
     log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
     let mut inject_idx = 0usize;
@@ -1782,30 +1817,6 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     } else {
         chars[..max_chars].iter().collect()
     }
-}
-
-/// Inject the full text (≤50 K chars) or, for longer documents, select the
-/// top-8 lexically-relevant chunks via jieba term overlap. Falls back to
-/// truncation when chunks are unavailable.
-fn chunked_or_truncated(conn: &rusqlite::Connection, md5: &str, text: &str, query: &str) -> String {
-    if text.chars().count() <= 50_000 {
-        return truncate_text(text, 50_000);
-    }
-    let chunks = match crate::db::chunks::get_chunks(conn, md5) {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("[AI] doc_chunks read failed: {e}");
-            vec![]
-        }
-    };
-    if chunks.is_empty() {
-        return truncate_text(text, 50_000);
-    }
-    crate::db::chunks::select_relevant_chunks(&chunks, query, 8)
-        .iter()
-        .map(|c| format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text))
-        .collect::<Vec<_>>()
-        .join("\n···\n")
 }
 
 /// Inject chunk text honoring a char budget. When the hit came from the
@@ -3178,5 +3189,60 @@ mod retrieval_keyword_tests {
         let kws = extract_retrieval_keywords("41833号案件 常宏");
         assert!(kws.iter().all(|k| k != "41833"), "got: {kws:?}");
         assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
+    }
+}
+
+#[cfg(test)]
+mod chunk_budget_tests {
+    use super::*;
+
+    /// 长文本 + 预算 → 返回不超过预算（含 20 字符块头开销）
+    #[test]
+    fn respects_char_budget() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        let long = "违约".repeat(2000); // 4000 字符
+        let out = chunked_or_truncated_with_budget(&conn, "md5-x", &long, "违约", 500, &[]);
+        assert!(out.chars().count() <= 520, "budget exceeded: {}", out.chars().count());
+        assert!(!out.trim().is_empty());
+    }
+
+    /// 短文本 ≤ 预算 → 全文返回，不截断
+    #[test]
+    fn short_text_returned_whole() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        let short = "常宏诉万城公司股东资格确认纠纷案";
+        let out = chunked_or_truncated_with_budget(&conn, "md5-y", short, "常宏", 10_000, &[]);
+        assert_eq!(out, short);
+    }
+
+    /// 预算 0 → 返回空
+    #[test]
+    fn zero_budget_returns_empty() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        let out = chunked_or_truncated_with_budget(&conn, "md5-z", "任意内容", "q", 0, &[]);
+        assert!(out.is_empty());
+    }
+
+    /// 语义命中块优先：命中块即便词重叠低也排前面
+    #[test]
+    fn hit_chunks_prioritized() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        // 构造一个长文档（>1 万字符触发分块），写入 doc_chunks
+        let md5 = "md5-hit";
+        let long = format!("{}。{}。", "A".repeat(6000), "B".repeat(6000)); // 12000 字符
+        crate::db::tracker::store_content(&conn, md5, &long, false, None).unwrap();
+        let windows = crate::db::chunks::chunk_text(&long);
+        assert!(!windows.is_empty(), "chunk_text should split long text");
+        crate::db::chunks::replace_chunks(&conn, md5, &windows).unwrap();
+        let chunks = crate::db::chunks::get_chunks(&conn, md5).unwrap();
+        assert!(!chunks.is_empty(), "chunks should exist for long text");
+        // 预算只够 1 块，命中块是最后一块 → 应返回它而非第一块
+        let hit_idx = chunks.last().unwrap().chunk_index as usize;
+        let out = chunked_or_truncated_with_budget(&conn, md5, &long, "无关词", 700, &[(hit_idx, 0.9)]);
+        assert!(out.contains(&format!("第{}", chunks.last().unwrap().start_char)), "hit chunk not prioritized: {out}");
     }
 }
