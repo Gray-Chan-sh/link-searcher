@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-09-02（AI 问答调研）
+
+- **研究：面向人少+文档量小场景的 AI 问答最佳实践调研报告**：深度调研个人/小团队本地文档 RAG 的业界做法（Anthropic Contextual Retrieval / Context Engineering、Pinecone chunking & hybrid search、Faiss 索引选型、ZeroEntropy LLM-reranker 基准、The Reranking Trap、Neel Mishra citation grounding、RedHop RAG citations、RAGAS 评测、luningqi 混合检索实测、BGE-M3/reranker 模型卡等 22 个经全文核实来源），并逐条对照本项目真实代码（`commands/ai.rs` 单体 RAG 管线、`chunks.rs` 分块、`tracker.rs` 向量存取、`ChatPanel.tsx` 引用渲染、`webapi` 事件桥），产出差距分析与分优先级实施路线图。交付：`docs/research-rag-best-practices-personal.md`（新增第 9 章差距分析 + 第 10 章 P0/P1/P2 路线图 + 明确不做清单）。核心结论：混合检索/小文件不切块/引用编号/范围控制已符合业界共识；主要差距在 P0（0 命中/低置信硬答、幻觉引用未白名单剥离、长文档静默截断）、P1（向量暴力余弦+无查询缓存、文件级向量只编前 2000 字符、Web 无 ai-progress）、P2（**无评测基线**、ai/skills 双份实现漂移、chunk 无结构语境）。本次仅文档调研，无代码改动。
+- **调研报告按真实库规模修正**：用户澄清实际监控库达 2.2 万文件、总 2.65 亿字、单文档最长 667 万字后，实测各库分布（com.link-searcher.app：22,441 active / 最长 667 万字，75% ≤1 万字；/Volumes/Data/index：doc_chunks 12.5 万行但 chunk_embeddings 仅 1154，回填滞后 ~100 倍），确认推理环境为本地 MLX（LLM Qwen3.6-35B、生效 embedding 为 local:bge-large-zh-v1.5）。原报告"1 万级向量、全表线性扫描够用、别上 ANN"的结论在 chunk 12.5 万–50 万+ 下不再成立。**修正**：`docs/research-rag-best-practices-personal.md` 第 9.1 规模参照更新为实测值 + 顶部新增规模修正警示区块；第 10 章 P1 重构为「规模适配」——新增 **P1-A 两级检索漏斗**（文档级粗筛→命中块精检，替代全库 chunk 暴力/ANN）、**P1-B 块级懒嵌入**（解决 100 倍回填滞后）、**P1-C doc 向量驻留内存 + 查询缓存**（chunk 不常驻）、**P1-D 结构感知切分上提**（5 篇 >1M 文档必需）；原 P1-2（文件级向量扩展）降级为不做（ROI 低，被 P1-A/B 覆盖）；🚫 不做清单与 10.5 门禁同步更新（全库 chunk 暴力扫描移入不做清单）。本次仍仅文档修正，无代码改动。
+
+---
+
 ## 2026-09-01（检索修复）
 
 - **AI 聊天检索不到人名/实体（如"涉及常宏的民事案件"答"找不到"）**：完整问句直接进三路检索，核心实体被泛词淹没。**根因**：(1) `path_match_files` 用完整问句做 `LIKE %...%` → 必然 0 命中（本应命中 5559 份路径含"常宏"的文件）；(2) BM25 把问句分词为 `涉及 OR 常宏 OR 民事 OR 案件 OR 民事案件 OR 一共 OR 多少 OR 列表`，泛词稀释 BM25 分数，"常宏"文件被挤出注入前 30，前 30 全被"民事案件案由规定"等无关高分文档占据；(3) 向量通道同样用完整问句，11684 个向量 0 命中。**修复**：新增 `extract_retrieval_keywords`（jieba Search 模式分词 + 检索级停用词表），从问句提炼核心实体词（"常宏"），BM25/向量/路径三通道改用实体词检索——`path_match_files` 改为多关键词 OR 匹配；无实体时回退完整问句。涉及 `src-tauri/src/commands/ai.rs`、`src-tauri/src/db/tracker.rs`，新增 6 个单元测试。验证：修复前注入前 30 全无关文档 → 修复后前 30 全是"常宏"相关文件（起诉书/会见记录/判决书/质证意见），命中从 8007 收敛到 5954。
