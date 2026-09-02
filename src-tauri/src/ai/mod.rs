@@ -278,22 +278,26 @@ pub fn vector_full_scan(
     query: &str,
     threshold: f32,
 ) -> Result<Vec<(String, f32)>, String> {
-    let t0 = std::time::Instant::now();
     let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
-    log::info!("[AI]   vector_full_scan: embed took {:?}", t0.elapsed());
-    let t1 = std::time::Instant::now();
+    vector_scan_with_query_emb(conn, &query_emb, threshold)
+}
+
+/// Core of [`vector_full_scan`] taking a pre-computed query embedding,
+/// so callers scanning both file and chunk vectors only embed once.
+pub fn vector_scan_with_query_emb(
+    conn: &rusqlite::Connection,
+    query_emb: &[f32],
+    threshold: f32,
+) -> Result<Vec<(String, f32)>, String> {
     let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
-    log::info!("[AI]   vector_full_scan: load {} emb took {:?}", all.len(), t1.elapsed());
     let all_count = all.len();
-    let t2 = std::time::Instant::now();
     let mut results: Vec<(String, f32)> = all
         .into_iter()
         .filter_map(|(fid, vec)| {
-            let sim = cosine(&query_emb, &vec);
+            let sim = cosine(query_emb, &vec);
             if sim >= threshold { Some((fid, sim)) } else { None }
         })
         .collect();
-    log::info!("[AI]   vector_full_scan: cosine over {} took {:?}", all_count, t2.elapsed());
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     log::info!("[AI]   vector: {} emb, {} above {:.2}", all_count, results.len(), threshold);
     Ok(results)
@@ -311,9 +315,20 @@ pub fn chunk_vector_scan(
     top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
     let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    chunk_vector_scan_with_query_emb(conn, &query_emb, threshold, top_k)
+}
+
+/// Core of [`chunk_vector_scan`] taking a pre-computed query embedding,
+/// so callers scanning both file and chunk vectors only embed once.
+pub fn chunk_vector_scan_with_query_emb(
+    conn: &rusqlite::Connection,
+    query_emb: &[f32],
+    threshold: f32,
+    top_k: usize,
+) -> Result<Vec<(String, usize, f32)>, String> {
     let all = crate::db::tracker::get_all_chunk_embeddings(conn).map_err(|e| e.to_string())?;
     let all_count = all.len();
-    let results = chunk_vector_scan_impl(&query_emb, &all, threshold, top_k);
+    let results = chunk_vector_scan_impl(query_emb, &all, threshold, top_k);
     log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (top {top_k})", all_count, results.len(), threshold);
     Ok(results)
 }
