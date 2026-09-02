@@ -10,6 +10,9 @@
 - **AI 聊天命中多时卡 1 分钟+ 不回复**：命中 >30 份时无条件对 60 份跑 LLM 摘要兜底（`batch_summarize`，4 批 × 15 + 1 次整合 = 5 次本地 Qwen 调用 ≈ 48s），且完全阻塞回答。**修复**：移除 Layer 2 摘要兜底（`ai.rs`），命中>30 时直接靠前 30 全文注入回答。删除 `batch_summarize` 函数。验证：dry-run 检索从 1m46s 降到 12.5s，命中 5957 份时不再触发 LLM 摘要。
 - **向量检索重复嵌入查询（debug 下翻倍浪费）**：`vector_full_scan` 与 `chunk_vector_scan` 各自内部调一次 `embed(query)`，同一查询被嵌入两次——debug 下 bge-large 单次推理 85s，两次共 118s。**修复**：拆分出 `vector_scan_with_query_emb` / `chunk_vector_scan_with_query_emb` 接收预计算查询向量，`ai.rs` 只 embed 一次两通道共享。验证：debug dry-run 从 2m33s 降到 1m5s（命中不变 5957），release 14s。
 - **文档**：`docs/08-ai-features.md` 补充「无引用提问」与「有引用提问」两张 Mermaid 流程图 + 差异对比表；移除已删除的「摘要兜底」过时描述（截断表 #4）。
+- **大量引用时静默丢弃引用文件（正确性修复）**：Layer 0 引用注入原本每个文件 `chunked_or_truncated` 全文（≤50k），拼接后 `truncate_text(50k)` 一刀切——前面的引用文件占满预算、**后面的引用文件被静默丢弃**，strict 模式也不报错。**修复**：Layer 0 改**均摊预算**——所有引用文件共享 `CONTEXT_BUDGET/3`，每文件按份数分配（`chunked_or_truncated_with_budget`），超长文件取相关块而非全文，保证每个引用文件都注入一部分。同时 Layer 1 的 content_budget 不再重复扣除 mention 预算（原预留 50k 已被 Layer 0 自管）。
+- **注入顺序统一按相关性排序（商用 RRF 一致性）**：三路合并的 `all_hits` 原本按通道添加顺序排列（BM25 在前、向量次之、路径最后），即使向量命中相似度更高也排后面。**修复**：合并后统一按混合分排序（`w×cosine + (1-w)×bm25_norm`，w=semantic_weight），BM25 分与语义分分别归一化，路径命中（无分）排最后——最相关的文件先进注入前 30。
+- 新增 `chunked_or_truncated_with_budget` 4 个单元测试（预算截断/短文本全文/零预算/语义命中块优先）。
 
 ---
 
