@@ -1208,39 +1208,44 @@ pub(crate) async fn prepare_conversation_prompt(
             log::info!("[AI]   about to call vector_full_scan");
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
             let vec_query = if retrieval_kws.is_empty() { search_q.clone() } else { retrieval_kws.join(" ") };
-            if let Ok(vec_hits) = crate::ai::vector_full_scan(&c, &vec_query, VECTOR_THRESHOLD) {
-                log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
-                let mut i = 0usize;
-                for (fid, sim) in vec_hits {
-                    if all_seen.insert(fid.clone()) {
-                        all_hits.push(ScoredHit {
-                            file_id: fid, path: String::new(), bm25_score: None,
-                            semantic_score: Some(sim as f64), rrf_score: None, from_history: false,
-                            from_chunk: false, hit_chunks: Vec::new(),
-                        });
+            // 只嵌入一次，文件级与 chunk 级两个向量通道共享同一查询向量
+            // （debug 下 bge-large 单次推理 85s，重复嵌入翻倍浪费）。
+            let query_emb = crate::ai::embed(&vec_query);
+            if let Some(qe) = &query_emb {
+                if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, VECTOR_THRESHOLD) {
+                    log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
+                    let mut i = 0usize;
+                    for (fid, sim) in vec_hits {
+                        if all_seen.insert(fid.clone()) {
+                            all_hits.push(ScoredHit {
+                                file_id: fid, path: String::new(), bm25_score: None,
+                                semantic_score: Some(sim as f64), rrf_score: None, from_history: false,
+                                from_chunk: false, hit_chunks: Vec::new(),
+                            });
+                        }
+                        i += 1;
+                        if !full_recall && i > 500 { break; }
                     }
-                    i += 1;
-                    if !full_recall && i > 500 { break; }
                 }
-            }
-            // chunk 级向量通道：长文档细节（在 ~1500 字符块内）在此直接命中。
-            // 命中块 → md5 → 活跃 file_id → 加入 all_hits（去重）。
-            if let Ok(chunk_hits) = crate::ai::chunk_vector_scan(&c, &vec_query, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
-                log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
-                let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
-                for (md5, idx, sim) in chunk_hits {
-                    by_md5.entry(md5).or_default().push((idx, sim));
-                }
-                for (md5, chunks) in by_md5 {
-                    let Ok(file_ids) = crate::db::tracker::get_files_by_md5(&c, &md5) else { continue };
-                    for fid in file_ids {
-                        if !all_seen.insert(fid.clone()) { continue; }
-                        all_hits.push(ScoredHit {
-                            file_id: fid, path: String::new(), bm25_score: None,
-                            semantic_score: chunks.first().map(|(_, s)| *s as f64),
-                            rrf_score: None, from_history: false,
-                            from_chunk: true, hit_chunks: chunks.clone(),
-                        });
+                // chunk 级向量通道：长文档细节（在 ~1500 字符块内）在此直接命中。
+                // 命中块 → md5 → 活跃 file_id → 加入 all_hits（去重）。
+                if let Ok(chunk_hits) = crate::ai::chunk_vector_scan_with_query_emb(&c, qe, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
+                    log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
+                    let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
+                    for (md5, idx, sim) in chunk_hits {
+                        by_md5.entry(md5).or_default().push((idx, sim));
+                    }
+                    for (md5, chunks) in by_md5 {
+                        let Ok(file_ids) = crate::db::tracker::get_files_by_md5(&c, &md5) else { continue };
+                        for fid in file_ids {
+                            if !all_seen.insert(fid.clone()) { continue; }
+                            all_hits.push(ScoredHit {
+                                file_id: fid, path: String::new(), bm25_score: None,
+                                semantic_score: chunks.first().map(|(_, s)| *s as f64),
+                                rrf_score: None, from_history: false,
+                                from_chunk: true, hit_chunks: chunks.clone(),
+                            });
+                        }
                     }
                 }
             }
