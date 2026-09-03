@@ -45,6 +45,19 @@ jobs:
             libspa-0.2-dev \
             patchelf
 
+      # 前端构建：tauri::generate_context!() 编译期要求 ../dist 存在
+      #（frontendDist 指向前端产物），cargo test/build 前必须先生成。
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
       # Rust lib 单测：核心逻辑（检索/AI/分块/提取）跨平台验证。
       # 平台 cfg 分支（Apple Vision / Windows OCR / poppler 路径）在各 runner 上真实编译。
       - name: Cargo test (lib)
