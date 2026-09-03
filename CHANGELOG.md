@@ -35,6 +35,12 @@
 
 ---
 
+## 2026-09-03（跨平台 CI 验证）
+
+- **新增 CI 跨平台验证（`.github/workflows/ci.yml`）**：原 release.yml 仅在打 tag 时触发且只做打包，push 普通提交无任何跨平台编译验证。新增 ci.yml——push/PR 到 master 时在 macOS(aarch64) / Windows(x86_64) / Linux(x86_64) 三平台跑 `cargo test --lib`（220 单测跨平台验证检索/AI/分块/提取核心逻辑）+ `cargo build`（验证平台 cfg 分支：Apple Vision / Windows OCR / poppler 路径在各 runner 真实编译）。触发即验证，防跨平台回归。
+
+---
+
 ## 2026-09-02（AI 问答调研）
 
 - **研究：面向人少+文档量小场景的 AI 问答最佳实践调研报告**：深度调研个人/小团队本地文档 RAG 的业界做法（Anthropic Contextual Retrieval / Context Engineering、Pinecone chunking & hybrid search、Faiss 索引选型、ZeroEntropy LLM-reranker 基准、The Reranking Trap、Neel Mishra citation grounding、RedHop RAG citations、RAGAS 评测、luningqi 混合检索实测、BGE-M3/reranker 模型卡等 22 个经全文核实来源），并逐条对照本项目真实代码（`commands/ai.rs` 单体 RAG 管线、`chunks.rs` 分块、`tracker.rs` 向量存取、`ChatPanel.tsx` 引用渲染、`webapi` 事件桥），产出差距分析与分优先级实施路线图。交付：`docs/research-rag-best-practices-personal.md`（新增第 9 章差距分析 + 第 10 章 P0/P1/P2 路线图 + 明确不做清单）。核心结论：混合检索/小文件不切块/引用编号/范围控制已符合业界共识；主要差距在 P0（0 命中/低置信硬答、幻觉引用未白名单剥离、长文档静默截断）、P1（向量暴力余弦+无查询缓存、文件级向量只编前 2000 字符、Web 无 ai-progress）、P2（**无评测基线**、ai/skills 双份实现漂移、chunk 无结构语境）。本次仅文档调研，无代码改动。
