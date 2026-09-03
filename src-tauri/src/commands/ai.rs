@@ -480,7 +480,7 @@ pub async fn smart_search_stream(
 
     let raw_text = result.text.unwrap_or_default();
     log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
-    let cited_text = auto_cite(&raw_text, &evidence);
+    let cited_text = auto_cite(&sanitize_citations(&raw_text, evidence.len()), &evidence);
     let _ = app.emit("ai-done", AiDone {
         session_id,
         full_text: cited_text,
@@ -937,6 +937,10 @@ pub(crate) struct PreparedConversation {
     /// Number of BM25 hits before merge with @mention files.
     pub(crate) hits: usize,
     pub(crate) total_match_count: usize,
+    /// Whether real material was injected (context non-empty after trim).
+    /// When false under non-strict mode, callers should refuse to answer
+    /// rather than let the LLM answer with no evidence.
+    pub(crate) has_evidence: bool,
     /// Accumulated AI events for this turn's pipeline execution.
     /// Caller should batch-insert into ai_events table.
     pub(crate) events: Vec<(String, serde_json::Value)>,
@@ -1396,8 +1400,11 @@ pub(crate) async fn prepare_conversation_prompt(
         .collect();
     let per_mention_file = mention_total_budget / mention_files_with_content.len().max(1);
     let mut mention_budget_used = 0usize;
-    for (i, (fid, resolved_path, md5, text)) in mention_files_with_content.iter().enumerate() {
-        let n = i + 1;
+    for (fid, resolved_path, md5, text) in mention_files_with_content.iter() {
+        // 全局材料编号 = 注入顺序（docs.len() 在 push 前 = 当前序号 - 1）。
+        // docs 与 evidence 同步 push，编号与 evidence 下标 +1 严格一致，
+        // auto_cite / sanitize_citations / @mention→[N] 都按此体系工作。
+        let n = docs.len() + 1;
         mention_has_content = true;
         let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_mention_file, &[]);
         if !injected.trim().is_empty() {
@@ -1446,7 +1453,19 @@ pub(crate) async fn prepare_conversation_prompt(
                         };
                         let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
                         if !injected.trim().is_empty() {
-                            docs.push(format!("【{}】\n{}", rec.path, injected));
+                            let n = docs.len() + 1;
+                            docs.push(format!("[{n}]（{}）\n{}", rec.path, injected));
+                            evidence.push(EvidenceItem {
+                                file_id: hit.file_id.clone(),
+                                path: rec.path.clone(),
+                                snippet: truncate_text(text, 200),
+                                bm25_score: hit.bm25_score,
+                                semantic_score: hit.semantic_score,
+                                rrf_score: hit.rrf_score,
+                                rewritten,
+                                rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
+                                from_history: false,
+                            });
                             content_budget = content_budget.saturating_sub(injected.chars().count());
                         }
                         if content_budget == 0 { break; }
@@ -1459,8 +1478,10 @@ pub(crate) async fn prepare_conversation_prompt(
 
     drop(conn);
 
-    let source_ids_final = all_hits.iter().map(|h| h.file_id.clone()).collect();
-    let source_files_final = all_hits.iter().map(|h| h.path.clone()).collect();
+    // source_ids/source_files 必须与 evidence 严格同序同长（只含实际注入的
+    // 材料），前端 [N] 引用按 evidence 序号跳转原文，错位会跳到错误文件。
+    let source_ids_final = evidence.iter().map(|e| e.file_id.clone()).collect();
+    let source_files_final = evidence.iter().map(|e| e.path.clone()).collect();
 
     let max_context_chars = if full_recall { CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE } else { 50_000 };
     let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
@@ -1504,7 +1525,7 @@ pub(crate) async fn prepare_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": 50000,
     })));
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events, total_match_count: all_hits.len() })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty() })
 }
 
 /// Pipeline 版本的 prepare_conversation_prompt（使用 RAGPipeline）。
@@ -1537,6 +1558,7 @@ async fn prepare_conversation_prompt_pipeline(
         state: Some(state_ptr),
     }).await.map_err(|e| e.message)?;
 
+    let has_evidence = !output.evidence.is_empty();
     Ok(PreparedConversation {
         system: output.system,
         user_msg: output.user_msg,
@@ -1547,6 +1569,7 @@ async fn prepare_conversation_prompt_pipeline(
         hits: 0,
         events: vec![],
         total_match_count: 0,
+        has_evidence,
     })
 }
 
@@ -1625,6 +1648,27 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
     result
 }
 
+/// Strip out-of-range citation markers (`[N]` where N > evidence_len) that
+/// the LLM fabricated, *before* [`auto_cite`] re-cites uncited sentences.
+/// Out-of-range brackets become plain text (the number is kept, brackets
+/// dropped) so no dangling `[99]` points at a nonexistent source.
+pub fn sanitize_citations(answer: &str, evidence_len: usize) -> String {
+    if evidence_len == 0 || answer.trim().is_empty() {
+        return answer.to_string();
+    }
+    let cite_re = regex::Regex::new(r"\[(\d+)\]").unwrap();
+    cite_re
+        .replace_all(answer, |caps: &regex::Captures| {
+            let n: usize = caps[1].parse().unwrap_or(0);
+            if (1..=evidence_len).contains(&n) {
+                caps[0].to_string() // valid: keep as-is
+            } else {
+                caps[1].to_string() // fabricated: drop the brackets, keep the text
+            }
+        })
+        .into_owned()
+}
+
 /// Jaccard-like keyword overlap score between two strings.
 fn keyword_overlap(a: &str, b: &str) -> f64 {
     let a_words: std::collections::HashSet<String> = crate::search::schema::JIEBA
@@ -1672,8 +1716,13 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, evidence, .. } =
+    let PreparedConversation { system, user_msg, evidence, has_evidence, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
+    // 非严格模式：无材料注入时拒绝硬答（避免 LLM 无据发挥）。
+    if !has_evidence {
+        log::warn!("[AI]   no evidence injected, refusing to answer (non-stream)");
+        return Ok("未在与当前范围匹配的文档中找到依据，因此无法回答。\n建议：换用更具体的关键词提问、通过 @ 引用相关文件，或使用全文搜索直接检索。".to_string());
+    }
     let answer = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user_msg))
         .await
         .unwrap_or(None)
@@ -1687,7 +1736,7 @@ pub async fn conversation_ask(
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
-    let cited = auto_cite(&answer, &evidence);
+    let cited = auto_cite(&sanitize_citations(&answer, evidence.len()), &evidence);
     log::info!("[AI]   done: {} chars", answer.chars().count());
 
     Ok(cited)
@@ -1728,15 +1777,49 @@ pub async fn conversation_ask_stream(
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, total_match_count, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, total_match_count, has_evidence, mut events } =
         prepared?;
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
     let cfg = crate::config::load_config();
     let turn_number = messages.iter().filter(|m| m.role == "user").count().saturating_sub(1);
     log::info!(
-        "[AI_TRACE] turn_begin trace_id={trace_id} llm={} embedding={} strict={} hits={} search_q={}",
-        cfg.active_llm_model_id, cfg.active_embedding_model_id, strict_docs, hits, search_query
+        "[AI_TRACE] turn_begin trace_id={trace_id} llm={} embedding={} strict={} hits={} search_q={} has_evidence={}",
+        cfg.active_llm_model_id, cfg.active_embedding_model_id, strict_docs, hits, search_query, has_evidence
     );
+    // 非严格模式：检索 0 命中 / 无材料注入时，拒绝硬答（避免 LLM 无据发挥），
+    // 直接返回"未找到依据"提示 + 建议。strict 模式的空 context 已在 prepare 内 Err。
+    if !has_evidence {
+        log::warn!("[AI]   no evidence injected (total_match_count={}), refusing to answer", total_match_count);
+        events.push(("turn_complete".into(), serde_json::json!({
+            "refused_no_evidence": true,
+            "total_match_count": total_match_count,
+            "answer_chars": 0,
+        })));
+        if let Ok(conn) = state.db.get() {
+            for (i, (event_type, payload)) in events.iter().enumerate() {
+                let _ = crate::db::ai_events::record_event(
+                    &conn, &session_id, turn_number, (i + 1) as u32, event_type, payload,
+                );
+            }
+        }
+        let refuse = "未在与当前范围匹配的文档中找到依据，因此无法回答。\n建议：换用更具体的关键词提问、通过 @ 引用相关文件，或点击右上角「全文搜索」直接检索。";
+        let _ = app.emit("ai-done", AiDone {
+            session_id,
+            full_text: refuse.to_string(),
+            took_ms: 0,
+            cancelled: false,
+            source_ids,
+            source_files,
+            evidence,
+            trace_id,
+            search_query,
+            hits,
+            total_match_count,
+            llm_model: cfg.active_llm_model_id,
+            embedding_model: cfg.active_embedding_model_id,
+        });
+        return Ok(());
+    }
     events.push(("llm_call".into(), serde_json::json!({
         "model_id": cfg.active_llm_model_id,
         "system_prompt_chars": system.chars().count(),
@@ -1785,7 +1868,7 @@ pub async fn conversation_ask_stream(
      }
      let raw_text = result.text.unwrap_or_default();
      log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
-     let cited_text = auto_cite(&raw_text, &evidence);
+     let cited_text = auto_cite(&sanitize_citations(&raw_text, evidence.len()), &evidence);
      let _ = app.emit("ai-done", AiDone {
          session_id,
         full_text: cited_text,
@@ -1832,12 +1915,20 @@ fn chunked_or_truncated_with_budget(
     hit_chunks: &[(usize, f32)],
 ) -> String {
     if char_budget == 0 { return String::new(); }
-    if text.chars().count() <= char_budget {
-        return truncate_text(text, char_budget);
+    let text_full_chars = text.chars().count();
+    // 原文超出预算 → 必然无法完整注入。给 LLM 显式标记"材料被截断"，
+    // 避免它把注入的部分当作全文下结论（静默截断 → 可感知截断）。
+    let truncated_note = if text_full_chars > char_budget {
+        format!("\n\n〔注：该材料过长，仅注入部分内容（共 {text_full_chars} 字，未全部展示），据此回答可能不完整。〕")
+    } else {
+        String::new()
+    };
+    if text_full_chars <= char_budget {
+        return format!("{}{}", truncate_text(text, char_budget), truncated_note);
     }
     let chunks = crate::db::chunks::get_chunks(conn, md5).unwrap_or_default();
     if chunks.is_empty() {
-        return truncate_text(text, char_budget);
+        return format!("{}{}", truncate_text(text, char_budget), truncated_note);
     }
     let hit_set: std::collections::HashSet<i64> =
         hit_chunks.iter().map(|(idx, _)| *idx as i64).collect();
@@ -1855,17 +1946,23 @@ fn chunked_or_truncated_with_budget(
         *used += chunk_chars;
         true
     };
+    let mut finish = |packed: Vec<String>| {
+        if packed.is_empty() {
+            return String::new();
+        }
+        format!("{}\n···\n{}", packed.join("\n···\n"), truncated_note)
+    };
     // 1) 语义命中块优先（保持 chunk_index 阅读顺序）
     for chunk in chunks.iter().filter(|c| hit_set.contains(&c.chunk_index)) {
-        if !push(chunk, &mut used, &mut packed) { return packed.join("\n···\n"); }
+        if !push(chunk, &mut used, &mut packed) { return finish(packed); }
     }
-    if used >= char_budget { return packed.join("\n···\n"); }
+    if used >= char_budget { return finish(packed); }
     // 2) 剩余预算按词重叠补足
     let relevant = crate::db::chunks::select_relevant_chunks(&chunks, query, chunks.len());
     for chunk in relevant.iter().filter(|c| !hit_set.contains(&c.chunk_index)) {
         if !push(chunk, &mut used, &mut packed) { break; }
     }
-    packed.join("\n···\n")
+    finish(packed)
 }
 
 pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
@@ -3146,6 +3243,41 @@ mod auto_cite_md_tests {
         eprintln!("OUTPUT: {}", result);
         assert!(result.contains("## 主要条款"), "heading broken: {}", result);
     }
+
+    // ---- sanitize_citations ----
+
+    #[test]
+    fn sanitize_keeps_in_range_citations() {
+        let s = sanitize_citations("违约金是千分之五[1]，每日计算。", 3);
+        assert_eq!(s, "违约金是千分之五[1]，每日计算。");
+    }
+
+    #[test]
+    fn sanitize_strips_out_of_range_citation() {
+        // evidence 只有 1 条，LLM 却引用了 [99] → 剥括号留文字
+        let s = sanitize_citations("相关内容见判决书[99]的记载。", 1);
+        assert_eq!(s, "相关内容见判决书99的记载。", "got: {s}");
+        assert!(!s.contains("[99]"));
+    }
+
+    #[test]
+    fn sanitize_strips_zero_and_handles_multi() {
+        let s = sanitize_citations("依据[1]与[0]，另见[2][5]。", 2);
+        // [1][2] 合法保留；[0][5] 越界剥离
+        assert_eq!(s, "依据[1]与0，另见[2]5。", "got: {s}");
+    }
+
+    #[test]
+    fn sanitize_empty_evidence_returns_original() {
+        let s = sanitize_citations("没有任何引用[7]的痕迹。", 0);
+        assert_eq!(s, "没有任何引用[7]的痕迹。");
+    }
+
+    #[test]
+    fn sanitize_plain_text_untouched() {
+        let s = sanitize_citations("这是没有方括号引用的普通文本。", 5);
+        assert_eq!(s, "这是没有方括号引用的普通文本。");
+    }
 }
 
 #[cfg(test)]
@@ -3196,18 +3328,31 @@ mod retrieval_keyword_tests {
 mod chunk_budget_tests {
     use super::*;
 
-    /// 长文本 + 预算 → 返回不超过预算（含 20 字符块头开销）
+    /// 长文本 + 预算 → 内容不超过预算（含 20 字符块头开销），但允许追加截断提示元信息
     #[test]
     fn respects_char_budget() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_db(&conn).unwrap();
         let long = "违约".repeat(2000); // 4000 字符
         let out = chunked_or_truncated_with_budget(&conn, "md5-x", &long, "违约", 500, &[]);
-        assert!(out.chars().count() <= 520, "budget exceeded: {}", out.chars().count());
+        // 截断提示元信息不计入内容预算；正文部分仍应受限。
+        let body = out.split("〔注：").next().unwrap_or(&out);
+        assert!(body.chars().count() <= 520, "budget exceeded: {}", body.chars().count());
         assert!(!out.trim().is_empty());
     }
 
-    /// 短文本 ≤ 预算 → 全文返回，不截断
+    /// 长文本超出预算 → 返回内容带显式"材料被截断"提示（可感知截断）
+    #[test]
+    fn truncated_text_gets_notice() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        let long = "违约".repeat(2000); // 4000 字符
+        let out = chunked_or_truncated_with_budget(&conn, "md5-note", &long, "违约", 500, &[]);
+        assert!(out.contains("材料过长"), "missing truncation notice: {}", &out[out.len().saturating_sub(80)..]);
+        assert!(out.contains("未全部展示"), "missing truncation notice: {}", &out[out.len().saturating_sub(80)..]);
+    }
+
+    /// 短文本 ≤ 预算 → 全文返回，无截断提示
     #[test]
     fn short_text_returned_whole() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
