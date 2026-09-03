@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-03（AI 问答正确性修复 P0 + 评测基线 P2-1）
+
+- **无引用提问时证据面板空白 + 引用编号失效（正确性修复，根因）**：Layer1（BM25/向量检索命中的非引用文档）注入只 `docs.push` 材料、**不 push evidence**——材料进了 prompt（system 含内容）但 `evidence` 数组为空，导致：前端「检索依据」面板空白、`auto_cite`/`sanitize_citations` 全部失效（`evidence.len()==0` 直接返回原文）、`[N]` 引用无处指向。实证：`chat --dry-run` 命中 2 份文件注入 0 条证据。**修复**：`prepare_conversation_prompt`（`commands/ai.rs`）Layer1 注入循环补 `evidence.push`，与 Layer0 一致。
+- **材料编号体系断裂（引用错位的隐患）**：Layer0（@引用文件）材料标 `[{n}]` 但用独立序号，Layer1 材料用 `【path】` 无编号——system prompt 要求 LLM 标 `[N]`、`auto_cite` 按 evidence 序号补 `[N]`，三处编号不统一，LLM 无从正确引用。**修复**：docs 与 evidence 严格同步 push，每条材料按注入顺序统一编号 `[N]`（编号 = evidence 下标+1）；`source_ids`/`source_files`（前端 `#ref` 跳转用）从 evidence 派生而非 `all_hits`，保证与 evidence 同序同长——点击 `[N]` 不再可能跳到错误文件。
+- **P0-2 引用白名单校验（剥离幻觉引用）**：LLM 自造越界 `[N]`（如 `[99]`）此前无任何拦截，`auto_cite` 只"补"不"验"。新增 `sanitize_citations(answer, evidence_len)`：越界/非数字编号剥括号留文字，合法编号保留，在 `auto_cite` 前执行（`smart_search_stream`/`conversation_ask`/`conversation_ask_stream` 三处）。新增 5 个单测覆盖越界/零/多编号/空 evidence/普通文本。
+- **P0-1 空依据不硬答**：非严格模式下检索 0 命中/无材料注入时仍让 LLM 带空 context 硬答（幻觉温床）。`PreparedConversation` 新增 `has_evidence` 字段（= context 非空）；`conversation_ask`/`conversation_ask_stream` 在 `!has_evidence` 时拒绝调用 LLM，直接返回「未找到依据 + 建议换词/@引用/全文搜索」；stream 版照常 emit `ai-done`（前端无需改动即能展示这一轮）。strict 模式已有拒绝逻辑（prepare 内 Err）不受影响。
+- **P0-3 截断可感知**：长文档注入超出预算时静默截断，LLM 会把注入部分当全文下结论。`chunked_or_truncated_with_budget` 在原文超预算时于注入内容末尾追加 `〔注：该材料过长，仅注入部分内容（共 N 字）…〕`。新增 1 个单测；既有 budget 单测按新语义（正文受限、元信息不计预算）更新。
+- **P2-1 评测基线（检索质量度量）**：新增 `scripts/eval/run_rag_eval.sh`——对 golden set 每条问句跑 `chat --dry-run`（不调 LLM），解析注入 evidence 与标注支撑文件比对，输出 Context Recall@10 / Success@10。`scripts/eval/README.md` 说明用法、真实库子集准备与隐私注意（真实案件材料不入库）。smoke 验证：3 问句语料 Recall@10=100%。**门禁**：任何检索/注入改动合入前必跑本评测对比基线。
+- 涉及 `src-tauri/src/commands/ai.rs`（prepare 注入/编号/拒答/截断/引用校验）、`scripts/eval/`（新增评测脚本+文档）。验证：224 lib 单测全绿；`chat --dry-run` 从"命中 2 注入 0"修复为"命中 2 注入 2"（含 bm25 分与 path）。
+
+---
+
 ## 2026-09-02（AI 问答调研）
 
 - **研究：面向人少+文档量小场景的 AI 问答最佳实践调研报告**：深度调研个人/小团队本地文档 RAG 的业界做法（Anthropic Contextual Retrieval / Context Engineering、Pinecone chunking & hybrid search、Faiss 索引选型、ZeroEntropy LLM-reranker 基准、The Reranking Trap、Neel Mishra citation grounding、RedHop RAG citations、RAGAS 评测、luningqi 混合检索实测、BGE-M3/reranker 模型卡等 22 个经全文核实来源），并逐条对照本项目真实代码（`commands/ai.rs` 单体 RAG 管线、`chunks.rs` 分块、`tracker.rs` 向量存取、`ChatPanel.tsx` 引用渲染、`webapi` 事件桥），产出差距分析与分优先级实施路线图。交付：`docs/research-rag-best-practices-personal.md`（新增第 9 章差距分析 + 第 10 章 P0/P1/P2 路线图 + 明确不做清单）。核心结论：混合检索/小文件不切块/引用编号/范围控制已符合业界共识；主要差距在 P0（0 命中/低置信硬答、幻觉引用未白名单剥离、长文档静默截断）、P1（向量暴力余弦+无查询缓存、文件级向量只编前 2000 字符、Web 无 ai-progress）、P2（**无评测基线**、ai/skills 双份实现漂移、chunk 无结构语境）。本次仅文档调研，无代码改动。
