@@ -14,6 +14,7 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 /// (model_name, display_name, dim)
 const LOCAL_MODELS: &[(&str, &str, u32)] = &[
     ("bge-large-zh-v1.5", "BGE-Large (1024维)", 1024),
+    ("bge-small-zh-v1.5", "BGE-Small (512维, 快)", 512),
 ];
 
 fn remote_bases(model_name: &str) -> Vec<String> {
