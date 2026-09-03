@@ -8,9 +8,61 @@ pub mod skills;
 pub mod local_embed;
 
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::config::{ModelType, ProviderConfig};
 use serde::{Deserialize, Serialize};
+
+/// Query-embedding LRU-ish cache. `embed()` serves single query texts from
+/// the retrieval path (rewrite / BM25 query / vector scan); caching them
+/// skips repeated local-BGE / gateway inference when the same or a
+/// near-identical query returns in a session. Capped — on overflow the whole
+/// cache is dropped (simplest correct eviction for a small hot set).
+/// Document-chunk embedding goes through `embed_batch`, never cached here.
+static QUERY_EMBED_CACHE: OnceLock<Mutex<HashMap<String, Vec<f32>>>> = OnceLock::new();
+const QUERY_EMBED_CACHE_CAP: usize = 256;
+
+fn query_embed_cache() -> &'static Mutex<HashMap<String, Vec<f32>>> {
+    QUERY_EMBED_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key(text: &str) -> String {
+    // 缓存键包含当前 embedding 模型 id：切换模型后旧向量不可比，天然失效。
+    let model = crate::config::load_config()
+        .active_embedding_model_id
+        .clone();
+    format!("{model}\n{}", text.trim())
+}
+
+pub fn cached_embed(text: &str) -> Option<Vec<f32>> {
+    let key = cache_key(text);
+    if key.is_empty() {
+        return embed(text);
+    }
+    {
+        let cache = query_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = cache.get(&key) {
+            return Some(v.clone());
+        }
+    }
+    let v = embed(text)?;
+    let mut cache = query_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= QUERY_EMBED_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, v.clone());
+    Some(v)
+}
+
+/// Drop the query-embedding cache (e.g. when the active embedding model or
+/// gateway changes; cached vectors from another model are not comparable).
+pub fn clear_query_embed_cache() {
+    if let Some(c) = QUERY_EMBED_CACHE.get() {
+        if let Ok(mut cache) = c.lock() {
+            cache.clear();
+        }
+    }
+}
 
 /// Resolved endpoint for a model role: the provider + model id in use.
 #[derive(Debug, Clone)]
@@ -278,7 +330,7 @@ pub fn vector_full_scan(
     query: &str,
     threshold: f32,
 ) -> Result<Vec<(String, f32)>, String> {
-    let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    let query_emb = cached_embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
     vector_scan_with_query_emb(conn, &query_emb, threshold)
 }
 
@@ -314,7 +366,7 @@ pub fn chunk_vector_scan(
     threshold: f32,
     top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
-    let query_emb = embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
+    let query_emb = cached_embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
     chunk_vector_scan_with_query_emb(conn, &query_emb, threshold, top_k)
 }
 
@@ -351,6 +403,27 @@ fn chunk_vector_scan_impl(
     results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(top_k);
     results
+}
+
+/// Two-level-funnel chunk scan: cosine over chunk embeddings belonging ONLY
+/// to the given md5 set (documents already short-listed by the document-level
+/// coarse filter), instead of brute-forcing the whole chunk corpus.
+/// Returns (md5, chunk_index, similarity) sorted desc, capped at `top_k`.
+pub fn chunk_vector_scan_for_md5s(
+    conn: &rusqlite::Connection,
+    query_emb: &[f32],
+    md5s: &[String],
+    threshold: f32,
+    top_k: usize,
+) -> Result<Vec<(String, usize, f32)>, String> {
+    let rows = crate::db::tracker::get_chunk_embeddings_by_md5s(conn, md5s).map_err(|e| e.to_string())?;
+    let scanned = rows.len();
+    let results = chunk_vector_scan_impl(query_emb, &rows, threshold, top_k);
+    log::info!(
+        "[AI]   chunk_vector(funnel): {} md5s -> {} chunk emb scanned, {} above {:.2} (top {top_k})",
+        md5s.len(), scanned, results.len(), threshold
+    );
+    Ok(results)
 }
 
 /// Send a chat-completion prompt to the configured LLM and return the reply

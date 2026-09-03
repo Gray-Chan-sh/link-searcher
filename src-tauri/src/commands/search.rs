@@ -279,7 +279,7 @@ fn semantic_rerank_worker(
         let (tx, rx) = std::sync::mpsc::channel();
         let q = query.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::ai::embed(&q));
+            let _ = tx.send(crate::ai::cached_embed(&q));
         });
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .ok()
