@@ -20,6 +20,7 @@ import Browse from './pages/Browse'
 import AiChat from './pages/AiChat'
 import StatusBar from './components/StatusBar'
 import OnboardingWizard from './components/OnboardingWizard'
+import ToastContainer from './components/ToastContainer'
 import { ErrorBoundary } from './components/ErrorBoundary'
 
 export default function App() {
@@ -194,6 +195,8 @@ export default function App() {
       </div>
 
       {showOnboarding && <OnboardingWizard onClose={handleOnboardingClose} />}
+
+      <ToastContainer />
 
       {showTokenDialog && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowTokenDialog(false)}>

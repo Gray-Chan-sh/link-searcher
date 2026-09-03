@@ -4,6 +4,7 @@ import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCap
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
+import { toast } from '../utils/toast'
 
 interface PreviewPanelProps {
   fileId: string | null
@@ -362,7 +363,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       {meta && (
         <div className="flex gap-2 px-4 py-2 border-t border-gray-200 dark:border-gray-800">
           <button
-            onClick={() => { navigator.clipboard.writeText(meta.path).catch(e => console.warn('复制失败:', e)) }}
+            onClick={() => { navigator.clipboard.writeText(meta.path).then(() => toast(t('copied_path'))).catch(e => console.warn('复制失败:', e)) }}
             className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
             {t('copy_path')}

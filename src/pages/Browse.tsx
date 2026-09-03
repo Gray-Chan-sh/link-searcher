@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '../api/client'
 import { confirm, saveFile } from '../utils/platform'
+import { toast } from '../utils/toast'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, previewFile } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
@@ -340,8 +341,12 @@ return (
             <SearchBar
               query={fts.query}
               loading={fts.status === 'loading'}
+              suggestions={fts.suggestions}
               onQueryChange={fts.setQuery}
               onSubmit={fts.submitSearch}
+              onFetchSuggestions={fts.fetchSuggestions}
+              onClearSuggestions={fts.clearSuggestions}
+              onPickSuggestion={q => { fts.setQuery(q) }}
             />
             {fts.query && (
               <button
@@ -756,7 +761,7 @@ return (
             <>
               <button
                 className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-                onClick={() => { navigator.clipboard.writeText(contextMenu.item.rel_path).catch(e => console.warn('复制失败:', e)); setContextMenu(null) }}
+                onClick={() => { navigator.clipboard.writeText(contextMenu.item.rel_path).then(() => toast(t('copied_path'))).catch(e => console.warn('复制失败:', e)); setContextMenu(null) }}
               >
                 {t('copy_path')}
               </button>

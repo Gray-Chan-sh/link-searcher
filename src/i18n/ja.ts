@@ -299,6 +299,8 @@ const ja: Record<string, string> = {
     recent_searches: '最近の検索',
     clear_history: '履歴をクリア',
     copy_name: '名前をコピー',
+    copied_path: 'パスをコピーしました',
+    copied_name: '名前をコピーしました',
     score: 'スコア: {score}',
 
     // Preview panel

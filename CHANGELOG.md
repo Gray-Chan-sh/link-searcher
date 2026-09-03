@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-03（前端交互提升 P0）
+
+- **全局 toast 反馈系统（此前成功操作全部静默）**：新增 `utils/toast.ts`（模块级事件总线 + 单例，无 Context）+ `components/ToastContainer.tsx`（右下角堆叠，success/error/info 三态，点击关闭，自动消失），挂载于 `App.tsx`。接入此前"复制成功无任何反馈"的静默点：Browse 上下文菜单复制路径、ResultList 右键复制名称、PreviewPanel 复制路径——复制成功弹「已复制路径/名称」，失败仍 console 警告。i18n 四语言补 `copied_path`/`copied_name`。
+- **搜索实时建议（接线死代码）**：`useSearch` 的 `fetchSuggestions/suggestions/clearSuggestions` 早已实现（200ms 防抖 + 竞态守卫）但从未被 UI 调用。`SearchBar` 新增建议下拉：输入即出联想、↑↓ 键盘导航 + Enter 选中即搜、Esc/失焦关闭、点击选中。SearchPage 与 Browse（FTS 模式）两处接入——两页共用 useSearch 故都受益。
+- **搜索键盘导航滚动跟随**：SearchPage ↑↓ 切换命中时焦点行此前可能落在虚拟列表未渲染区（不可见）。`ResultList` 新增 `revealIndex` prop，变化时将目标行滚动到容器中部；SearchPage 传入 `focusIndex`。
+- **AI 聊天流式自动跟随滚动**：ChatPanel 流式文本增长时视口此前不跟随（auto-scroll 只依赖 messages/loading，而流式文本在独立 streaming state）。新增 `stickToBottomRef`：默认跟随，用户上滚 >80px 查看历史时暂停，回到底部恢复。`streaming?.text` 加入滚动 effect 依赖。
+- 涉及 11 个前端文件 + 2 新增。验证：`tsc -b tsconfig.app.json` 零错误 + `npm run build` 成功（29s）。
+
+---
+
 ## 2026-09-03（发布流程）
 
 - **发布产物版本号与 tag 同步（根治产物名停留在 0.1.0）**：`tauri.conf.json` 的 `version` 硬编码 `0.1.0` 且从不随发布更新，导致 release 产物文件名/app 版本恒为 0.1.0（如 `Link-Searcher_0.1.0_aarch64.dmg`），与 tag（v0.1.6）不一致。**修复**：`release.yml` 在 Build 前新增 "Set version from tag" 步骤——用 python 从 tag 提取版本（`v0.1.7` → `0.1.7`）写入 tauri.conf.json，产物名/app 版本与 release 自动一致。打 tag 发布无需手动改 conf。v0.1.6 已发布产物不受影响，自 v0.1.7 起生效。

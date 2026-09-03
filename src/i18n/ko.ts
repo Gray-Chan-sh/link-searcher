@@ -299,6 +299,8 @@ const ko: Record<string, string> = {
     recent_searches: '최근 검색',
     clear_history: '기록 지우기',
     copy_name: '이름 복사',
+    copied_path: '경로 복사됨',
+    copied_name: '이름 복사됨',
     score: '점수: {score}',
 
     // Preview panel

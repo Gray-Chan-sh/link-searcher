@@ -310,6 +310,8 @@ const en: Record<string, string> = {
     recent_searches: 'Recent searches',
     clear_history: 'Clear history',
     copy_name: 'Copy Name',
+    copied_path: 'Path copied',
+    copied_name: 'Name copied',
     score: 'Score: {score}',
 
     // Preview panel

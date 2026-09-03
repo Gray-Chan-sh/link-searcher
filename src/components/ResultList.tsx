@@ -3,22 +3,25 @@ import type { SearchHit } from '../api/search'
 import { openFile, revealInFolder } from '../api/files'
 import { useI18n } from '../i18n'
 import { formatSize, formatTime } from '../utils/format'
+import { toast } from '../utils/toast'
 
 const ITEM_HEIGHT = 80
 const OVERSCAN = 5
-
-interface ContextMenu {
-  x: number
-  y: number
-  hit: SearchHit
-}
 
 interface ResultListProps {
   hits: SearchHit[]
   selectedId: string | null
   onSelect: (hit: SearchHit) => void
+  /** 键盘导航目标（index）：变化时滚动到该行使其可见 */
+  revealIndex?: number
   checkboxIds?: Set<string>
   onCheckboxToggle?: (fileId: string) => void
+}
+
+interface ContextMenu {
+  x: number
+  y: number
+  hit: SearchHit
 }
 
 function highlightSnippet(snippet: string): React.ReactNode {
@@ -34,11 +37,23 @@ function highlightSnippet(snippet: string): React.ReactNode {
   })
 }
 
-export default function ResultList({ hits, selectedId, onSelect, checkboxIds, onCheckboxToggle }: ResultListProps) {
+export default function ResultList({ hits, selectedId, onSelect, revealIndex, checkboxIds, onCheckboxToggle }: ResultListProps) {
   const { t } = useI18n()
   const containerRef = useRef<HTMLDivElement>(null)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 20 })
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+
+  // 键盘导航：revealIndex 变化时把目标行滚进视野（虚拟列表直接设 scrollTop）
+  useEffect(() => {
+    if (revealIndex == null || revealIndex < 0) return
+    const container = containerRef.current
+    if (!container) return
+    const top = revealIndex * ITEM_HEIGHT
+    const bottom = top + ITEM_HEIGHT
+    if (top < container.scrollTop || bottom > container.scrollTop + container.clientHeight) {
+      container.scrollTo({ top: top - container.clientHeight / 2 + ITEM_HEIGHT / 2 })
+    }
+  }, [revealIndex, hits.length])
 
   const handleContextMenu = (e: React.MouseEvent, hit: SearchHit) => {
     e.preventDefault()
@@ -133,7 +148,7 @@ export default function ResultList({ hits, selectedId, onSelect, checkboxIds, on
           </button>
           <button
             className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-            onClick={() => { navigator.clipboard.writeText(contextMenu.hit.file_name).catch(e => console.warn('复制失败:', e)); setContextMenu(null) }}
+            onClick={() => { navigator.clipboard.writeText(contextMenu.hit.file_name).then(() => toast(t('copied_name'))).catch(e => console.warn('复制失败:', e)); setContextMenu(null) }}
           >
             {t('copy_name')}
           </button>

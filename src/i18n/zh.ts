@@ -310,6 +310,8 @@ const zh: Record<string, string> = {
     recent_searches: '最近搜索',
     clear_history: '清除历史',
     copy_name: '复制名称',
+    copied_path: '已复制路径',
+    copied_name: '已复制名称',
     score: '得分：{score}',
 
     // Preview panel

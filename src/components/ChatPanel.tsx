@@ -56,6 +56,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string; reasoning: string } | null>(null)
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  // 流式自动跟随：用户主动上滚查看历史时暂停跟随，回到底部后恢复
+  const stickToBottomRef = useRef(true)
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    stickToBottomRef.current = nearBottom
+  }, [])
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
+    const el = scrollRef.current
+    if (el && stickToBottomRef.current) el.scrollTo({ top: el.scrollHeight, behavior })
+  }, [])
   // 在途请求标识：取消或新请求会递增它，旧请求的迟到响应据此丢弃。
   const latestReqIdRef = useRef(0)
   // 发送中防护：阻止 Enter + 按钮点击双重触发
@@ -102,9 +114,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     if (cur) onSessionChange({ ...cur, ...patch })
   }, [session, onSessionChange])
 
+  // 新消息/流式文本增长时跟随滚动（用户上滚则暂停，scrollToBottom 内部判断）
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [messages, loading])
+    scrollToBottom('smooth')
+  }, [messages, loading, streaming?.text])
 
   const errText = (e: unknown) => {
     const raw =
@@ -440,7 +453,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         </div>
       )}
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {messages.length === 0 && (
           <div className="text-center text-sm text-gray-400 py-12">
             {t('chat_placeholder')}

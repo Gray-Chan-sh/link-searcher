@@ -1,38 +1,86 @@
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '../i18n'
 import { SearchIcon, XIcon, LoadingSpinner } from '../icons'
 
 interface SearchBarProps {
   query: string
   loading: boolean
+  suggestions?: string[]
   onQueryChange: (q: string) => void
   onSubmit: () => void
+  onFetchSuggestions?: (prefix: string) => void
+  onClearSuggestions?: () => void
+  onPickSuggestion?: (s: string) => void
 }
 
 export default function SearchBar({
   query,
   loading,
+  suggestions,
   onQueryChange,
   onSubmit,
+  onFetchSuggestions,
+  onClearSuggestions,
+  onPickSuggestion,
 }: SearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
+  const [open, setOpen] = useState(false)
+  const [activeIdx, setActiveIdx] = useState(-1)
 
   const handleInput = useCallback((value: string) => {
     onQueryChange(value)
-  }, [onQueryChange])
+    onFetchSuggestions?.(value)
+    setOpen(true)
+    setActiveIdx(-1)
+  }, [onQueryChange, onFetchSuggestions])
+
+  const close = useCallback(() => {
+    setOpen(false)
+    setActiveIdx(-1)
+    onClearSuggestions?.()
+  }, [onClearSuggestions])
+
+  const pick = useCallback((s: string) => {
+    onPickSuggestion?.(s)
+    close()
+    onSubmit()
+  }, [onPickSuggestion, close, onSubmit])
 
   const clear = useCallback(() => {
     onQueryChange('')
+    close()
     inputRef.current?.focus()
-  }, [onQueryChange])
+  }, [onQueryChange, close])
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      onSubmit()
+    if (!open || !suggestions?.length) {
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        onSubmit()
+      }
+      if (e.key === 'Escape') close()
+      return
     }
-  }, [onSubmit])
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActiveIdx(i => (i + 1) % suggestions.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActiveIdx(i => (i <= 0 ? suggestions.length - 1 : i - 1))
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      if (activeIdx >= 0 && suggestions[activeIdx]) {
+        pick(suggestions[activeIdx])
+      } else {
+        onSubmit()
+        close()
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      close()
+    }
+  }, [open, suggestions, activeIdx, onSubmit, close, pick])
 
   // ⌘K / Ctrl+K 全局快捷键聚焦搜索框
   useEffect(() => {
@@ -45,6 +93,8 @@ export default function SearchBar({
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [])
+
+  const showDropdown = open && !!suggestions?.length && query.trim().length > 0
 
   return (
     <div className="relative">
@@ -60,8 +110,11 @@ export default function SearchBar({
           value={query}
           onChange={e => handleInput(e.target.value)}
           onKeyDown={handleKeyDown}
+          onFocus={() => { if (query.trim() && suggestions?.length) setOpen(true) }}
+          onBlur={() => setTimeout(() => setOpen(false), 120)}
           placeholder={`${t('search_placeholder')} (⌘K)`}
           aria-label={t('search')}
+          aria-expanded={showDropdown}
           data-search-input="true"
           className="w-full pl-9 pr-20 py-2.5 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-colors"
         />
@@ -81,6 +134,24 @@ export default function SearchBar({
           )}
         </div>
       </div>
+      {showDropdown && (
+        <ul className="absolute left-0 right-0 mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg overflow-hidden z-30 text-sm max-h-64 overflow-y-auto">
+          {suggestions.map((s, i) => (
+            <li key={s}>
+              <button
+                type="button"
+                onMouseDown={e => { e.preventDefault(); pick(s) }}
+                onMouseEnter={() => setActiveIdx(i)}
+                className={`w-full px-3 py-2 text-left truncate hover:bg-gray-100 dark:hover:bg-gray-700 ${
+                  i === activeIdx ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300' : 'text-gray-700 dark:text-gray-300'
+                }`}
+              >
+                {s}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   )
 }

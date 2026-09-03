@@ -216,7 +216,11 @@ export default function SearchPage() {
           <div className="flex items-center gap-2">
             <div className="flex-1">
               <SearchBar query={search.query} loading={search.status === 'loading'}
-                onQueryChange={search.setQuery} onSubmit={search.submitSearch} />
+                suggestions={search.suggestions}
+                onQueryChange={search.setQuery} onSubmit={search.submitSearch}
+                onFetchSuggestions={search.fetchSuggestions}
+                onClearSuggestions={search.clearSuggestions}
+                onPickSuggestion={q => { search.setQuery(q) }} />
             </div>
             <button onClick={() => setShowFilters(v => !v)}
               className="px-2.5 py-2 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors shrink-0">{t('filters')}</button>
@@ -315,6 +319,7 @@ export default function SearchPage() {
           )}
           {displayHits.length > 0 && (
             <ResultList hits={displayHits} selectedId={selectedHit?.file_id ?? null} onSelect={setSelectedHit}
+              revealIndex={focusIndex}
               checkboxIds={isRefining && currentRefine ? currentRefine.selectedIds : undefined}
               onCheckboxToggle={isRefining ? toggleRefineFile : undefined} />
           )}
