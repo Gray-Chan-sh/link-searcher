@@ -4,6 +4,12 @@
 
 ---
 
+## 2026-09-03（发布流程）
+
+- **发布产物版本号与 tag 同步（根治产物名停留在 0.1.0）**：`tauri.conf.json` 的 `version` 硬编码 `0.1.0` 且从不随发布更新，导致 release 产物文件名/app 版本恒为 0.1.0（如 `Link-Searcher_0.1.0_aarch64.dmg`），与 tag（v0.1.6）不一致。**修复**：`release.yml` 在 Build 前新增 "Set version from tag" 步骤——用 python 从 tag 提取版本（`v0.1.7` → `0.1.7`）写入 tauri.conf.json，产物名/app 版本与 release 自动一致。打 tag 发布无需手动改 conf。v0.1.6 已发布产物不受影响，自 v0.1.7 起生效。
+
+---
+
 ## 2026-09-03（AI 问答正确性修复 P0 + 评测基线 P2-1）
 
 - **无引用提问时证据面板空白 + 引用编号失效（正确性修复，根因）**：Layer1（BM25/向量检索命中的非引用文档）注入只 `docs.push` 材料、**不 push evidence**——材料进了 prompt（system 含内容）但 `evidence` 数组为空，导致：前端「检索依据」面板空白、`auto_cite`/`sanitize_citations` 全部失效（`evidence.len()==0` 直接返回原文）、`[N]` 引用无处指向。实证：`chat --dry-run` 命中 2 份文件注入 0 条证据。**修复**：`prepare_conversation_prompt`（`commands/ai.rs`）Layer1 注入循环补 `evidence.push`，与 Layer0 一致。

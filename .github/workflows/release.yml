@@ -59,6 +59,22 @@ jobs:
       - name: Install npm deps (incl. Tauri CLI)
         run: npm ci
 
+      # 从 tag 同步版本号到 tauri.conf.json（tag v0.1.7 → version 0.1.7），
+      # 产物文件名/app 版本与 release 一致。打 tag 发布无需手动改 conf。
+      - name: Set version from tag
+        run: |
+          TAG="${{ github.ref_name }}"
+          VER="${TAG#v}"
+          python3 - "$VER" <<'PY'
+          import json, sys
+          ver = sys.argv[1]
+          p = "src-tauri/tauri.conf.json"
+          c = json.load(open(p))
+          c["version"] = ver
+          json.dump(c, open(p, "w"), indent=2, ensure_ascii=False)
+          print(f"tauri.conf.json version -> {ver}")
+          PY
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
