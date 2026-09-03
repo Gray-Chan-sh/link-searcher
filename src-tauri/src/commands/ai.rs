@@ -1552,51 +1552,6 @@ pub(crate) async fn prepare_conversation_prompt(
     Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty() })
 }
 
-/// Pipeline 版本的 prepare_conversation_prompt（使用 RAGPipeline）。
-/// 与原函数功能相同，但拆分为独立 Skill 模块，便于测试和维护。
-#[allow(dead_code)]
-async fn prepare_conversation_prompt_pipeline(
-    state: &tauri::State<'_, AppState>,
-    messages: &[ChatMessage],
-    source_ids: &[String],
-    scope: &TurnScope,
-    session_retrieval_scope: &[String],
-    strict_docs: bool,
-) -> Result<PreparedConversation, String> {
-    use crate::ai::skills::pipeline::{RAGPipeline, RAGContext};
-    use std::sync::Arc;
-
-    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
-    let pipeline = RAGPipeline::new();
-    let db = state.db.clone();
-    let state_ptr: &'static tauri::State<'static, AppState> = unsafe { std::mem::transmute(state) };
-
-    let output = pipeline.execute(&RAGContext {
-        last_q,
-        messages: messages.to_vec(),
-        scope: scope.clone(),
-        session_retrieval_scope: session_retrieval_scope.to_vec(),
-        strict_docs,
-        source_ids: source_ids.to_vec(),
-        db: Arc::new(db),
-        state: Some(state_ptr),
-    }).await.map_err(|e| e.message)?;
-
-    let has_evidence = !output.evidence.is_empty();
-    Ok(PreparedConversation {
-        system: output.system,
-        user_msg: output.user_msg,
-        source_ids: output.source_ids,
-        source_files: output.source_files,
-        evidence: output.evidence,
-        search_query: String::new(),
-        hits: 0,
-        events: vec![],
-        total_match_count: 0,
-        has_evidence,
-    })
-}
-
 /// Post-process LLM response: supplement [N] citations for sentences that
 /// match evidence snippets but weren't tagged by the LLM.
 ///
