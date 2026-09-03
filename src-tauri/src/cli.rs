@@ -194,7 +194,7 @@ pub fn run_cli() -> Result<()> {
                 }
             }
         }
-        Cli::Chat { query, scope, full_recall, no_llm: _, dry_run } => {
+        Cli::Chat { query, scope, full_recall, no_llm, dry_run } => {
             let data_dir = config::load_config().data_dir;
             let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
 
@@ -268,38 +268,83 @@ pub fn run_cli() -> Result<()> {
                 return Ok(());
             }
 
-            let total_files = {
-                let c = bootstrap.pool.get().context("failed to get DB connection")?;
-                crate::db::tracker::count_active_files(&c).context("count_active_files failed")?
-            };
-            let limit = if full_recall { (total_files as usize).max(500) } else { 100 };
-            let bm25_hits = crate::commands::ai::bm25_relevant_hits(
-                &state,
-                &query.to_lowercase(),
-                limit,
-                false,
-                None, None, None, None, None, None,
-            )
-            .map_err(|e| anyhow::anyhow!("bm25_relevant_hits failed: {e}"))?;
+            if no_llm {
+                // BM25-only 检索展示（原行为）
+                let total_files = {
+                    let c = bootstrap.pool.get().context("failed to get DB connection")?;
+                    crate::db::tracker::count_active_files(&c).context("count_active_files failed")?
+                };
+                let limit = if full_recall { (total_files as usize).max(500) } else { 100 };
+                let bm25_hits = crate::commands::ai::bm25_relevant_hits(
+                    &state,
+                    &query.to_lowercase(),
+                    limit,
+                    false,
+                    None, None, None, None, None, None,
+                )
+                .map_err(|e| anyhow::anyhow!("bm25_relevant_hits failed: {e}"))?;
 
-            println!(
-                "[BM25] 共 {} 份文件，命中 {} 条（full_recall={} limit={}）",
-                total_files,
-                bm25_hits.len(),
-                full_recall,
-                limit
-            );
-            for (i, hit) in bm25_hits.iter().enumerate().take(20) {
                 println!(
-                    "  [{:>3}] score={:.2} path={}",
-                    i + 1,
-                    hit.bm25_score.unwrap_or(0.0),
-                    hit.path
+                    "[BM25] 共 {} 份文件，命中 {} 条（full_recall={} limit={}）",
+                    total_files,
+                    bm25_hits.len(),
+                    full_recall,
+                    limit
                 );
+                for (i, hit) in bm25_hits.iter().enumerate().take(20) {
+                    println!(
+                        "  [{:>3}] score={:.2} path={}",
+                        i + 1,
+                        hit.bm25_score.unwrap_or(0.0),
+                        hit.path
+                    );
+                }
+                if bm25_hits.len() > 20 {
+                    println!("  ... 仅显示前 20 条，共 {} 条命中", bm25_hits.len());
+                }
+                return Ok(());
             }
-            if bm25_hits.len() > 20 {
-                println!("  ... 仅显示前 20 条，共 {} 条命中", bm25_hits.len());
+
+            // 完整 RAG 问答：三路检索 → 注入 → LLM → 引用标注
+            let mention_files: Vec<String> = scope
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let turn_scope = crate::commands::ai::TurnScope {
+                mention_files,
+                mention_dirs: vec![],
+                inherit_from: vec![],
+                conditions: vec![],
+            };
+            let messages = vec![crate::commands::ai::ChatMessage {
+                role: "user".into(),
+                content: query.clone(),
+            }];
+            let prepared = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .context("failed to create tokio runtime")?
+                .block_on(crate::commands::ai::prepare_conversation_prompt(
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, false, None, "",
+                ))
+                .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
+            if !prepared.has_evidence {
+                println!("未在与当前范围匹配的文档中找到依据。建议换关键词或 @ 引用文件。");
+                return Ok(());
             }
+            eprintln!(
+                "[RAG] 命中 {} 份，注入 {} 条证据，调用 LLM 中…",
+                prepared.total_match_count,
+                prepared.evidence.len()
+            );
+            let raw = crate::ai::chat(&prepared.system, &prepared.user_msg)
+                .ok_or_else(|| anyhow::anyhow!("LLM 调用失败（检查网关配置或网络）"))?;
+            let cited = crate::commands::ai::auto_cite(
+                &crate::commands::ai::sanitize_citations(&raw, prepared.evidence.len()),
+                &prepared.evidence,
+            );
+            println!("{cited}");
         }
         Cli::Health => {
             let data_dir = config::load_config().data_dir;
