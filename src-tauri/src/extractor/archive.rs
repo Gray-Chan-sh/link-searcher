@@ -326,7 +326,13 @@ mod tests {
         assert!(is_safe_archive_name("sub/dir/file.txt"));
         assert!(!is_safe_archive_name("../evil.pdf"));
         assert!(!is_safe_archive_name("a/../../evil.pdf"));
-        assert!(!is_safe_archive_name("/etc/passwd"));
+        // 绝对路径：Unix 用 /etc/passwd，Windows 用盘符路径（/etc/passwd 在
+        // Windows 是相对路径，Path::is_absolute() 返回 false）。
+        #[cfg(windows)]
+        let abs = "C:\\etc\\passwd";
+        #[cfg(not(windows))]
+        let abs = "/etc/passwd";
+        assert!(!is_safe_archive_name(abs), "{abs} should be unsafe");
         assert!(!is_safe_archive_name("..\\..\\evil.pdf"));
         assert!(!is_safe_archive_name(".."));
     }

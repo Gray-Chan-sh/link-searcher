@@ -53,6 +53,7 @@ jobs:
             librsvg2-dev \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
+            libgbm-dev \
             patchelf
 
       - name: Install npm deps (incl. Tauri CLI)
