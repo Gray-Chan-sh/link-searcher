@@ -1556,7 +1556,8 @@ pub(crate) async fn prepare_conversation_prompt(
 /// match evidence snippets but weren't tagged by the LLM.
 ///
 /// Algorithm:
-/// 1. Split by 。！？.!? into sentences
+/// 1. Split by 。！？!? into sentences (`.` excluded — it appears in
+///    decimals/versions/URLs; Chinese sentences end with 。！？)
 /// 2. Skip sentences that already have [N]
 /// 3. For remaining sentences, compute keyword overlap with each evidence snippet
 /// 4. If overlap > threshold, add [N] to sentence end
@@ -1576,7 +1577,7 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
 
     let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
 
-    let sent_re = regex::Regex::new(r"[^。！？.!?\n]*[。！？.!?]").unwrap();
+    let sent_re = regex::Regex::new(r"[^。！？!?\n]*[。！？!?]").unwrap();
     // 已有引用的句子直接跳过，不再追加 [N]（避免 [3][1] 重叠）
     let has_cite_re = regex::Regex::new(r"\[\d+\]").unwrap();
     let mut result = String::with_capacity(protected.len() + 64);
@@ -3256,6 +3257,33 @@ mod auto_cite_md_tests {
     fn sanitize_plain_text_untouched() {
         let s = sanitize_citations("这是没有方括号引用的普通文本。", 5);
         assert_eq!(s, "这是没有方括号引用的普通文本。");
+    }
+
+    // ---- 小数/版本号等含 `.` 内容不被断句切开（0.[1]3 回归）----
+
+    #[test]
+    fn decimal_number_not_split_by_citation() {
+        // 回归：物业服务费"下调为0.3元/天/平方米"曾被 `.` 断句切开，
+        // 前半句"下调为0."被补引成"0.[1]3"。`.` 不再是句终符后应整体保留。
+        let e = vec![ev("违约金千分之五"), ev("物业服务费标准为10元每平方米每月")];
+        let input = "物业服务费标准原为10元/月·平方米，后下调为0.3元/天/平方米。";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(
+            !result.contains("0.[1]") && !result.contains(".[1]"),
+            "citation inserted inside decimal: {result}"
+        );
+        assert!(result.contains("0.3"), "decimal mangled: {result}");
+    }
+
+    #[test]
+    fn version_like_number_not_split() {
+        let e = vec![ev("软件版本")];
+        let input = "系统升级到 v2.1.3 版本后恢复正常。";
+        let result = auto_cite(input, &e);
+        eprintln!("OUTPUT: {}", result);
+        assert!(result.contains("v2.1.3"), "version mangled: {result}");
+        assert!(!result.contains("2.["), "citation inside version: {result}");
     }
 }
 
