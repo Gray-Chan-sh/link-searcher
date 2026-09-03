@@ -28,6 +28,8 @@ src-tauri/.env
 src-tauri/data.db*
 src-tauri/*.log
 src-tauri/index/
+# 本机 Cargo 环境变量（如 sherpa-onnx 预编译库路径）— 勿入库，避免平台绑定
+src-tauri/.cargo/config.toml
 
 # Local session data
 .omo/
