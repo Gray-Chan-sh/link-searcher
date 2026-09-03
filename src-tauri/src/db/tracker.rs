@@ -770,6 +770,42 @@ pub fn get_all_chunk_embeddings(
     Ok(result)
 }
 
+/// Load chunk embeddings restricted to a set of md5s as
+/// `(md5, chunk_index, Vec<f32>)`. Used by the two-level retrieval funnel:
+/// document-level coarse filter picks top documents first, then only those
+/// documents' chunk vectors are cosine-scanned (not the whole corpus).
+pub fn get_chunk_embeddings_by_md5s(
+    conn: &Connection,
+    md5s: &[String],
+) -> Result<Vec<(String, usize, Vec<f32>)>> {
+    if md5s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", md5s.len()).collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings WHERE md5 IN ({placeholders})"
+    );
+    let mut s = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+        md5s.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    let rows = s.query_map(param_refs.as_slice(), |row| {
+        let md5: String = row.get(0)?;
+        let chunk_index: usize = row.get(1)?;
+        let dim: usize = row.get(2)?;
+        let blob: Vec<u8> = row.get(3)?;
+        let mut v = Vec::with_capacity(dim);
+        for chunk in blob.chunks_exact(4) {
+            v.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok((md5, chunk_index, v))
+    })?;
+    let mut result = Vec::new();
+    for row in rows {
+        result.push(row?);
+    }
+    Ok(result)
+}
+
 /// Remove all chunk embeddings for an md5 (e.g. when content is re-indexed).
 pub fn delete_chunk_embeddings(conn: &Connection, md5: &str) -> Result<()> {
     conn.execute(

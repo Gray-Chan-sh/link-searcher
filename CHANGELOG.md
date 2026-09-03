@@ -13,6 +13,12 @@
 - **P0-3 截断可感知**：长文档注入超出预算时静默截断，LLM 会把注入部分当全文下结论。`chunked_or_truncated_with_budget` 在原文超预算时于注入内容末尾追加 `〔注：该材料过长，仅注入部分内容（共 N 字）…〕`。新增 1 个单测；既有 budget 单测按新语义（正文受限、元信息不计预算）更新。
 - **P2-1 评测基线（检索质量度量）**：新增 `scripts/eval/run_rag_eval.sh`——对 golden set 每条问句跑 `chat --dry-run`（不调 LLM），解析注入 evidence 与标注支撑文件比对，输出 Context Recall@10 / Success@10。`scripts/eval/README.md` 说明用法、真实库子集准备与隐私注意（真实案件材料不入库）。smoke 验证：3 问句语料 Recall@10=100%。**门禁**：任何检索/注入改动合入前必跑本评测对比基线。
 - 涉及 `src-tauri/src/commands/ai.rs`（prepare 注入/编号/拒答/截断/引用校验）、`scripts/eval/`（新增评测脚本+文档）。验证：224 lib 单测全绿；`chat --dry-run` 从"命中 2 注入 0"修复为"命中 2 注入 2"（含 bm25 分与 path）。
+- **P1-A 两级检索漏斗（规模适配核心）**：chunk 级向量通道原对全库 chunk_embeddings 暴力余弦（12.5 万–50 万块规模不再免费）。改为只对"文档级粗筛（BM25 + 文件级向量）命中的 md5 集"做块级精检（`ai.rs` prepare 检索编排）；新增 `ai/mod.rs::chunk_vector_scan_for_md5s` + `db/tracker.rs::get_chunk_embeddings_by_md5s`（IN 限定批量取块向量）。粗筛 0 命中时回退全库 chunk 扫描保底（不丢失"仅块级可命中"极端场景）。**已确认取舍**：BM25 与文件级向量都对一段内容零信号时，块级单独召回退化（严格两级）。
+- **P1-B chunk 向量增量回填（解决 100 倍滞后）**：原 `missing_chunk_embedding_md5s` 只选"零向量 md5"整文档重嵌，中断即全丢。改为 LEFT JOIN 选"有缺块的 md5"、按缺块数升序（缺得少的先补完，尽快产生完整可检索向量集），回填循环只嵌缺失块（`existing_chunk_indexes` 跳过已有）。新增 1 单测验证部分收敛优先。
+- **P1-C 查询 embedding 缓存**：新增 `ai/mod.rs::cached_embed`——查询向量 LRU 缓存（cap 256，key 含 embedding 模型 id，切模型天然失效），避免同一/近似查询在本地 BGE（debug 单次 ~85s）上重复推理。接入全部查询嵌入调用点（`ai.rs` semantic_fuse/prepare、`search.rs` 语义搜索、`ai/mod.rs` vector/chunk scan 入口）。
+- **P1-3 Web 模式补 ai-progress**：`ai-progress` 加入 `webapi/mod.rs` BRIDGED_EVENTS + `webapi/routes/ai.rs` SSE 会话过滤器，Web 端获得与桌面一致的检索/生成阶段进度。
+- **P1-C doc 向量内存驻留——暂缓**：评估后当前 doc 向量 1.1 万条全表拉+余弦约几十 ms 非瓶颈（chunk 全扫已被漏斗消除、BGE 推理已被缓存缓解），内存驻留（含失效钩子）架构改动大而 ROI 低，推迟到 doc 向量几十万级再做。
+- P1 验证：225 lib 单测全绿；评测脚本对含 2 万字符长文档语料 Recall@10=100%（漏斗路径无回落）。
 
 ---
 

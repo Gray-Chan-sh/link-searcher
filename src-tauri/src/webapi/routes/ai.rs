@@ -326,15 +326,16 @@ async fn conversation_ask_handler(
     Ok(Json(serde_json::json!({ "answer": answer })))
 }
 
-/// SSE frames for one chat session: the AI command emits `ai-chunk`/`ai-done`
-/// via Tauri events → webapi bridge → `event_tx`; filter back out by session id.
+/// SSE frames for one chat session: the AI command emits
+/// `ai-chunk`/`ai-progress`/`ai-done` via Tauri events → webapi bridge →
+/// `event_tx`; filter back out by session id.
 fn sse_for_session(
     rx: tokio::sync::broadcast::Receiver<(String, String)>,
     session_id: String,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
         Ok((name, payload)) => {
-            if name != "ai-chunk" && name != "ai-done" {
+            if name != "ai-chunk" && name != "ai-progress" && name != "ai-done" {
                 return None;
             }
             let mine = serde_json::from_str::<serde_json::Value>(&payload)

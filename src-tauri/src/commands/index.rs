@@ -628,24 +628,48 @@ fn missing_embedding_rows(
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-embedding rows")
 }
 
-/// Long documents (md5s that have `doc_chunks` rows) that lack chunk
-/// embeddings, capped per run. Returns md5s only; chunks are loaded per-md5
-/// in the caller so the chunk set stays consistent with what is embedded.
+/// Long documents (md5s that have `doc_chunks` rows) that have at least one
+/// chunk lacking an embedding, capped per run. Ordered by fewest-missing
+/// first so near-complete documents converge quickly and produce fully
+/// searchable vector sets sooner. Returns md5s only; the caller loads the
+/// per-md5 chunk set and skips already-embedded indexes (partial progress).
 fn missing_chunk_embedding_md5s(
     conn: &rusqlite::Connection,
     limit: usize,
 ) -> anyhow::Result<Vec<String>> {
     let mut stmt = conn
         .prepare(
-            "SELECT DISTINCT md5 FROM doc_chunks
-             WHERE md5 NOT IN (SELECT DISTINCT md5 FROM chunk_embeddings)
-             ORDER BY md5 LIMIT ?1",
+            "SELECT dc.md5
+             FROM doc_chunks dc
+             LEFT JOIN chunk_embeddings ce
+               ON ce.md5 = dc.md5 AND ce.chunk_index = dc.chunk_index
+             WHERE ce.md5 IS NULL
+             GROUP BY dc.md5
+             ORDER BY COUNT(*) ASC, dc.md5
+             LIMIT ?1",
         )
         .context("prepare missing-chunk-embedding query")?;
     let rows = stmt
         .query_map(rusqlite::params![limit as i64], |row| row.get::<_, String>(0))
         .context("query missing-chunk-embedding md5s")?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-chunk-embedding md5s")
+}
+
+/// Existing (md5, chunk_index) pairs that already have embeddings, so the
+/// per-md5 backfill loop only embeds the missing ones (partial progress —
+/// a doc interrupted mid-run resumes without re-embedding finished chunks).
+fn existing_chunk_indexes(conn: &rusqlite::Connection, md5: &str) -> anyhow::Result<std::collections::HashSet<i64>> {
+    let mut stmt = conn
+        .prepare("SELECT chunk_index FROM chunk_embeddings WHERE md5 = ?1")
+        .context("prepare existing-chunk-indexes")?;
+    let rows = stmt
+        .query_map(rusqlite::params![md5], |row| row.get::<_, i64>(0))
+        .context("query existing-chunk-indexes")?;
+    let mut set = std::collections::HashSet::new();
+    for r in rows {
+        set.insert(r?);
+    }
+    Ok(set)
 }
 
 /// Backfill chunk-level embeddings for long documents: every `doc_chunks`
@@ -684,7 +708,23 @@ fn run_backfill_chunk_embeddings(
         if chunks.is_empty() {
             continue;
         }
-        for batch in chunks.chunks(BATCH) {
+        // 只嵌缺失的块：中断后恢复不重复嵌已完成的块（P1-B 增量收敛）。
+        let existing = match existing_chunk_indexes(&conn, md5) {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[AI] existing_chunk_indexes failed for {md5}: {e}");
+                failed += 1;
+                continue;
+            }
+        };
+        let missing: Vec<&crate::db::chunks::DocChunk> = chunks
+            .iter()
+            .filter(|c| !existing.contains(&c.chunk_index))
+            .collect();
+        if missing.is_empty() {
+            continue;
+        }
+        for batch in missing.chunks(BATCH) {
             let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
             let vecs = crate::ai::embed_batched(&texts, BATCH);
             for (chunk, v) in batch.iter().zip(vecs) {
@@ -1126,6 +1166,44 @@ mod tests {
             let _ = std::fs::remove_file(&bad);
             let _ = std::fs::remove_file(&db_path);
         }
+    }
+
+    /// P1-B: missing_chunk_embedding_md5s 应返回"有缺块的 md5"，且缺得少的
+    /// 优先（部分收敛的文档先补完，尽快产生完整可检索的向量集）。
+    #[test]
+    fn missing_chunk_embedding_prefers_partial_docs() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        // md5-a: 3 块全缺向量（缺 3）
+        let long_a = format!("{}。{}。{}。", "甲".repeat(5000), "乙".repeat(5000), "丙".repeat(5000));
+        crate::db::tracker::store_content(&conn, "md5-a", &long_a, false, None).unwrap();
+        let wa = crate::db::chunks::chunk_text(&long_a);
+        assert!(wa.len() >= 3, "expected >=3 chunks for long_a, got {}", wa.len());
+        crate::db::chunks::replace_chunks(&conn, "md5-a", &wa).unwrap();
+
+        // md5-b: 3 块但已有 2 块向量（缺 1）
+        let long_b = format!("{}。{}。{}。", "子".repeat(5000), "丑".repeat(5000), "寅".repeat(5000));
+        crate::db::tracker::store_content(&conn, "md5-b", &long_b, false, None).unwrap();
+        let wb = crate::db::chunks::chunk_text(&long_b);
+        assert!(wb.len() >= 3);
+        crate::db::chunks::replace_chunks(&conn, "md5-b", &wb).unwrap();
+        let chunks_b = crate::db::chunks::get_chunks(&conn, "md5-b").unwrap();
+        assert!(chunks_b.len() >= 3);
+        // 给 md5-b 前 2 块补向量（用 DB 里的真实 chunk_index）
+        for c in chunks_b.iter().take(2) {
+            crate::db::tracker::upsert_chunk_embedding(&conn, "md5-b", c.chunk_index, &[1.0, 2.0, 3.0]).unwrap();
+        }
+
+        let rows = missing_chunk_embedding_md5s(&conn, 10).unwrap();
+        // 缺得少的 md5-b（缺 1）应排在 md5-a（缺 3）前面
+        assert_eq!(rows.len(), 2, "both docs have missing chunks: {rows:?}");
+        assert_eq!(rows[0], "md5-b", "fewest-missing should come first: {rows:?}");
+        assert_eq!(rows[1], "md5-a");
+
+        // existing_chunk_indexes 只返回已嵌块
+        let ex = existing_chunk_indexes(&conn, "md5-b").unwrap();
+        assert_eq!(ex.len(), 2);
+        assert!(!ex.contains(&chunks_b[2].chunk_index));
     }
 }
 #[cfg(test)]

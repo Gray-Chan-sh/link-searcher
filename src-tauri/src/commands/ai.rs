@@ -756,7 +756,7 @@ fn semantic_fuse(
         let (tx, rx) = std::sync::mpsc::channel();
         let q = query.to_string();
         std::thread::spawn(move || {
-            let _ = tx.send(crate::ai::embed(&q));
+            let _ = tx.send(crate::ai::cached_embed(&q));
         });
         rx.recv_timeout(std::time::Duration::from_secs(5))
             .ok()
@@ -1214,7 +1214,8 @@ pub(crate) async fn prepare_conversation_prompt(
             let vec_query = if retrieval_kws.is_empty() { search_q.clone() } else { retrieval_kws.join(" ") };
             // 只嵌入一次，文件级与 chunk 级两个向量通道共享同一查询向量
             // （debug 下 bge-large 单次推理 85s，重复嵌入翻倍浪费）。
-            let query_emb = crate::ai::embed(&vec_query);
+            // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
+            let query_emb = crate::ai::cached_embed(&vec_query);
             if let Some(qe) = &query_emb {
                 if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, VECTOR_THRESHOLD) {
                     log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
@@ -1231,9 +1232,32 @@ pub(crate) async fn prepare_conversation_prompt(
                         if !full_recall && i > 500 { break; }
                     }
                 }
-                // chunk 级向量通道：长文档细节（在 ~1500 字符块内）在此直接命中。
-                // 命中块 → md5 → 活跃 file_id → 加入 all_hits（去重）。
-                if let Ok(chunk_hits) = crate::ai::chunk_vector_scan_with_query_emb(&c, qe, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K) {
+                // chunk 级向量通道：只对"文档级粗筛已命中的 md5 集"做块级精检
+                // （两级漏斗，避免全库 12.5 万+ chunk 暴力余弦）。粗筛集 =
+                // BM25 命中 + 文件级向量命中（上面已并入 all_hits）。
+                if let Ok(chunk_hits) = {
+                    // 收集粗筛命中文件 → md5 候选集
+                    let hit_ids: Vec<String> = all_hits.iter().map(|h| h.file_id.clone()).collect();
+                    let recs = if hit_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        crate::db::tracker::get_files_by_ids(&c, &hit_ids).unwrap_or_default()
+                    };
+                    let mut md5s: Vec<String> = recs
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|r| r.md5)
+                        .collect();
+                    md5s.sort();
+                    md5s.dedup();
+                    if md5s.is_empty() {
+                        // 粗筛 0 命中时回退全库 chunk 扫描（保底：不因漏斗丢失
+                        // "仅块级可命中"的极端场景；正常粗筛命中数千份时走漏斗）。
+                        crate::ai::chunk_vector_scan_with_query_emb(&c, qe, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K)
+                    } else {
+                        crate::ai::chunk_vector_scan_for_md5s(&c, qe, &md5s, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K)
+                    }
+                } {
                     log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
                     let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
                     for (md5, idx, sim) in chunk_hits {

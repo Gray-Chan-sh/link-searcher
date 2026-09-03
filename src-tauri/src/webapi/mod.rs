@@ -32,6 +32,7 @@ const BRIDGED_EVENTS: &[&str] = &[
     "scan-progress",
     "scan-completed",
     "ai-chunk",
+    "ai-progress",
     "ai-done",
     "migration-progress",
     "migration-warning",
