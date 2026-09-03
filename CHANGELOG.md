@@ -18,6 +18,8 @@
 - **P1-C 查询 embedding 缓存**：新增 `ai/mod.rs::cached_embed`——查询向量 LRU 缓存（cap 256，key 含 embedding 模型 id，切模型天然失效），避免同一/近似查询在本地 BGE（debug 单次 ~85s）上重复推理。接入全部查询嵌入调用点（`ai.rs` semantic_fuse/prepare、`search.rs` 语义搜索、`ai/mod.rs` vector/chunk scan 入口）。
 - **P1-3 Web 模式补 ai-progress**：`ai-progress` 加入 `webapi/mod.rs` BRIDGED_EVENTS + `webapi/routes/ai.rs` SSE 会话过滤器，Web 端获得与桌面一致的检索/生成阶段进度。
 - **P1-C doc 向量内存驻留——暂缓**：评估后当前 doc 向量 1.1 万条全表拉+余弦约几十 ms 非瓶颈（chunk 全扫已被漏斗消除、BGE 推理已被缓存缓解），内存驻留（含失效钩子）架构改动大而 ROI 低，推迟到 doc 向量几十万级再做。
+- **P2-2 删除 ai/skills 脚手架（双份实现收敛）**：`ai/skills/*`（6 文件）仅被 `#[allow(dead_code)]` 的 `prepare_conversation_prompt_pipeline`（commands/ai.rs）引用，无任何生产调用——生产链路是单体 `prepare_conversation_prompt`。且脚手架已退化（单路 BM25 top-10、无三通道/无取消/无预算均摊，对比生产版），并含 `Box::leak` 泄漏 r2d2 连接池的实现缺陷（pipeline.rs）。**删除**：`skills/` 目录 + `prepare_conversation_prompt_pipeline` 死函数 + `ai/mod.rs` 的 `pub mod skills`。测试数 225→218（丢失 7 个均为对 commands/ai.rs 已有功能的重复/占位断言，无独占业务覆盖）。涉及 `src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/ai.rs`。验证：cargo check 零残留引用、218 lib 单测全绿。
+- **P1-D 结构感知切分 / P2-4 reranker——延后（决策记录）**：探索确认 P1-D 需先改提取器层——主路径（lopdf/OCR）不保留分页符/页码/标题信号（仅 pdftotext 回退路径可能带 `\f`；页码被水印归一化主动剥除），chunk 层无结构可消费，需另立提取器改造任务。P2-4 reranker 评测未证明需要（当前 Recall@10=100%）且缺 cross-encoder 推理依赖（现仅 tract-onnx 用于 BGE），延迟到评测显示漏检时再加。两项均非本轮实施范围。
 - P1 验证：225 lib 单测全绿；评测脚本对含 2 万字符长文档语料 Recall@10=100%（漏斗路径无回落）。
 
 ---
