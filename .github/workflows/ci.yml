@@ -43,6 +43,7 @@ jobs:
             librsvg2-dev \
             libpipewire-0.3-dev \
             libspa-0.2-dev \
+            libgbm-dev \
             patchelf
 
       # 前端构建：tauri::generate_context!() 编译期要求 ../dist 存在

@@ -39,6 +39,7 @@
 
 - **新增 CI 跨平台验证（`.github/workflows/ci.yml`）**：原 release.yml 仅在打 tag 时触发且只做打包，push 普通提交无任何跨平台编译验证。新增 ci.yml——push/PR 到 master 时在 macOS(aarch64) / Windows(x86_64) / Linux(x86_64) 三平台跑 `cargo test --lib`（220 单测跨平台验证检索/AI/分块/提取核心逻辑）+ `cargo build`（验证平台 cfg 分支：Apple Vision / Windows OCR / poppler 路径在各 runner 真实编译）。触发即验证，防跨平台回归。
 - **移除硬编码 macOS 路径的 `.cargo/config.toml`（跨平台 bug，CI 首跑暴露）**：首次 CI 在 macOS/ubuntu 均失败（exit 101）——`sherpa-onnx-sys` build.rs panic `SHERPA_ONNX_LIB_DIR does not exist`，因 `src-tauri/.cargo/config.toml` 入库了本机绝对路径 `/Volumes/Data/Project/Link-Searcher/.../osx-arm64-static-lib/lib`（开发者本机下载的预编译库）。sherpa-onnx-sys 逻辑：env 设置了就必须存在（否则 panic），未设置时按平台从 GitHub 自动下载（crate 设计行为）。**修复**：`git rm --cached` 移出版本库 + `.gitignore` 忽略（本机磁盘文件保留，本机继续用预下载库）。
+- **CI 迭代修复（三平台真实验证暴露的 3 类问题）**：① cargo test 需前端 dist——`tauri::generate_context!()` 编译期检查 `frontendDist="../dist"`，干净 CI 无 dist → ci.yml 在 cargo 前加 `npm ci` + `npm run build`；② ubuntu 链接缺 `libgbm` → ci.yml 与 release.yml 的 Linux 依赖补 `libgbm-dev`（webkit2gtk 传递依赖）；③ 两个测试的平台假设：`audio.rs` 的 `diarization_models_resolve_from_funasr_dir` 在无 FunASR 模型环境 `unwrap_or_else(panic)`（本意是 soft-fail）→ 改为 `let Some(_)` 软跳过；`archive.rs` 的 `archive_name_safety` 断言 `/etc/passwd` 是绝对路径——Windows 上它是相对路径（`Path::is_absolute()` 为 false）→ 测试改为 `cfg(windows)` 用盘符路径。
 
 ---
 
