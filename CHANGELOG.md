@@ -38,6 +38,7 @@
 ## 2026-09-03（跨平台 CI 验证）
 
 - **新增 CI 跨平台验证（`.github/workflows/ci.yml`）**：原 release.yml 仅在打 tag 时触发且只做打包，push 普通提交无任何跨平台编译验证。新增 ci.yml——push/PR 到 master 时在 macOS(aarch64) / Windows(x86_64) / Linux(x86_64) 三平台跑 `cargo test --lib`（220 单测跨平台验证检索/AI/分块/提取核心逻辑）+ `cargo build`（验证平台 cfg 分支：Apple Vision / Windows OCR / poppler 路径在各 runner 真实编译）。触发即验证，防跨平台回归。
+- **移除硬编码 macOS 路径的 `.cargo/config.toml`（跨平台 bug，CI 首跑暴露）**：首次 CI 在 macOS/ubuntu 均失败（exit 101）——`sherpa-onnx-sys` build.rs panic `SHERPA_ONNX_LIB_DIR does not exist`，因 `src-tauri/.cargo/config.toml` 入库了本机绝对路径 `/Volumes/Data/Project/Link-Searcher/.../osx-arm64-static-lib/lib`（开发者本机下载的预编译库）。sherpa-onnx-sys 逻辑：env 设置了就必须存在（否则 panic），未设置时按平台从 GitHub 自动下载（crate 设计行为）。**修复**：`git rm --cached` 移出版本库 + `.gitignore` 忽略（本机磁盘文件保留，本机继续用预下载库）。
 
 ---
 
