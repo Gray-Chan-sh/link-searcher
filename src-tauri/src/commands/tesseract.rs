@@ -11,6 +11,9 @@ pub struct OcrEngineStatus {
     pub available: bool,
     pub platforms: Vec<String>,
     pub install_guide: String,
+    /// Extra status detail (e.g. which Windows OCR language packs are
+    /// installed, or the OCR model dir). Empty when nothing to add.
+    pub detail: String,
 }
 
 #[derive(Serialize)]
@@ -38,7 +41,7 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
             ocr::OcrEngineType::PaddleOCR => (
                 "PaddleOCR（内置）".to_string(),
                 vec!["macOS".to_string(), "Windows".to_string(), "Linux".to_string()],
-                "内置引擎，无需安装，开箱即用".to_string(),
+                "在首次启动引导或设置页「依赖中心」下载 OCR 模型（约 20MB）".to_string(),
             ),
             ocr::OcrEngineType::AppleVision => (
                 "Apple Vision (macOS 内置)".to_string(),
@@ -48,7 +51,7 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
             ocr::OcrEngineType::WindowsOcr => (
                 "Windows OCR".to_string(),
                 vec!["Windows".to_string()],
-                "内置在 Windows 10+，无需安装".to_string(),
+                "内置在 Windows 10+；中文识别需安装中文语言包\n设置 → 时间和语言 → 语言 → 添加中文 → 选项 → 手写/OCR".to_string(),
             ),
             ocr::OcrEngineType::Tesseract => (
                 "Tesseract OCR".to_string(),
@@ -64,12 +67,28 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
                 "始终可用，跳过图片索引".to_string(),
             ),
         };
-        let available = match &engine {
-            ocr::OcrEngineType::PaddleOCR => true,
-            ocr::OcrEngineType::Tesseract => ocr::is_tesseract_available(),
-            ocr::OcrEngineType::AppleVision => true,
-            ocr::OcrEngineType::WindowsOcr => true,
-            ocr::OcrEngineType::None => true,
+        let (available, detail) = match &engine {
+            ocr::OcrEngineType::PaddleOCR => {
+                let ok = crate::extractor::paddleocr::models_present();
+                let detail = if ok {
+                    "模型就绪".to_string()
+                } else {
+                    "模型未安装：请在「依赖中心」下载".to_string()
+                };
+                (ok, detail)
+            }
+            ocr::OcrEngineType::Tesseract => (ocr::is_tesseract_available(), String::new()),
+            ocr::OcrEngineType::AppleVision => (true, String::new()),
+            ocr::OcrEngineType::WindowsOcr => {
+                let (ok, langs) = crate::extractor::windows_ocr::availability();
+                let detail = if langs.is_empty() {
+                    "未检测到已安装的 OCR 语言包".to_string()
+                } else {
+                    format!("可用语言包: {}", langs.join(", "))
+                };
+                (ok, detail)
+            }
+            ocr::OcrEngineType::None => (true, String::new()),
         };
         result.push(OcrEngineStatus {
             engine_type: format!("{:?}", engine),
@@ -77,6 +96,7 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
             available,
             platforms,
             install_guide,
+            detail,
         });
     }
     Ok(result)
@@ -94,6 +114,12 @@ pub struct DependencyStatus {
 #[tauri::command]
 pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencyStatus>, String> {
     Ok(vec![
+        DependencyStatus {
+            name: "PaddleOCR（图片 OCR）".into(),
+            command: "data_dir/models/ppocrv5".into(),
+            available: crate::extractor::paddleocr::models_present(),
+            install_guide: "在「依赖中心」点击安装（镜像下载，约 20MB）".into(),
+        },
         DependencyStatus {
             name: "Tesseract OCR".into(),
             command: "tesseract".into(),
@@ -116,7 +142,7 @@ pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencySt
             name: "FunASR (音频转写)".into(),
             command: "data_dir/models/funasr (sherpa-onnx int8 models)".into(),
             available: crate::extractor::audio::funasr_model_ready(&state.data_dir),
-            install_guide: "在设置页点击「下载 FunASR 模型」\n（自动下载 sherpa-onnx-funasr-nano-int8，约 850MB）\n或手动: 将下列归档解压到 <data_dir>/models/funasr/\n  https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2".into(),
+            install_guide: "在「依赖中心」点击下载 FunASR 模型（约 850MB）".into(),
         },
     ])
 }

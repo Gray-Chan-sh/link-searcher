@@ -454,5 +454,16 @@ const ko: Record<string, string> = {
 
     effective_scope: '이번 턴 검색 범위',
     scope_all: '전체 라이브러리',
+
+    // ── First-run setup wizard / dependency center ──
+    setup_title: '의존성 설정',
+    setup_desc: '검색·OCR을 바로 사용할 수 있도록 권장 구성요소를 설치합니다(국내 미러 경유).',
+    setup_progress: '{done}/{total} 준비됨',
+    setup_all_ready: '모두 준비됨 — 앱으로 진입합니다…',
+    setup_skip: '건너뛰기(나중에 설정에서 설치)',
+    setup_install_all: '모두 설치',
+    dep_center_title: '의존성 센터',
+    dep_center_desc: '런타임 의존성을 감지하고 플랫폼별로 설치합니다.',
+    dep_missing_banner: '권장 의존성 {n}개 미설치 — 의존성 센터 열기',
 }
 export default ko

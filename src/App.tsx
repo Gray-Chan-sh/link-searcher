@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
-import { Routes, Route, NavLink } from 'react-router-dom'
+import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
 import { confirm, alert, isTauri, getToken, setToken } from './utils/platform'
 import { invoke } from './api/client'
-import { checkDependencies, installFunasr } from './api/settings'
+import { checkDependencies, getSetupStatus, installFunasr } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
   SunIcon, MoonIcon, MonitorIcon,
@@ -22,13 +22,17 @@ import StatusBar from './components/StatusBar'
 import OnboardingWizard from './components/OnboardingWizard'
 import ToastContainer from './components/ToastContainer'
 import { ErrorBoundary } from './components/ErrorBoundary'
+import SetupWizard from './components/SetupWizard'
 
 export default function App() {
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
+  const navigate = useNavigate()
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [showTokenDialog, setShowTokenDialog] = useState(false)
   const [tokenInput, setTokenInput] = useState('')
+  const [setupPending, setSetupPending] = useState(false)
+  const [depsMissingCount, setDepsMissingCount] = useState(0)
   const funasrCheckedRef = useRef(false)
 
   useEffect(() => {
@@ -102,9 +106,41 @@ export default function App() {
     }
   }, [])
 
+  // First-run dependency gate (Tauri only). When recommended deps are missing
+  // and the user hasn't dismissed this session, show the SetupWizard overlay.
+  const checkSetup = () => {
+    if (!isTauri()) return
+    getSetupStatus()
+      .then(s => {
+        const missing = s.deps.filter(d => d.recommended && !d.available).length
+        setDepsMissingCount(missing)
+        if (missing > 0 && sessionStorage.getItem('setup_prompt_skipped') !== '1') {
+          setSetupPending(true)
+        }
+      })
+      .catch(() => {})
+  }
+  useEffect(() => {
+    checkSetup()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const handleSetupDone = () => {
+    setSetupPending(false)
+    sessionStorage.setItem('setup_prompt_skipped', '1')
+    checkSetup()
+  }
+
+  const goToDepCenter = () => {
+    try {
+      localStorage.setItem('settings_tab', JSON.stringify('deps'))
+    } catch { /* ignore */ }
+    navigate('/settings')
+  }
+
   useEffect(() => {
     const checked = sessionStorage.getItem('funasr_prompt_skipped') === '1'
-    if (checked || funasrCheckedRef.current) return
+    if (checked || funasrCheckedRef.current || setupPending) return
     funasrCheckedRef.current = true
     checkDependencies().then(async deps => {
       const funasr = deps.find(d => d.name.includes('FunASR'))
@@ -116,7 +152,7 @@ export default function App() {
         sessionStorage.setItem('funasr_prompt_skipped', '1')
       }
     }).catch(() => {})
-  }, [])
+  }, [setupPending])
 
   const handleOnboardingClose = () => {
     setShowOnboarding(false)
@@ -179,6 +215,15 @@ export default function App() {
       </aside>
 
       <div className="flex flex-col flex-1 min-w-0">
+        {!setupPending && depsMissingCount > 0 && (
+          <button
+            onClick={goToDepCenter}
+            className="shrink-0 flex items-center gap-2 px-4 py-1.5 text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-900/40 hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors text-left"
+          >
+            <span>⚠️</span>
+            <span>{t('dep_missing_banner', { n: depsMissingCount })}</span>
+          </button>
+        )}
         <main className="flex-1 overflow-auto">
           <Routes>
             <Route index element={<SearchPage />} />
@@ -193,6 +238,8 @@ export default function App() {
         </main>
         <StatusBar />
       </div>
+
+      {setupPending && <SetupWizard onDone={handleSetupDone} />}
 
       {showOnboarding && <OnboardingWizard onClose={handleOnboardingClose} />}
 

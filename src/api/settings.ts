@@ -14,6 +14,7 @@ export interface OcrEngineStatus {
     available: boolean
     platforms: string[]
     install_guide: string
+    detail: string
 }
 
 export interface OcrTestResult {
@@ -71,4 +72,44 @@ export async function installBge(modelName?: string): Promise<void> {
 
 export async function checkBgeInstalled(): Promise<BgeStatus[]> {
     return client.invoke<BgeStatus[]>('check_bge_installed')
+}
+
+// ── Dependency center / first-run setup ──
+
+export interface DepStatus {
+    id: string
+    name: string
+    available: boolean
+    recommended: boolean
+    size_bytes: number
+    hint: string
+    required_files: string[]
+}
+
+export interface SetupStatus {
+    deps: DepStatus[]
+    all_recommended_ready: boolean
+    data_dir: string
+}
+
+export async function getSetupStatus(): Promise<SetupStatus> {
+    return client.invoke<SetupStatus>('get_setup_status')
+}
+
+export interface DepInstallResult {
+    dep: string
+    success: boolean
+    message: string
+}
+
+export async function installDep(dep: string): Promise<void> {
+    return client.invoke('install_dep', { dep })
+}
+
+export async function cancelDepInstall(): Promise<void> {
+    return client.invoke('cancel_dep_install')
+}
+
+export async function depInstallStatus(): Promise<{ installing: boolean; dep: string | null }> {
+    return client.invoke('dep_install_status')
 }

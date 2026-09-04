@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
@@ -19,9 +19,31 @@ unsafe extern "C" {
 #[cfg(target_os = "macos")]
 const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 
-static DET_MODEL: &[u8] = include_bytes!("../../models/ppocrv5/det.onnx");
-static REC_MODEL: &[u8] = include_bytes!("../../models/ppocrv5/rec.onnx");
-static DICT_DATA: &[u8] = include_bytes!("../../models/ppocrv5/ppocrv5_dict.txt");
+/// Locate the PP-OCRv5 model dir.
+///
+/// Resolution order (release vs dev):
+/// 1. `<data_dir>/models/ppocrv5` — where the setup wizard / dep installer
+///    downloads the models for packaged builds.
+/// 2. `<repo>/src-tauri/models/ppocrv5` — git-tracked dev models, so
+///    `tauri dev` needs no download.
+pub fn resolve_model_dir(data_dir: Option<&Path>) -> Option<PathBuf> {
+    if let Some(dd) = data_dir {
+        let p = dd.join("models").join("ppocrv5");
+        if p.join("det.onnx").is_file() && p.join("rec.onnx").is_file() {
+            return Some(p);
+        }
+    }
+    // Fall back to the git-tracked dev tree.
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models").join("ppocrv5");
+    if dev.join("det.onnx").is_file() && dev.join("rec.onnx").is_file() {
+        return Some(dev);
+    }
+    None
+}
+
+pub fn models_present() -> bool {
+    resolve_model_dir(resolved_model_dir()).is_some()
+}
 
 struct SendEngine(Mutex<OcrEngine>);
 // SAFETY: OcrEngine contains non-Send interior mutability (RefCell-backed ONNX session).
@@ -67,30 +89,28 @@ impl EnginePool {
 }
 
 static POOL: OnceLock<EnginePool> = OnceLock::new();
+static MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-fn write_if_missing(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
-    if !path.exists() {
-        std::fs::write(path, data)?;
-    }
-    Ok(())
+/// Point the OCR engine at a data dir (packaged builds). Called at startup
+/// with the app data dir; dev builds may skip it (falls back to the repo
+/// models dir). Must run before the first inference.
+pub fn init(data_dir: &Path) {
+    let _ = MODEL_DIR.set(data_dir.to_path_buf());
+}
+
+fn resolved_model_dir() -> Option<&'static Path> {
+    MODEL_DIR.get().map(|p| p.as_path())
 }
 
 fn try_build_engine() -> Result<SendEngine, String> {
-    let dir = match std::env::temp_dir().join("link_searcher_models").join("ppocrv5") {
-        d if d.exists() => d,
-        d => {
-            std::fs::create_dir_all(&d).map_err(|e| format!("无法创建模型缓存目录: {e}"))?;
-            d
-        }
-    };
+    let dir = resolve_model_dir(resolved_model_dir())
+        .ok_or_else(|| {
+            "PaddleOCR 模型未找到。请在首次启动引导或设置页「依赖中心」下载 OCR 模型。".to_string()
+        })?;
 
     let det = dir.join("det.onnx");
     let rec = dir.join("rec.onnx");
     let dict = dir.join("ppocrv5_dict.txt");
-
-    write_if_missing(&det, DET_MODEL).map_err(|e| format!("无法写入检测模型: {e}"))?;
-    write_if_missing(&rec, REC_MODEL).map_err(|e| format!("无法写入识别模型: {e}"))?;
-    write_if_missing(&dict, DICT_DATA).map_err(|e| format!("无法写入字典文件: {e}"))?;
 
     let inner = OcrEngineBuilder::new()
         .det_model_path(&det)

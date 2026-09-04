@@ -465,5 +465,16 @@ const en: Record<string, string> = {
 
     effective_scope: 'This turn searches',
     scope_all: 'All library',
+
+    // ── First-run setup wizard / dependency center ──
+    setup_title: 'Setup dependencies',
+    setup_desc: 'Install recommended components so search & OCR work out of the box. All downloads use China-friendly mirrors.',
+    setup_progress: '{done}/{total} ready',
+    setup_all_ready: 'All ready — entering the app…',
+    setup_skip: 'Skip (install later in Settings)',
+    setup_install_all: 'Install all',
+    dep_center_title: 'Dependency Center',
+    dep_center_desc: 'Detect runtime dependencies and install per platform (models via mirror).',
+    dep_missing_banner: '{n} recommended dependencies missing — open Dependency Center',
 }
 export default en

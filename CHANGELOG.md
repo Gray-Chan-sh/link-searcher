@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-04（运行依赖检测与安装 · 首启向导 · 镜像优先）
+
+- **发布版瘦身 + 首启依赖安装框架**：新增 `src-tauri/src/deps/` 模块——统一依赖目录（PaddleOCR 模型 / BGE-small / FunASR / ffmpeg / poppler）、镜像优先下载器（GitHub Releases 为源，ghfast.top 等国内镜像前缀自动重试，`LINK_SEARCHER_GH_MIRROR`/`LINK_SEARCHER_NO_MIRROR` 可调）、`*.part` 原子写入 + 断点续装（已存在文件跳过）、单飞防重入 + 协作取消。新增命令 `get_setup_status` / `install_dep` / `cancel_dep_install` / `dep_install_status`，进度经 `dep-progress`、完成经 `dep-install-done` 事件推前端。
+- **PaddleOCR 模型外置（去掉 include_bytes 的 20MB 内嵌）**：`extractor/paddleocr.rs` 改为运行期定位模型——优先 `<data_dir>/models/ppocrv5`（首启向导安装位置），dev 树回退 `src-tauri/models/ppocrv5`（git 保留，`tauri dev` 零下载）。启动按需 `init(data_dir)`；模型缺失时启动自检跳过而非报错。POC 单测仍走 dev 树通过。
+- **Windows OCR 语言包真实检测**：`extractor/windows_ocr.rs` 新增 `availability()`（枚举 en-US/zh-Hans/ja-JP/ko-KR 语言包实际可用性）；`list_ocr_engines` 对 WindowsOcr 返回真实可用状态+已装语言，PaddleOCR available 改为模型是否就绪，`detail` 字段透出给 UI（此前写死 available=true，语言包引导永不展示）。
+- **首启向导 + 依赖中心 UI**：新增 `src/components/SetupWizard.tsx` + `hooks/useSetup.ts`，Tauri 首启检测推荐依赖（PaddleOCR+BGE-small，默认阻塞）缺失时全屏引导安装，支持跳过/取消/实时进度条；App.tsx 原"仅 FunASR 弹窗"改为向导门禁 + FunASR 独立提示保留。设置页新增「依赖中心」标签（`components/settings/DepsTab.tsx`）。i18n 四语言补充。
+- **打包配置**：`tauri.conf.json` 增加 `bundle.windows.webviewInstallMode=embedBootstrapper`，Windows 离线机器可完成 WebView2 安装。
+- **开发脚本**：新增 `scripts/setup-dev.sh`（macOS/Linux）与 `scripts/setup-dev.ps1`（Windows）——自动写 cargo 国内镜像(rsproxy.cn) + 项目 `.npmrc`(npmmirror) + git 复用代理；Windows 版预下载 sherpa-onnx 预编译库到 `third_party/` 并设 `SHERPA_ONNX_ARCHIVE_DIR`，规避 GitHub 直连失败。
+- **模型发布资产（已发布）**：模型统一以 GitHub Releases 资产发布——公开仓库 `Gray-Chan-sh/link-searcher-models`、tag `models-v1`（env `LINK_SEARCHER_MODELS_GH`/`LINK_SEARCHER_MODELS_TAG` 可覆盖），文件扁平命名映射到本地路径（如 `paddleocr-det.onnx` → `det.onnx`）。10 个资产已全部上传：PP-OCRv5 三件套 + BGE-small 两件 + FunASR 四件（~1GB 总量）。应用内下载经 ghfast.top 镜像前缀加速，直连 GitHub 回退。
+- 涉及：`src-tauri/src/deps/*`（新增）、`extractor/paddleocr.rs`、`extractor/windows_ocr.rs`、`commands/tesseract.rs`、`lib.rs`、`src/api/settings.ts`、`src/App.tsx`、`src/hooks/useSetup.ts`（新增）、`src/components/SetupWizard.tsx`（新增）、`src/components/settings/DepsTab.tsx`（新增）、4 个 i18n、`tauri.conf.json`、`scripts/setup-dev.*`（新增）。验证：cargo check/test 通过（220 lib 单测）、`tsc -b` 零错误。
+
+---
+
 ## 2026-09-03（前端交互提升 P0）
 
 - **全局 toast 反馈系统（此前成功操作全部静默）**：新增 `utils/toast.ts`（模块级事件总线 + 单例，无 Context）+ `components/ToastContainer.tsx`（右下角堆叠，success/error/info 三态，点击关闭，自动消失），挂载于 `App.tsx`。接入此前"复制成功无任何反馈"的静默点：Browse 上下文菜单复制路径、ResultList 右键复制名称、PreviewPanel 复制路径——复制成功弹「已复制路径/名称」，失败仍 console 警告。i18n 四语言补 `copied_path`/`copied_name`。

@@ -11,7 +11,7 @@ import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFu
 import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
 import { useSettingsOcr } from '../hooks/useSettingsOcr'
-import { GeneralTab, DocsTab, IndexTab, AiTab, BackupTab, SystemTab } from '../components/settings'
+import { GeneralTab, DocsTab, IndexTab, AiTab, DepsTab, BackupTab, SystemTab } from '../components/settings'
 
 export default function Settings() {
   const { t, lang, setLang } = useI18n()
@@ -159,6 +159,7 @@ export default function Settings() {
         {[
           { id: 'general', key: t('tab_general') },
           { id: 'index', key: t('tab_index') },
+          { id: 'deps', key: t('dep_center_title') },
           { id: 'docs', key: t('tab_docs') },
           { id: 'ai', key: t('tab_ai') },
           { id: 'backup', key: t('tab_backup') },
@@ -194,6 +195,8 @@ export default function Settings() {
         )}
 
         {activeTab === 'docs' && <DocsTab />}
+
+        {activeTab === 'deps' && <DepsTab />}
 
         {activeTab === 'index' && (
           <IndexTab

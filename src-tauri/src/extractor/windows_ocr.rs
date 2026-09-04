@@ -15,6 +15,35 @@ const WIN_LANG_MAP: &[(&str, &[&str])] = &[
     ("kor",     &["ko-KR", "ko"]),
 ];
 
+/// Windows: report whether the OS OCR engine is usable at all, and which
+/// app language codes (eng/chi_sim/jpn/kor) have a matching installed
+/// language pack. Non-Windows: always unavailable.
+#[cfg(target_os = "windows")]
+pub fn availability() -> (bool, Vec<String>) {
+    use windows::Globalization::Language;
+    use windows::Media::Ocr::OcrEngine;
+
+    let fallback_ok = OcrEngine::TryCreateFromUserProfileLanguages().is_ok();
+    let mut usable = Vec::new();
+    for (app_code, tags) in WIN_LANG_MAP {
+        let ok = tags.iter().any(|tag| {
+            Language::CreateLanguage(&windows::core::HSTRING::from(*tag))
+                .ok()
+                .and_then(|l| OcrEngine::TryCreateFromLanguage(&l).ok())
+                .is_some()
+        });
+        if ok {
+            usable.push(app_code.to_string());
+        }
+    }
+    (fallback_ok || !usable.is_empty(), usable)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn availability() -> (bool, Vec<String>) {
+    (false, Vec::new())
+}
+
 #[cfg(target_os = "windows")]
 fn map_lang(lang: &str) -> &[&str] {
     WIN_LANG_MAP

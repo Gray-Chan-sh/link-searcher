@@ -454,5 +454,16 @@ const ja: Record<string, string> = {
 
     effective_scope: 'このターンの検索範囲',
     scope_all: '全ライブラリ',
+
+    // ── First-run setup wizard / dependency center ──
+    setup_title: '依存関係のセットアップ',
+    setup_desc: '検索・OCR をすぐ使えるよう推奨コンポーネントをインストールします（国内ミラー経由）。',
+    setup_progress: '{done}/{total} 準備完了',
+    setup_all_ready: 'すべて準備完了 — アプリに入ります…',
+    setup_skip: 'スキップ（後で設定からインストール）',
+    setup_install_all: 'すべてインストール',
+    dep_center_title: '依存センター',
+    dep_center_desc: '実行時依存関係を検出し、プラットフォーム別にインストールします。',
+    dep_missing_banner: '推奨依存関係 {n} 件が未インストール — 依存センターを開く',
 }
 export default ja

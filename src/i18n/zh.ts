@@ -465,5 +465,16 @@ const zh: Record<string, string> = {
 
     effective_scope: '本轮检索范围',
     scope_all: '全库',
+
+    // ── First-run setup wizard / dependency center ──
+    setup_title: '初始化依赖',
+    setup_desc: '为了让搜索、OCR 等功能开箱即用，请先安装以下推荐组件。均从国内镜像下载。',
+    setup_progress: '已就绪 {done}/{total} 项',
+    setup_all_ready: '全部就绪，即将进入应用…',
+    setup_skip: '跳过（可稍后在设置中安装）',
+    setup_install_all: '全部安装',
+    dep_center_title: '依赖中心',
+    dep_center_desc: '检测本机运行依赖并按平台安装（模型均走镜像下载）。',
+    dep_missing_banner: '有 {n} 项推荐依赖未安装，点击进入「依赖中心」',
 }
 export default zh

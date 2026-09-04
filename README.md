@@ -57,13 +57,13 @@
 
 ### OCR（文字识别）
 
-**内置 PaddleOCR 引擎**，基于 PP-OCRv5 模型 + 纯 Rust ONNX 推理（tract），零 C/C++ 依赖，无需用户安装任何额外软件。
+**内置 PaddleOCR 引擎**，基于 PP-OCRv5 模型 + 纯 Rust ONNX 推理（tract），零 C/C++ 依赖。发布版**不内嵌模型**：首次启动的「依赖中心」向导会从国内镜像自动下载模型（约 20MB）到数据目录；开发版直接使用仓库内 `src-tauri/models/ppocrv5`。
 
 | 引擎 | 状态 | 说明 |
 |------|:---:|------|
-| **PaddleOCR**（默认） | ✅ | 内置引擎，模型编译进二进制（约 21MB），支持中英文，开箱即用 |
+| **PaddleOCR**（默认） | ✅ | PP-OCRv5 模型由首启向导/依赖中心镜像下载，支持中英文 |
 | Apple Vision | ✅ | macOS 10.15+ 系统原生，ANE 硬件加速 |
-| Windows OCR | ✅ | Windows 10+ 系统原生 |
+| Windows OCR | ✅ | Windows 10+ 系统原生（向导会检测并提示补装 OCR 语言包） |
 | Tesseract | ✅ | 备选引擎，需用户自行安装 `tesseract` CLI |
 
 引擎优先级：PaddleOCR → Apple Vision → Windows OCR → Tesseract（自动降级）。
@@ -145,19 +145,31 @@
 
 - **Node.js** 20+
 - **Rust** 1.85+
-- **音频识别（可选）**：ffmpeg，首次使用时在设置页下载 FunASR-Nano 模型（~850MB）后启用 mp3/wav 等语音转写（sherpa-onnx 纯 Rust 推理，无需 Python）
-- **国内网络构建提示（可选）**：`cargo clean` 后首次编译需从 GitHub 下载 sherpa-onnx 预编译库（~30MB）。无法直连时可设 `SHERPA_ONNX_ARCHIVE_DIR=/path/to/archives` 指向本地缓存的压缩包（`.tar.bz2`），或 `SHERPA_ONNX_LIB_DIR` 直接指向已解压的库目录——上游 `sherpa-onnx-sys` 构建脚本原生支持这两个环境变量，无需改代码
+- **音频识别（可选）**：ffmpeg，音频转写模型（FunASR-Nano ~850MB）在应用「依赖中心」下载（镜像优先）
+- **Windows 额外**：VS Build Tools（MSVC + Windows SDK）。`cargo build` 需从 GitHub 拉 `tauri-plugin-mcp`（git 依赖）与 sherpa-onnx 预编译库——国内网络建议先跑 `scripts/setup-dev.ps1`（自动配 cargo/npm 镜像、预下载 sherpa 库），或设代理 `HTTPS_PROXY`
 
-> PaddleOCR 引擎已内置，无需额外安装 OCR 软件。如需备选 Tesseract 引擎，请参考用户手册。
+### 国内网络一键配置（推荐）
+
+```bash
+# macOS / Linux
+./scripts/setup-dev.sh
+# Windows（PowerShell）
+.\scripts\setup-dev.ps1
+```
+
+脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`。
 
 ### 开发运行
 
 ```bash
 git clone https://github.com/Gray-Chan-sh/link-searcher.git
 cd link-searcher
-npm install
+./scripts/setup-dev.sh      # 可选：配镜像
+npm ci
 npm run tauri dev
 ```
+
+> 开发版直接使用仓库内 `src-tauri/models/ppocrv5` 模型，OCR 零下载开箱可用。
 
 ### 构建
 
@@ -167,8 +179,10 @@ npm run tauri build
 
 构建产物在 `src-tauri/target/release/bundle/`：
 - **macOS** → `.dmg`
-- **Windows** → `.msi`
+- **Windows** → `.msi` / `.exe`（NSIS）
 - **Linux** → `.deb` / `.AppImage`
+
+> **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE（~95MB）/FunASR（~850MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等），可跳过、可稍后在设置页「依赖中心」补装。
 
 ---
 

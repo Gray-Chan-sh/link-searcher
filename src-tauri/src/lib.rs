@@ -4,6 +4,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod db;
+pub mod deps;
 pub mod extractor;
 pub mod indexer;
 pub mod logs;
@@ -27,6 +28,7 @@ use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
+use crate::deps::commands::{cancel_dep_install, dep_install_status, get_setup_status, install_dep};
 use crate::scanner::watcher::FileWatcher;
 use crate::state::AppState;
 use crate::state::ScanDelta;
@@ -154,6 +156,10 @@ get_dir_children,
             install_funasr,
             install_bge,
             check_bge_installed,
+            get_setup_status,
+            install_dep,
+            cancel_dep_install,
+            dep_install_status,
             get_config,
             update_config,
             add_provider,
@@ -171,6 +177,9 @@ get_dir_children,
                 eprintln!("[FATAL] failed to create data directory {:?}: {}", data_dir, e);
                 return Err(Box::new(e));
             }
+
+            // Point model-based extractors at the data dir (packaged builds).
+            crate::extractor::paddleocr::init(&data_dir);
 
             // Initialize file logger (append across restarts, rotate at 100 MB)
             let log_path = data_dir.join("app.log");
@@ -245,11 +254,13 @@ get_dir_children,
                 log::info!("[STARTUP] OCR engine: {}", engine_name);
             }
 
-            if let Err(e) = crate::extractor::paddleocr::health_check() {
-                log::error!("OCR 引擎自检失败: {e}");
-                eprintln!("[OCR] 引擎自检失败: {e}");
+            if crate::extractor::paddleocr::models_present() {
+                match crate::extractor::paddleocr::health_check() {
+                    Ok(()) => log::info!("OCR 引擎自检通过"),
+                    Err(e) => log::error!("OCR 引擎自检失败: {e}"),
+                }
             } else {
-                log::info!("OCR 引擎自检通过");
+                log::info!("[STARTUP] PaddleOCR 模型未安装，跳过自检（可在依赖中心安装）");
             }
 
             // Warm up Apple Vision OCR (preloads CoreML/ANE models on a background
