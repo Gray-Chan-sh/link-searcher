@@ -148,16 +148,35 @@ if (-not $SkipSystemDeps) {
 
 # 5. 工具链检查与安装
 Write-Host ""
+
+# winget 已装检查 helper：`winget list --id X` 退出码为 0（找到包）即 $true。
+# 需要临时放宽 $ErrorActionPreference：winget list 找不到包时退出码非 0，
+# 在 "Stop" 下会被当作终止错误。
+function Test-WingetPackageInstalled([string]$id) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    winget list --id $id --accept-source-agreements 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    return ($code -eq 0)
+}
+
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
+    if (Test-WingetPackageInstalled "Rustlang.Rustup") {
+        Write-Host "!! 检测到 Rust 已通过 winget 安装，但 cargo 不在当前 PATH。" -ForegroundColor Yellow
+        Write-Host "    请关闭本终端后重新打开（或注销/重启一次）再跑 cargo build。"
+        Write-Host "    若重开后仍找不到 cargo，先执行一次：rustup default stable"
+    } elseif (Get-Command winget -ErrorAction SilentlyContinue) {
         Write-Host "==> winget 安装 Rust（Rustlang.Rustup，免管理员）..." -ForegroundColor Yellow
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         winget install -e --id Rustlang.Rustup --silent --accept-package-agreements --accept-source-agreements
         $exit = $LASTEXITCODE
         $ErrorActionPreference = $prevEAP
-        if ($exit -eq 0) {
-            Write-Host "    Rust 安装完成。请重开终端后先跑一次：rustup default stable"
+        # 0 = installed; 0x8A15002B (-1978335189) = already at newest version.
+        if ($exit -eq 0 -or $exit -eq -1978335189) {
+            Write-Host "    Rust 已就绪。请重开终端后先跑一次：rustup default stable"
             Write-Host '    （国内加速可选：$env:RUSTUP_DIST_SERVER="https://rsproxy.cn" 后 rustup-init）'
         } else {
             Write-Host "!! winget 安装 Rust 失败（exit=$exit），请手动执行：" -ForegroundColor Yellow

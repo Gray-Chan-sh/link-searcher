@@ -19,6 +19,7 @@
 - **setup-dev.ps1 实测修复**：加 UTF-8 BOM（Windows PowerShell 5.1 无 BOM 按 ANSI 解码中文导致解析错乱）、提示文案移除 PS 5.1 不支持的 `&&`、curl 下载加 `--ssl-no-revoke`（绕过 schannel `CRYPT_E_NO_REVOCATION_CHECK` 吊销检查失败）、Rust 缺失时自动 `winget install Rustlang.Rustup`（免管理员），MSVC 提示补完整 Build Tools 工作负载命令（体积大需 UAC，保持手动）。
 - **模型下载镜像链**：`deps/download.rs` 从单一 ghfast.top 镜像升级为镜像链——用户 `LINK_SEARCHER_GH_MIRROR`（若设）→ ghfast.top → gh-proxy.com → GitHub 直连兜底；`LINK_SEARCHER_NO_MIRROR=1` 仍可完全跳过。实测（2026-09，国内网络）：ghfast.top ≈4.3MB/s、gh-proxy.com ≈3.7MB/s，而 GitHub 直连仅 ≈29KB/s（差 ~150 倍）——单镜像失效时不再直接掉到龟速直连。新增 4 个 `effective_urls` 单测（镜像顺序/用户镜像前置/NO_MIRROR/非 GitHub 源直连）。
 - **模型下载断点续传 + SHA-256 完整性校验**：① `.part` 中断文件不再删除重下——下次启动/换源时从已有字节数发 HTTP `Range` 续传（镜像与 GitHub 直连均实测支持 206）；服务器返回 416（部分文件过期/源变小）时自动丢弃 `.part` 从头重下。② `catalog.rs` 每个发布资产登记 SHA-256（取自 GitHub release digest，dev 树 PaddleOCR 实测哈希一致），下载完成后校验通过才 `rename` 落地；**已存在的损坏文件（上次异常退出留下）会被校验识别并自动重下**，不再误判为就绪。新增 6 个单测（sha256 格式/dev 树哈希一致性/file_sha256），并用手动临时 e2e 验证了「损坏文件自愈」与「真实 Range 续传」两条链路（均已通过，临时测试已删除）。
+- **setup-dev.ps1 Rust 检测逻辑修复**：winget 对已装 Rustlang.Rustup 执行 install 会返回 `0x8A15002B`（UPDATE_NOT_APPLICABLE，无可用更新），此前被误判为安装失败并打印误导性指引。现在：先 `winget list` 探测是否已装——已装但 cargo 不在 PATH（装后未重开终端）时明确提示重开终端而非重装；未装才 install，且该退出码视为成功。
 
 ---
 
