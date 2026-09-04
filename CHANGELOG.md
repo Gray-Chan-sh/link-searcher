@@ -1,6 +1,19 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 8月31日，共 50+ commit，修复 85+ Bug，完成 40+ 功能改进
+> 2026年7月30日 — 9月4日。v0.2.0：运行依赖按需安装 + 首启向导 + 发布版瘦身
+
+---
+
+## v0.2.0（2026-09-04）
+
+### 主要变更
+
+- **发布版瘦身 + 运行依赖按需安装**：模型不再内嵌进二进制/安装包（-20MB+），新增 `deps` 框架（依赖清单/镜像优先下载器/进度事件/取消），首次启动「初始化依赖」向导按需从国内镜像下载 PaddleOCR（默认阻塞）等模型；设置页新增「依赖中心」。
+- **PaddleOCR 模型外置**：`include_bytes!` 移除，改 data_dir 优先 + dev 树回退；启动自检随模型就绪状态调整。
+- **Windows OCR 语言包真实检测**：不再写死 available，枚举实际语言包。
+- **模型镜像发布**：`Gray-Chan-sh/link-searcher-models@models-v1`（9 资产，ghfast.top 镜像优先）。
+- **仓库卫生**：filter-repo 清理 `.commandcode/`/`inkos.json`/`ggml-tiny.bin`(74MB) 等误提交本地状态与大文件（pack 124→57MB）；移除 `.opencode/`；补交 setup-dev 脚本；.gitignore 白名单化。
+- **开发体验**：`scripts/setup-dev.sh/.ps1` 一键配置国内镜像（cargo rsproxy / npm npmmirror / sherpa-onnx 预下载）；tauri.conf 加 `webviewInstallMode=embedBootstrapper`。
 
 ---
 
