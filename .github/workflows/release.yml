@@ -61,11 +61,13 @@ jobs:
 
       # 从 tag 同步版本号到 tauri.conf.json（tag v0.1.7 → version 0.1.7），
       # 产物文件名/app 版本与 release 一致。打 tag 发布无需手动改 conf。
+      # 用 `python` 而非 `python3`：Windows runner 无 python3（有 python）。
       - name: Set version from tag
+        shell: bash
         run: |
           TAG="${{ github.ref_name }}"
           VER="${TAG#v}"
-          python3 - "$VER" <<'PY'
+          python - "$VER" <<'PY'
           import json, sys
           ver = sys.argv[1]
           p = "src-tauri/tauri.conf.json"
