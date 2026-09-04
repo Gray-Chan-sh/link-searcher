@@ -1,13 +1,24 @@
-# Link-Searcher 开发环境一键配置（Windows PowerShell）
+﻿# Link-Searcher 开发环境一键配置（Windows PowerShell）
 #
 # 用途：clone 源码后在 Windows 开发机快速就绪。
 #   - 配置 cargo 国内镜像（rsproxy.cn）
 #   - 配置 npm 镜像（npmmirror.com）
 #   - 让 git 依赖（tauri-plugin-mcp 等）复用系统 git 代理/凭证
 #   - 下载 sherpa-onnx 预编译静态库，避免 cargo build 时从 GitHub 拉取失败
-#   - 提示安装 VS Build Tools / WebView2 / poppler / ffmpeg
+#   - 自动安装可选系统依赖：poppler（扫描版 PDF 渲染）、ffmpeg（音频解码）、
+#     tesseract（可选 OCR CLI）——通过 winget，已装则跳过
+#   - 提示安装 VS Build Tools / WebView2
+#
+# 参数：
+#   -SkipSystemDeps   不自动安装 poppler/ffmpeg/tesseract（仅提示）
+#   -IncludeTesseract 额外安装 tesseract OCR CLI（UB-Mannheim.TesseractOCR）
 #
 # 幂等：可重复执行。管理员权限不是必须（只写用户级配置与缓存）。
+
+param(
+    [switch]$SkipSystemDeps,
+    [switch]$IncludeTesseract
+)
 
 $ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent $PSScriptRoot
@@ -80,7 +91,54 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = $dlDir
 [Environment]::SetEnvironmentVariable("SHERPA_ONNX_ARCHIVE_DIR", $dlDir, "User")
 Write-Host "    SHERPA_ONNX_ARCHIVE_DIR=$dlDir (已写入用户环境变量)"
 
-# 4. 工具链检查
+# 4. 可选系统依赖：自动检测缺失并 winget 安装
+if (-not $SkipSystemDeps) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Warning "未检测到 winget（Windows 10 1709+ / 11 自带；也可从 Microsoft Store 安装 App Installer）。"
+        Write-Warning "跳过自动安装，请手动安装："
+        Write-Warning "  poppler:  winget install -e --id oschwartz10612.Poppler"
+        Write-Warning "  ffmpeg:   winget install -e --id Gyan.FFmpeg"
+        if ($IncludeTesseract) {
+            Write-Warning "  tesseract: winget install -e --id UB-Mannheim.TesseractOCR"
+        }
+    } else {
+        # 包 ID -> 检测命令 -> 说明
+        $deps = @(
+            @{ Id = "oschwartz10612.Poppler"; Probe = "pdftoppm"; Name = "poppler（扫描版 PDF 渲染）" },
+            @{ Id = "Gyan.FFmpeg";            Probe = "ffmpeg";   Name = "ffmpeg（音频解码）" }
+        )
+        if ($IncludeTesseract) {
+            $deps += @{ Id = "UB-Mannheim.TesseractOCR"; Probe = "tesseract"; Name = "tesseract（OCR CLI）" }
+        }
+        foreach ($d in $deps) {
+            if (Get-Command $d.Probe -ErrorAction SilentlyContinue) {
+                Write-Host "    $($d.Name): 已安装（$($d.Probe)）"
+                continue
+            }
+            Write-Host "==> winget 安装 $($d.Name) ..." -ForegroundColor Yellow
+            # 安装失败不应中断整个脚本（幂等可重跑）
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            winget install -e --id $d.Id --silent --accept-package-agreements --accept-source-agreements
+            $exit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+            if ($exit -eq 0) {
+                Write-Host "    $($d.Name) 安装完成"
+            } else {
+                Write-Warning "$($d.Name) 安装失败（exit=$exit），请手动运行：winget install -e --id $($d.Id)"
+            }
+        }
+    }
+} else {
+    Write-Host "==> 跳过系统依赖安装（-SkipSystemDeps）。如需安装："
+    Write-Host "    winget install -e --id oschwartz10612.Poppler"
+    Write-Host "    winget install -e --id Gyan.FFmpeg"
+    if ($IncludeTesseract) {
+        Write-Host "    winget install -e --id UB-Mannheim.TesseractOCR"
+    }
+}
+
+# 5. 工具链检查
 Write-Host ""
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Host "!! Rust 未安装。用国内源安装：" -ForegroundColor Yellow
@@ -95,7 +153,10 @@ if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
 }
 
 Write-Host ""
-Write-Host "==> 完成。之后："
+Write-Host "==> 完成。之后：" -ForegroundColor Green
 Write-Host "    npm ci"
-Write-Host "    cd src-tauri && cargo build"
-Write-Host "    如需 poppler(扫描PDF)/ffmpeg(音频)：winget install poppler ffmpeg"
+Write-Host "    cd src-tauri"
+Write-Host "    cargo build"
+Write-Host ""
+Write-Host "    注意：winget 装完的 poppler/ffmpeg/tesseract 需要重新打开终端才在 PATH 中；"
+Write-Host "    若 `cargo build` 报找不到，请开新终端再试。"

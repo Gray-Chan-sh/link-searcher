@@ -157,7 +157,7 @@
 .\scripts\setup-dev.ps1
 ```
 
-脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`。
+脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；并自动检测安装可选系统依赖 poppler/ffmpeg（macOS 走 Homebrew、Debian/Ubuntu 走 apt、Windows 走 winget；`--skip-system-deps` / `-SkipSystemDeps` 跳过，`--include-tesseract` / `-IncludeTesseract` 加装 tesseract）。Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`。
 
 ### 开发运行
 

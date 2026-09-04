@@ -57,7 +57,7 @@ pub fn list_ocr_engines() -> Result<Vec<OcrEngineStatus>, String> {
                 "Tesseract OCR".to_string(),
                 vec!["macOS".to_string(), "Windows".to_string(), "Linux".to_string()],
                 "macOS: brew install tesseract tesseract-lang\n\
-                 Windows: winget install Tesseract-OCR\n\
+                 Windows: winget install -e --id UB-Mannheim.TesseractOCR\n\
                  Linux: sudo apt install tesseract-ocr"
                     .to_string(),
             ),
@@ -124,19 +124,19 @@ pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencySt
             name: "Tesseract OCR".into(),
             command: "tesseract".into(),
             available: crate::extractor::ocr::is_tesseract_available(),
-            install_guide: "macOS: brew install tesseract\nWindows: winget install Tesseract-OCR\nLinux: sudo apt install tesseract-ocr".into(),
+            install_guide: "macOS: brew install tesseract\nWindows: winget install -e --id UB-Mannheim.TesseractOCR\nLinux: sudo apt install tesseract-ocr".into(),
         },
         DependencyStatus {
             name: "PDF Renderer (pdftoppm)".into(),
             command: "pdftoppm".into(),
             available: crate::extractor::pdf::is_pdftoppm_available(),
-            install_guide: "macOS: brew install poppler\nWindows: winget install poppler\nLinux: sudo apt install poppler-utils".into(),
+            install_guide: "macOS: brew install poppler\nWindows: winget install -e --id oschwartz10612.Poppler\nLinux: sudo apt install poppler-utils".into(),
         },
         DependencyStatus {
             name: "FFmpeg (音频解码)".into(),
             command: "ffmpeg".into(),
             available: crate::extractor::audio::ffmpeg_available(),
-            install_guide: "macOS: brew install ffmpeg\nWindows: winget install ffmpeg\nLinux: sudo apt install ffmpeg".into(),
+            install_guide: "macOS: brew install ffmpeg\nWindows: winget install -e --id Gyan.FFmpeg\nLinux: sudo apt install ffmpeg".into(),
         },
         DependencyStatus {
             name: "FunASR (音频转写)".into(),

@@ -15,6 +15,7 @@
 - **首启默认引擎按平台种入**：`db/mod.rs` `seed_default_settings` 改为平台原生——macOS 种 `AppleVision`，Windows 在 OCR 语言包可用时种 `WindowsOcr`（否则 `PaddleOCR`），Linux 维持 `PaddleOCR`。
 - 涉及：`src-tauri/src/process.rs`（新增）、`extractor/{pdf,ocr,audio,mod}.rs`、`db/mod.rs`、`lib.rs`。验证：`cargo check` 零错误、lib 单测 227 通过（含新增 process 单测）、`tsc -b` 零错误。
 - **文档纠偏**：同步 README / FAQ / 竞品对比中 PaddleOCR「模型编译进二进制（~21MB）开箱即用」的过时描述——v0.2.0 起模型已外置，改为「首启向导/依赖中心自动下载至数据目录（约 20MB）」，并补充 Windows cmd 窗口与默认引擎说明（`README.md`、`docs/11-faq.md`、`docs/research-competitor-comparison.md`）。
+- **setup-dev 脚本升级为自动安装系统依赖**：`setup-dev.sh`（macOS brew / Debian·Ubuntu apt）与 `setup-dev.ps1`（winget）从"仅提示"改为"检测缺失 → 自动安装 poppler/ffmpeg"，`--include-tesseract`/`-IncludeTesseract` 加装 tesseract，`--skip-system-deps`/`-SkipSystemDeps` 跳过（仅打印命令）；安装失败不中断（幂等可重跑）。**修正全仓库错误的 winget 包 ID**：poppler → `oschwartz10612.Poppler`、ffmpeg → `Gyan.FFmpeg`、tesseract → `UB-Mannheim.TesseractOCR`（原写 `winget install poppler/Tesseract-OCR/ffmpeg` 均无效）——涉及 `scripts/setup-dev.*`、`README.md`、`src-tauri/src/commands/tesseract.rs` 依赖引导文案。验证：`bash -n` 通过、`cargo check` 零错误、`tsc -b` 零错误。
 
 ---
 
