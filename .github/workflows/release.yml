@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的 tag（如 v0.2.0）。用于手动补跑：tag-push 触发的 run 中 GITHUB_TOKEN 无法创建 release，需用 dispatch 手动触发。'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -28,8 +33,11 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
+      # dispatch 手动触发时 checkout 指定 tag；tag push 时 checkout 该 tag。
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -60,13 +68,16 @@ jobs:
         run: npm ci
 
       # 从 tag 同步版本号到 tauri.conf.json（tag v0.1.7 → version 0.1.7），
-      # 产物文件名/app 版本与 release 一致。打 tag 发布无需手动改 conf。
+      # 产物文件名/app 版本与 release 一致。
+      # - push tag：github.ref_name
+      # - workflow_dispatch：inputs.tag
       # 用 `python` 而非 `python3`：Windows runner 无 python3（有 python）。
       - name: Set version from tag
         shell: bash
         run: |
-          TAG="${{ github.ref_name }}"
-          VER="${TAG#v}"
+          RELEASE_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
+          VER="${RELEASE_TAG#v}"
           python - "$VER" <<'PY'
           import json, sys
           ver = sys.argv[1]
@@ -82,7 +93,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'Link-Searcher v__VERSION__'
           releaseBody: 'See [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/master/CHANGELOG.md) for details.'
           releaseDraft: true
