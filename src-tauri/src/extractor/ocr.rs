@@ -9,7 +9,6 @@
 //! Falls back to English if the requested language is not installed.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -115,7 +114,11 @@ pub enum OcrEngineType {
 
 /// Detect all available OCR engines on the current system.
 ///
-/// Returns engines in priority order (platform-native first, then Tesseract).
+/// Returns candidate engines for the Settings list, in display order: the
+/// built-in PaddleOCR, then platform-native (Apple Vision / Windows OCR),
+/// then Tesseract when installed. Usability is reported separately via
+/// `list_ocr_engines`; actual runtime selection goes through
+/// [`preferred_engine`], which is platform-aware.
 pub fn detect_available_engines() -> Vec<OcrEngineType> {
     let mut engines = Vec::new();
 
@@ -132,6 +135,66 @@ pub fn detect_available_engines() -> Vec<OcrEngineType> {
     }
 
     engines
+}
+
+/// Whether a specific engine is actually usable on this machine right now.
+fn engine_usable(engine: &OcrEngineType) -> bool {
+    match engine {
+        OcrEngineType::PaddleOCR => super::paddleocr::models_present(),
+        OcrEngineType::AppleVision => cfg!(target_os = "macos"),
+        OcrEngineType::WindowsOcr => cfg!(target_os = "windows") && super::windows_ocr::availability().0,
+        OcrEngineType::Tesseract => is_tesseract_available(),
+        OcrEngineType::None => true,
+    }
+}
+
+/// Best OCR engine to fall back to on this platform. Platform-native engines
+/// are preferred because they spawn no extra subprocesses (Windows OCR runs
+/// in-process; Apple Vision is in-process) — this avoids the black console
+/// windows that invoking poppler/tesseract on Windows would create — then the
+/// built-in PaddleOCR, then Tesseract.
+pub fn platform_default_engine() -> OcrEngineType {
+    let platform_first = [
+        #[cfg(target_os = "macos")]
+        OcrEngineType::AppleVision,
+        #[cfg(target_os = "windows")]
+        OcrEngineType::WindowsOcr,
+    ];
+    for c in platform_first {
+        if engine_usable(&c) {
+            return c;
+        }
+    }
+    if engine_usable(&OcrEngineType::PaddleOCR) {
+        return OcrEngineType::PaddleOCR;
+    }
+    if engine_usable(&OcrEngineType::Tesseract) {
+        return OcrEngineType::Tesseract;
+    }
+    // Nothing usable — keep the built-in default so callers surface a clear
+    // "model not installed" error instead of an obscure engine failure.
+    OcrEngineType::PaddleOCR
+}
+
+/// Resolve the engine to actually run. If the configured engine isn't usable
+/// on this machine (e.g. the seeded "AppleVision" on Windows, or PaddleOCR
+/// before its models are downloaded), fall back to [`platform_default_engine`]
+/// instead of failing or silently indexing nothing.
+pub fn preferred_engine(configured: Option<OcrEngineType>) -> OcrEngineType {
+    match configured {
+        Some(engine) if engine_usable(&engine) => engine,
+        configured => {
+            let fallback = platform_default_engine();
+            if configured.is_some() {
+                log::warn!(
+                    "[OCR] configured engine {:?} unusable on this machine, using {:?}",
+                    configured,
+                    fallback
+                );
+            }
+            fallback
+        }
+    }
 }
 
 /// Map a settings string to its [`OcrEngineType`] variant.
@@ -217,7 +280,7 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
     // Preprocess image for better OCR accuracy
     let pp_path = preprocess_image(image_path)?;
 
-    let mut cmd = Command::new("tesseract");
+    let mut cmd = crate::process::new("tesseract");
     cmd.arg(pp_path.as_os_str())
         .arg("stdout")
         .arg("-l")
@@ -256,9 +319,11 @@ pub fn ocr_image_tesseract(image_path: &Path, lang: &str) -> Result<String> {
 
 /// Extract text from an image using the best available engine.
 ///
-/// Convenience wrapper. Falls back to PaddleOCR when `engine` is `None`.
+/// Convenience wrapper. When `engine` is `None` — or the configured engine is
+/// not usable on this machine — [`preferred_engine`] picks the platform
+/// default.
 pub fn ocr_image(image_path: &Path, lang: &str, engine: Option<OcrEngineType>) -> Result<String> {
-    let e = engine.unwrap_or(OcrEngineType::PaddleOCR);
+    let e = preferred_engine(engine);
     ocr_image_with_engine(image_path, &e, lang)
 }
 
@@ -328,13 +393,7 @@ fn draw_h12_pattern(img: &mut image::RgbaImage) {
 
 /// Check if the `tesseract` CLI is available on the system.
 pub fn is_tesseract_available() -> bool {
-    Command::new("tesseract")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    crate::process::probe_ok("tesseract", &["--version"])
 }
 
 /// Return the list of languages installed for Tesseract.
@@ -346,7 +405,7 @@ pub fn is_tesseract_available() -> bool {
 ///
 /// Returns an error if `tesseract` is not available or the command fails.
 pub fn get_available_languages() -> Result<Vec<String>> {
-    let output = Command::new("tesseract")
+    let output = crate::process::new("tesseract")
         .arg("--list-langs")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

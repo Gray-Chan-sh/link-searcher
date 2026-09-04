@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-04（修复：Windows 子进程黑窗口闪现 + 引擎平台默认对齐）
+
+**动机**：Windows 上运行 GUI（`windows_subsystem="windows"`）时，索引大量 PDF/图片/音频期间反复闪现黑色 cmd 窗口。根因是 Rust 端 `Command::spawn` 外部控制台程序（pdftoppm/pdfimages/pdfinfo/pdftotext/tesseract/ffmpeg）时未设置 `CREATE_NO_WINDOW`——GUI 进程 spawn 控制台子进程会让 Windows 为其新建可见控制台窗口。与 Microsoft Edge WebView2 无关。
+
+- **跨平台子进程辅助模块（新增 `src-tauri/src/process.rs`）**：`process::new()`/`probe_ok()` 统一构造 `std::process::Command`，Windows 上自动带 `creation_flags(CREATE_NO_WINDOW)`（0x08000000），子进程不再创建控制台窗口；非 Windows 为空操作，行为不变。附单测。
+- **子进程调用点收敛**：`extractor/pdf.rs`（pdfinfo/pdftotext/pdftoppm/pdfimages 探测与执行）、`extractor/ocr.rs`（tesseract 探测/语言列表/识别）、`extractor/audio.rs`（ffmpeg 探测与解码）全部改走 `process::new`/`probe_ok`。
+- **Windows 二进制定位补齐**：poppler/ffmpeg 探测增加 `.exe` 名字转换（`windows_exe_name`）与 Windows 常见安装前缀（`C:\Program Files\poppler...`、`C:\ffmpeg\bin` 等）；此前只在 macOS Homebrew 前缀与裸名路径查找，Windows 打包/开发环境基本找不到外部工具。
+- **OCR 引擎默认平台化**：新增 `preferred_engine()`/`platform_default_engine()`（`extractor/ocr.rs`）——用户配置的引擎在本机不可用（如 Windows 上 DB 遗留 "AppleVision"、PaddleOCR 模型未装）时自动回退到平台可用引擎（Windows OCR → PaddleOCR → Tesseract；macOS Apple Vision 优先），不再静默产出空索引；回退打 WARN 日志。`extract_text` 图片分支、`PdfExtractor` OCR 回退、`ocr_image` 统一走该解析。
+- **首启默认引擎按平台种入**：`db/mod.rs` `seed_default_settings` 改为平台原生——macOS 种 `AppleVision`，Windows 在 OCR 语言包可用时种 `WindowsOcr`（否则 `PaddleOCR`），Linux 维持 `PaddleOCR`。
+- 涉及：`src-tauri/src/process.rs`（新增）、`extractor/{pdf,ocr,audio,mod}.rs`、`db/mod.rs`、`lib.rs`。验证：`cargo check` 零错误、lib 单测 227 通过（含新增 process 单测）、`tsc -b` 零错误。
+- **文档纠偏**：同步 README / FAQ / 竞品对比中 PaddleOCR「模型编译进二进制（~21MB）开箱即用」的过时描述——v0.2.0 起模型已外置，改为「首启向导/依赖中心自动下载至数据目录（约 20MB）」，并补充 Windows cmd 窗口与默认引擎说明（`README.md`、`docs/11-faq.md`、`docs/research-competitor-comparison.md`）。
+
+---
+
 ## v0.2.0（2026-09-04）
 
 ### 主要变更

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -10,29 +10,40 @@ use super::Extractor;
 use crate::scanner::helpers::TempDir;
 
 /// Locate a poppler binary (`pdftoppm` or `pdfimages`).
-/// Searches PATH first, then common Homebrew installation prefixes
-/// so the Tauri app (which may not inherit the terminal PATH) can
-/// find them.
+/// Searches PATH first, then the bundled/dev `poppler-bin/` dir, then next
+/// to the executable, then platform install prefixes — the Tauri app may
+/// not inherit the terminal PATH.
 fn find_poppler_binary(name: &str) -> Option<PathBuf> {
-    if Command::new(name).arg("--version").output().is_ok() {
+    // On Windows, probe with the .exe name first; the bare-name PATH probe
+    // can still match via PATHEXT, but CreateProcess needs the real file.
+    if crate::process::probe_ok(name, &["--version"]) {
         return Some(PathBuf::from(name));
     }
     // Dev mode: look relative to project root
-    let dev_path = PathBuf::from("poppler-bin").join(name);
-    if dev_path.exists() && Command::new(&dev_path).arg("--version").output().is_ok() {
+    let dev_name = crate::process::windows_exe_name(name);
+    let dev_path = PathBuf::from("poppler-bin").join(&dev_name);
+    if dev_path.exists() && crate::process::probe_ok(&dev_path, &["--version"]) {
         return Some(dev_path);
     }
     // Release mode: look next to the executable
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {
-            let bundle_path = dir.join(name);
-            if bundle_path.exists() && Command::new(&bundle_path).arg("--version").output().is_ok() {
+            let bundle_path = dir.join(&dev_name);
+            if bundle_path.exists() && crate::process::probe_ok(&bundle_path, &["--version"]) {
                 return Some(bundle_path);
             }
         }
+    #[cfg(target_os = "windows")]
+    for prefix in ["C:\\Program Files\\poppler\\Library\\bin", "C:\\poppler\\Library\\bin", "C:\\Program Files\\poppler\\bin"] {
+        let candidate = PathBuf::from(prefix).join(&dev_name);
+        if candidate.exists() && crate::process::probe_ok(&candidate, &["--version"]) {
+            return Some(candidate);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        let candidate = PathBuf::from(prefix).join(name);
-        if candidate.exists() && Command::new(&candidate).arg("--version").output().is_ok() {
+        let candidate = PathBuf::from(prefix).join(&dev_name);
+        if candidate.exists() && crate::process::probe_ok(&candidate, &["--version"]) {
             return Some(candidate);
         }
     }
@@ -67,7 +78,7 @@ fn pdfinfo_path() -> Option<&'static Path> {
 fn get_pdf_page_count(path: &Path) -> Result<u32> {
     // Try pdfinfo first — handles broken streams that lopdf rejects
     if let Some(bin) = pdfinfo_path() {
-        let mut cmd = Command::new(bin);
+        let mut cmd = crate::process::new(bin);
         cmd.arg(path);
         let (status, stdout) = run_with_timeout(cmd, Duration::from_secs(60))
             .unwrap_or((None, Vec::new()));
@@ -88,7 +99,7 @@ fn get_pdf_page_count(path: &Path) -> Result<u32> {
 /// Run a command with a timeout, capturing stdout. A broken/crafted PDF can
 /// hang poppler forever; the timeout lets the scan worker move on. A timeout
 /// yields `Ok((None, vec![]))` so callers can fall back.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
+fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
     cmd.stdout(Stdio::piped());
     let mut child = cmd.spawn()?;
     let deadline = Instant::now() + timeout;
@@ -115,7 +126,7 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<(Opt
 /// still valid (common for digitally generated PDFs with stream errors).
 fn try_pdftotext_extract(path: &Path) -> Option<String> {
     let bin = pdftotext_path()?;
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::new(bin);
     cmd.arg(path).arg("-");
     let (status, stdout) = run_with_timeout(cmd, Duration::from_secs(120)).ok()?;
     let status = status?;
@@ -141,10 +152,6 @@ fn try_pdftotext_extract(path: &Path) -> Option<String> {
 }
 
 pub struct PdfExtractor;
-
-fn default_engine() -> super::ocr::OcrEngineType {
-    super::ocr::OcrEngineType::PaddleOCR
-}
 
 /// Try OCR via pdfimages → pdftoppm, returning the first non-empty result.
 fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType) -> Option<String> {
@@ -229,7 +236,7 @@ impl PdfExtractor {
                     "[PDF] {:?}: pdftotext unavailable/watermarked, falling to image OCR",
                     path.file_name()
                 );
-                let engine = engine.unwrap_or_else(default_engine);
+                let engine = super::ocr::preferred_engine(engine);
                 return if let Some(text) = try_ocr_fallback(path, lang, &engine) {
                     Ok(text)
                 } else {
@@ -256,7 +263,7 @@ impl PdfExtractor {
         }
         let merged = page_texts.join("\n");
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
-        let engine = engine.unwrap_or_else(default_engine);
+        let engine = super::ocr::preferred_engine(engine);
 
         // Use pdf-inspector for accurate PDF classification
         if merged.len() > 100
@@ -448,7 +455,7 @@ pub fn ocr_pdf_via_pdftoppm(
     let output_prefix = tmp_dir.path().join("page");
     let bin = pdftoppm_path()
         .ok_or_else(|| anyhow::anyhow!("pdftoppm not available. Install poppler-utils."))?;
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::new(bin);
     cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
@@ -615,7 +622,7 @@ fn extract_and_ocr_page_via_pdfimages(
 
     let bin = pdfimages_path()
         .ok_or_else(|| anyhow::anyhow!("pdfimages not available. Install poppler-utils."))?;
-    let mut cmd = Command::new(bin);
+    let mut cmd = crate::process::new(bin);
     cmd.args([
         "-png",
         "-f",

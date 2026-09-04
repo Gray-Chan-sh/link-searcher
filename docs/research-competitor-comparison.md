@@ -473,7 +473,7 @@
 
 ### 8.1 独特优势
 
-1. **唯一零外部依赖 OCR**：PaddleOCR PP-OCRv5 模型编译进二进制（~21MB），纯 Rust ONNX 推理（tract），无需安装 tesseract/任何 C++ 库。Recoll/AnyTXT/Open Semantic 全需外部 OCR 引擎。
+1. **唯一零外部依赖 OCR**：PaddleOCR PP-OCRv5 模型，纯 Rust ONNX 推理（tract），模型由首启向导/依赖中心自动下载（约 20MB），无需安装 tesseract/任何 C++ 库。Recoll/AnyTXT/Open Semantic 全需外部 OCR 引擎。
 
 2. **唯一内置语音识别**：FunASR-Nano + sherpa-onnx，8 种音频格式，支持吴语/粤语/闽语 + CAM++ 说话人分离。Recoll 可选 Whisper 但需用户安装 PyTorch（~3GB）。
 

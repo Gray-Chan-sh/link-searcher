@@ -61,12 +61,12 @@
 
 | 引擎 | 状态 | 说明 |
 |------|:---:|------|
-| **PaddleOCR**（默认） | ✅ | PP-OCRv5 模型由首启向导/依赖中心镜像下载，支持中英文 |
-| Apple Vision | ✅ | macOS 10.15+ 系统原生，ANE 硬件加速 |
-| Windows OCR | ✅ | Windows 10+ 系统原生（向导会检测并提示补装 OCR 语言包） |
+| **PaddleOCR**（内置默认） | ✅ | PP-OCRv5 模型由首启向导/依赖中心镜像下载，支持中英文 |
+| Apple Vision | ✅ | macOS 10.15+ 系统原生，ANE 硬件加速；macOS 默认引擎 |
+| Windows OCR | ✅ | Windows 10+ 系统原生（语言包可用时为 Windows 默认引擎，避免调用外部 CLI） |
 | Tesseract | ✅ | 备选引擎，需用户自行安装 `tesseract` CLI |
 
-引擎优先级：PaddleOCR → Apple Vision → Windows OCR → Tesseract（自动降级）。
+引擎优先级：平台原生（macOS Apple Vision / Windows OCR）→ PaddleOCR → Tesseract（自动降级）。配置的引擎在本机不可用时（如 Windows 上残留 macOS 默认值、PaddleOCR 模型未装）会自动回退到可用引擎。Windows 上所有外部 CLI 子进程（poppler/tesseract/ffmpeg）均以 `CREATE_NO_WINDOW` 隐藏运行，不会闪现黑色 cmd 窗口。
 
 ### 索引与监控
 
@@ -232,7 +232,7 @@ link-searcher/
 │   │   ├── extractor/         # 文本提取
 │   │   │   ├── mod.rs         # 格式路由
 │   │   │   ├── ocr.rs         # OCR 引擎调度
-│   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型内嵌 + 引擎池并行）
+│   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型运行期定位 + 引擎池并行）
 │   │   │   ├── pdf.rs         # PDF 提取 + pdftoppm OCR
 │   │   │   ├── office/        # Office 提取（rwml/calamine/anydoc 原生，无外部依赖）
 │   │   │   ├── image.rs       # 图片 OCR

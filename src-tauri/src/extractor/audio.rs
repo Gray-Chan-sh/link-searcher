@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -8,23 +7,32 @@ use anyhow::{Context, Result};
 /// `ffmpeg-bin/` dir, then next to the executable, then common
 /// Homebrew prefixes — the Tauri app may not inherit the terminal PATH.
 fn find_ffmpeg_binary() -> Option<PathBuf> {
-    if Command::new("ffmpeg").arg("-version").output().is_ok() {
+    if crate::process::probe_ok("ffmpeg", &["-version"]) {
         return Some(PathBuf::from("ffmpeg"));
     }
-    let dev_path = PathBuf::from("ffmpeg-bin").join("ffmpeg");
-    if dev_path.exists() && Command::new(&dev_path).arg("-version").output().is_ok() {
+    let dev_name = crate::process::windows_exe_name("ffmpeg");
+    let dev_path = PathBuf::from("ffmpeg-bin").join(&dev_name);
+    if dev_path.exists() && crate::process::probe_ok(&dev_path, &["-version"]) {
         return Some(dev_path);
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent() {
-            let bundle_path = dir.join("ffmpeg");
-            if bundle_path.exists() && Command::new(&bundle_path).arg("-version").output().is_ok() {
+            let bundle_path = dir.join(&dev_name);
+            if bundle_path.exists() && crate::process::probe_ok(&bundle_path, &["-version"]) {
                 return Some(bundle_path);
             }
         }
+    #[cfg(target_os = "windows")]
+    for prefix in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"] {
+        let candidate = PathBuf::from(prefix).join(&dev_name);
+        if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
+            return Some(candidate);
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        let candidate = PathBuf::from(prefix).join("ffmpeg");
-        if candidate.exists() && Command::new(&candidate).arg("-version").output().is_ok() {
+        let candidate = PathBuf::from(prefix).join(&dev_name);
+        if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
             return Some(candidate);
         }
     }
@@ -255,7 +263,7 @@ impl AudioExtractor {
             .ok_or_else(|| anyhow::anyhow!("ffmpeg not available. Install ffmpeg (brew install ffmpeg)"))?;
         // Cap decode at 30 minutes so the WAV and sample buffer stay bounded;
         // poll child with a timeout so a hung decode can't stall the scan.
-        let mut child = Command::new(ffmpeg)
+        let mut child = crate::process::new(ffmpeg)
             .args(["-y", "-i"]).arg(path)
             .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
             .arg(&wav_path)

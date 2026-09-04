@@ -30,7 +30,9 @@ static AUDIO_EXTRACTOR: LazyLock<audio::AudioExtractor> = LazyLock::new(audio::A
 /// Dispatch text extraction based on file extension.
 /// `lang` is the OCR language for PDF/image extraction (from directory config
 /// or global settings). When the extracted text is watermark/garbage, PDFs
-/// fall through to OCR and image files always go through OCR.
+/// fall through to OCR and image files always go through OCR. An unusable or
+/// missing configured OCR engine resolves via [`ocr::preferred_engine`] to the
+/// best engine available on this platform.
 pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>) -> Result<String> {
     let ext = path
         .extension()
@@ -50,7 +52,7 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         | "epub" => OFFICE_EXTRACTOR.extract(path),
         // Image formats (OCR placeholder)
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => {
-            let e = engine.unwrap_or(ocr::OcrEngineType::PaddleOCR);
+            let e = ocr::preferred_engine(engine);
             ocr::ocr_image_with_engine(path, &e, lang)
         }
         // Archives

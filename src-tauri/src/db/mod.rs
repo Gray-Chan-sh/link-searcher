@@ -354,8 +354,28 @@ fn migrate_legacy_backup_settings(tx: &Connection) -> Result<()> {
 }
 
 fn seed_default_settings(conn: &Connection) -> Result<()> {
+    // OCR engine default is platform-native: Apple Vision on macOS, Windows
+    // OCR on Windows when a usable language pack is installed (checked here
+    // at seed time; a user who never opens Settings gets the working default).
+    // Otherwise the built-in PaddleOCR. `preferred_engine()` in
+    // `extractor/ocr.rs` still guards runtime: if the seeded engine is not
+    // actually usable (e.g. no Windows OCR language pack, PaddleOCR models
+    // not yet downloaded), it falls back to a usable engine.
+    #[cfg(target_os = "macos")]
+    let default_ocr_engine = "AppleVision";
+    #[cfg(target_os = "windows")]
+    let default_ocr_engine = {
+        if crate::extractor::windows_ocr::availability().0 {
+            "WindowsOcr"
+        } else {
+            "PaddleOCR"
+        }
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let default_ocr_engine = "PaddleOCR";
+
     let defaults = [
-        ("ocr_engine", "AppleVision"),
+        ("ocr_engine", default_ocr_engine),
         ("ocr_lang", "chi_sim"),
         ("scheduled_scan_time", "02:00"),
         ("max_results", "1000"),

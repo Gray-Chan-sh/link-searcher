@@ -84,11 +84,19 @@ A：可以。扫描件 PDF 会自动渲染为图片（200 DPI），然后通过 
 
 ### Q：PaddleOCR 需要安装吗？
 
-A：不需要。PaddleOCR 引擎（PP-OCRv5 模型）已内置，使用纯 Rust ONNX 推理（tract），模型编译进二进制（约 21MB），开箱即用。
+A：不需要手动安装。应用内置 PaddleOCR 引擎（纯 Rust ONNX 推理，tract），模型由首次启动的「依赖中心」向导或设置页从国内镜像自动下载到数据目录（约 20MB）；开发版直接使用仓库内 `src-tauri/models/ppocrv5`。
 
 ### Q：PaddleOCR 和 Tesseract 有什么区别？
 
-A：PaddleOCR 是内置引擎，无需安装，零依赖。Tesseract 是备选引擎，需要自行安装 CLI，但支持更多语言。
+A：PaddleOCR 是内置引擎，模型由应用自动下载，纯 Rust 零外部依赖。Tesseract 是备选引擎，需要自行安装 CLI，但支持更多语言。
+
+### Q：Windows 上索引时频繁闪现黑色 cmd 窗口怎么办？
+
+A：这是旧版本的已知问题——GUI 进程调用 poppler/tesseract/ffmpeg 等外部命令行工具时未隐藏子进程控制台窗口。2026-09-04 起所有外部子进程均以 `CREATE_NO_WINDOW` 隐藏运行，不再闪现；若仍遇到，请升级到包含该修复的版本。
+
+### Q：Windows 上默认用哪个 OCR 引擎？
+
+A：若系统已装 Windows OCR 语言包，默认使用 Windows OCR（系统原生、进程内运行、不调用外部 CLI）；否则默认 PaddleOCR。设置的引擎在本机不可用时会自动回退到可用引擎。
 
 ### Q：如何提高 OCR 识别率？
 

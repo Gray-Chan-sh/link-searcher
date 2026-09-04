@@ -8,6 +8,7 @@ pub mod deps;
 pub mod extractor;
 pub mod indexer;
 pub mod logs;
+pub mod process;
 pub mod scanner;
 pub mod search;
 pub mod state;
