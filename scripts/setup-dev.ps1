@@ -78,10 +78,18 @@ if (-not (Test-Path $archive)) {
     Write-Host "    如果下载失败，请用浏览器/加速器下载后放到:"
     Write-Host "    $archive"
     try {
-        curl.exe -L --fail --retry 3 -o $archive `
+        # --ssl-no-revoke：国内网络/代理下 schannel 证书吊销检查常失败
+        # （CRYPT_E_NO_REVOCATION_CHECK），此处绕过吊销检查。
+        curl.exe -L --fail --retry 3 --ssl-no-revoke -o $archive `
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${ver}/$(Split-Path $archive -Leaf)"
+        $curlExit = $LASTEXITCODE
+        if ($curlExit -ne 0 -or -not (Test-Path $archive)) {
+            throw "curl exit=$curlExit"
+        }
     } catch {
-        Write-Warning "自动下载失败，请手动下载后重跑本脚本。"
+        Write-Warning "自动下载失败（$_）。请用浏览器/加速器下载后放到："
+        Write-Warning "  $archive"
+        Write-Warning "然后重跑本脚本（已存在的文件会跳过下载）。"
     }
 } else {
     Write-Host "    sherpa-onnx archive already present"
@@ -138,18 +146,38 @@ if (-not $SkipSystemDeps) {
     }
 }
 
-# 5. 工具链检查
+# 5. 工具链检查与安装
 Write-Host ""
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
-    Write-Host "!! Rust 未安装。用国内源安装：" -ForegroundColor Yellow
-    Write-Host '   $env:RUSTUP_DIST_SERVER="https://rsproxy.cn"; $env:RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"; irm https://rsproxy.cn/rustup-init.exe | iex'
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Host "==> winget 安装 Rust（Rustlang.Rustup，免管理员）..." -ForegroundColor Yellow
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        winget install -e --id Rustlang.Rustup --silent --accept-package-agreements --accept-source-agreements
+        $exit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($exit -eq 0) {
+            Write-Host "    Rust 安装完成。请重开终端后先跑一次：rustup default stable"
+            Write-Host '    （国内加速可选：$env:RUSTUP_DIST_SERVER="https://rsproxy.cn" 后 rustup-init）'
+        } else {
+            Write-Host "!! winget 安装 Rust 失败（exit=$exit），请手动执行：" -ForegroundColor Yellow
+            Write-Host '   $env:RUSTUP_DIST_SERVER="https://rsproxy.cn"; $env:RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"; irm https://rsproxy.cn/rustup-init.exe | iex'
+        }
+    } else {
+        Write-Host "!! Rust 未安装且无 winget。请用国内源手动安装：" -ForegroundColor Yellow
+        Write-Host '   $env:RUSTUP_DIST_SERVER="https://rsproxy.cn"; $env:RUSTUP_UPDATE_ROOT="https://rsproxy.cn/rustup"; irm https://rsproxy.cn/rustup-init.exe | iex'
+    }
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
     Write-Host "!! Node.js 未安装（建议 >=20）：https://nodejs.org 或 winget install OpenJS.NodeJS.LTS"
 }
 if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
-    Write-Host "!! 未检测到 MSVC 编译器。请安装 Visual Studio Build Tools（含 MSVC + Windows SDK），"
-    Write-Host "   或：winget install Microsoft.VisualStudio.2022.BuildTools"
+    Write-Host "!! 未检测到 MSVC 编译器（cargo 构建必需）。两种方式（任选）：" -ForegroundColor Yellow
+    Write-Host "    A. Visual Studio Build Tools（含 C++ 桌面工作负载，体积大需管理员）："
+    Write-Host '       winget install Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
+    Write-Host "    B. 仅安装 MSVC 命令行工具链（更轻量，仍需管理员）："
+    Write-Host "       winget install Microsoft.VisualStudio.2022.BuildTools"
+    Write-Host "    装完重开终端后 cl 即可用；本脚本不自动安装（体积大且需 UAC）。"
 }
 
 Write-Host ""
