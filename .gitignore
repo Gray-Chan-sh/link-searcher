@@ -33,13 +33,20 @@ src-tauri/.cargo/config.toml
 
 # Local session data
 .omo/
-scripts/
 opencode.json
+
+# Agent/tool local state — never commit
+.commandcode/
+.inkos/
+inkos.json
 
 # Python venv for FunASR
 src-tauri/models/funasr/.venv/
 .env
 node_modules/
 
-# Inkos tool local state
-.inkos/
+# Dev tooling scripts: keep only the portable setup helpers, ignore the rest
+# (eval corpora, private fixtures).
+scripts/*
+!scripts/setup-dev.sh
+!scripts/setup-dev.ps1

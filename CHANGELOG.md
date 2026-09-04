@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-09-04（仓库卫生：清除误提交的本地状态 + 补交 dev 脚本）
+
+- **历史清理**：`.commandcode/`（本机 agent shell 历史白名单 + taste 学习）与 `inkos.json`（指向本机 127.0.0.1 的 LLM 开发配置）被历史提交误带入公开仓库。用 `git filter-repo` 从全部历史移除（各仅出现于单次提交），并加入 `.gitignore`（`.commandcode/`、`.inkos/`、`inkos.json`）。备份分支 `backup-pre-cleanup` 保留以防回滚。
+- **补交 setup-dev 脚本**：`scripts/` 整目录 ignore 规则导致 `setup-dev.sh/.ps1` 未进入上一提交。改为白名单（`scripts/*` + `!scripts/setup-dev.sh` `!scripts/setup-dev.ps1`）后补交。
+- 验证：filter-repo 重写 476 commits 无异常；`git log --all -- .commandcode inkos.json` 为空；`git check-ignore` 规则生效。
+
+---
+
 ## 2026-09-04（运行依赖检测与安装 · 首启向导 · 镜像优先）
 
 - **发布版瘦身 + 首启依赖安装框架**：新增 `src-tauri/src/deps/` 模块——统一依赖目录（PaddleOCR 模型 / BGE-small / FunASR / ffmpeg / poppler）、镜像优先下载器（GitHub Releases 为源，ghfast.top 等国内镜像前缀自动重试，`LINK_SEARCHER_GH_MIRROR`/`LINK_SEARCHER_NO_MIRROR` 可调）、`*.part` 原子写入 + 断点续装（已存在文件跳过）、单飞防重入 + 协作取消。新增命令 `get_setup_status` / `install_dep` / `cancel_dep_install` / `dep_install_status`，进度经 `dep-progress`、完成经 `dep-install-done` 事件推前端。
