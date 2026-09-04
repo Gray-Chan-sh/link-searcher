@@ -6,9 +6,10 @@
 
 ## 2026-09-04（仓库卫生：清除误提交的本地状态 + 补交 dev 脚本）
 
-- **历史清理**：`.commandcode/`（本机 agent shell 历史白名单 + taste 学习）与 `inkos.json`（指向本机 127.0.0.1 的 LLM 开发配置）被历史提交误带入公开仓库。用 `git filter-repo` 从全部历史移除（各仅出现于单次提交），并加入 `.gitignore`（`.commandcode/`、`.inkos/`、`inkos.json`）。备份分支 `backup-pre-cleanup` 保留以防回滚。
+- **历史清理（两轮）**：`.commandcode/`（本机 agent shell 历史白名单 + taste 学习）与 `inkos.json`（指向本机 127.0.0.1 的 LLM 开发配置）被历史提交误带入公开仓库；另清理历史遗留大文件 `src-tauri/models/funasr/ggml-tiny.bin`（74MB，早已弃用的 whisper 模型，`fea8ece` 已移除工作树但 blob 残留在历史）。均用 `git filter-repo` 从全部历史移除，并加入 `.gitignore`。repo pack 体积 123.87MiB → 57.37MiB。备份分支 `backup-pre-cleanup` 保留以防回滚。
 - **补交 setup-dev 脚本**：`scripts/` 整目录 ignore 规则导致 `setup-dev.sh/.ps1` 未进入上一提交。改为白名单（`scripts/*` + `!scripts/setup-dev.sh` `!scripts/setup-dev.ps1`）后补交。
-- 验证：filter-repo 重写 476 commits 无异常；`git log --all -- .commandcode inkos.json` 为空；`git check-ignore` 规则生效。
+- **保留说明**：`assets/Arial Unicode.ttf`（23MB）与 `src-tauri/models/ppocrv5/*.onnx`（20MB）为当前构建/开发在用资源（`include_bytes!` 编译依赖与 dev 树 OCR 模型），继续跟踪。
+- 验证：filter-repo 重写无异常；`git rev-list --objects --all` 已无被删路径；tag v0.1.0–v0.1.6 全部有效；远程 master 已 force-push 至 f1b02ad。
 
 ---
 
