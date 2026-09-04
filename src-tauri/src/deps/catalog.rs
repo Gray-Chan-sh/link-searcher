@@ -14,12 +14,17 @@
 
 use std::path::Path;
 
-/// One file of a dependency: remote path relative to the source base URL, and
-/// local path relative to the dep's install dir.
+/// One file of a dependency: remote path relative to the source base URL, local
+/// path relative to the dep's install dir, and the SHA-256 of the published
+/// asset. The digest comes from the GitHub release asset (`digest` field);
+/// `download.rs` verifies completed files against it so a truncated or corrupt
+/// download is never mistaken for a complete one.
 #[derive(Debug, Clone)]
 pub struct FileSpec {
     pub remote: &'static str,
     pub local: &'static str,
+    /// Lowercase hex SHA-256 of the published file.
+    pub sha256: &'static str,
 }
 
 /// A mirror source: `(label, base_url)`. Files resolve as `<base>/<remote>`.
@@ -83,9 +88,9 @@ fn paddleocr() -> DepDef {
         size_bytes: 20 * 1024 * 1024,
         hint: "图片与扫描版 PDF 的文字识别（约 20MB）",
         files: &[
-            FileSpec { remote: "paddleocr-det.onnx", local: "det.onnx" },
-            FileSpec { remote: "paddleocr-rec.onnx", local: "rec.onnx" },
-            FileSpec { remote: "paddleocr-ppocrv5_dict.txt", local: "ppocrv5_dict.txt" },
+            FileSpec { remote: "paddleocr-det.onnx", local: "det.onnx", sha256: "8c3b7ee97913a7942b8565669dc9acbe8846fbbaf4b63e1d7fdb339005574a33" },
+            FileSpec { remote: "paddleocr-rec.onnx", local: "rec.onnx", sha256: "31fb844ce3a4aaf13e4bea62ae35f43bd9a509966061980c30db9b248c542a6b" },
+            FileSpec { remote: "paddleocr-ppocrv5_dict.txt", local: "ppocrv5_dict.txt", sha256: "1ea29636956177e400af712d9782e7693f3fb25f98617bed10479d2965a836fd" },
         ],
         sources: vec![Source {
             label: "GitHub Releases",
@@ -103,8 +108,8 @@ fn bge_small() -> DepDef {
         size_bytes: 95 * 1024 * 1024,
         hint: "离线语义搜索 / embedding（约 95MB）",
         files: &[
-            FileSpec { remote: "bge-small-model.onnx", local: "model.onnx" },
-            FileSpec { remote: "bge-small-tokenizer.json", local: "tokenizer.json" },
+            FileSpec { remote: "bge-small-model.onnx", local: "model.onnx", sha256: "69a0b846f4f116b5e6aabf9546ea6754d02264f3211a13a1bd69b31b8040749a" },
+            FileSpec { remote: "bge-small-tokenizer.json", local: "tokenizer.json", sha256: "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26" },
         ],
         sources: vec![Source {
             label: "GitHub Releases",
@@ -122,10 +127,10 @@ fn funasr() -> DepDef {
         size_bytes: 850 * 1024 * 1024,
         hint: "音频转文字（约 850MB，可选）",
         files: &[
-            FileSpec { remote: "funasr-encoder_adaptor.int8.onnx", local: "encoder_adaptor.int8.onnx" },
-            FileSpec { remote: "funasr-llm.int8.onnx", local: "llm.int8.onnx" },
-            FileSpec { remote: "funasr-embedding.int8.onnx", local: "embedding.int8.onnx" },
-            FileSpec { remote: "funasr-tokenizer.json", local: "Qwen3-0.6B/tokenizer.json" },
+            FileSpec { remote: "funasr-encoder_adaptor.int8.onnx", local: "encoder_adaptor.int8.onnx", sha256: "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422" },
+            FileSpec { remote: "funasr-llm.int8.onnx", local: "llm.int8.onnx", sha256: "dfbf9aa3be41bccc257587f151e15c63fbe1b549f2b517f5ccd5bdce3bf4322a" },
+            FileSpec { remote: "funasr-embedding.int8.onnx", local: "embedding.int8.onnx", sha256: "95e61cd0c9c3b9543339a4cf973c95c116815e745ccc1e0285cbd81f76d18644" },
+            FileSpec { remote: "funasr-tokenizer.json", local: "Qwen3-0.6B/tokenizer.json", sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4" },
         ],
         sources: vec![Source {
             label: "GitHub Releases",
@@ -241,7 +246,47 @@ mod tests {
                 r.sort_unstable();
                 r.dedup();
                 assert_eq!(remotes.len(), r.len(), "dep {} has duplicate remote", def.id);
+
+                // Every published asset must carry a 64-hex-char SHA-256 so the
+                // downloader can verify integrity.
+                for f in def.files {
+                    assert_eq!(
+                        f.sha256.len(),
+                        64,
+                        "dep {} file {} sha256 must be 64 hex chars",
+                        def.id,
+                        f.remote
+                    );
+                    assert!(
+                        f.sha256.chars().all(|c| c.is_ascii_hexdigit()),
+                        "dep {} file {} sha256 must be hex",
+                        def.id,
+                        f.remote
+                    );
+                }
             }
+        }
+    }
+
+    #[test]
+    fn paddleocr_dev_tree_sha256_matches_catalog() {
+        let _g = env_lock();
+        // The git-tracked dev models are the same bytes as the published
+        // assets; verify the catalog digest really matches them so a typo in
+        // catalog.rs is caught (guarded: dev files may be absent in CI).
+        let def = all().into_iter().find(|d| d.id == "paddleocr").unwrap();
+        let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models").join("ppocrv5");
+        for f in def.files {
+            let p = dev.join(f.local);
+            if !p.is_file() {
+                continue;
+            }
+            let digest = {
+                use sha2::{Digest, Sha256};
+                let bytes = std::fs::read(&p).unwrap();
+                format!("{:x}", Sha256::digest(&bytes))
+            };
+            assert_eq!(digest, f.sha256, "dev tree {} digest must match catalog", f.local);
         }
     }
 
