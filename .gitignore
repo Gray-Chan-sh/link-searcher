@@ -39,6 +39,7 @@ opencode.json
 .commandcode/
 .inkos/
 inkos.json
+.opencode/
 
 # Python venv for FunASR
 src-tauri/models/funasr/.venv/

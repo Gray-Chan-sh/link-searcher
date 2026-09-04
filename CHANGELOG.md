@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-09-04（仓库卫生：清理点文件与统一本地工具目录策略）
+
+- **移除 `.opencode/`**：仅跟踪的 `agents/tauri-auto-ui-gen.yaml` 为本地 agent 工具（opencode）的项目配置，曾用于生成 `auto_ui_e2e.rs`，但测试/CI/源码均不引用——移除跟踪并加入 `.gitignore`，与 `.commandcode/`/`.inkos/`/`.omo/` 等本地工具目录策略统一。
+- **删除重复的 `.nvmrc`**：与 `.node-version` 内容重复（均为 Node 22），保留更通用的 `.node-version`。
+- 清理后仓库根被跟踪点文件仅剩必要项：`.gitignore`/`.node-version`/`.oxlintrc.json`/`.semgrep/custom.yml` + `.github/`。
+- 验证：`git ls-files | grep '^\.'` 无多余项；`.opencode/` 本地目录保留但已忽略。
+
+---
+
 ## 2026-09-04（仓库卫生：清除误提交的本地状态 + 补交 dev 脚本）
 
 - **历史清理（两轮）**：`.commandcode/`（本机 agent shell 历史白名单 + taste 学习）与 `inkos.json`（指向本机 127.0.0.1 的 LLM 开发配置）被历史提交误带入公开仓库；另清理历史遗留大文件 `src-tauri/models/funasr/ggml-tiny.bin`（74MB，早已弃用的 whisper 模型，`fea8ece` 已移除工作树但 blob 残留在历史）。均用 `git filter-repo` 从全部历史移除，并加入 `.gitignore`。repo pack 体积 123.87MiB → 57.37MiB。备份分支 `backup-pre-cleanup` 保留以防回滚。
