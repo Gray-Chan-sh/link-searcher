@@ -17,7 +17,8 @@
 
 param(
     [switch]$SkipSystemDeps,
-    [switch]$IncludeTesseract
+    [switch]$IncludeTesseract,
+    [switch]$ForceRedownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,6 +33,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     $relaunchArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
     if ($SkipSystemDeps) { $relaunchArgs += "-SkipSystemDeps" }
     if ($IncludeTesseract) { $relaunchArgs += "-IncludeTesseract" }
+    if ($ForceRedownload) { $relaunchArgs += "-ForceRedownload" }
     try {
         $proc = Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
         exit $proc.ExitCode
@@ -92,27 +94,60 @@ $ver = "1.13.4"
 $dlDir = Join-Path $ROOT "third_party\sherpa-onnx"
 New-Item -ItemType Directory -Force -Path $dlDir | Out-Null
 $archive = Join-Path $dlDir "sherpa-onnx-v${ver}-win-x64-static-MT-Release-lib.tar.bz2"
-if (-not (Test-Path $archive)) {
+$dlUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${ver}/$(Split-Path $archive -Leaf)"
+
+# 验证 tar.bz2 可读性（tar.exe Windows 10 1803+ 自带）
+function Test-ArchiveIntact([string]$path) {
+    if (-not (Test-Path $path)) { return $false }
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    & tar -tf $path 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    return ($code -eq 0)
+}
+
+$needDownload = $false
+if ($ForceRedownload) {
+    if (Test-Path $archive) {
+        Write-Host "    -ForceRedownload：删除现有压缩包重新下载..." -ForegroundColor Yellow
+        Remove-Item $archive -Force
+    }
+    $needDownload = $true
+} elseif (-not (Test-Path $archive)) {
+    $needDownload = $true
+} elseif (-not (Test-ArchiveIntact $archive)) {
+    Write-Host "    sherpa-onnx 压缩包损坏（tar -tf 验证失败），删除重新下载..." -ForegroundColor Yellow
+    Remove-Item $archive -Force
+    $needDownload = $true
+} else {
+    Write-Host "    sherpa-onnx archive already present (verified)"
+}
+
+if ($needDownload) {
     Write-Host "==> 下载 sherpa-onnx Windows 静态库（约 18MB，一次性）..." -ForegroundColor Yellow
-    Write-Host "    URL: https://github.com/k2-fsa/sherpa-onnx/releases/download/v${ver}/$(Split-Path $archive -Leaf)"
+    Write-Host "    URL: $dlUrl"
     Write-Host "    如果下载失败，请用浏览器/加速器下载后放到:"
     Write-Host "    $archive"
     try {
         # --ssl-no-revoke：国内网络/代理下 schannel 证书吊销检查常失败
         # （CRYPT_E_NO_REVOCATION_CHECK），此处绕过吊销检查。
-        curl.exe -L --fail --retry 3 --ssl-no-revoke -o $archive `
-            "https://github.com/k2-fsa/sherpa-onnx/releases/download/v${ver}/$(Split-Path $archive -Leaf)"
+        curl.exe -L --fail --retry 3 --ssl-no-revoke -o $archive $dlUrl
         $curlExit = $LASTEXITCODE
         if ($curlExit -ne 0 -or -not (Test-Path $archive)) {
             throw "curl exit=$curlExit"
         }
+        # 下载后验证完整性
+        if (-not (Test-ArchiveIntact $archive)) {
+            Remove-Item $archive -Force
+            throw "下载的文件验证失败（tar -tf 失败）"
+        }
+        Write-Host "    下载完成，验证通过。"
     } catch {
         Write-Warning "自动下载失败（$_）。请用浏览器/加速器下载后放到："
         Write-Warning "  $archive"
-        Write-Warning "然后重跑本脚本（已存在的文件会跳过下载）。"
+        Write-Warning "然后重跑本脚本。"
     }
-} else {
-    Write-Host "    sherpa-onnx archive already present"
 }
 # 供 cargo build 使用（当前会话 + 持久化到用户环境变量）
 $env:SHERPA_ONNX_ARCHIVE_DIR = $dlDir

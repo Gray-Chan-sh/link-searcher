@@ -10,5 +10,6 @@ rem Usage:
 rem   setup-dev.bat                   run with defaults
 rem   setup-dev.bat -IncludeTesseract also install tesseract OCR CLI
 rem   setup-dev.bat -SkipSystemDeps   skip poppler/ffmpeg/tesseract install
+rem   setup-dev.bat -ForceRedownload  force re-download sherpa-onnx archive
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup-dev.ps1" %*
