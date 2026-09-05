@@ -28,6 +28,7 @@
 - **新增 `scripts/setup-dev.bat` 启动器**：cmd 双击/直接运行 `.bat` 会触发 PowerShell 执行策略报错（用户最初的痛点），bat 内用 `powershell -ExecutionPolicy Bypass -File setup-dev.ps1` 薄封装绕开策略，全部逻辑仍在 ps1 单点维护；纯英文注释避开 cmd 代码页中文乱码。README Windows 调用示例补充 bat 方式。`.gitignore` scripts 白名单同步放行 `setup-dev.bat`。
 - **setup-dev.ps1 自提权 + setup.exe `--wait`**：非提权进程启动 `setup.exe` 时 UAC fork 导致 PowerShell `&` 调用不阻塞——setup.exe 返回 0 但实际安装仍在后台进行，vswhere 复检误报"未检测到 MSVC 工具链"。改为脚本开头自检测 admin 身份，非 admin 则 `Start-Process -Verb RunAs -Wait -PassThru` 重跑自身后 `exit`，确保 setup.exe 在同进程提权上下文中执行；末尾 `Read-Host` 防提权窗口闪退；UAC 取消时 catch 给出手动运行指引。
 - **setup-dev.ps1 移除 `--wait`**：VS Installer 4.9.x 的 `setup.exe` 不支持 `--wait` 选项（exit 87 = 命令行解析失败，整个安装未执行）。自提权后 `& $setupExe` 在同进程内天然阻塞到 setup.exe 退出，无需额外等待标志。错误提示从"请用管理员身份重跑"改为"请打开 VS Installer 手动补装"（已在提权上下文中，重提权无意义）。
+- **setup-dev.ps1 加 `--noUpdateInstaller` + 复检重试循环**：setup.exe 是 bootstrapper，"Adding packages from --add" 后立即 exit 0 但实际安装未执行——安装器在尝试自更新时因 `Error 0x80070003`（temp 文件缺失）卡死。加 `--noUpdateInstaller` 跳过自更新直奔组件安装；复检从"一次性 vswhere 查询"改为 6 次 × 10s 重试循环（共 60s），等 bootstrapper 触发的后台安装完成后 vswhere 元数据刷新。
 
 ---
 

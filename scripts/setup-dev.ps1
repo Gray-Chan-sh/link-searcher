@@ -243,9 +243,9 @@ $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.ex
 $setupExists = Test-Path $setupExe
 
 # 安装所需的组件参数（每个 token 必须是独立 argv，不能拼成一个字符串）。
-# 不加 --wait：VS Installer 4.9.x 的 setup.exe 不支持该选项（exit 87），
-# 且脚本开头已自提权，& 调用在同进程内天然阻塞到 setup.exe 退出。
-$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100")
+# --noUpdateInstaller：跳过 VS Installer 自更新（自更新会因 temp 文件缺失卡死）。
+#   setup.exe 是 bootstrapper，exit 0 不代表安装完成——下方用重试循环等真正装完。
+$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100", "--noUpdateInstaller")
 
 if (-not (Test-MsvcPresent)) {
     Write-Host "==> 未检测到可用的 MSVC 工具链（link.exe 依赖它）。" -ForegroundColor Yellow
@@ -278,11 +278,23 @@ if (-not (Test-MsvcPresent)) {
             Write-Host "!! 安装器返回失败 exit=$exit。请打开 VS Installer 手动补装「使用 C++ 的桌面开发」工作负载。" -ForegroundColor Yellow
         }
 
-        # 复检：刚装完 vswhere 元数据即可见（无需重开终端）。
-        if (Test-MsvcPresent) {
+        # 复检：setup.exe 是 bootstrapper，exit 0 后安装可能仍在后台进行。
+        # 重试循环最多 6 次 × 10s = 60s，等 vswhere 元数据刷新。
+        $msvcReady = $false
+        for ($i = 0; $i -lt 6; $i++) {
+            if ($i -gt 0) {
+                Write-Host "    等待安装完成...（$($i * 10)s）" -ForegroundColor Yellow
+                Start-Sleep -Seconds 10
+            }
+            if (Test-MsvcPresent) {
+                $msvcReady = $true
+                break
+            }
+        }
+        if ($msvcReady) {
             Write-Host "    MSVC 工具链就绪。"
         } else {
-            Write-Host "!! 复检仍未检测到 MSVC 工具链。请关闭本终端重新打开后重跑本脚本。" -ForegroundColor Yellow
+            Write-Host "!! 复检仍未检测到 MSVC 工具链。请打开 VS Installer 手动补装「使用 C++ 的桌面开发」工作负载。" -ForegroundColor Yellow
         }
     }
 } else {
