@@ -52,3 +52,6 @@ scripts/*
 !scripts/setup-dev.sh
 !scripts/setup-dev.ps1
 !scripts/setup-dev.bat
+!scripts/clean-dev.sh
+!scripts/clean-dev.ps1
+!scripts/clean-dev.bat

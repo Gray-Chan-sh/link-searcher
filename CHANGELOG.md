@@ -35,6 +35,7 @@
 - **修复 fsync_tree 在 Windows 上 os error 5**：Rust `File::open` 只请求 `GENERIC_READ`，而 Windows `FlushFileBuffers` 要求句柄带 `GENERIC_WRITE` → `fsync_tree` 每次迁移都挂。改用 `OpenOptions::new().write(true)` 显式加写，打不开则跳过（fsync 是持久化优化非正确性要求）；去掉末尾 `File::open(root)` 目录 fsync——目录需 `FILE_FLAG_BACKUP_SEMANTICS` 才能打开，`File::open` 不传同样报 error 5。
 - **setup-dev.ps1 配置 lld-link 加速 cargo 链接**：MSVC `link.exe` 链接 300+ crate 慢，换 `lld-link`（LLVM 内置，比 link.exe 快 3-5×）。脚本检测 `lld-link` 缺失时 winget 装 LLVM（脚本已自提权），装后刷新 PATH，并把 `linker = "lld-link"` 写入项目级 `src-tauri/.cargo/config.toml`（`[target.x86_64-pc-windows-msvc]` 段，已被 .gitignore）。LLVM 装失败则跳过，cargo 仍可用 MSVC 链接。
 - **统一启动依赖检查界面（FunASR 并入 SetupWizard）**：启动时 FunASR 用旧的原生 `confirm()` 弹窗（`checkDependencies`/`installFunasr` 旧路径）、PaddleOCR 用新版 SetupWizard overlay，两套机制并存导致界面不一致。修复：`catalog.rs` 把 FunASR 从 `recommended:false` 改为 `true`（提示文案去掉「可选」），它会出现在 SetupWizard 首次向导列表；`App.tsx` 删除 legacy confirm useEffect、`funasrCheckedRef` 及不再需要的 `checkDependencies`/`installFunasr`/`confirm`/`useRef` import。现在启动只弹一个 SetupWizard，可统一安装/跳过。funasr 的安装仍保留了 settings 页「依赖中心」和 OCR tab 的手动入口（`installFunasr` 仍在用，非死代码）。
+- **新增 `scripts/clean-dev.*` 一键清理构建产物**：删 `src-tauri/target/`、`node_modules/`、`dist/`/`dist-ssr/`、`third_party/sherpa-onnx/`，释放 10GB+ 空间。保留系统级配置（cargo/npm 镜像、lld-link、brew/apt/winget 装的 bin 工具）。`-y`/`-Yes` 跳过确认。`.gitignore` 白名单同步放行。
 
 ---
 
