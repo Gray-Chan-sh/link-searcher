@@ -123,9 +123,9 @@ fn funasr() -> DepDef {
     DepDef {
         id: "funasr",
         name: "FunASR 语音转写模型",
-        recommended: false,
+        recommended: true,
         size_bytes: 850 * 1024 * 1024,
-        hint: "音频转文字（约 850MB，可选）",
+        hint: "音频转文字（约 850MB）",
         files: &[
             FileSpec { remote: "funasr-encoder_adaptor.int8.onnx", local: "encoder_adaptor.int8.onnx", sha256: "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422" },
             FileSpec { remote: "funasr-llm.int8.onnx", local: "llm.int8.onnx", sha256: "dfbf9aa3be41bccc257587f151e15c63fbe1b549f2b517f5ccd5bdce3bf4322a" },

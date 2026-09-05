@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, useNavigate } from 'react-router-dom'
 import { useTheme } from './theme'
 import { useI18n } from './i18n'
-import { confirm, alert, isTauri, getToken, setToken } from './utils/platform'
+import { alert, isTauri, getToken, setToken } from './utils/platform'
 import { invoke } from './api/client'
-import { checkDependencies, getSetupStatus, installFunasr } from './api/settings'
+import { getSetupStatus } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
   SunIcon, MoonIcon, MonitorIcon,
@@ -33,7 +33,6 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('')
   const [setupPending, setSetupPending] = useState(false)
   const [depsMissingCount, setDepsMissingCount] = useState(0)
-  const funasrCheckedRef = useRef(false)
 
   useEffect(() => {
     const urlToken = new URLSearchParams(window.location.search).get('token')
@@ -137,22 +136,6 @@ export default function App() {
     } catch { /* ignore */ }
     navigate('/settings')
   }
-
-  useEffect(() => {
-    const checked = sessionStorage.getItem('funasr_prompt_skipped') === '1'
-    if (checked || funasrCheckedRef.current || setupPending) return
-    funasrCheckedRef.current = true
-    checkDependencies().then(async deps => {
-      const funasr = deps.find(d => d.name.includes('FunASR'))
-      if (!funasr || funasr.available) return
-      const confirmed = await confirm(t('confirm_install_funasr'), t('funasr_install_prompt'))
-      if (confirmed) {
-        await installFunasr().catch(e => console.error('FunASR install failed:', e))
-      } else {
-        sessionStorage.setItem('funasr_prompt_skipped', '1')
-      }
-    }).catch(() => {})
-  }, [setupPending])
 
   const handleOnboardingClose = () => {
     setShowOnboarding(false)
