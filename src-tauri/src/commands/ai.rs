@@ -1453,11 +1453,17 @@ pub(crate) async fn prepare_conversation_prompt(
     }
 
     // Layer 1: Additional BM25 hits (not already in scope).
+    // 严格模式（仅依据文档）：scope/mention 文件已在 Layer0 全部注入，
+    // 这里不再注入任何全库命中，避免无关文件混入 evidence。
     let inject_limit = if full_recall { all_hits.len().max(1) } else { MAX_CONTENT_INJECT };
-    let content_hits: Vec<&ScoredHit> = all_hits.iter()
-        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
-        .take(inject_limit)
-        .collect();
+    let content_hits: Vec<&ScoredHit> = if strict_docs {
+        Vec::new()
+    } else {
+        all_hits.iter()
+            .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
+            .take(inject_limit)
+            .collect()
+    };
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
         .saturating_sub(ANSWER_RESERVE);
@@ -2039,9 +2045,13 @@ pub struct ChatSession {
     #[serde(default)]
     pub retrieval_scope: Vec<String>,
     /// P2 严格模式：范围内无命中时拒绝回答（会话级，可切换）。
-    #[serde(default)]
+    /// 默认 true：旧会话（该功能加入前）无此字段，缺失时应沿用
+    /// 功能初衷"仅依据引用文档"，而非静默退化为全库检索。
+    #[serde(default = "default_strict_docs")]
     pub strict_docs: bool,
 }
+
+fn default_strict_docs() -> bool { true }
 
 
 #[derive(Debug, Clone, serde::Serialize)]

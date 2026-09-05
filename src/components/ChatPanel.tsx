@@ -397,7 +397,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
     try {
       // ponytail: smart_search_stream bypasses scope/semantic/rewrite; always use conversation path
-      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? false, session.full_recall ?? false)
+      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? true, session.full_recall ?? false)
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
       sendingRef.current = false

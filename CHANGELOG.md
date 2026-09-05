@@ -38,6 +38,8 @@
 - **新增 `scripts/clean-dev.*` 一键清理构建产物**：删 `src-tauri/target/`、`node_modules/`、`dist/`/`dist-ssr/`、`third_party/sherpa-onnx/`，释放 10GB+ 空间。保留系统级配置（cargo/npm 镜像、lld-link、brew/apt/winget 装的 bin 工具）。`-y`/`-Yes` 跳过确认。`.gitignore` 白名单同步放行。
 - **clean-dev 增加数据目录模型清理**：按用户要求，清理时一并删除 PaddleOCR/BGE/FunASR 模型（数据目录 `~/Library/Application Support/link-searcher/models`、`$LOCALAPPDATA\link-searcher\models`、Linux `~/.local/share/link-searcher/models`），回到最初环境；脚本头部注释同步更新为"模型亦清理"。
 - **依赖检查集中到「依赖中心」+ 系统包一键安装**：设置页「索引」tab 的旧 dependencies 区块（`check_dependencies` 旧命令，PaddleOCR/Poppler 等重复展示、只有 FunASR 有安装按钮）删除，依赖统一由「依赖中心」（DepsTab，`get_setup_status`）管理。Poppler/FFmpeg 等系统包此前 `files:[]` 导致 `install_dep` 直接报"需手动安装"——`catalog.rs` 给 `DepDef` 新增 `system_package` 字段（winget/brew/apt 命令），`deps/commands.rs` 新增 `install_system_package()`，缺失时走平台包管理器一键安装。同步清理 `App.tsx`/`Settings.tsx`/`IndexTab.tsx`/`useSettingsOcr.ts` 中遗留的 FunASR 手动安装逻辑（`installFunasr`/`checkDependencies`/`handleInstallFunasr`）——启动、设置页、依赖中心现在只有一套依赖 UI。
+- **修复 RAG 严格模式（仅依据文档）未过滤全库命中**：`strict_docs=true` 时 `content_hits` 本应只注入 scope/mention 内文件，但代码只做了"范围内无命中时拒绝"，Layer1（`all_hits.take(inject_limit)`）把 BM25+语义+路径三路**全库检索**的命中一并注入，导致用户"只引用一个文档"却在 evidence 出现几十个无关文件。修复：`strict_docs` 时 Layer1 注入置空（scope/mention 文件已在 Layer0 全部注入），彻底杜绝无关文件混入。
+- **旧会话 `strict_docs` 默认迁移为 true**：`ChatSession.strict_docs` 原 `#[serde(default)]` 给 bool 默认 false——功能加入前创建的旧会话缺此字段，恢复后静默退化为全库检索，与 UI 新建默认 true 矛盾。改为 `#[serde(default = "default_strict_docs")]` 返回 true（沿用功能初衷"仅依据引用文档"），前端 `ChatPanel` 传参的 `?? false` 同步改 `?? true`。lib 单测 234 全过。
 
 ---
 
