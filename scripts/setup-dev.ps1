@@ -208,35 +208,46 @@ function Test-BuildToolsInstalled {
     Test-WingetPackageInstalled "Microsoft.VisualStudio.2022.BuildTools"
 }
 
-# 用 VS Installer 补装/安装 C++ 组件。winget install 对已安装的产品会
-# 复用现有安装并追加 --override 里 --add 的组件，因此同一命令既覆盖
-# 全新安装也覆盖"装了本体但缺 C++ 组件"的修复。
-function Install-VcToolchain {
-    Write-Host "==> 安装/补装 VS Build Tools C++ 组件（C++ 桌面开发 + Windows 11 SDK）..." -ForegroundColor Yellow
+# 用 VS Installer 补装/安装 C++ 组件。winget 对"已安装"的包默认只尝试
+# 升级，找不到新版就直接退出，根本不会把 --override --add 传给 installer
+# （实测踩坑）——所以补装场景必须加 --force 强制重跑安装器并携带组件参数。
+function Install-VcToolchain([bool]$force) {
+    if ($force) {
+        Write-Host "==> 补装 VS Build Tools C++ 组件（现有安装已存在，--force 重跑安装器）..." -ForegroundColor Yellow
+    } else {
+        Write-Host "==> 安装 VS Build Tools（C++ 桌面开发 + Windows 11 SDK）..." -ForegroundColor Yellow
+    }
     Write-Host "    体积较大（数 GB），下载安装需要一段时间；如弹出 UAC 请点「是」。"
     $prevEAP = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
-    winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override `
-        "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
+    $wArgs = @("install", "-e", "--id", "Microsoft.VisualStudio.2022.BuildTools")
+    if ($force) { $wArgs += "--force" }
+    $wArgs += @("--override", "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100")
+    winget @wArgs
     $exit = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($exit -eq 0 -or $exit -eq -1978335189) {
-        Write-Host "    VS Build Tools 组件安装完成。"
+        Write-Host "    VS Build Tools 组件安装流程已执行完成。"
     } else {
         Write-Host "!! VS Build Tools 组件安装失败（exit=$exit）。请手动重试：" -ForegroundColor Yellow
-        Write-Host '       winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
+        if ($force) {
+            Write-Host '       winget install -e --id Microsoft.VisualStudio.2022.BuildTools --force --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
+        } else {
+            Write-Host '       winget install -e --id Microsoft.VisualStudio.2022.BuildTools --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.Windows11SDK.26100"'
+        }
     }
 }
 
 if (-not (Test-MsvcPresent)) {
     Write-Host "==> 未检测到可用的 MSVC 工具链（link.exe 依赖它）。" -ForegroundColor Yellow
     if (Get-Command winget -ErrorAction SilentlyContinue) {
-        if (Test-BuildToolsInstalled) {
-            Write-Host "    检测到 Build Tools 已安装但缺少 C++ 组件 —— 正在补装..." -ForegroundColor Yellow
+        $needsForce = Test-BuildToolsInstalled
+        if ($needsForce) {
+            Write-Host "    检测到 Build Tools 已安装但缺少 C++ 组件 —— 以 --force 补装组件..." -ForegroundColor Yellow
         } else {
             Write-Host "    Build Tools 未安装 —— 正在安装..." -ForegroundColor Yellow
         }
-        Install-VcToolchain
+        Install-VcToolchain -force $needsForce
         # 补装后复检；刚装完 vswhere 即可见（无需重开终端，vswhere 读安装元数据）。
         if (Test-MsvcPresent) {
             Write-Host "    MSVC 工具链就绪。"
