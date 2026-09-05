@@ -424,10 +424,14 @@ fn fsync_tree(root: &std::path::Path) -> std::io::Result<()> {
     for entry in walkdir::WalkDir::new(root) {
         let entry = entry?;
         if entry.file_type().is_file() {
-            std::fs::File::open(entry.path())?.sync_all()?;
+            // Windows: FlushFileBuffers 要求句柄带 GENERIC_WRITE，而 File::open
+            // 只请求 GENERIC_READ → 用 OpenOptions 显式加写；打不开则跳过
+            // （fsync 是持久化优化，非正确性要求）。
+            if let Ok(f) = std::fs::OpenOptions::new().write(true).open(entry.path()) {
+                let _ = f.sync_all();
+            }
         }
     }
-    std::fs::File::open(root)?.sync_all()?;
     Ok(())
 }
 
