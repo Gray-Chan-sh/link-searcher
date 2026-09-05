@@ -91,6 +91,9 @@ fn dist_dir() -> std::path::PathBuf {
 }
 
 fn mime_from_path(path: &str) -> &'static str {
+    if path.is_empty() || path == "/" {
+        return "text/html; charset=utf-8";
+    }
     let ext = path.rsplit('.').next().unwrap_or("");
     match ext {
         "html" => "text/html; charset=utf-8",
