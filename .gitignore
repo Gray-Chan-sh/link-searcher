@@ -51,3 +51,4 @@ node_modules/
 scripts/*
 !scripts/setup-dev.sh
 !scripts/setup-dev.ps1
+!scripts/setup-dev.bat

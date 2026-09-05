@@ -21,6 +21,7 @@
 - **模型下载镜像链**：`deps/download.rs` 从单一 ghfast.top 镜像升级为镜像链——用户 `LINK_SEARCHER_GH_MIRROR`（若设）→ ghfast.top → gh-proxy.com → GitHub 直连兜底；`LINK_SEARCHER_NO_MIRROR=1` 仍可完全跳过。实测（2026-09，国内网络）：ghfast.top ≈4.3MB/s、gh-proxy.com ≈3.7MB/s，而 GitHub 直连仅 ≈29KB/s（差 ~150 倍）——单镜像失效时不再直接掉到龟速直连。新增 4 个 `effective_urls` 单测（镜像顺序/用户镜像前置/NO_MIRROR/非 GitHub 源直连）。
 - **模型下载断点续传 + SHA-256 完整性校验**：① `.part` 中断文件不再删除重下——下次启动/换源时从已有字节数发 HTTP `Range` 续传（镜像与 GitHub 直连均实测支持 206）；服务器返回 416（部分文件过期/源变小）时自动丢弃 `.part` 从头重下。② `catalog.rs` 每个发布资产登记 SHA-256（取自 GitHub release digest，dev 树 PaddleOCR 实测哈希一致），下载完成后校验通过才 `rename` 落地；**已存在的损坏文件（上次异常退出留下）会被校验识别并自动重下**，不再误判为就绪。新增 6 个单测（sha256 格式/dev 树哈希一致性/file_sha256），并用手动临时 e2e 验证了「损坏文件自愈」与「真实 Range 续传」两条链路（均已通过，临时测试已删除）。
 - **setup-dev.ps1 Rust 检测逻辑修复**：winget 对已装 Rustlang.Rustup 执行 install 会返回 `0x8A15002B`（UPDATE_NOT_APPLICABLE，无可用更新），此前被误判为安装失败并打印误导性指引。现在：先 `winget list` 探测是否已装——已装但 cargo 不在 PATH（装后未重开终端）时明确提示重开终端而非重装；未装才 install，且该退出码视为成功。
+- **新增 `scripts/setup-dev.bat` 启动器**：cmd 双击/直接运行 `.bat` 会触发 PowerShell 执行策略报错（用户最初的痛点），bat 内用 `powershell -ExecutionPolicy Bypass -File setup-dev.ps1` 薄封装绕开策略，全部逻辑仍在 ps1 单点维护；纯英文注释避开 cmd 代码页中文乱码。README Windows 调用示例补充 bat 方式。`.gitignore` scripts 白名单同步放行 `setup-dev.bat`。
 
 ---
 

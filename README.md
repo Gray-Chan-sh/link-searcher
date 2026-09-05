@@ -153,11 +153,13 @@
 ```bash
 # macOS / Linux
 ./scripts/setup-dev.sh
-# Windows（PowerShell）
+# Windows —— 两种方式任选（bat 会自动绕过 PowerShell 执行策略）
+.\scripts\setup-dev.bat
+# 或 PowerShell 里直接跑 ps1（需先放行执行策略）
 .\scripts\setup-dev.ps1
 ```
 
-脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；并自动检测安装可选系统依赖 poppler/ffmpeg（macOS 走 Homebrew、Debian/Ubuntu 走 apt、Windows 走 winget；`--skip-system-deps` / `-SkipSystemDeps` 跳过，`--include-tesseract` / `-IncludeTesseract` 加装 tesseract）。Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`。
+脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；并自动检测安装可选系统依赖 poppler/ffmpeg（macOS 走 Homebrew、Debian/Ubuntu 走 apt、Windows 走 winget；`--skip-system-deps` / `-SkipSystemDeps` 跳过，`--include-tesseract` / `-IncludeTesseract` 加装 tesseract）。Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`；自动补装 Rust 与 VS Build Tools C++ 组件（cargo 构建必需，缺失时触发，UAC 弹窗点「是」即可）。
 
 ### 开发运行
 
