@@ -242,8 +242,10 @@ function Get-VsInstallPath {
 $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
 $setupExists = Test-Path $setupExe
 
-# 安装构所需的组件参数（每个 token 必须是独立 argv，不能拼成一个字符串）。
-$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100", "--wait")
+# 安装所需的组件参数（每个 token 必须是独立 argv，不能拼成一个字符串）。
+# 不加 --wait：VS Installer 4.9.x 的 setup.exe 不支持该选项（exit 87），
+# 且脚本开头已自提权，& 调用在同进程内天然阻塞到 setup.exe 退出。
+$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100")
 
 if (-not (Test-MsvcPresent)) {
     Write-Host "==> 未检测到可用的 MSVC 工具链（link.exe 依赖它）。" -ForegroundColor Yellow
@@ -253,7 +255,7 @@ if (-not (Test-MsvcPresent)) {
         Write-Host "    请从 https://visualstudio.microsoft.com/downloads/ 下载 Build Tools，"
         Write-Host "    安装时勾选「使用 C++ 的桌面开发」工作负载。"
     } else {
-        Write-Host "    即将启动官方 VS 安装器（会弹 UAC 时请点「是」；进度窗口装完会自动关闭）..." -ForegroundColor Yellow
+        Write-Host "    即将启动官方 VS 安装器（进度窗口装完会自动关闭）..." -ForegroundColor Yellow
         $installedPath = Get-VsInstallPath
         if ($installedPath) {
             # BuildTools/VS 已存在但缺 C++ 组件 → modify 已有装加组件
@@ -273,7 +275,7 @@ if (-not (Test-MsvcPresent)) {
         $ErrorActionPreference = $prevEAP
 
         if ($exit -ne 0) {
-            Write-Host "!! 安装器返回失败 exit=$exit。请用管理员身份重跑（setup 有时需管理员权限）。" -ForegroundColor Yellow
+            Write-Host "!! 安装器返回失败 exit=$exit。请打开 VS Installer 手动补装「使用 C++ 的桌面开发」工作负载。" -ForegroundColor Yellow
         }
 
         # 复检：刚装完 vswhere 元数据即可见（无需重开终端）。
