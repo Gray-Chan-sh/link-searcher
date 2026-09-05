@@ -32,6 +32,8 @@
 - **setup-dev.ps1 sherpa-onnx 压缩包完整性校验 + `-ForceRedownload`**：此前脚本仅 `Test-Path` 查存在性——下载中断/不完整的 `.tar.bz2` 会被当"already present"跳过，cargo build 解压时 panic。改为：存在时用 `tar -tf`（tar.exe Windows 10 1803+ 自带）验证可读性，损坏自动删除重下；下载完成后再次 `tar -tf` 验证，不通过则删除报错；新增 `-ForceRedownload` 参数跳过验证直接删了重下。`setup-dev.bat` Usage 注释同步更新。
 - **setup-dev.ps1 sherpa-onnx 下载改用国内镜像链**：此前脚本直接从 GitHub 原链下载，国内约 29 KB/s。改为与主程序 `deps/download.rs` 一致的镜像链——ghfast.top（≈4.3 MB/s）→ gh-proxy.com（≈3.7 MB/s）→ GitHub 直连兜底，依次尝试，首个成功即停。每个镜像显示"尝试/成功/失败"状态行。
 - **修复 Windows 数据目录迁移 os error 5**：`copy_dir_recursive` 拷贝 Tantivy 索引文件时，被 reader mmap 锁定的文件（`meta.lock` 等）和独占锁文件在 Windows 上返回 `PermissionDenied`（os error 5），导致迁移失败。改为遇 `PermissionDenied` 跳过该文件并 WARN 日志——锁文件是临时性的，新位置重新打开索引时自动重建。同时错误消息附带文件路径便于排查。（`src-tauri/src/commands/config.rs`）
+- **修复 fsync_tree 在 Windows 上 os error 5**：Rust `File::open` 只请求 `GENERIC_READ`，而 Windows `FlushFileBuffers` 要求句柄带 `GENERIC_WRITE` → `fsync_tree` 每次迁移都挂。改用 `OpenOptions::new().write(true)` 显式加写，打不开则跳过（fsync 是持久化优化非正确性要求）；去掉末尾 `File::open(root)` 目录 fsync——目录需 `FILE_FLAG_BACKUP_SEMANTICS` 才能打开，`File::open` 不传同样报 error 5。
+- **setup-dev.ps1 配置 lld-link 加速 cargo 链接**：MSVC `link.exe` 链接 300+ crate 慢，换 `lld-link`（LLVM 内置，比 link.exe 快 3-5×）。脚本检测 `lld-link` 缺失时 winget 装 LLVM（脚本已自提权），装后刷新 PATH，并把 `linker = "lld-link"` 写入项目级 `src-tauri/.cargo/config.toml`（`[target.x86_64-pc-windows-msvc]` 段，已被 .gitignore）。LLVM 装失败则跳过，cargo 仍可用 MSVC 链接。
 
 ---
 

@@ -88,7 +88,45 @@ if (-not (Test-Path $npmrc)) {
     Write-Host "    .npmrc already present"
 }
 
-# 3. sherpa-onnx 预编译库（构建期从 GitHub 拉，国内易失败）
+# 3. 项目级 .cargo/config.toml — lld-link（比 MSVC link.exe 快 3-5×）
+#    LLVM 未装时跳过（winget 安装需 UAC，脚本已自提权）。
+$cargoProjDir = Join-Path $ROOT "src-tauri\.cargo"
+New-Item -ItemType Directory -Force -Path $cargoProjDir | Out-Null
+$cargoProjConfig = Join-Path $cargoProjDir "config.toml"
+$lldBlock = @"
+
+[target.x86_64-pc-windows-msvc]
+linker = "lld-link"
+"@
+$lldConfigured = Test-Path $cargoProjConfig -and ((Get-Content $cargoProjConfig -Raw) -match "lld-link")
+if (-not $lldConfigured) {
+    $lldAvailable = Get-Command lld-link -ErrorAction SilentlyContinue
+    if (-not $lldAvailable) {
+        Write-Host "==> 未检测到 lld-link（LLVM linker），正在 winget 安装 LLVM..." -ForegroundColor Yellow
+        if (Get-Command winget -ErrorAction SilentlyContinue) {
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            winget install -e --id LLVM.LLVM --silent --accept-package-agreements --accept-source-agreements
+            $exit = $LASTEXITCODE
+            $ErrorActionPreference = $prevEAP
+            if ($exit -eq 0) {
+                Write-Host "    LLVM 安装完成"
+            } else {
+                Write-Host "    LLVM 安装失败（exit=$exit），跳过 lld-link 配置（cargo 仍可用 MSVC 链接）" -ForegroundColor Yellow
+            }
+        }
+        # winget 安装后需重开终端，直接刷新 PATH 当前会话
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    }
+    if (Get-Command lld-link -ErrorAction SilentlyContinue) {
+        Add-Content -Path $cargoProjConfig -Value $lldBlock
+        Write-Host "    lld-link configured -> $cargoProjConfig"
+    }
+} else {
+    Write-Host "    lld-link already configured"
+}
+
+# 4. sherpa-onnx 预编译库（构建期从 GitHub 拉，国内易失败）
 #    sherpa-onnx-sys 的 build.rs 会读 SHERPA_ONNX_ARCHIVE_DIR，找不到才联网。
 $ver = "1.13.4"
 $dlDir = Join-Path $ROOT "third_party\sherpa-onnx"
@@ -173,7 +211,7 @@ $env:SHERPA_ONNX_ARCHIVE_DIR = $dlDir
 [Environment]::SetEnvironmentVariable("SHERPA_ONNX_ARCHIVE_DIR", $dlDir, "User")
 Write-Host "    SHERPA_ONNX_ARCHIVE_DIR=$dlDir (已写入用户环境变量)"
 
-# 4. 可选系统依赖：自动检测缺失并 winget 安装
+# 5. 可选系统依赖：自动检测缺失并 winget 安装
 if (-not $SkipSystemDeps) {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Warning "未检测到 winget（Windows 10 1709+ / 11 自带；也可从 Microsoft Store 安装 App Installer）。"
@@ -220,7 +258,7 @@ if (-not $SkipSystemDeps) {
     }
 }
 
-# 5. 工具链检查与安装
+# 6. 工具链检查与安装
 Write-Host ""
 
 # winget 已装检查 helper：`winget list --id X` 退出码为 0（找到包）即 $true。
