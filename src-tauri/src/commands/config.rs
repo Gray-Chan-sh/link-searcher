@@ -432,16 +432,26 @@ fn fsync_tree(root: &std::path::Path) -> std::io::Result<()> {
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
-    std::fs::create_dir_all(dst).map_err(|e| format!("{e}"))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("{e}"))? {
-        let entry = entry.map_err(|e| format!("{e}"))?;
-        let file_type = entry.file_type().map_err(|e| format!("{e}"))?;
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录 {dst:?} 失败: {e}"))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("读取目录 {src:?} 失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("遍历 {src:?} 失败: {e}"))?;
+        let file_type = entry.file_type().map_err(|e| format!("获取类型 {src:?} 失败: {e}"))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if file_type.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
-            std::fs::copy(&src_path, &dst_path).map_err(|e| format!("{e}"))?;
+            // Windows 上 Tantivy 索引文件被 reader mmap 锁定、
+            // meta.lock 被独占锁定，fs::copy 返回 PermissionDenied。
+            // 这些文件是临时性的（锁文件/可重建的段文件），
+            // 新位置重新打开索引时自动重建，跳过即可。
+            if let Err(e) = std::fs::copy(&src_path, &dst_path) {
+                if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    log::warn!("[MIGRATE] 跳过被锁定的文件 {src_path:?}: {e}");
+                    continue;
+                }
+                return Err(format!("复制 {src_path:?} -> {dst_path:?} 失败: {e}"));
+            }
         }
     }
     Ok(())

@@ -31,6 +31,7 @@
 - **setup-dev.ps1 加 `--noUpdateInstaller` + 复检重试循环**：setup.exe 是 bootstrapper，"Adding packages from --add" 后立即 exit 0 但实际安装未执行——安装器在尝试自更新时因 `Error 0x80070003`（temp 文件缺失）卡死。加 `--noUpdateInstaller` 跳过自更新直奔组件安装；复检从"一次性 vswhere 查询"改为 6 次 × 10s 重试循环（共 60s），等 bootstrapper 触发的后台安装完成后 vswhere 元数据刷新。
 - **setup-dev.ps1 sherpa-onnx 压缩包完整性校验 + `-ForceRedownload`**：此前脚本仅 `Test-Path` 查存在性——下载中断/不完整的 `.tar.bz2` 会被当"already present"跳过，cargo build 解压时 panic。改为：存在时用 `tar -tf`（tar.exe Windows 10 1803+ 自带）验证可读性，损坏自动删除重下；下载完成后再次 `tar -tf` 验证，不通过则删除报错；新增 `-ForceRedownload` 参数跳过验证直接删了重下。`setup-dev.bat` Usage 注释同步更新。
 - **setup-dev.ps1 sherpa-onnx 下载改用国内镜像链**：此前脚本直接从 GitHub 原链下载，国内约 29 KB/s。改为与主程序 `deps/download.rs` 一致的镜像链——ghfast.top（≈4.3 MB/s）→ gh-proxy.com（≈3.7 MB/s）→ GitHub 直连兜底，依次尝试，首个成功即停。每个镜像显示"尝试/成功/失败"状态行。
+- **修复 Windows 数据目录迁移 os error 5**：`copy_dir_recursive` 拷贝 Tantivy 索引文件时，被 reader mmap 锁定的文件（`meta.lock` 等）和独占锁文件在 Windows 上返回 `PermissionDenied`（os error 5），导致迁移失败。改为遇 `PermissionDenied` 跳过该文件并 WARN 日志——锁文件是临时性的，新位置重新打开索引时自动重建。同时错误消息附带文件路径便于排查。（`src-tauri/src/commands/config.rs`）
 
 ---
 
