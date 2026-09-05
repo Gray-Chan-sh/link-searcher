@@ -23,6 +23,26 @@ param(
 $ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent $PSScriptRoot
 
+# Self-elevate: VS Build Tools 安装需要管理员权限。
+# 非提权进程启动 setup.exe 时，UAC fork 导致 PowerShell 的 & 调用不阻塞，
+# setup.exe 返回 0 但实际安装仍在后台进行，复检 vswhere 误报失败。
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "==> 需要管理员权限（VS Build Tools 安装），正在提权重跑..." -ForegroundColor Yellow
+    $relaunchArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $PSCommandPath)
+    if ($SkipSystemDeps) { $relaunchArgs += "-SkipSystemDeps" }
+    if ($IncludeTesseract) { $relaunchArgs += "-IncludeTesseract" }
+    try {
+        $proc = Start-Process powershell -Verb RunAs -ArgumentList $relaunchArgs -Wait -PassThru
+        exit $proc.ExitCode
+    } catch {
+        Write-Host "!! 用户取消了提权。请以管理员身份手动运行：" -ForegroundColor Red
+        Write-Host "    右键 PowerShell → 以管理员身份运行 → .\scripts\setup-dev.ps1"
+        Read-Host "按 Enter 退出"
+        exit 1
+    }
+}
+
 Write-Host "==> Link-Searcher dev setup (root: $ROOT)" -ForegroundColor Cyan
 
 # 1. Cargo 镜像（rsproxy.cn）
@@ -223,7 +243,7 @@ $setupExe = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.ex
 $setupExists = Test-Path $setupExe
 
 # 安装构所需的组件参数（每个 token 必须是独立 argv，不能拼成一个字符串）。
-$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100")
+$vsArgs = @("--add", "Microsoft.VisualStudio.Workload.VCTools", "--add", "Microsoft.VisualStudio.Component.Windows11SDK.26100", "--wait")
 
 if (-not (Test-MsvcPresent)) {
     Write-Host "==> 未检测到可用的 MSVC 工具链（link.exe 依赖它）。" -ForegroundColor Yellow
@@ -275,3 +295,6 @@ Write-Host "    cargo build"
 Write-Host ""
 Write-Host "    注意：winget 装完的 poppler/ffmpeg/tesseract 需要重新打开终端才在 PATH 中；"
 Write-Host "    若 `cargo build` 报找不到，请开新终端再试。"
+Write-Host ""
+Write-Host "按 Enter 退出..." -ForegroundColor Cyan
+Read-Host
