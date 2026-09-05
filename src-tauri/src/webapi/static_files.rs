@@ -30,7 +30,12 @@ async fn proxy_to_vite(path: &str) -> Response {
     match tokio::task::spawn_blocking(move || ureq::get(&url_clone).call()).await {
         Ok(Ok(response)) => {
             let status = StatusCode::from_u16(response.status()).unwrap_or(StatusCode::BAD_GATEWAY);
-            let mime = mime_from_path(path);
+            // Trust Vite's own Content-Type (handles tsx/ts/import 等动态模块，
+            // 自己按扩展名猜会漏 tsx/ts 等导致浏览器当文件下载)。
+            let mime = response
+                .header("content-type")
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| mime_from_path(path).to_string());
 
             let mut body = Vec::new();
             if response.into_reader().read_to_end(&mut body).is_err() {
