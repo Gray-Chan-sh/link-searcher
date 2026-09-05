@@ -1515,7 +1515,37 @@ pub(crate) async fn prepare_conversation_prompt(
 
     let max_context_chars = if full_recall { CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE } else { 50_000 };
     let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
-    log::info!("[AI]   context assembled: strict={} docs_len={} context_chars={} mention_resolved={} mention_has_content={}", strict_docs, docs.len(), context.chars().count(), mention_resolved.len(), mention_has_content);
+
+    // Layer 2: Chat history recall — keyword-match previous AI responses.
+    // 不走 Tantivy（聊天消息未索引），在内存中对历史回答做关键词匹配，
+    // 命中的回答注入 2000 字摘录到"对话回忆"段，让 LLM 能回忆之前讨论过的内容。
+    const CHAT_RECALL_BUDGET: usize = 20_000;
+    const CHAT_RECALL_PER_MSG: usize = 2_000;
+    let mut chat_recall: Vec<String> = Vec::new();
+    let mut recall_budget = CHAT_RECALL_BUDGET;
+    if messages.len() > 1 && !retrieval_kws.is_empty() {
+        for (i, m) in messages.iter().enumerate().take(messages.len().saturating_sub(1)) {
+            if m.role != "assistant" || m.content.trim().is_empty() { continue; }
+            let content_lower = m.content.to_lowercase();
+            let match_count = retrieval_kws.iter()
+                .filter(|kw| content_lower.contains(&kw.to_lowercase()))
+                .count();
+            if match_count == 0 { continue; }
+            let turn = (i + 1) / 2;
+            let limit = recall_budget.min(CHAT_RECALL_PER_MSG);
+            let excerpt = truncate_text(&m.content, limit);
+            recall_budget = recall_budget.saturating_sub(excerpt.chars().count());
+            chat_recall.push(format!("【第{turn}轮回答片段】\n{excerpt}"));
+            if recall_budget == 0 { break; }
+        }
+    }
+    let recall_section = if chat_recall.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n--- 对话回忆（来自历史回答，按关键词匹配） ---\n{}", chat_recall.join("\n\n"))
+    };
+
+    log::info!("[AI]   context assembled: strict={} docs_len={} context_chars={} recall={} mention_resolved={} mention_has_content={}", strict_docs, docs.len(), context.chars().count(), chat_recall.len(), mention_resolved.len(), mention_has_content);
     // 严格模式（仅依据文档）：范围内无命中时明确拒绝，而非让 LLM 自由发挥。
     if strict_docs {
         if !missing_mentions.is_empty() {
@@ -1531,14 +1561,14 @@ pub(crate) async fn prepare_conversation_prompt(
             return Err("未在与当前范围匹配的文档中找到依据".into());
         }
     }
-    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n引用材料时在文件名后标注 [N]（N 为材料编号），便于用户查阅原文。\n\n材料：\n{}", context);
+    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n引用材料时在文件名后标注 [N]（N 为材料编号），便于用户查阅原文。\n\n材料：\n{}{}", context, recall_section);
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");
         for m in messages.iter().take(last_n) {
             history_str.push_str(&format!("[{}] {}\n",
                 if m.role == "user" { "用户" } else { "助手" },
-                truncate_text(&m.content, 500)));
+                truncate_text(&m.content, 2000)));
         }
         format!("{}\n当前问题：{}", history_str, last_q)
     } else {

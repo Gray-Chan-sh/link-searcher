@@ -40,6 +40,7 @@
 - **依赖检查集中到「依赖中心」+ 系统包一键安装**：设置页「索引」tab 的旧 dependencies 区块（`check_dependencies` 旧命令，PaddleOCR/Poppler 等重复展示、只有 FunASR 有安装按钮）删除，依赖统一由「依赖中心」（DepsTab，`get_setup_status`）管理。Poppler/FFmpeg 等系统包此前 `files:[]` 导致 `install_dep` 直接报"需手动安装"——`catalog.rs` 给 `DepDef` 新增 `system_package` 字段（winget/brew/apt 命令），`deps/commands.rs` 新增 `install_system_package()`，缺失时走平台包管理器一键安装。同步清理 `App.tsx`/`Settings.tsx`/`IndexTab.tsx`/`useSettingsOcr.ts` 中遗留的 FunASR 手动安装逻辑（`installFunasr`/`checkDependencies`/`handleInstallFunasr`）——启动、设置页、依赖中心现在只有一套依赖 UI。
 - **修复 RAG 严格模式（仅依据文档）未过滤全库命中**：`strict_docs=true` 时 `content_hits` 本应只注入 scope/mention 内文件，但代码只做了"范围内无命中时拒绝"，Layer1（`all_hits.take(inject_limit)`）把 BM25+语义+路径三路**全库检索**的命中一并注入，导致用户"只引用一个文档"却在 evidence 出现几十个无关文件。修复：`strict_docs` 时 Layer1 注入置空（scope/mention 文件已在 Layer0 全部注入），彻底杜绝无关文件混入。
 - **旧会话 `strict_docs` 默认迁移为 true**：`ChatSession.strict_docs` 原 `#[serde(default)]` 给 bool 默认 false——功能加入前创建的旧会话缺此字段，恢复后静默退化为全库检索，与 UI 新建默认 true 矛盾。改为 `#[serde(default = "default_strict_docs")]` 返回 true（沿用功能初衷"仅依据引用文档"），前端 `ChatPanel` 传参的 `?? false` 同步改 `?? true`。lib 单测 234 全过。
+- **AI 聊天历史可检索（Layer 2 对话回忆）**：此前 AI 追问只能从文档检索（BM25/向量/路径三路），历史对话不参与检索，每条截断到 500 字——AI 长回答后半段丢失，"之前提到的那个观点"搜不到。新增 Layer 2：用问句关键词对历史 AI 回答做内存匹配（不走 Tantivy，消息未索引），命中的回答注入 2000 字摘录到独立"对话回忆"段（总预算 20k 字符），让 LLM 能回忆之前讨论过的内容。同时把历史截断从 500→2000，配合检索补全上下文。
 
 ---
 
