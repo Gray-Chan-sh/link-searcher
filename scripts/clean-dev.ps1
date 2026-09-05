@@ -1,4 +1,4 @@
-# Link-Searcher 开发环境一键清理（Windows PowerShell）
+﻿# Link-Searcher 开发环境一键清理（Windows PowerShell）
 #
 # 清理 setup-dev.ps1 产生的构建产物，让源码回到初始状态（保留系统级
 # 配置如 cargo/npm 镜像、lld-link、winget 装的 poppler/ffmpeg/LLVM/Rust，
