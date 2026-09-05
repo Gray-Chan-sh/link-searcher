@@ -126,27 +126,46 @@ if ($ForceRedownload) {
 
 if ($needDownload) {
     Write-Host "==> 下载 sherpa-onnx Windows 静态库（约 18MB，一次性）..." -ForegroundColor Yellow
-    Write-Host "    URL: $dlUrl"
-    Write-Host "    如果下载失败，请用浏览器/加速器下载后放到:"
+    # 国内镜像优先，GitHub 直连兜底（与主程序 deps/download.rs 镜像链一致）
+    $mirrors = @(
+        "https://ghfast.top/$dlUrl",
+        "https://gh-proxy.com/$dlUrl",
+        $dlUrl
+    )
+    Write-Host "    如果全部失败，请用浏览器/加速器下载后放到:"
     Write-Host "    $archive"
-    try {
+    $dlOk = $false
+    foreach ($url in $mirrors) {
+        $label = if ($url -eq $dlUrl) { "GitHub 直连" } else { $url.Split('/')[2] }
+        Write-Host "    尝试 $label ..." -NoNewline
         # --ssl-no-revoke：国内网络/代理下 schannel 证书吊销检查常失败
-        # （CRYPT_E_NO_REVOCATION_CHECK），此处绕过吊销检查。
-        curl.exe -L --fail --retry 3 --ssl-no-revoke -o $archive $dlUrl
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        curl.exe -L --fail --retry 1 --ssl-no-revoke -o $archive $url 2>&1 | Out-Null
         $curlExit = $LASTEXITCODE
-        if ($curlExit -ne 0 -or -not (Test-Path $archive)) {
-            throw "curl exit=$curlExit"
+        $ErrorActionPreference = $prevEAP
+        if ($curlExit -eq 0 -and (Test-Path $archive)) {
+            Write-Host " 成功" -ForegroundColor Green
+            $dlOk = $true
+            break
         }
+        Write-Host " 失败" -ForegroundColor Red
+    }
+    if (-not $dlOk) {
+        Remove-Item $archive -ErrorAction SilentlyContinue
+        Write-Warning "所有镜像均下载失败。请用浏览器/加速器下载后放到："
+        Write-Warning "  $archive"
+        Write-Warning "然后重跑本脚本。"
+    } else {
         # 下载后验证完整性
         if (-not (Test-ArchiveIntact $archive)) {
             Remove-Item $archive -Force
-            throw "下载的文件验证失败（tar -tf 失败）"
+            Write-Warning "下载的文件验证失败（tar -tf 失败）。请用浏览器/加速器下载后放到："
+            Write-Warning "  $archive"
+            Write-Warning "然后重跑本脚本。"
+        } else {
+            Write-Host "    下载完成，验证通过。"
         }
-        Write-Host "    下载完成，验证通过。"
-    } catch {
-        Write-Warning "自动下载失败（$_）。请用浏览器/加速器下载后放到："
-        Write-Warning "  $archive"
-        Write-Warning "然后重跑本脚本。"
     }
 }
 # 供 cargo build 使用（当前会话 + 持久化到用户环境变量）

@@ -30,6 +30,7 @@
 - **setup-dev.ps1 移除 `--wait`**：VS Installer 4.9.x 的 `setup.exe` 不支持 `--wait` 选项（exit 87 = 命令行解析失败，整个安装未执行）。自提权后 `& $setupExe` 在同进程内天然阻塞到 setup.exe 退出，无需额外等待标志。错误提示从"请用管理员身份重跑"改为"请打开 VS Installer 手动补装"（已在提权上下文中，重提权无意义）。
 - **setup-dev.ps1 加 `--noUpdateInstaller` + 复检重试循环**：setup.exe 是 bootstrapper，"Adding packages from --add" 后立即 exit 0 但实际安装未执行——安装器在尝试自更新时因 `Error 0x80070003`（temp 文件缺失）卡死。加 `--noUpdateInstaller` 跳过自更新直奔组件安装；复检从"一次性 vswhere 查询"改为 6 次 × 10s 重试循环（共 60s），等 bootstrapper 触发的后台安装完成后 vswhere 元数据刷新。
 - **setup-dev.ps1 sherpa-onnx 压缩包完整性校验 + `-ForceRedownload`**：此前脚本仅 `Test-Path` 查存在性——下载中断/不完整的 `.tar.bz2` 会被当"already present"跳过，cargo build 解压时 panic。改为：存在时用 `tar -tf`（tar.exe Windows 10 1803+ 自带）验证可读性，损坏自动删除重下；下载完成后再次 `tar -tf` 验证，不通过则删除报错；新增 `-ForceRedownload` 参数跳过验证直接删了重下。`setup-dev.bat` Usage 注释同步更新。
+- **setup-dev.ps1 sherpa-onnx 下载改用国内镜像链**：此前脚本直接从 GitHub 原链下载，国内约 29 KB/s。改为与主程序 `deps/download.rs` 一致的镜像链——ghfast.top（≈4.3 MB/s）→ gh-proxy.com（≈3.7 MB/s）→ GitHub 直连兜底，依次尝试，首个成功即停。每个镜像显示"尝试/成功/失败"状态行。
 
 ---
 
