@@ -7,7 +7,7 @@ import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
-import { checkDependencies, checkBgeInstalled, getVersion, installBge, installFunasr, updateSettings, type FunasrInstallResult } from '../api/settings'
+import { checkBgeInstalled, getVersion, installBge, updateSettings } from '../api/settings'
 import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
 import { useSettingsOcr } from '../hooks/useSettingsOcr'
@@ -24,7 +24,6 @@ export default function Settings() {
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
-  const [funasrInstalling, setFunasrInstalling] = useState(false)
   const [bgeInstalling, setBgeInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -48,11 +47,6 @@ export default function Settings() {
     }).then(u => unlisteners.push(u))
     listen<MigrationWarning>('migration-warning', payload => {
       void alert(payload.message, '迁移警告')
-    }).then(u => unlisteners.push(u))
-    listen<FunasrInstallResult>('funasr-install-done', async payload => {
-      setFunasrInstalling(false)
-      await alert(payload.message, 'FunASR')
-      checkDependencies().then(ocr.setDeps).catch(() => {})
     }).then(u => unlisteners.push(u))
     listen<{ success: boolean; message: string }>('bge-install-done', async payload => {
       setBgeInstalling(false)
@@ -205,23 +199,9 @@ export default function Settings() {
             ocrResult={ocr.ocrResult}
             selectedEngine={selectedEngine}
             ocrLang={settings['ocr_lang'] ?? 'eng'}
-            deps={ocr.deps}
-            funasrInstalling={funasrInstalling}
             onTestOcr={() => ocr.handleTestOcr(settings['ocr_engine'] ?? 'PaddleOCR')}
             onChangeOcrEngine={engineType => handleFieldChange('ocr_engine', engineType)}
             onChangeOcrLang={v => handleFieldChange('ocr_lang', v)}
-            onInstallFunasr={async () => {
-              if (funasrInstalling) return
-              const confirmed = await confirm(t('confirm_install_funasr'), t('funasr_install_prompt'))
-              if (!confirmed) return
-              setFunasrInstalling(true)
-              try {
-                await installFunasr()
-              } catch (e) {
-                setFunasrInstalling(false)
-                setLocalError(e instanceof Error ? e.message : String(e))
-              }
-            }}
           />
         )}
 

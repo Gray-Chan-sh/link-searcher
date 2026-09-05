@@ -47,8 +47,9 @@ pub fn install_dep(
     let Some(def) = catalog::all().into_iter().find(|d| d.id == dep) else {
         return Err(format!("未知依赖: {dep}"));
     };
-    if def.files.is_empty() {
-        // System-provided deps (ffmpeg/poppler) are not installable by the app.
+    let is_system_pkg = def.files.is_empty() && def.system_package.is_some();
+    if def.files.is_empty() && !is_system_pkg {
+        // System-provided deps with no package spec (future deps) — not installable.
         return Err(format!("依赖 {dep} 需要按平台手动安装（见引导）"));
     }
     if INSTALLING_DEP.swap(true, Ordering::SeqCst) {
@@ -72,7 +73,11 @@ pub fn install_dep(
                 }),
             );
         };
-        let res = download::install_dep(&def, &data_dir, &CANCEL, &on_progress);
+        let res = if is_system_pkg {
+            install_system_package(&def)
+        } else {
+            download::install_dep(&def, &data_dir, &CANCEL, &on_progress)
+        };
         let cancelled = CANCEL.load(Ordering::SeqCst);
         let result = match res {
             Ok(()) => DepInstallResult {
@@ -98,6 +103,49 @@ pub fn install_dep(
     });
 
     Ok(())
+}
+
+/// Install a system-provided dep via the platform package manager
+/// (winget on Windows, brew on macOS, apt on Debian/Ubuntu).
+fn install_system_package(def: &catalog::DepDef) -> Result<(), download::DownloadError> {
+    let Some(pkg) = &def.system_package else {
+        return Err(download::DownloadError(format!("依赖 {} 需要按平台手动安装", def.id)));
+    };
+
+    #[cfg(target_os = "windows")]
+    let (cmd, args) = match pkg.winget {
+        Some(id) => ("winget", vec!["install", "-e", "--id", id, "--silent", "--accept-package-agreements", "--accept-source-agreements"]),
+        None => return Err(download::DownloadError("该依赖不支持 winget 安装".into())),
+    };
+    #[cfg(target_os = "macos")]
+    let (cmd, args) = match pkg.brew {
+        Some(p) => ("brew", vec!["install", p]),
+        None => return Err(download::DownloadError("该依赖不支持 brew 安装".into())),
+    };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let (cmd, args) = match pkg.apt {
+        Some(p) => ("apt-get", vec!["install", "-y", p]),
+        None => return Err(download::DownloadError("该依赖不支持 apt 安装".into())),
+    };
+    #[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+    let (cmd, args) = ("", Vec::<&str>::new());
+
+    #[cfg(target_os = "linux")]
+    let exit = std::process::Command::new("sudo")
+        .arg(cmd)
+        .args(&args)
+        .status();
+    #[cfg(not(target_os = "linux"))]
+    let exit = std::process::Command::new(cmd)
+        .args(&args)
+        .status();
+
+    let exit = exit.map_err(|e| download::DownloadError(format!("无法启动 {cmd}: {e}")))?;
+    if exit.success() {
+        Ok(())
+    } else {
+        Err(download::DownloadError(format!("{cmd} 安装失败（exit={}）", exit.code().unwrap_or(-1))))
+    }
 }
 
 #[tauri::command]

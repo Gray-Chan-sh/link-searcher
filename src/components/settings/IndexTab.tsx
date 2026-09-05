@@ -1,6 +1,6 @@
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
-import type { OcrEngineStatus, OcrTestResult, DependencyStatus } from '../../api/settings'
+import type { OcrEngineStatus, OcrTestResult } from '../../api/settings'
 import { Section, SelectField, filterGuide } from './SettingsFields'
 
 const OCR_LANGS = [
@@ -16,15 +16,12 @@ interface IndexTabProps {
   ocrResult: OcrTestResult | null
   selectedEngine: OcrEngineStatus | undefined
   ocrLang: string
-  deps: DependencyStatus[]
-  funasrInstalling: boolean
   onTestOcr: () => void
   onChangeOcrEngine: (engineType: string) => void
   onChangeOcrLang: (lang: string) => void
-  onInstallFunasr: () => void
 }
 
-export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, deps, funasrInstalling, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onInstallFunasr }: IndexTabProps) {
+export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, onTestOcr, onChangeOcrEngine, onChangeOcrLang }: IndexTabProps) {
   const { t } = useI18n()
 
   return (
@@ -95,33 +92,6 @@ export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, oc
           onChange={onChangeOcrLang}
           options={OCR_LANGS}
         />
-      </Section>
-
-      <Section title={t('dependencies')}>
-        {deps.map(dep => (
-          <div key={dep.command} className="flex items-start gap-3">
-            {dep.available
-              ? <span className="text-green-600 dark:text-green-400 text-lg">✓</span>
-              : <span className="text-amber-600 dark:text-amber-400 text-lg">✗</span>
-            }
-            <div className="flex-1">
-              <p className="text-sm text-gray-900 dark:text-gray-100">{dep.name}</p>
-              <p className="text-xs text-gray-500">{dep.command}</p>
-              {!dep.available && (
-                <pre className="mt-1 text-xs text-gray-600 dark:text-gray-400 whitespace-pre-wrap bg-gray-50 dark:bg-gray-800 p-2 rounded">{filterGuide(dep.install_guide)}</pre>
-              )}
-            </div>
-            {!dep.available && dep.name.includes('FunASR') && (
-              <button
-                onClick={onInstallFunasr}
-                disabled={funasrInstalling}
-                className="shrink-0 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
-              >
-                {funasrInstalling ? t('installing') : t('install_now')}
-              </button>
-            )}
-          </div>
-        ))}
       </Section>
     </div>
   )

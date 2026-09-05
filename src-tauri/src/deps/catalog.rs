@@ -34,6 +34,16 @@ pub struct Source {
     pub base_url: String,
 }
 
+/// Platform package manager install spec for system-provided deps
+/// (ffmpeg, poppler). When present, `install_dep` invokes the platform
+/// package manager instead of downloading files.
+#[derive(Debug, Clone)]
+pub struct SystemPackage {
+    pub winget: Option<&'static str>,
+    pub brew: Option<&'static str>,
+    pub apt: Option<&'static str>,
+}
+
 /// A model/dependency definition. Owns its strings so `all()` can build
 /// source URLs from the configured GitHub repo at call time.
 #[derive(Debug, Clone)]
@@ -45,6 +55,7 @@ pub struct DepDef {
     pub hint: &'static str,
     pub files: &'static [FileSpec],
     pub sources: Vec<Source>,
+    pub system_package: Option<SystemPackage>,
 }
 
 /// All catalog entries (fresh copy each call; cheap, pure).
@@ -96,6 +107,7 @@ fn paddleocr() -> DepDef {
             label: "GitHub Releases",
             base_url: gh_base(),
         }],
+        system_package: None,
     }
 }
 
@@ -115,6 +127,7 @@ fn bge_small() -> DepDef {
             label: "GitHub Releases",
             base_url: gh_base(),
         }],
+        system_package: None,
     }
 }
 
@@ -136,20 +149,26 @@ fn funasr() -> DepDef {
             label: "GitHub Releases",
             base_url: gh_base(),
         }],
+        system_package: None,
     }
 }
 
-/// FFmpeg — audio decode. System-provided; never downloaded by the app but
-/// surfaced in the wizard with an install guide when missing.
+/// FFmpeg — audio decode. System-provided; installed via platform package
+/// manager when missing (winget/brew/apt), not downloaded from GitHub.
 fn ffmpeg() -> DepDef {
     DepDef {
         id: "ffmpeg",
         name: "FFmpeg（音频解码）",
         recommended: false,
         size_bytes: 0,
-        hint: "音频文件解码，缺失时按平台引导安装",
+        hint: "音频文件解码，点击安装自动走 winget/brew/apt",
         files: &[],
         sources: vec![],
+        system_package: Some(SystemPackage {
+            winget: Some("Gyan.FFmpeg"),
+            brew: Some("ffmpeg"),
+            apt: Some("ffmpeg"),
+        }),
     }
 }
 
@@ -160,9 +179,14 @@ fn poppler() -> DepDef {
         name: "Poppler（PDF 渲染）",
         recommended: false,
         size_bytes: 0,
-        hint: "扫描版 PDF 渲染，缺失时按平台引导安装",
+        hint: "扫描版 PDF 渲染，点击安装自动走 winget/brew/apt",
         files: &[],
         sources: vec![],
+        system_package: Some(SystemPackage {
+            winget: Some("oschwartz10612.Poppler"),
+            brew: Some("poppler"),
+            apt: Some("poppler-utils"),
+        }),
     }
 }
 

@@ -12,7 +12,7 @@
 #   - third_party/sherpa-onnx/    Windows 专用 sherpa 下载缓存（macOS 一般无）
 #
 # 保留：~/.cargo/config.toml、项目 .npmrc、src-tauri/.cargo/config.toml、
-#       数据目录模型（应用运行时数据，非构建产物）。
+#       系统级 bin 工具（可能被其它项目共用）。
 #
 # 参数：
 #   -y  跳过确认直接删
@@ -34,12 +34,19 @@ TARGETS=(
 )
 
 echo "==> Link-Searcher dev clean (root: $ROOT)"
-echo "    将删除以下构建产物（系统级配置与数据目录模型保留）："
+echo "    将删除以下内容（系统级配置保留）："
 for t in "${TARGETS[@]}"; do
   [ -e "$t" ] && echo "    - $t"
 done
+# 数据目录模型（PaddleOCR/BGE/FunASR）
+MODEL_DIR="$HOME/Library/Application Support/link-searcher/models"
+if [ -d "$MODEL_DIR" ]; then
+  echo "    - $MODEL_DIR (应用数据模型)"
+fi
+echo ""
 echo "    清空数据目录下的模型（PaddleOCR/BGE/FunASR ~965MB）请手动删："
-echo "      rm -rf \"\$HOME/Library/Application Support/link-searcher/models\""
+echo "      rm -rf \"$MODEL_DIR\""
+echo "      rm -rf \"$HOME/.local/share/link-searcher/models\"  # Linux"
 
 if [ "$ASSUME_YES" != "1" ]; then
   read -r -p "确认删除？[y/N] " ans
@@ -50,6 +57,14 @@ for t in "${TARGETS[@]}"; do
   if [ -e "$t" ]; then
     rm -rf "$t"
     echo "    已删除: $t"
+  fi
+done
+
+# 同时清理数据目录模型（回到最初环境）
+for d in "$MODEL_DIR" "$HOME/.local/share/link-searcher/models"; do
+  if [ -d "$d" ]; then
+    rm -rf "$d"
+    echo "    已删除: $d"
   fi
 done
 

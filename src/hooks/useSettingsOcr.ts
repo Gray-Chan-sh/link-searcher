@@ -1,24 +1,16 @@
 import { useState, useEffect } from 'react'
-import { useI18n } from '../i18n'
 import { alert } from '../utils/platform'
-import { checkDependencies, checkBgeInstalled, installBge, installFunasr, listOcrEngines, testOcrEngine, type BgeStatus, type DependencyStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
+import { checkBgeInstalled, installBge, listOcrEngines, testOcrEngine, type BgeStatus, type OcrEngineStatus, type OcrTestResult } from '../api/settings'
 
 export function useSettingsOcr() {
-  const { t } = useI18n()
   const [ocrEngines, setOcrEngines] = useState<OcrEngineStatus[]>([])
   const [ocrTesting, setOcrTesting] = useState(false)
   const [ocrResult, setOcrResult] = useState<OcrTestResult | null>(null)
-  const [deps, setDeps] = useState<DependencyStatus[]>([])
-  const [funasrInstalling, setFunasrInstalling] = useState(false)
   const [bgeStatus, setBgeStatus] = useState<BgeStatus[] | null>(null)
   const [bgeInstalling, setBgeInstalling] = useState(false)
 
   useEffect(() => {
     listOcrEngines().then(setOcrEngines).catch(() => {})
-  }, [])
-
-  useEffect(() => {
-    checkDependencies().then(setDeps).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -38,19 +30,6 @@ export function useSettingsOcr() {
     }
   }
 
-  const handleInstallFunasr = async () => {
-    setFunasrInstalling(true)
-    try {
-      await installFunasr()
-      await alert(t('funasr_install_done'), 'FunASR')
-      checkDependencies().then(setDeps).catch(() => {})
-    } catch (e) {
-      await alert(e instanceof Error ? e.message : String(e), 'FunASR')
-    } finally {
-      setFunasrInstalling(false)
-    }
-  }
-
   const handleInstallBge = async () => {
     setBgeInstalling(true)
     try {
@@ -64,9 +43,9 @@ export function useSettingsOcr() {
   }
 
   return {
-    ocrEngines, ocrTesting, ocrResult, deps,
-    funasrInstalling, bgeStatus, bgeInstalling,
-    setDeps, setBgeStatus,
-    handleTestOcr, handleInstallFunasr, handleInstallBge,
+    ocrEngines, ocrTesting, ocrResult,
+    bgeStatus, bgeInstalling,
+    setBgeStatus,
+    handleTestOcr, handleInstallBge,
   }
 }

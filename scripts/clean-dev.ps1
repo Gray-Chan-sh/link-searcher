@@ -11,7 +11,7 @@
 #   - third_party\sherpa-onnx\       sherpa-onnx 下载缓存
 #
 # 保留：~/.cargo/config.toml、项目 .npmrc、src-tauri/.cargo/config.toml、
-#       SHERPA_ONNX_ARCHIVE_DIR 用户环境变量、数据目录模型（运行数据）。
+#       SHERPA_ONNX_ARCHIVE_DIR 用户环境变量、系统级 bin 工具。
 #
 # 参数：
 #   -Yes  跳过确认直接删
@@ -47,9 +47,14 @@ if ($existing.Count -eq 0) {
     exit 0
 }
 
-Write-Host "    将删除以下构建产物（系统级配置与数据目录模型保留）："
+Write-Host "    将删除以下内容（系统级配置保留）："
 foreach ($t in $existing) {
     Write-Host "    - $($t.Path)"
+}
+# 数据目录模型
+$modelDir = "$env:LOCALAPPDATA\link-searcher\models"
+if (Test-Path $modelDir) {
+    Write-Host "    - $modelDir (应用数据模型)"
 }
 
 # 体积估算
@@ -59,13 +64,15 @@ foreach ($t in $existing) {
              Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
     if ($size) { $totalSize += $size }
 }
+if (Test-Path $modelDir) {
+    $modelSize = (Get-ChildItem -Path $modelDir -Recurse -File -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
+    if ($modelSize) { $totalSize += $modelSize }
+}
 if ($totalSize -gt 0) {
     $sizeMB = [math]::Round($totalSize / 1MB, 0)
     Write-Host "    预计释放: ${sizeMB} MB"
 }
-
-Write-Host "    清空数据目录下的模型（PaddleOCR/BGE/FunASR ~965MB）请手动删："
-Write-Host "      Remove-Item -Recurse -Force `"$env:LOCALAPPDATA\link-searcher\models`""
 
 if (-not $Yes) {
     $ans = Read-Host "确认删除？[y/N]"
@@ -81,6 +88,16 @@ foreach ($t in $existing) {
         Write-Host "    已删除: $($t.Path)" -ForegroundColor Green
     } else {
         Write-Host "    !! 删除失败（可能被占用）: $($t.Path)" -ForegroundColor Yellow
+    }
+}
+
+# 同时清理数据目录模型
+if (Test-Path $modelDir) {
+    Remove-Item -Path $modelDir -Recurse -Force -ErrorAction SilentlyContinue
+    if (-not (Test-Path $modelDir)) {
+        Write-Host "    已删除: $modelDir" -ForegroundColor Green
+    } else {
+        Write-Host "    !! 删除失败（可能被占用）: $modelDir" -ForegroundColor Yellow
     }
 }
 
