@@ -38,18 +38,20 @@ export function useIndexStatus(): UseIndexStatusReturn {
 
   const rebuild = useCallback(async () => {
     try {
-      // Immediately show scanning state (rebuildIndex spawns background task)
+      console.log('[useIndexStatus] rebuild called, current status:', JSON.stringify(status))
       setStatus(prev => prev ? { ...prev, indexed: 0, pending: 0, errors: 0, is_scanning: true } : null)
+      console.log('[useIndexStatus] calling rebuildIndex IPC...')
       await rebuildIndex()
+      console.log('[useIndexStatus] rebuildIndex IPC completed, refreshing...')
       void refresh()
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to rebuild index'
+      console.error('[useIndexStatus] rebuild failed:', msg)
       setError(msg)
-      // Show a visible alert so the user knows why it failed (e.g. scan stuck)
       const { alert } = await import('../utils/platform')
       await alert(msg)
     }
-  }, [refresh])
+  }, [refresh, status])
 
   // Adaptive polling: 5s while scanning, 30s when idle
   useEffect(() => {
