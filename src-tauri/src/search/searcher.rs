@@ -137,13 +137,23 @@ impl SearcherWrap {
         let searcher: Searcher = self.reader.searcher();
         let schema = build_schema();
 
-        let query = self.build_query(&schema, params)?;
+        log::info!("[SEARCH] start: query={:?} sort={:?} page={} size={} dedupe={}",
+            params.query, params.sort, params.page, params.page_size, params.dedupe);
+
+        let query = self.build_query(&schema, params).map_err(|e| {
+            log::error!("[SEARCH] build_query FAILED: {e}");
+            e
+        })?;
 
         // Compute total hits before pagination.
         let total = {
             let count_collector = tantivy::collector::Count;
-            searcher.search(&*query, &count_collector)?
+            searcher.search(&*query, &count_collector).map_err(|e| {
+                log::error!("[SEARCH] count query FAILED: {e}");
+                e
+            })?
         };
+        log::debug!("[SEARCH] total={total}");
 
         // Determine limit for fetching: need enough to cover the requested page.
         let limit = params.page * params.page_size;
@@ -270,7 +280,13 @@ impl SearcherWrap {
         let mut hits = Vec::with_capacity(page_addrs.len());
         let mut dedup_meta: Vec<(String, u64, i64, String)> = Vec::with_capacity(page_addrs.len());
         for (addr, score) in &page_addrs {
-            let doc: TantivyDocument = searcher.doc::<TantivyDocument>(*addr)?;
+            let doc: TantivyDocument = match searcher.doc::<TantivyDocument>(*addr) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("[SEARCH] doc read FAILED at {addr:?}: {e}");
+                    return Err(e);
+                }
+            };
 
             let snippet = snippet_generator
                 .as_ref()

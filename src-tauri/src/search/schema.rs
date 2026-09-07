@@ -73,11 +73,13 @@ pub fn build_schema() -> Schema {
     builder.add_text_field("file_ext", STRING | STORED);
     builder.add_text_field("dir_id", STRING | STORED);
     builder.add_text_field("path", STRING | STORED);
-    builder.add_text_field("md5", STRING | STORED);
     builder.add_text_field("content", content_options);
     builder.add_text_field("content_suggest", suggest_options);
     builder.add_date_field("mtime", INDEXED | STORED | FAST);
     builder.add_u64_field("file_size", INDEXED | STORED | FAST);
+    // md5 MUST be added LAST: existing on-disk indexes were created without it.
+    // Inserting it earlier shifts all subsequent field IDs, breaking old segments.
+    builder.add_text_field("md5", STRING | STORED);
 
     builder.build()
 }

@@ -4,9 +4,9 @@
 
 ---
 
-## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复 + 搜索筛选 Web 模式修复）
+## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复 + 搜索筛选 Web 模式修复 + 目录筛选/语义搜索 Bug 修复）
 
-> 本次更新包含三项独立修复。
+> 本次更新包含四项独立修复。
 
 ### 搜索筛选 Web 模式修复
 
@@ -14,6 +14,15 @@
 - **修复**：`src/api/client.ts` 添加 `dirPaths: 'dir_paths'` 到 search 的 paramMap；`src-tauri/src/webapi/routes/search.rs` 的 `SearchQuery` 添加 `dir_paths: Option<Vec<String>>` 字段，并在 `search_handler` 中调用 `resolve_dir_paths` 解析为 `file_ids`；`resolve_dir_paths` 函数改为 `pub` 以便跨模块调用。
 - **影响范围**：仅影响 Web 浏览器模式（`isTauri() === false`），Tauri IPC 模式不受影响。
 - 涉及：`src/api/client.ts`、`src-tauri/src/webapi/routes/search.rs`、`src-tauri/src/commands/search.rs`。验证：`cargo check` 零错误、`tsc --noEmit` 零错误。
+
+### 目录筛选失效（历史路径存储 bug + 语义搜索忽略范围筛选）
+
+- **根因 A：`file_tracking.path` 中存储的是绝对路径而非相对路径**，导致 `resolve_dir_paths` 用相对路径前缀做 `LIKE` 匹配永远返回空。历史迁移函数 `migrate_paths_to_relative` 存在但从未在启动时被调用，旧库持续写入绝对路径。
+- **根因 B：语义搜索（RRF fusion）的 `semantic_rerank_worker` 从全库 embedding 召回时未应用目录/扩展名筛选**，导致开启「语义」后搜索结果混入其他目录的文档。
+- **修复 A**：`db/mod.rs` `run_migrations` 中首次调用 `migrate_paths_to_relative`，将存量绝对路径迁移为相对路径；`resolve_dir_paths` 同时兼容两种格式（OR 条件覆盖 rel 和 abs 前缀），防止后续数据不一致。
+- **修复 B**：`semantic_rerank_worker` 新增 `allowed_ids` 集合（从 `bm25_top` 预构建），过滤掉超出当前筛选范围的语义召回候选。
+- **影响范围**：目录筛选（所有模式）和语义搜索筛选（所有模式）。
+- 涉及：`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/search.rs`。验证：`cargo test --lib` 238 通过、`cargo check` 零错误、`tsc --noEmit` 零错误。
 
 ---
 

@@ -86,6 +86,13 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // `private` column on dir_config.
     drop_dir_config_private_column(&tx)?;
 
+    // Migrate any absolute paths stored in file_tracking.path to relative
+    // form (relative to each dir_config root), fixing a historic bug where
+    // migration was never actually invoked at startup.
+    let migrated = tracker::migrate_paths_to_relative(&tx).unwrap_or(0);
+    if migrated > 0 {
+        log::info!("[DB] path migration: {} records converted from absolute to relative", migrated);
+    }
 
     seed_default_settings(&tx)?;
 

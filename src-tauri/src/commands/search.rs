@@ -62,6 +62,7 @@ fn file_type_name(ext: &str) -> String {
 /// never matches. Map each path to its owning dir plus a relative prefix,
 /// matching `(dir_id, rel)` or `(dir_id, rel/…) — this also excludes
 /// sibling dirs that merely share a prefix (`docs` vs `docs2`).
+/// Also supports legacy absolute paths stored before migration.
 pub fn resolve_dir_paths(
     conn: &rusqlite::Connection,
     paths: &[String],
@@ -70,7 +71,7 @@ pub fn resolve_dir_paths(
         return Ok(None);
     }
     let dirs = crate::db::dir_config::list_dirs(conn).map_err(|e| format!("db error: {e}"))?;
-    let mut clauses: Vec<&str> = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
     let mut params: Vec<String> = Vec::new();
     let mut matched = false;
     for p in paths {
@@ -81,14 +82,22 @@ pub fn resolve_dir_paths(
             };
             matched = true;
             if rel.is_empty() {
-                clauses.push("dir_id = ?");
+                clauses.push("dir_id = ?".to_string());
                 params.push(d.id.clone());
             } else {
                 let escaped = rel.replace('%', "\\%").replace('_', "\\_");
-                clauses.push("dir_id = ? AND (path = ? OR path LIKE ? ESCAPE '\\')");
+                // Match both relative path form ("新建文件夹/doc.pdf") and
+                // legacy absolute path form ("/Users/.../新建文件夹/doc.pdf").
+                let abs_prefix = format!("{}/{}", d.path.trim_end_matches('/'), escaped);
+                clauses.push(format!(
+                    "(dir_id = ? AND (path = ? OR path LIKE ? ESCAPE '\\')) \
+                     OR (dir_id = ? AND path LIKE ? ESCAPE '\\')"
+                ));
                 params.push(d.id.clone());
-                params.push(escaped.clone());
-                params.push(format!("{escaped}/%"));
+                params.push(escaped.clone());       // rel path
+                params.push(format!("{escaped}/%")); // rel prefix
+                params.push(d.id.clone());          // abs dir_id
+                params.push(format!("{abs_prefix}/%")); // abs prefix
             }
             break;
         }
@@ -333,8 +342,17 @@ fn semantic_rerank_worker(
 
     // Fetch metadata for semantic-only ids (top fused order, bounded).
     let conn = pool.get().map_err(|e| format!("db error: {e}"))?;
+    // Pre-build the allowed file_id set from BM25 so semantic-only recall
+    // stays within the same filter scope (dirs / exts / paths) as BM25.
+    let allowed_ids: std::collections::HashSet<&str> = bm25_top.iter()
+        .map(|h| h.file_id.as_str())
+        .collect();
     for (fid, _fusion) in ordered.iter().take(100) {
         if by_id.contains_key(fid) {
+            continue;
+        }
+        // Skip semantic-only candidates outside the filter scope.
+        if !allowed_ids.contains(fid.as_str()) {
             continue;
         }
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
