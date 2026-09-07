@@ -578,6 +578,7 @@ mod tests {
             "dir-a",
             "/home/user/report.pdf",
             "annual financial report for 2024 showing revenue growth",
+            "md5-1",
             1_700_000_000_000_000,
             204800,
         )
@@ -592,6 +593,7 @@ mod tests {
             "dir-a",
             "/home/user/notes.txt",
             "meeting notes about project planning and resource allocation",
+            "md5-2",
             1_700_000_000_100_000,
             4096,
         )
@@ -606,6 +608,7 @@ mod tests {
             "dir-b",
             "/home/user/code.rs",
             "rust implementation of the search algorithm with efficient indexing",
+            "md5-3",
             1_700_000_000_200_000,
             8192,
         )
@@ -620,6 +623,7 @@ mod tests {
             "dir-a",
             "/home/user/中文文档.txt",
             "这是一个关于搜索引擎的中文测试文档",
+            "md5-4",
             1_700_000_000_300_000,
             1024,
         )

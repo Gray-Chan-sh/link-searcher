@@ -33,6 +33,7 @@ impl Indexer {
         dir_id: &str,
         path: &str,
         content: &str,
+        md5: &str,
         mtime: i64,
         file_size: u64,
     ) -> Result<(), TantivyError> {
@@ -45,6 +46,7 @@ impl Indexer {
         let path_field = schema.get_field("path").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let content_field = schema.get_field("content").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let content_suggest_field = schema.get_field("content_suggest").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
+        let md5_field = schema.get_field("md5").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let mtime_field = schema.get_field("mtime").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
         let file_size_field = schema.get_field("file_size").map_err(|e| TantivyError::InvalidArgument(format!("{e:?}")))?;
 
@@ -56,6 +58,7 @@ impl Indexer {
             path_field => path,
             content_field => content,
             content_suggest_field => content,
+            md5_field => md5,
             mtime_field => DateTime::from_timestamp_micros(mtime),
             file_size_field => file_size,
         );
@@ -133,6 +136,7 @@ mod tests {
             "dir-1",
             "/home/user/test.txt",
             "hello world this is a test document",
+            "md5-a",
             1_700_000_000_000_000,
             1024,
         )
@@ -168,6 +172,7 @@ mod tests {
             "dir-1",
             "/home/user/delete-me.txt",
             "content to delete",
+            "md5-a",
             1_700_000_000_000_000,
             512,
         )
@@ -208,8 +213,9 @@ mod tests {
             "dir-1",
             "/home/user/permanent.txt",
             "permanent content here",
+            "md5-a",
             1_700_000_000_000_000,
-        256,
+            256,
         )
         .expect("add_document");
         Indexer::commit(&mut writer).expect("commit");

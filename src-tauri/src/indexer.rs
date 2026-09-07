@@ -425,6 +425,7 @@ impl IndexerService {
                             &data.dir_id,
                             &data.file_path_str,
                             &data.text,
+                            &data.hash,
                             data.mtime,
                             data.file_size,
                         ) {
@@ -578,7 +579,7 @@ impl IndexerService {
             Indexer::add_document(
                 w, &data.file_id, &data.file_name, &data.file_ext,
                 &data.dir_id, &data.file_path_str, &data.text,
-                data.mtime, data.file_size,
+                &data.hash, data.mtime, data.file_size,
             )
             .map_err(|e| anyhow::anyhow!("failed to add document to index: {e}"))?;
 
