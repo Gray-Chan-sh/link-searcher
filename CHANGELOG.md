@@ -1,10 +1,20 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 9月4日。v0.2.0：运行依赖按需安装 + 首启向导 + 发布版瘦身
+> 2026年7月30日 — 9月7日。v0.2.0：运行依赖按需安装 + 首启向导 + 发布版瘦身 + GUI 测试框架
 
 ---
 
-## 2026-09-04（修复：Windows 子进程黑窗口闪现 + 引擎平台默认对齐）
+## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复）
+
+**动机**：验证程序是否开发完成需要一套覆盖全部用户交互的 GUI 测试方案。现有 37 个 E2E 用例依赖 MCP 但 `execute_js` 在运行 2-3 分钟后超时失效。
+
+- **MCP `execute_js` 超时根因定位与修复**：`tauri-plugin-mcp 0.3.1` 的 `emit_and_wait` 收到 JS 响应后解析时遇到 Tauri 事件系统的多重 JSON 编码（字符串被再次序列化为带引号 JSON），导致 `response.get("result")` 返回 None → 回退 `[Result could not be stringified]`。修复 `src/tools/execute_js.rs`：增加 3 层解包循环 `for _ in 0..3 { if let Some(s) = response.as_str() { response = serde_json::from_str(s)?; } }`。`src-tauri/Cargo.toml` 改为 `path` 引用本地修改版插件。验证：连续 8 次 execute_js 全部返回正确值（`2`/`3`/`4`...），之前 3-4 次后即超时。
+- **React 18 兼容交互层**：`lib.sh` 的 `type()`/`click()` 函数改用原生 value setter（`Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set`）+ `dispatchEvent(new MouseEvent('click', {bubbles:true,composed:true}))`。普通 `el.value = 'x'` 和 `btn.click()` 不触发 React 17+ 的合成事件。`goto()` 改用 `window.location.hash`（不触发 webview reload，避免 App 崩溃）。
+- **HMR 后事件监听器丢失修复**：`src/App.tsx` 的 MCP `useEffect` 增加 `pageshow`/`focus`/`visibilitychange` 事件重注册。Vite HMR 触发 `App.tsx` 重新挂载时 `setupPluginListeners` 先 cleanup 再 setup，但旧 webview context 的监听器可能残留，新 context 未注册。重注册确保页面恢复可见时重建监听器。
+- **GUI 测试框架 `test-visual/`**：`run-all.sh`（自动发现 `cases/*.sh` + P0/P1/P2 过滤 + HTML 报告）、`lib.sh`（React 兼容交互层 + MCP 桥接 + 自动重启 App + 截图 + 断言）、`mcp_bridge.py`（JSON-RPC ↔ 真实 App MCP socket 桥接器，`os.read` 非阻塞读取）、`generate-report.sh`（HTML 报告含截图）、`pixel-diff.py`（Pillow 像素对比，替代 ImageMagick）。
+- **101 个 GUI 交互用例**（P0 30 + P1 57 + P2 14）：覆盖页面加载/搜索/浏览/预览/索引/设置/语言/主题/目录/日志/AI 聊天/跨页面流/键盘导航/备份。全量验证 101/101 通过。P2 边缘场景（短语搜索/列宽拖拽/ZIP 导出恢复等）含降级断言（原生对话框走"页面可用 + 按钮操作不报错"）。
+- **测试方案文档**：`docs/gui-test-plan.md`（127 用例完整方案 + 执行架构 + 判定标准 + 手工签收清单 + 实施路线）。
+- 涉及：`src/App.tsx`、`src-tauri/Cargo.toml`、`docs/gui-test-plan.md`（新增）、`test-visual/`（新增）、`.gitignore`。验证：101/101 用例通过（分批验证）、`cargo check` 零错误、`tsc -b` 零错误。
 
 **动机**：Windows 上运行 GUI（`windows_subsystem="windows"`）时，索引大量 PDF/图片/音频期间反复闪现黑色 cmd 窗口。根因是 Rust 端 `Command::spawn` 外部控制台程序（pdftoppm/pdfimages/pdfinfo/pdftotext/tesseract/ffmpeg）时未设置 `CREATE_NO_WINDOW`——GUI 进程 spawn 控制台子进程会让 Windows 为其新建可见控制台窗口。与 Microsoft Edge WebView2 无关。
 

@@ -96,12 +96,27 @@ export default function App() {
     })
   }, [])
 
-  // MCP plugin — bridge DOM events for AI agent interaction
+  // MCP plugin — bridge DOM events for AI agent interaction.
+  // Re-register on visibility change / pageshow: webview reloads (HMR, SwiftUI
+  // reparenting) drop the listener registry, so re-setup keeps the socket alive.
   useEffect(() => {
-    if (isTauri()) {
+    if (!isTauri()) return
+    let disposed = false
+    const setupMcp = () => {
       import('tauri-plugin-mcp').then(({ setupPluginListeners }) => {
-        setupPluginListeners().catch(() => {})
+        if (!disposed) setupPluginListeners().catch(() => {})
       })
+    }
+    setupMcp()
+    const rearm = () => setupMcp()
+    window.addEventListener('pageshow', rearm)
+    window.addEventListener('focus', rearm)
+    document.addEventListener('visibilitychange', rearm)
+    return () => {
+      disposed = true
+      window.removeEventListener('pageshow', rearm)
+      window.removeEventListener('focus', rearm)
+      document.removeEventListener('visibilitychange', rearm)
     }
   }, [])
 

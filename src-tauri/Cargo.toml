@@ -80,7 +80,7 @@ rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
 # MCP (Model Context Protocol) — debug-only AI agent integration
-tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
+tauri-plugin-mcp = { path = "/Users/gray/.cargo/git/checkouts/tauri-plugin-mcp-2fd5dc058bb53a96/c7d271a" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

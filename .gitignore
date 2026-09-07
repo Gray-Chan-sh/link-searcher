@@ -58,3 +58,12 @@ scripts/*
 !scripts/clean-dev.sh
 !scripts/clean-dev.ps1
 !scripts/clean-dev.bat
+
+# GUI 测试运行时产物 (脚本本身入库)
+test-visual/current/
+test-visual/diff/
+test-visual/baseline/
+test-visual/report/
+test-visual/report.html
+test-visual/results.tsv
+~/ls-shots/
