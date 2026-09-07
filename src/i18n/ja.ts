@@ -302,6 +302,7 @@ const ja: Record<string, string> = {
     copied_path: 'パスをコピーしました',
     copied_name: '名前をコピーしました',
     score: 'スコア: {score}',
+    duplicates_count: '{count}件の重複',
 
     // Preview panel
     shrink_panel: 'パネルを縮小',

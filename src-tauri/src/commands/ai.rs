@@ -858,6 +858,7 @@ pub(crate) fn bm25_relevant_hits(
         date_from, date_to, path_prefixes: path_prefixes.clone(),
         sort: SortField::Score, sort_order: "desc".to_string(),
         page: 1, page_size: fetch, fuzzy: false, semantic: false,
+        dedupe: false,
     };
     log::info!("[AI]   bm25: q=\"{}\" dirs={} files={} limit={}", truncate_text(query, 30), dir_ids.as_ref().map_or(0, |v| v.len()), file_ids.as_ref().map_or(0, |v| v.len()), limit);
     let mut result = searcher.search(&params).map_err(|e| format!("{e}"))?;
@@ -873,6 +874,7 @@ pub(crate) fn bm25_relevant_hits(
             date_from, date_to, path_prefixes: path_prefixes.clone(),
             sort: SortField::Score, sort_order: "desc".to_string(),
             page: 1, page_size: fetch, fuzzy: false, semantic: false,
+            dedupe: false,
         };
         log::info!("[AI] bm25_relevant_hits: zero hits with file_ids, retrying with empty query");
         result = searcher.search(&fallback_params).map_err(|e| format!("{e}"))?;

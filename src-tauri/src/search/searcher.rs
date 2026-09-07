@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -53,6 +54,10 @@ pub struct SearchParams {
     /// Enable fuzzy search with edit distance 1 (single-word queries only).
     #[serde(default)]
     pub fuzzy: bool,
+    /// When true, collapse documents sharing the same (md5, file_size) key
+    /// into a single representative (newest mtime wins).
+    #[serde(default = "default_dedupe_true")]
+    pub dedupe: bool,
     /// Sort field.
     pub sort: SortField,
     /// Sort order: "asc" or "desc".
@@ -79,6 +84,9 @@ fn default_page() -> usize {
 fn default_page_size() -> usize {
     20
 }
+fn default_dedupe_true() -> bool {
+    true
+}
 
 /// A single search hit returned to the frontend.
 #[derive(Debug, Clone, Serialize)]
@@ -91,6 +99,8 @@ pub struct SearchHit {
     pub score: f64,
     pub mtime: i64,
     pub file_size: u64,
+    pub duplicate_count: u64,
+    pub duplicate_paths: Vec<String>,
 }
 
 /// Full search response including pagination metadata.
@@ -243,6 +253,7 @@ impl SearcherWrap {
         let content_field = schema.get_field("content")?;
         let mtime_field = schema.get_field("mtime")?;
         let file_size_field = schema.get_field("file_size")?;
+        let md5_field = schema.get_field("md5")?;
 
         let snippet_generator = if !params.query.is_empty() {
             let fields = self.searchable_fields(&schema);
@@ -257,6 +268,7 @@ impl SearcherWrap {
         };
 
         let mut hits = Vec::with_capacity(page_addrs.len());
+        let mut dedup_meta: Vec<(String, u64, i64, String)> = Vec::with_capacity(page_addrs.len());
         for (addr, score) in &page_addrs {
             let doc: TantivyDocument = searcher.doc::<TantivyDocument>(*addr)?;
 
@@ -294,7 +306,13 @@ impl SearcherWrap {
                 .get_first(file_size_field)
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
+            let md5 = doc
+                .get_first(md5_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
 
+            dedup_meta.push((md5, file_size, mtime, path.clone()));
             hits.push(SearchHit {
                 file_id,
                 file_name,
@@ -304,6 +322,72 @@ impl SearcherWrap {
                 score: *score,
                 mtime,
                 file_size,
+                duplicate_count: 1,
+                duplicate_paths: vec![],
+            });
+        }
+
+        // Dedup grouping: collapse documents with same (md5, file_size) key.
+        let original_count = hits.len() as u64;
+        if params.dedupe && !hits.is_empty() {
+            // Group by composite key (md5 + file_size); empty md5 → unique.
+            let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
+            for (i, (md5, size, _, _)) in dedup_meta.iter().enumerate() {
+                let key = if md5.is_empty() {
+                    format!("__unique_{i}")
+                } else {
+                    format!("{md5}:{size}")
+                };
+                groups.entry(key).or_default().push(i);
+            }
+
+            let mut keep: Vec<usize> = Vec::new();
+            for indices in groups.values() {
+                if indices.len() == 1 {
+                    keep.push(indices[0]);
+                    continue;
+                }
+                // Multiple docs with same (md5, size): keep newest mtime.
+                let &representative = indices
+                    .iter()
+                    .max_by_key(|&&idx| dedup_meta[idx].2)
+                    .unwrap();
+                keep.push(representative);
+
+                let rep_idx = representative;
+                for &idx in indices {
+                    if idx == rep_idx {
+                        hits[idx].duplicate_count = indices.len() as u64;
+                        hits[idx].duplicate_paths = indices
+                            .iter()
+                            .filter(|&&j| j != idx)
+                            .map(|&j| dedup_meta[j].3.clone())
+                            .collect();
+                    }
+                }
+            }
+
+            // Non-unique (empty md5) hits keep duplicate_count=1.
+            for &idx in &keep {
+                if hits[idx].duplicate_count == 0 {
+                    hits[idx].duplicate_count = 1;
+                }
+            }
+
+            keep.sort();
+            let collapsed = original_count - keep.len() as u64;
+            let adjusted_total = total as u64 - collapsed;
+            let mut hits_opt: Vec<Option<SearchHit>> = hits.into_iter().map(Some).collect();
+            let deduped_hits: Vec<SearchHit> = keep.into_iter().filter_map(|i| hits_opt[i].take()).collect();
+            let _ = adjusted_total;
+
+            let took_ms = start.elapsed().as_millis() as u64;
+            return Ok(SearchResponse {
+                total: adjusted_total,
+                page: params.page,
+                page_size: params.page_size,
+                took_ms,
+                hits: deduped_hits,
             });
         }
 
@@ -655,6 +739,7 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -684,6 +769,7 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -710,6 +796,7 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -737,6 +824,7 @@ mod tests {
             page_size: 2,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
         let resp = searcher.search(&params).expect("search");
         assert_eq!(resp.total, 4);
@@ -789,6 +877,7 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -818,6 +907,7 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
 
         let resp = searcher.search(&params).expect("search");
@@ -841,11 +931,124 @@ mod tests {
             page_size: 20,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
         let resp = searcher.search(&params).expect("search");
         assert!(
             resp.hits.iter().any(|h| h.file_id == "uuid-1"),
             "filename:epor should match report.pdf (any position)"
         );
+    }
+
+    fn setup_index_with_dedup_docs(
+        docs: &[(&str, &str, &str, &str, &str, &str, &str, i64, u64)],
+    ) -> (Index, IndexReader) {
+        let schema = build_schema();
+        let index = Index::create_in_ram(schema);
+        register_tokenizers(&index);
+
+        let mut writer = index.writer(50_000_000).unwrap();
+        for &(file_id, file_name, file_ext, dir_id, path, content, md5, mtime, file_size) in docs {
+            Indexer::add_document(
+                &mut writer, file_id, file_name, file_ext, dir_id, path, content, md5, mtime, file_size,
+            )
+            .unwrap();
+        }
+        Indexer::commit(&mut writer).unwrap();
+        drop(writer);
+
+        let reader = index.reader().unwrap();
+        (index, reader)
+    }
+
+    #[test]
+    fn test_search_dedupes_same_md5_keeps_newest() {
+        let docs = vec![
+            ("uuid-a", "old.pdf", "pdf", "dir1", "/docs/old.pdf", "same content", "same-md5", 1_000, 1000),
+            ("uuid-b", "new.pdf", "pdf", "dir2", "/docs/new.pdf", "same content", "same-md5", 2_000, 1000),
+        ];
+        let (index, reader) = setup_index_with_dedup_docs(&docs);
+        let searcher = SearcherWrap::new(reader, index);
+
+        let params = SearchParams {
+            query: String::new(),
+            dir_ids: None, file_ids: None, ext_filter: None, date_from: None, date_to: None,
+            path_prefixes: None, sort: SortField::Score, sort_order: "desc".to_string(),
+            page: 1, page_size: 20, fuzzy: false, semantic: false, dedupe: true,
+        };
+        let resp = searcher.search(&params).expect("search");
+        assert_eq!(resp.hits.len(), 1, "should collapse to 1 hit");
+        assert_eq!(resp.total, 1);
+        assert_eq!(resp.hits[0].duplicate_count, 2);
+        assert_eq!(resp.hits[0].duplicate_paths, vec!["/docs/old.pdf"]);
+        assert_eq!(resp.hits[0].file_name, "new.pdf");
+    }
+
+    #[test]
+    fn test_search_dedupe_false_returns_all() {
+        let docs = vec![
+            ("uuid-a", "old.pdf", "pdf", "dir1", "/docs/old.pdf", "same content", "same-md5", 1_000, 1000),
+            ("uuid-b", "new.pdf", "pdf", "dir2", "/docs/new.pdf", "same content", "same-md5", 2_000, 1000),
+        ];
+        let (index, reader) = setup_index_with_dedup_docs(&docs);
+        let searcher = SearcherWrap::new(reader, index);
+
+        let params = SearchParams {
+            query: String::new(),
+            dir_ids: None, file_ids: None, ext_filter: None, date_from: None, date_to: None,
+            path_prefixes: None, sort: SortField::Score, sort_order: "desc".to_string(),
+            page: 1, page_size: 20, fuzzy: false, semantic: false, dedupe: false,
+        };
+        let resp = searcher.search(&params).expect("search");
+        assert_eq!(resp.hits.len(), 2, "no dedup → 2 hits");
+        assert_eq!(resp.total, 2);
+        assert!(resp.hits.iter().all(|h| h.duplicate_count == 1));
+    }
+
+    #[test]
+    fn test_search_dedupe_skips_size_mismatch() {
+        let docs = vec![
+            ("uuid-a", "file1.pdf", "pdf", "dir1", "/docs/file1.pdf", "content", "same-md5", 1_000, 1000),
+            ("uuid-b", "file2.pdf", "pdf", "dir2", "/docs/file2.pdf", "content", "same-md5", 2_000, 2000),
+        ];
+        let (index, reader) = setup_index_with_dedup_docs(&docs);
+        let searcher = SearcherWrap::new(reader, index);
+
+        let params = SearchParams {
+            query: String::new(),
+            dir_ids: None, file_ids: None, ext_filter: None, date_from: None, date_to: None,
+            path_prefixes: None, sort: SortField::Score, sort_order: "desc".to_string(),
+            page: 1, page_size: 20, fuzzy: false, semantic: false, dedupe: true,
+        };
+        let resp = searcher.search(&params).expect("search");
+        assert_eq!(resp.hits.len(), 2, "different file_size → not collapsed");
+        assert_eq!(resp.total, 2);
+        assert!(resp.hits.iter().all(|h| h.duplicate_count == 1));
+    }
+
+    #[test]
+    fn test_search_deduped_total_in_window() {
+        let docs = vec![
+            ("uuid-a", "a.pdf", "pdf", "d", "/a.pdf", "aaa", "md5-x", 1_000, 100),
+            ("uuid-b", "b.pdf", "pdf", "d", "/b.pdf", "bbb", "md5-y", 2_000, 200),
+            ("uuid-c", "c.pdf", "pdf", "d", "/c.pdf", "ccc", "md5-z", 3_000, 300),
+            ("uuid-d", "d.pdf", "pdf", "d", "/d.pdf", "ddd", "md5-x", 4_000, 100),
+            ("uuid-e", "e.pdf", "pdf", "d", "/e.pdf", "eee", "md5-y", 5_000, 200),
+        ];
+        let (index, reader) = setup_index_with_dedup_docs(&docs);
+        let searcher = SearcherWrap::new(reader, index);
+
+        let params = SearchParams {
+            query: String::new(),
+            dir_ids: None, file_ids: None, ext_filter: None, date_from: None, date_to: None,
+            path_prefixes: None, sort: SortField::Date, sort_order: "desc".to_string(),
+            page: 1, page_size: 2, fuzzy: false, semantic: false, dedupe: true,
+        };
+        let resp = searcher.search(&params).expect("search");
+        assert!(resp.hits.len() <= 2, "page_size=2 limits hits");
+        assert!(resp.total >= 3, "3 distinct (md5,size) keys → total >= 3");
+        for h in &resp.hits {
+            assert!(h.duplicate_count >= 1);
+        }
     }
 }

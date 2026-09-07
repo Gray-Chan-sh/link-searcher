@@ -9,6 +9,8 @@ export interface SearchHit {
   score: number
   mtime: number
   file_size: number
+  duplicate_count: number
+  duplicate_paths: string[]
 }
 
 export interface IdWithPath {

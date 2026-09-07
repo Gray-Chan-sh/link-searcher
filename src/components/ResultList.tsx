@@ -42,6 +42,7 @@ export default function ResultList({ hits, selectedId, onSelect, revealIndex, ch
   const containerRef = useRef<HTMLDivElement>(null)
   const [visibleRange, setVisibleRange] = useState({ start: 0, end: 20 })
   const [contextMenu, setContextMenu] = useState<ContextMenu | null>(null)
+  const [expandedDuplicate, setExpandedDuplicate] = useState<Set<string>>(new Set())
 
   // 键盘导航：revealIndex 变化时把目标行滚进视野（虚拟列表直接设 scrollTop）
   useEffect(() => {
@@ -122,6 +123,22 @@ export default function ResultList({ hits, selectedId, onSelect, revealIndex, ch
                 </span>
                 <span className="text-xs text-gray-400 uppercase shrink-0">{hit.file_ext}</span>
                 <span className="ml-auto text-xs text-gray-400 shrink-0">{formatTime(hit.mtime)}</span>
+                {hit.duplicate_count > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      setExpandedDuplicate(prev => {
+                        const next = new Set(prev)
+                        if (next.has(hit.file_id)) next.delete(hit.file_id)
+                        else next.add(hit.file_id)
+                        return next
+                      })
+                    }}
+                    className="shrink-0 text-xs px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-800/40 ml-1"
+                  >
+                    📎 {t('duplicates_count', { count: hit.duplicate_count })}
+                  </button>
+                )}
               </div>
               <p className="text-xs text-gray-500 dark:text-gray-400 leading-relaxed line-clamp-2 mb-1">
                 {highlightSnippet(hit.snippet)}
@@ -131,6 +148,13 @@ export default function ResultList({ hits, selectedId, onSelect, revealIndex, ch
                 <span className="shrink-0">{formatSize(hit.file_size)}</span>
                 <span className="shrink-0">{t('score', { score: hit.score.toFixed(2) })}</span>
               </div>
+              {expandedDuplicate.has(hit.file_id) && hit.duplicate_paths.length > 0 && (
+                <div className="mt-1 pl-2 border-l-2 border-amber-300 dark:border-amber-700 text-xs text-gray-500 dark:text-gray-400 space-y-0.5">
+                  {hit.duplicate_paths.map((p, i) => (
+                    <div key={i} className="truncate" title={p}>{p}</div>
+                  ))}
+                </div>
+              )}
             </button>
           )
         })}

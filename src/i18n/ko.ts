@@ -302,6 +302,7 @@ const ko: Record<string, string> = {
     copied_path: '경로 복사됨',
     copied_name: '이름 복사됨',
     score: '점수: {score}',
+    duplicates_count: '{count}개의 중복',
 
     // Preview panel
     shrink_panel: '패널 축소',

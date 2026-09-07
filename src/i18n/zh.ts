@@ -313,6 +313,7 @@ const zh: Record<string, string> = {
     copied_path: '已复制路径',
     copied_name: '已复制名称',
     score: '得分：{score}',
+    duplicates_count: '{count} 份重复',
 
     // Preview panel
     shrink_panel: '收缩面板',

@@ -313,6 +313,7 @@ const en: Record<string, string> = {
     copied_path: 'Path copied',
     copied_name: 'Name copied',
     score: 'Score: {score}',
+    duplicates_count: '{count} duplicates',
 
     // Preview panel
     shrink_panel: 'Shrink panel',

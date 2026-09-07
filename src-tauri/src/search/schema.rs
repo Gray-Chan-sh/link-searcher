@@ -40,6 +40,8 @@ pub fn register_tokenizers(index: &Index) {
 /// - `file_name` (TEXT | STORED) — Base filename (indexed with jieba)
 /// - `file_ext` (STRING | STORED) — Lowercase extension
 /// - `dir_id` (STRING | STORED) — Directory ID for scoped search
+/// - `path` (STRING | STORED) — Relative path
+/// - `md5` (STRING | STORED) — Content MD5 hash for deduplication
 /// - `content` (TEXT) — Full extracted text (tokenized with jieba, NOT stored)
 /// - `content_suggest` (TEXT) — Same content with suggest tokenizer for autocomplete
 /// - `mtime` (DATE | INDEXED | STORED) — Modification time for date filtering
@@ -71,6 +73,7 @@ pub fn build_schema() -> Schema {
     builder.add_text_field("file_ext", STRING | STORED);
     builder.add_text_field("dir_id", STRING | STORED);
     builder.add_text_field("path", STRING | STORED);
+    builder.add_text_field("md5", STRING | STORED);
     builder.add_text_field("content", content_options);
     builder.add_text_field("content_suggest", suggest_options);
     builder.add_date_field("mtime", INDEXED | STORED | FAST);
@@ -205,6 +208,7 @@ mod tests {
         assert!(schema.get_field("file_ext").is_ok());
         assert!(schema.get_field("dir_id").is_ok());
         assert!(schema.get_field("path").is_ok());
+        assert!(schema.get_field("md5").is_ok());
         assert!(schema.get_field("content").is_ok());
         assert!(schema.get_field("content_suggest").is_ok());
         assert!(schema.get_field("mtime").is_ok());

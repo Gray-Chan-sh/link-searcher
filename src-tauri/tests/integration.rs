@@ -129,6 +129,7 @@ impl TestEnv {
             page_size: 100,
             fuzzy: false,
             semantic: false,
+            dedupe: true,
         };
         searcher.search(&params).unwrap().hits.into_iter().map(|h| h.file_id).collect()
     }

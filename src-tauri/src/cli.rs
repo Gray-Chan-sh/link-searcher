@@ -78,6 +78,7 @@ pub fn run_cli() -> Result<()> {
                 page_size: limit,
                 fuzzy: false,
                 semantic: false,
+                dedupe: true,
             };
 
             let result = searcher.search(&params).context("search failed")?;

@@ -74,6 +74,7 @@ async fn search_handler(
         page_size: params.page_size,
         fuzzy: params.fuzzy.unwrap_or(false),
         semantic: params.semantic.unwrap_or(false),
+        dedupe: true,
     };
 
     let result = searcher

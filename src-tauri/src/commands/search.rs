@@ -174,6 +174,7 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
         page_size: page_size.unwrap_or(20).min(max_results).min(1000),
         fuzzy: fuzzy.unwrap_or(false),
         semantic: semantic.unwrap_or(false),
+        dedupe: true,
     };
 
     let mgr = state
@@ -379,6 +380,8 @@ fn semantic_rerank_worker(
                     score: (cos * 100.0) as f64,
                     mtime: rec.mtime,
                     file_size: rec.size,
+                    duplicate_count: 0,
+                    duplicate_paths: vec![],
                 },
             );
         }
@@ -707,6 +710,7 @@ pub async fn export_search_results_impl(
         page_size: export_page_size,
         fuzzy: false,
         semantic: false,
+        dedupe: false,
     };
 
     let mgr = app_state
@@ -853,6 +857,7 @@ pub async fn search_file_ids_only_impl(
         page_size: 5000,
         fuzzy: false,
         semantic: semantic.unwrap_or(false),
+        dedupe: false,
     };
 
     let mgr = app_state.index_manager.read().map_err(|e| format!("{e}"))?;
@@ -915,6 +920,7 @@ pub async fn refine_search_impl(
         page_size: page_size.unwrap_or(200),
         fuzzy: false,
         semantic: false,
+        dedupe: false,
     };
 
     let mgr = app_state.index_manager.read().map_err(|e| format!("{e}"))?;
