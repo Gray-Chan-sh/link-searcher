@@ -114,16 +114,35 @@ export default function IndexStatus() {
   }, [status?.scan_delta])
 
   const handleRebuild = async () => {
-    console.log('[IndexStatus] handleRebuild called')
-    const confirmed = await confirm(t('confirm_rebuild'))
-    console.log('[IndexStatus] confirm result:', confirmed)
-    if (!confirmed) return
+    const logFile = '/tmp/link-searcher-debug.log'
+    const writeLog = async (msg: string) => {
+      const ts = new Date().toISOString()
+      const { writeTextFile, exists, readTextFile } = await import('@tauri-apps/plugin-fs')
+      const existing = await exists(logFile).catch(() => false)
+      const prev = existing ? await readTextFile(logFile).catch(() => '') : ''
+      await writeTextFile(logFile, prev + `[${ts}] [IndexStatus] ${msg}\n`).catch(() => {})
+    }
+    try { await writeLog('handleRebuild called') } catch {}
+    let confirmed = false
+    try {
+      const { ask } = await import('@tauri-apps/plugin-dialog')
+      confirmed = await ask(t('confirm_rebuild'), { title: '确认' })
+      try { await writeLog(`confirm result: ${confirmed}`) } catch {}
+    } catch (e) {
+      try { await writeLog(`confirm FAILED: ${e}`) } catch {}
+    }
+    if (!confirmed) {
+      try { await writeLog('user cancelled or confirm failed, returning') } catch {}
+      return
+    }
     setRebuilding(true)
     try {
       await rebuild()
-      console.log('[IndexStatus] rebuild succeeded')
+      try { await writeLog('rebuild() completed successfully') } catch {}
     } catch (e) {
-      console.error('[IndexStatus] rebuild error:', e)
+      const msg = e instanceof Error ? e.message : String(e)
+      try { await writeLog(`rebuild() FAILED: ${msg}`) } catch {}
+      setError(msg)
     } finally {
       setRebuilding(false)
     }
