@@ -60,9 +60,9 @@ fn file_type_name(ext: &str) -> String {
 ///
 /// DB stores paths RELATIVE to each dir root, so a raw absolute prefix
 /// never matches. Map each path to its owning dir plus a relative prefix,
-/// matching `(dir_id, rel)` or `(dir_id, rel/…)` — this also excludes
+/// matching `(dir_id, rel)` or `(dir_id, rel/…) — this also excludes
 /// sibling dirs that merely share a prefix (`docs` vs `docs2`).
-fn resolve_dir_paths(
+pub fn resolve_dir_paths(
     conn: &rusqlite::Connection,
     paths: &[String],
 ) -> Result<Option<Vec<String>>, String> {
@@ -126,6 +126,8 @@ pub async fn search(
     fuzzy: Option<bool>,
     semantic: Option<bool>,
 ) -> Result<SearchResponse, String> {
+    log::info!("[CMD] search called: query={:?} page={:?} page_size={:?} sort={:?} sort_order={:?}",
+        query, page, page_size, sort, sort_order);
     if state.is_rebuilding.load(Ordering::SeqCst) {
         return Err("索引重建中，请稍后再试".to_string());
     }
@@ -192,9 +194,10 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
 
     let response = searcher
         .search(&params)
-        .map_err(|e| format!("search failed: {e}"))?;
-
-    // Semantic rerank (optional): when enabled and the AI gateway is
+        .map_err(|e| {
+            log::error!("[SEARCH] search failed: query={:?} dedupe={} error={e}", params.query, params.dedupe);
+            format!("search failed: {e}")
+        })?;
     // configured, fuse BM25 hits with embedding-cosine top-N via RRF so
     // meaning-matches surface alongside keyword matches. Runs on a
     // blocking thread with a short timeout so a hung embedding gateway

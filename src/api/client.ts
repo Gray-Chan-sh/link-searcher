@@ -37,7 +37,7 @@ const MAPPINGS: Record<string, Mapping> = {
   // ── Search ──
   search: {
     method: 'GET', path: '/api/search',
-    paramMap: { query: 'q', pageSize: 'page_size', dirIds: 'dir_ids', extFilter: 'ext_filter' },
+    paramMap: { query: 'q', pageSize: 'page_size', dirIds: 'dir_ids', dirPaths: 'dir_paths', extFilter: 'ext_filter' },
   },
   suggest: { method: 'GET', path: '/api/suggest' },
   search_file_paths: { method: 'GET', path: '/api/search/paths' },

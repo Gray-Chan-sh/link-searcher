@@ -4,7 +4,18 @@
 
 ---
 
-## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复）
+## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复 + 搜索筛选 Web 模式修复）
+
+> 本次更新包含三项独立修复。
+
+### 搜索筛选 Web 模式修复
+
+- **根因**：Web 浏览器模式下，`client.ts` 的 `search` 命令 `paramMap` 缺少 `dirPaths` 映射，导致目录筛选路径参数无法传递到后端；同时 `webapi/routes/search.rs` 的 `SearchQuery` 结构体缺少 `dir_paths` 字段。
+- **修复**：`src/api/client.ts` 添加 `dirPaths: 'dir_paths'` 到 search 的 paramMap；`src-tauri/src/webapi/routes/search.rs` 的 `SearchQuery` 添加 `dir_paths: Option<Vec<String>>` 字段，并在 `search_handler` 中调用 `resolve_dir_paths` 解析为 `file_ids`；`resolve_dir_paths` 函数改为 `pub` 以便跨模块调用。
+- **影响范围**：仅影响 Web 浏览器模式（`isTauri() === false`），Tauri IPC 模式不受影响。
+- 涉及：`src/api/client.ts`、`src-tauri/src/webapi/routes/search.rs`、`src-tauri/src/commands/search.rs`。验证：`cargo check` 零错误、`tsc --noEmit` 零错误。
+
+---
 
 **动机**：验证程序是否开发完成需要一套覆盖全部用户交互的 GUI 测试方案。现有 37 个 E2E 用例依赖 MCP 但 `execute_js` 在运行 2-3 分钟后超时失效。
 

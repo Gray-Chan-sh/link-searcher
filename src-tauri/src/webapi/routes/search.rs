@@ -22,6 +22,7 @@ pub struct SearchQuery {
     #[serde(default = "default_page_size")]
     pub page_size: usize,
     pub dir_ids: Option<Vec<String>>,
+    pub dir_paths: Option<Vec<String>>,
     pub ext_filter: Option<Vec<String>>,
     pub date_from: Option<i64>,
     pub date_to: Option<i64>,
@@ -48,6 +49,20 @@ async fn search_handler(
     Query(params): Query<SearchQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
+
+    // Resolve dir_paths to file_ids via SQLite path prefix matching.
+    let file_ids: Option<Vec<String>> = if let Some(paths) = &params.dir_paths {
+        if paths.is_empty() {
+            None
+        } else {
+            let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+            let ids = search::resolve_dir_paths(&conn, paths).map_err(|e| ApiError { error: e })?;
+            ids
+        }
+    } else {
+        None
+    };
+
     let mgr = app_state
         .index_manager
         .read()
@@ -63,7 +78,7 @@ async fn search_handler(
     let search_params = SearchParams {
         query: crate::search::schema::split_query_terms(&params.q.to_lowercase()),
         dir_ids: params.dir_ids,
-        file_ids: None,
+        file_ids,
         ext_filter: params.ext_filter,
         path_prefixes: None,
         date_from: params.date_from,
