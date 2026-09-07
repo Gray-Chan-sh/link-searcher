@@ -24,7 +24,11 @@
 - **影响范围**：目录筛选（所有模式）和语义搜索筛选（所有模式）。
 - 涉及：`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/search.rs`。验证：`cargo test --lib` 238 通过、`cargo check` 零错误、`tsc --noEmit` 零错误。
 
----
+### 重建索引按钮无响应
+
+- **根因**：`rebuild_index` 命令在已有扫描正在进行时直接返回错误 `"a scan is already in progress"`，而前端 `handleRebuild` 在失败时只 `setError` 但未向用户展示错误（错误状态在页面中不显式渲染）。
+- **修复**：`commands/index.rs` 的 `rebuild_index` 改为先设置 `cancel_scan = true` 取消正在运行的扫描，等待最多 10 秒后开始重建；`useIndexStatus.ts` 中 `rebuild` 失败时同时调用 `alert()` 让用户看到错误提示。
+- 涉及：`src-tauri/src/commands/index.rs`、`src/hooks/useIndexStatus.ts`。验证：`cargo check` 零错误、`tsc --noEmit` 零错误。
 
 **动机**：验证程序是否开发完成需要一套覆盖全部用户交互的 GUI 测试方案。现有 37 个 E2E 用例依赖 MCP 但 `execute_js` 在运行 2-3 分钟后超时失效。
 

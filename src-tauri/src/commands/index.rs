@@ -297,12 +297,18 @@ pub async fn rebuild_index(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
-    if state
-        .is_scanning
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("a scan is already in progress".to_string());
+    // If a scan is already in progress, cancel it and wait for it to finish
+    // before starting the rebuild (avoids the "scan already in progress" error).
+    if state.is_scanning.swap(true, Ordering::SeqCst) {
+        // Signal the running scan to cancel
+        state.cancel_scan.store(true, Ordering::SeqCst);
+        // Wait up to 10s for the current scan to exit
+        for _ in 0..20 {
+            if !state.is_scanning.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     }
     state.is_rebuilding.store(true, Ordering::SeqCst);
 

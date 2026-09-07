@@ -43,7 +43,11 @@ export function useIndexStatus(): UseIndexStatusReturn {
       await rebuildIndex()
       void refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to rebuild index')
+      const msg = e instanceof Error ? e.message : 'Failed to rebuild index'
+      setError(msg)
+      // Show a visible alert so the user knows why it failed (e.g. scan stuck)
+      const { alert } = await import('../utils/platform')
+      await alert(msg)
     }
   }, [refresh])
 
