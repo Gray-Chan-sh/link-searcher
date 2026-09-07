@@ -113,12 +113,20 @@ export default function IndexStatus() {
     }
   }, [status?.scan_delta])
 
-const handleRebuild = async () => {
+  const handleRebuild = async () => {
+    console.log('[IndexStatus] handleRebuild called')
     const confirmed = await confirm(t('confirm_rebuild'))
+    console.log('[IndexStatus] confirm result:', confirmed)
     if (!confirmed) return
     setRebuilding(true)
-    await rebuild()
-    setRebuilding(false)
+    try {
+      await rebuild()
+      console.log('[IndexStatus] rebuild succeeded')
+    } catch (e) {
+      console.error('[IndexStatus] rebuild error:', e)
+    } finally {
+      setRebuilding(false)
+    }
   }
 
   const handleBackfill = async () => {
