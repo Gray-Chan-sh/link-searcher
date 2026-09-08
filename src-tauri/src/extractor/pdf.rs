@@ -104,6 +104,7 @@ fn get_pdf_page_count(path: &Path) -> Result<u32> {
 /// yields `Ok((None, vec![]))` so callers can fall back.
 fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> std::io::Result<(Option<std::process::ExitStatus>, Vec<u8>)> {
     cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::null());
     let mut child = cmd.spawn()?;
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -460,6 +461,7 @@ pub fn ocr_pdf_via_pdftoppm(
         .ok_or_else(|| anyhow::anyhow!("pdftoppm not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
     cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
+    cmd.stderr(Stdio::null());
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
