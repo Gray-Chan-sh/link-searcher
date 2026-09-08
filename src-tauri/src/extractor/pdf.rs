@@ -637,6 +637,7 @@ fn extract_and_ocr_page_via_pdfimages(
     ])
     .arg(pdf_path)
     .arg(&prefix);
+    cmd.stderr(Stdio::null());
 
     let mut child = cmd
         .spawn()
