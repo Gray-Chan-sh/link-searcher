@@ -77,7 +77,24 @@ impl IndexManager {
     pub fn open_or_create(path: &Path) -> Result<Self, TantivyError> {
         let schema = build_schema();
         let index = if path.join("meta.json").exists() {
-            Index::open_in_dir(path)?
+            match Index::open_in_dir(path) {
+                Ok(idx) => {
+                    if idx.schema() == schema {
+                        idx
+                    } else {
+                        log::warn!("[INDEX] schema mismatch at {:?}, recreating index", path);
+                        let _ = std::fs::remove_dir_all(path);
+                        std::fs::create_dir_all(path).ok();
+                        Index::create_in_dir(path, schema)?
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[INDEX] failed to open {:?}: {e}, recreating", path);
+                    let _ = std::fs::remove_dir_all(path);
+                    std::fs::create_dir_all(path).ok();
+                    Index::create_in_dir(path, schema)?
+                }
+            }
         } else {
             std::fs::create_dir_all(path).ok();
             Index::create_in_dir(path, schema)?

@@ -30,6 +30,12 @@
 - **修复**：`commands/index.rs` 的 `rebuild_index` 改为先设置 `cancel_scan = true` 取消正在运行的扫描，等待最多 10 秒后开始重建；`useIndexStatus.ts` 中 `rebuild` 失败时同时调用 `alert()` 让用户看到错误提示。
 - 涉及：`src-tauri/src/commands/index.rs`、`src/hooks/useIndexStatus.ts`。验证：`cargo check` 零错误、`tsc --noEmit` 零错误。
 
+### Tantivy 字段不匹配导致崩溃（`index out of bounds: the len is 9 but the index is 9`）
+
+- **根因**：磁盘上的已有索引文件是用旧版 Schema（9 个字段，无 `md5`）建立的，`IndexManager::open_or_create` 读取磁盘 `meta.json` 时直接打开旧 Schema 索引；而代码中的 `add_document` 使用编译期固定 Schema（10 个字段，`md5` 为第 10 个字段，索引 9）写入，导致 Tantivy fastfield 内部动态数组越界崩溃。
+- **修复**：`src-tauri/src/search/mod.rs` 的 `open_or_create` 中，以 `idx.schema() == schema` 校验磁盘索引结构。若校验不一致或打开报错，打 Warn 日志并自动删除重建该索引，避免任何崩溃。
+- 涉及：`src-tauri/src/search/mod.rs`。验证：`cargo test --lib` 238 通过、`cargo check` 零错误。
+
 **动机**：验证程序是否开发完成需要一套覆盖全部用户交互的 GUI 测试方案。现有 37 个 E2E 用例依赖 MCP 但 `execute_js` 在运行 2-3 分钟后超时失效。
 
 - **MCP `execute_js` 超时根因定位与修复**：`tauri-plugin-mcp 0.3.1` 的 `emit_and_wait` 收到 JS 响应后解析时遇到 Tauri 事件系统的多重 JSON 编码（字符串被再次序列化为带引号 JSON），导致 `response.get("result")` 返回 None → 回退 `[Result could not be stringified]`。修复 `src/tools/execute_js.rs`：增加 3 层解包循环 `for _ in 0..3 { if let Some(s) = response.as_str() { response = serde_json::from_str(s)?; } }`。`src-tauri/Cargo.toml` 改为 `path` 引用本地修改版插件。验证：连续 8 次 execute_js 全部返回正确值（`2`/`3`/`4`...），之前 3-4 次后即超时。
