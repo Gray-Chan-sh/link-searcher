@@ -499,7 +499,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                         }
                         return `[${n}]`
                       })
-                      return links.join('')
+                      // 多个引用连写（[4][6]）用空格分隔渲染，避免视觉上
+                      // 拼成单个编号（"46"）无法区分是 [46] 还是 [4][6]。
+                      return links.join(' ')
                     })}</ReactMarkdown>
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
