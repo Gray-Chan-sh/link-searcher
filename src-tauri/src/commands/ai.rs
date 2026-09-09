@@ -2556,21 +2556,43 @@ struct TurnExport {
     search_query: String,
     /// BM25 合并前命中数。
     hits: usize,
+    /// 本轮 RAG 管线日志（query rewrite/scope/retrieval/context/LLM 调用等
+    /// 结构化事件，来自 ai_events 表；旧会话无记录时省略该键）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    log: Vec<AiEventJson>,
 }
 
 /// 导出会话为 JSON（分析友好）：空范围轮次 scope=[] ，无回答轮次 answer=null。
+/// 每轮附带 `log` 段（ai_events 表中的结构化管线事件，需传 DB pool；为
+/// None 时省略 log 段，便于无 DB 的纯历史导出场景）。
 #[tauri::command]
 pub fn export_chat_session_json(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    export_chat_session_json_impl(&state.data_dir, &id)
+    export_chat_session_json_impl(&state.data_dir, &id, Some(&state.db))
 }
 
-pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+pub fn export_chat_session_json_impl(
+    data_dir: &std::path::Path,
+    id: &str,
+    db: Option<&r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>,
+) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
         .into_iter()
         .find(|s| s.id == id)
         .ok_or_else(|| "会话不存在".to_string())?;
+
+    // Load per-turn structured pipeline events (ai_events, 0-based turn_number).
+    let mut events_by_turn: std::collections::HashMap<usize, Vec<AiEventJson>> =
+        std::collections::HashMap::new();
+    if let Some(pool) = db
+        && let Ok(conn) = pool.get()
+        && let Ok(events) = crate::db::ai_events::get_session_events(&conn, &session.id)
+    {
+        for e in events.iter().map(ai_event_to_json) {
+            events_by_turn.entry(e.turn_number).or_default().push(e);
+        }
+    }
 
     let mut turns = Vec::new();
     let mut turn_idx = 0usize;
@@ -2600,6 +2622,12 @@ pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Re
             let search_query = per_turn.map(|e| e.search_query.clone()).unwrap_or_default();
             let hits = per_turn.map(|e| e.hits).unwrap_or(0);
             let evidence = per_turn.map(|e| e.items.clone()).unwrap_or_default();
+            // ai_events turn_number 是 0-based（运行时 user 消息计数-1），
+            // 与导出的 turn_index-1 对齐。
+            let log = events_by_turn
+                .get(&(turn_idx - 1))
+                .cloned()
+                .unwrap_or_default();
             turns.push(TurnExport {
                 turn_index: turn_idx,
                 scope,
@@ -2612,13 +2640,14 @@ pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Re
                 embedding_model,
                 search_query,
                 hits,
+                log,
             });
         }
     }
 
     let config = crate::config::load_config();
     let export = ChatExportJson {
-        schema_version: 2,
+        schema_version: 3,
         exported_at: now_ts(),
         session: SessionExportMeta {
             id: session.id,
@@ -2635,7 +2664,7 @@ pub fn export_chat_session_json_impl(data_dir: &std::path::Path, id: &str) -> Re
     serde_json::to_string_pretty(&export).map_err(|e| format!("JSON 序列化失败: {e}"))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct AiEventJson {
     pub id: i64,
     pub session_id: String,
@@ -2646,6 +2675,19 @@ pub struct AiEventJson {
     pub created_at: i64,
 }
 
+/// Convert a stored [`crate::db::ai_events::AiEvent`] row to its JSON shape.
+pub(crate) fn ai_event_to_json(e: &crate::db::ai_events::AiEvent) -> AiEventJson {
+    AiEventJson {
+        id: e.id,
+        session_id: e.session_id.clone(),
+        turn_number: e.turn_number,
+        event_seq: e.event_seq,
+        event_type: e.event_type.clone(),
+        payload: e.payload.clone(),
+        created_at: e.created_at,
+    }
+}
+
 #[tauri::command]
 pub fn get_ai_events(
     state: State<'_, AppState>,
@@ -2654,15 +2696,7 @@ pub fn get_ai_events(
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let events = crate::db::ai_events::get_session_events(&conn, &session_id)
         .map_err(|e| format!("{e}"))?;
-    Ok(events.into_iter().map(|e| AiEventJson {
-        id: e.id,
-        session_id: e.session_id,
-        turn_number: e.turn_number,
-        event_seq: e.event_seq,
-        event_type: e.event_type,
-        payload: e.payload,
-        created_at: e.created_at,
-    }).collect())
+    Ok(events.iter().map(ai_event_to_json).collect())
 }
 
 #[tauri::command]
@@ -2674,15 +2708,7 @@ pub fn get_turn_ai_events(
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let events = crate::db::ai_events::get_turn_events(&conn, &session_id, turn_number)
         .map_err(|e| format!("{e}"))?;
-    Ok(events.into_iter().map(|e| AiEventJson {
-        id: e.id,
-        session_id: e.session_id,
-        turn_number: e.turn_number,
-        event_seq: e.event_seq,
-        event_type: e.event_type,
-        payload: e.payload,
-        created_at: e.created_at,
-    }).collect())
+    Ok(events.iter().map(ai_event_to_json).collect())
 }
 
 #[cfg(test)]
@@ -2917,13 +2943,17 @@ mod history_tests {
             strict_docs: false,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let json_str = export_chat_session_json_impl(&dir, "s2").unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s2", None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        // schema v3：无 ai_events 记录时省略 log 段（向后兼容）。
+        assert_eq!(v["schema_version"], serde_json::json!(3));
 
         let t0 = &v["turns"][0];
         assert_eq!(t0["scope"], serde_json::json!([]), "未指定范围轮次 scope 应为空数组");
         assert_eq!(t0["answer"], serde_json::Value::Null, "无回答轮次 answer 应为 null");
         assert_eq!(t0["evidence"].as_array().map(Vec::len), Some(0), "无依据轮次 evidence 应为空数组");
+        assert!(t0.get("log").is_none(), "无事件记录时不应输出 log 段");
 
         let t1 = &v["turns"][1];
         assert_eq!(t1["scope"][0], serde_json::json!(scope));
@@ -2941,6 +2971,65 @@ mod history_tests {
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage { role: role.into(), content: content.into() }
+    }
+
+    /// export JSON 每轮 log 段：ai_events 的结构化管线事件按轮次写入导出。
+    #[test]
+    fn export_json_includes_per_turn_events() {
+        let dir = std::env::temp_dir().join(format!("ls_export_ev_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("ev.db");
+        let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
+        {
+            let c = pool.get().unwrap();
+            crate::db::init_db(&c).unwrap();
+            drop(c);
+        }
+
+        let session = ChatSession {
+            id: "s-evt".into(),
+            title: "带日志导出".into(),
+            created_at: 0,
+            updated_at: 0,
+            messages: vec![msg("user", "毛弟被辱骂了么"), msg("assistant", "是的")],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![],
+            retrieval_scope: vec!["案件/和嘉案/聊天记录".into()],
+            strict_docs: true,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+
+        // 记录第 0 轮（ai_events 的 turn_number 是 0-based）的两个事件。
+        {
+            let c = pool.get().unwrap();
+            crate::db::ai_events::record_event(
+                &c, "s-evt", 0, 1, "query_rewrite",
+                &serde_json::json!({"original": "q", "rewritten": "毛弟 辱骂", "was_rewritten": true, "rewrite_method": "rule"}),
+            )
+            .unwrap();
+            crate::db::ai_events::record_event(
+                &c, "s-evt", 0, 2, "retrieval",
+                &serde_json::json!({"search_query": "毛弟 OR 辱骂", "bm25_hits": 132, "semantic_fused": false, "merged_hits": 6, "from_history_count": 0}),
+            )
+            .unwrap();
+            drop(c);
+        }
+
+        let json_str = export_chat_session_json_impl(&dir, "s-evt", Some(&pool)).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(v["schema_version"], serde_json::json!(3));
+        let log = &v["turns"][0]["log"];
+        assert_eq!(log.as_array().map(Vec::len), Some(2), "应导出 2 条事件: {log}");
+        assert_eq!(log[0]["event_type"], serde_json::json!("query_rewrite"));
+        assert_eq!(log[0]["payload"]["rewritten"], serde_json::json!("毛弟 辱骂"));
+        assert_eq!(log[1]["event_type"], serde_json::json!("retrieval"));
+        assert_eq!(log[1]["payload"]["bm25_hits"], serde_json::json!(132));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

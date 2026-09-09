@@ -163,7 +163,7 @@ async fn chat_session_export_handler(
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;
-    let json = crate::commands::ai::export_chat_session_json_impl(&app_state.data_dir, &id)
+    let json = crate::commands::ai::export_chat_session_json_impl(&app_state.data_dir, &id, Some(&app_state.db))
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;

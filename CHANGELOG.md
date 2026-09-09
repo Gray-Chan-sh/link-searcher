@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-10（AI 聊天 JSON 导出每轮附加 log 段：RAG 管线调试日志）
+
+> 导出 JSON 仅含问答/依据，缺管线过程日志，跨轮检索异常难以复盘。
+
+- **根因**：`export_chat_session_json_impl` 只导出 `chat_history.json` 里的会话（问答、evidence、search_query 等），RAG 管线事件（query rewrite/scope 解析/检索命中/context 装配/LLM 调用）存在 SQLite `ai_events` 表里但未进导出，且导出函数签名拿不到 DB。
+- **修复**：导出函数增加可选 DB pool 参数；按轮（ai_events 的 0-based turn_number ↔ 导出的 turn_index-1）把结构化事件组装成每轮的 `log` 段（含 event_type 与 payload：改写前后查询、检索关键词、命中数、注入材料数、LLM 模型与耗时等）。`schema_version` 升为 3；无事件记录时省略 `log` 键（向后兼容）。Tauri 命令与 webapi 导出均接上 DB。
+- 涉及：`src-tauri/src/commands/ai.rs`、`src-tauri/src/webapi/routes/ai.rs`。验证：`export_json_includes_per_turn_events` 单测通过，`cargo test --lib` 247 passed。
+
+---
+
 ## 2026-09-10（AI 聊天导出文件名修复：标题+时间序列 + 根治 macOS 追加 .* 后缀）
 
 > 导出 JSON 文件名不确定（.json / ai.json）与 macOS 保存后面临系统追加 .* 后缀的问题。
