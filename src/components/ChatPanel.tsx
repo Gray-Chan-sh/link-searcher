@@ -54,6 +54,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [scopeActionPreview, setScopeActionPreview] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string; reasoning: string } | null>(null)
+  // 引用悬浮卡（跟随鼠标，fixed 定位，pointer-events-none 不拦截 hover 移出）
+  const [hoverCite, setHoverCite] = useState<{ x: number; y: number; path: string; snippet: string } | null>(null)
+  // 就地展开的引用卡：{ m: 消息下标, n: 材料编号(1-based) }
+  const [activeCite, setActiveCite] = useState<{ m: number; n: number; path: string; snippet: string } | null>(null)
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   // 流式自动跟随：用户主动上滚查看历史时暂停跟随，回到底部后恢复
@@ -94,6 +98,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setConditionChips([])
     setScopeActionPreview(null)
     setInput('')
+    setActiveCite(null)
+    setHoverCite(null)
   }, [session?.id])
 
   // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
@@ -478,10 +484,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                             const idx = parseInt(href.slice(5), 10)
                             const ev = evidenceFor(i)
                             if (idx >= 0 && idx < ev.length && ev[idx]!.path) {
+                              const item = ev[idx]!
                               return (
                                 <span
-                                  className="text-blue-600 dark:text-blue-400 cursor-pointer underline decoration-dotted hover:underline"
-                                  onClick={() => navigate('/browse?path=' + encodeURIComponent(ev[idx]!.path))}
+                                  className="text-blue-600 dark:text-blue-400 cursor-pointer underline decoration-dotted decoration-1 underline-offset-2 rounded px-0.5 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors"
+                                  onMouseEnter={(e) => setHoverCite({ x: e.clientX, y: e.clientY, path: item.path, snippet: item.snippet })}
+                                  onMouseLeave={() => setHoverCite(null)}
+                                  onClick={() => {
+                                    setHoverCite(null)
+                                    setActiveCite(prev =>
+                                      prev && prev.m === i && prev.n === idx + 1
+                                        ? null
+                                        : { m: i, n: idx + 1, path: item.path, snippet: item.snippet })
+                                  }}
                                 >{children}</span>
                               )
                             }
@@ -503,6 +518,39 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                       // 拼成单个编号（"46"）无法区分是 [46] 还是 [4][6]。
                       return links.join(' ')
                     })}</ReactMarkdown>
+                    {activeCite && activeCite.m === i && (
+                      <div className="mt-2 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/15 px-2.5 py-2 text-xs">
+                        <div className="flex items-start justify-between gap-2">
+                          <span className="font-medium text-gray-700 dark:text-gray-300 break-all">
+                            📄 [{activeCite.n}] {activeCite.path}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setActiveCite(null)}
+                            className="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 leading-none px-0.5"
+                            aria-label="关闭"
+                          >×</button>
+                        </div>
+                        {activeCite.snippet && (
+                          <p className="mt-1 text-gray-600 dark:text-gray-400 whitespace-pre-wrap max-h-36 overflow-y-auto border-l-2 border-blue-200 dark:border-blue-800 pl-2">
+                            {activeCite.snippet}
+                          </p>
+                        )}
+                        <div className="mt-1.5 flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => navigate('/browse?path=' + encodeURIComponent(activeCite.path))}
+                            className="text-blue-600 dark:text-blue-400 hover:underline"
+                          >打开原文 ↗</button>
+                          <span className="text-gray-300 dark:text-gray-600">|</span>
+                          <button
+                            type="button"
+                            onClick={() => setActiveCite(null)}
+                            className="text-gray-500 dark:text-gray-400 hover:underline"
+                          >关闭</button>
+                        </div>
+                      </div>
+                    )}
                     {evidenceFor(i).length > 0 && (
                       <details className="mt-2 text-xs text-gray-500 dark:text-gray-400">
                         <summary className="cursor-pointer select-none hover:text-purple-600 dark:hover:text-purple-300">
@@ -760,6 +808,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       ) : (
         <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 text-center text-xs text-gray-400">
           {t('ai_llm_unavailable')}
+        </div>
+      )}
+
+      {/* 引用悬浮卡：跟随鼠标展示文件名 + 命中片段，不打断阅读 */}
+      {hoverCite && (
+        <div
+          className="fixed z-50 pointer-events-none max-w-[340px] rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg px-2.5 py-2 text-[11px] text-gray-600 dark:text-gray-300"
+          style={{ left: Math.min(hoverCite.x + 14, window.innerWidth - 360), top: hoverCite.y + 18 }}
+        >
+          <div className="font-medium text-gray-700 dark:text-gray-300 break-all">📄 {hoverCite.path}</div>
+          {hoverCite.snippet && (
+            <div className="mt-1 whitespace-pre-wrap line-clamp-5">{hoverCite.snippet}</div>
+          )}
         </div>
       )}
     </div>
