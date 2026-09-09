@@ -4,6 +4,12 @@
 
 ---
 
+## v1.1.0（2026-09-10）
+
+> 版本号从 tag 同步（tauri.conf.json / package.json → 1.1.0）。自 v0.2.0 以来：检索范围锚定修复、索引完整性自愈、AI 聊天导出增强（文件名时间序列 + 每轮 log 段 + 可读时间）、引用交互（悬浮预览/就地展开/连写编号分隔）、CI 依赖修复。
+
+---
+
 ## 2026-09-10（CI 修复：tauri-plugin-mcp 绝对路径依赖 → 固定上游 git 依赖）
 
 > GitHub CI 三平台（mac/win/linux）在 `cargo test --lib` 全部失败：`failed to read ~/.cargo/git/checkouts/tauri-plugin-mcp-*/Cargo.toml: No such file or directory`。
