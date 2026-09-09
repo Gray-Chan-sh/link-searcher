@@ -69,7 +69,15 @@ export async function saveFile(content: string, defaultName: string): Promise<vo
   if (isTauri()) {
     const { save } = await import('@tauri-apps/plugin-dialog');
     const { writeTextFile } = await import('@tauri-apps/plugin-fs');
-    const path = await save({ defaultPath: defaultName, filters: [{ name: 'All Files', extensions: ['*'] }] });
+    // Derive a concrete extension filter from the default name. Passing
+    // "All Files / *" to the macOS NSSavePanel makes the system guess the
+    // extension and append a spurious suffix (e.g. `ai.json.*`) on save.
+    const dot = defaultName.lastIndexOf('.');
+    const ext = dot > 0 ? defaultName.slice(dot + 1).toLowerCase() : '';
+    const filters = ext
+      ? [{ name: ext.toUpperCase(), extensions: [ext] }]
+      : [{ name: 'All Files', extensions: ['*'] }];
+    const path = await save({ defaultPath: defaultName, filters });
     if (path) await writeTextFile(path, content);
   } else {
     const blob = new Blob([content], { type: 'text/plain' });

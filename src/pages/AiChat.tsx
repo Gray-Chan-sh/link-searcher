@@ -274,13 +274,16 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     if (!activeId) return
     try {
       const content = await exportChatSessionJson(activeId)
-      const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_')
-      await saveFile(content, `${title}.json`)
+      const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
+      const d = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+      await saveFile(content, `${title}_${ts}.json`)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [activeId])
+  }, [activeId, activeSession?.title])
 
   // 批量管理模式
   const [selectMode, setSelectMode] = useState(false)
@@ -333,7 +336,10 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
       }
       if (parts.length === 0) { alert(t('export_failed', { error: t('no_sessions_match') })); return }
       const combined = parts.join('\n\n---\n\n')
-      await saveFile(combined, 'ai-chats-batch.md')
+      const d = new Date()
+      const pad = (n: number) => String(n).padStart(2, '0')
+      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+      await saveFile(combined, `ai-chats-batch_${ts}.md`)
     } catch (e) {
       alert(t('export_failed', { error: e instanceof Error ? e.message : String(e) }))
     }

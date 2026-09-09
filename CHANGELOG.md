@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-10（AI 聊天导出文件名修复：标题+时间序列 + 根治 macOS 追加 .* 后缀）
+
+> 导出 JSON 文件名不确定（.json / ai.json）与 macOS 保存后面临系统追加 .* 后缀的问题。
+
+### save 对话框 All Files 过滤器 → macOS NSSavePanel 猜扩展名追加后缀
+
+- **根因**：`saveFile`（utils/platform.ts）向 Tauri `save()` 传 `filters: [{ name: 'All Files', extensions: ['*'] }]`，macOS NSSavePanel 在无明确扩展名类型约束时会自行追加后缀，保存后文件变成 `ai.json.*`。
+- **修复**：`saveFile` 从 `defaultName` 推导扩展名并生成具体过滤器（如 `[{ name: 'JSON', extensions: ['json'] }]`）；无扩展名才回退 All Files。AI 聊天导出、浏览页导出文本、批量导出 markdown 一并受益。
+- 涉及：`src/utils/platform.ts`。
+
+### AI 聊天 JSON 导出文件名 → 会话标题 + 时间序列
+
+- **根因**：`handleExport` 用 `${title}.json`，会话标题为空时产出 `.json`（无标题隐藏文件），标题不同则文件名不同，且依赖数组缺 `activeSession.title` 导致闭包陈旧。
+- **修复**：文件名改为 `标题_YYYYMMDD_HHMMSS.json`（标题去非法字符，空标题回退 `ai-chat`）；批量 markdown 导出同样加时间戳防覆盖。
+- 涉及：`src/pages/AiChat.tsx`。
+
+### IndexStatus handleRebuild 引用未定义 setError（既有 tsc 错误）
+
+- `setError(msg)` 在组件内从未定义，改为写入已有渲染的 `setScanError`，修复 `tsc -b` 全量编译错误。
+- 涉及：`src/pages/IndexStatus.tsx`。
+
+验证：`tsc -b` 零错误、`vitest` 13 passed、`oxlint` 0 errors。
+
+---
+
 ## 2026-09-09（索引完整性自愈：schema 重建后自动重灌 + 重复文档清理）
 
 > 修复"检索范围正确后仍零证据拒答"的底层数据损坏：Tantivy 索引与 DB 脱节（DB 标 indexed=1 的 11705 份，索引实际只有 3790 份，scope 目录文件全部缺失）。

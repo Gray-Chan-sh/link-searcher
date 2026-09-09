@@ -142,7 +142,7 @@ export default function IndexStatus() {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       try { await writeLog(`rebuild() FAILED: ${msg}`) } catch {}
-      setError(msg)
+      setScanError(msg)
     } finally {
       setRebuilding(false)
     }
