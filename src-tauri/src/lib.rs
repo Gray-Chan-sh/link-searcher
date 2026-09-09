@@ -22,7 +22,7 @@ use crate::commands::ai::{ai_capabilities, ai_topic_clusters, ask_documents, can
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan, verify_index_content};
+use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, heal_index_integrity, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
@@ -148,6 +148,7 @@ get_dir_children,
             get_unsupported_ext_stats,
             check_index_health,
             check_index_integrity,
+            heal_index_integrity,
             backfill_embeddings,
             backfill_chunk_embeddings,
             get_logs,
@@ -320,6 +321,9 @@ get_dir_children,
             });
 
             let logs_dir = data_dir.join("logs");
+            // Clone before AppState::new moves `indexer` in; used later by the
+            // startup-scan thread for the post-scan integrity heal.
+            let indexer_for_startup = indexer.clone();
             let app_state = AppState::new(
                 db_pool.clone(),
                 index_manager,
@@ -361,6 +365,7 @@ get_dir_children,
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
+            let indexer_ref = indexer_for_startup;
             let watch_tx = watcher_tx_for_startup;
 
             // R3-11: StartWatch 必须先于扫描线程，否则扫描期间的变更会丢失
@@ -514,6 +519,19 @@ get_dir_children,
                 app_handle.emit("scan-completed", serde_json::json!({}))
                     .unwrap_or_else(|e| log::error!("[STARTUP] failed to emit scan-completed: {e}"));
                 log::info!("[STARTUP] 启动扫描完成");
+
+                // 索引完整性自愈：schema 重建会清空 Tantivy 而不重灌，DB 的
+                // indexed=1 标记与索引脱节后增量扫描永远不会补写缺失文件。
+                // 扫描完成后比对 DB↔Tantivy，把缺失文件重灌（复用 md5 缓存）。
+                {
+                    let pool_h = db_ref.clone();
+                    let indexer_h = indexer_ref.clone();
+                    std::thread::spawn(move || {
+                        if let Err(e) = crate::commands::index::run_index_integrity_heal(&pool_h, &indexer_h) {
+                            log::error!("[STARTUP] 索引完整性自愈失败: {e}");
+                        }
+                    });
+                }
             });
 
             // Set window icon from embedded PNG bytes

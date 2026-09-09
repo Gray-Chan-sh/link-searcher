@@ -136,6 +136,14 @@ impl IndexManager {
         Ok(&self.reader)
     }
 
+    /// Force an immediate reader reload regardless of the throttle window.
+    /// Used by rare maintenance paths (index integrity heal) that must diff
+    /// DB records against the freshest committed documents.
+    pub fn reader_fresh(&self) -> Result<&IndexReader, TantivyError> {
+        self.reader.reload()?;
+        Ok(&self.reader)
+    }
+
     /// Return a new [`IndexWriter`] with the given memory budget (in bytes).
     ///
     /// A budget of 50–200 MB is typical for desktop usage.

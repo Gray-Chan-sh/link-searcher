@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-09（索引完整性自愈：schema 重建后自动重灌 + 重复文档清理）
+
+> 修复"检索范围正确后仍零证据拒答"的底层数据损坏：Tantivy 索引与 DB 脱节（DB 标 indexed=1 的 11705 份，索引实际只有 3790 份，scope 目录文件全部缺失）。
+
+### schema 重建只建空索引不重灌 → DB↔Tantivy 永久脱节
+
+- **根因**：commit `5307ae1` 检测到 schema 不一致时 `remove_dir_all` 删除整个旧索引并新建**空**索引，没有任何重灌步骤；而 `needs_reindex`（scanner/helpers.rs）对"indexed=1 + 有 md5 + mtime 未变"的记录返回 false，增量扫描永远跳过 → 缺失的 7915 个文件（67%）永远不会被补写。真实目录 `案件/和嘉案/聊天记录`（125 个文件）全部缺失，BM25 通道命中 0，向量相似度低于阈值，路径通道文件名无语义词 → strict 模式零材料拒答"未在与当前范围匹配的文档中找到依据"。
+- **修复**：新增 `run_index_integrity_heal`——强制 reload 最新快照后枚举 Tantivy 全部 file_id，与 DB indexed=1 集合做差集，对缺失文件逐个 `index_file` 重灌（复用 content_index 的 md5 缓存文本，不重新 OCR），并清理同一 file_id 的重复文档（delete 全部副本 + commit 后补写一份，跨 commit 避免同批 delete+add 相互抵消）。接入启动扫描完成与手动扫描完成两个 hook 自动执行（互斥防并发），另暴露 `heal_index_integrity` Tauri 命令供前端手动触发。`IndexManager` 新增 `reader_fresh`（绕过节流窗口强制 reload）。
+- 涉及：`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/search/mod.rs`、`src-tauri/src/indexer.rs`（新增 `commit_now`）。验证：`integrity_heal_reindexes_db_orphans`、`integrity_heal_collapses_duplicates` 单测通过；真实库自愈一次：DB 11705 / Tantivy 11705，缺失 0，去重 1223。
+
+---
+
 ## 2026-09-10（Tantivy FSM 正则绕过 + strict_docs 注入修复 + 范围解析 AND 交集）
 
 > 修复第 3-4 轮泛词追问跨案文件泄漏的三个底层叠加 bug。

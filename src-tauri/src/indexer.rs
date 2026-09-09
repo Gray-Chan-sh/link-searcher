@@ -648,6 +648,17 @@ impl IndexerService {
             .map_err(|e| anyhow::anyhow!("failed to delete document from index: {e}"))
     }
 
+    /// Force an immediate commit of pending writes. Used by the integrity heal
+    /// so the final batch of re-indexed files becomes searchable right away
+    /// instead of waiting for the periodic auto-commit.
+    pub fn commit_now(&self) -> Result<()> {
+        let mut guard = self.lock_writer()?;
+        let w = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("writer poisoned"))?;
+        Indexer::commit(w).map_err(|e| anyhow::anyhow!("commit failed: {e}"))
+    }
+
     /// Remove all Tantivy documents belonging to `dir_id` (used when a
     /// sub-directory is absorbed into its parent). Does NOT touch
     /// file_tracking — those rows were already migrated to the parent.
