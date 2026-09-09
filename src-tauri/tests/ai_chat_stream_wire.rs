@@ -145,7 +145,7 @@ fn chat_stream_happy_path_aggregates_deltas_until_done() {
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
     let mut deltas = Vec::new();
-    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
     assert_eq!(out.text.as_deref(), Some("你好世界"));
     assert_eq!(deltas, vec!["你好".to_string(), "世界".to_string()]);
     assert!(!out.cancelled);
@@ -174,7 +174,7 @@ fn chat_stream_falls_back_to_plain_json_body() {
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
     let mut deltas = Vec::new();
-    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
     assert_eq!(out.text.as_deref(), Some("非流式回答"));
     assert_eq!(deltas, vec!["非流式回答".to_string()]);
 
@@ -198,7 +198,7 @@ fn chat_stream_skips_malformed_frames_and_keeps_valid_ones() {
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
     let mut deltas = Vec::new();
-    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
     assert_eq!(out.text.as_deref(), Some("仍"), "畸形帧应被静默跳过");
 
     let _ = gw.handle.join();
@@ -220,7 +220,7 @@ fn chat_stream_returns_partial_text_on_truncated_stream() {
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
     let mut deltas = Vec::new();
-    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
     assert_eq!(out.text.as_deref(), Some("部分"), "断流应保留已收文本");
 
     let _ = gw.handle.join();
@@ -238,7 +238,7 @@ fn chat_stream_degrades_to_none_on_http_error() {
     write_mock_config(&tmp, &gw.addr);
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
-    let out = chat_stream("sys", "user", &mut |_| {});
+    let out = chat_stream("sys", "user", &mut |_, _| {});
     assert!(out.text.is_none(), "500 应返回 None 而非文本");
 
     let _ = gw.handle.join();
@@ -256,7 +256,7 @@ fn chat_stream_degrades_when_unconfigured() {
     std::fs::write(tmp.join("config.json"), "{}").unwrap();
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
-    let out = chat_stream("sys", "user", &mut |_| {});
+    let out = chat_stream("sys", "user", &mut |_, _| {});
     assert!(out.text.is_none(), "空配置应返回 None");
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -273,7 +273,7 @@ fn chat_stream_sends_correct_request_payload() {
     write_mock_config(&tmp, &gw.addr);
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
-    let _ = chat_stream("sys", "user", &mut |_| {});
+    let _ = chat_stream("sys", "user", &mut |_, _| {});
     let body = gw.req_body(std::time::Duration::from_secs(5)).expect("request captured");
     let json: serde_json::Value = serde_json::from_str(&body).expect("request body is json");
     assert_eq!(json["model"], "mock-llm");
@@ -300,7 +300,7 @@ fn chat_stream_conn_refused_degrades_gracefully() {
     write_mock_config(&tmp, &addr);
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
-    let out = chat_stream("sys", "user", &mut |_| {});
+    let out = chat_stream("sys", "user", &mut |_, _| {});
     assert!(out.text.is_none(), "连接拒绝应返回 None 而非 panic");
     assert_eq!(out.took_ms, 0);
 
@@ -320,7 +320,7 @@ fn chat_stream_empty_done_returns_empty_string() {
     unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
 
     let mut deltas = Vec::new();
-    let out = chat_stream("sys", "user", &mut |d: &str| deltas.push(d.to_string()));
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
     assert_eq!(out.text.as_deref(), Some(""), "空流应返回空字符串（非 None）");
     assert!(deltas.is_empty(), "空流不应触发任何 delta");
     assert!(!out.cancelled);

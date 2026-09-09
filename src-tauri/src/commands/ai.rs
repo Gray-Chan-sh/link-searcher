@@ -515,7 +515,16 @@ pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
     const DEICTIC: &[&str] =
         &["它", "这个", "那个", "上述", "上文", "该", "那", "此", "刚才", "上面", "之前", "前面"];
     let q = last_q.trim();
-    let needs_rewrite = q.chars().count() < 4 || DEICTIC.iter().any(|p| q.starts_with(p));
+    // 触发改写：
+    // 1) 问句过短（<4 字）
+    // 2) 以指代词开头（它/这个/那个…）
+    // 3) 检索关键词为空（extract_retrieval_keywords 已过滤停用词，返回空
+    //    ⇒ 问句不含任何可检索实体词，如"把时间列出来"这类依赖上文的追问，
+    //    必须借助历史补全实体词。）
+    let keywords_empty = extract_retrieval_keywords(&q).is_empty();
+    let needs_rewrite = q.chars().count() < 4
+        || DEICTIC.iter().any(|p| q.starts_with(p))
+        || keywords_empty;
     if !needs_rewrite {
         return RewriteOutcome { query: q.to_string() };
     }
@@ -609,7 +618,7 @@ pub async fn llm_rewrite_query(
             truncate_text(&m.content, 120),
         ));
     }
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略。要求：输出最小必要关键词短语，保留主题实体（具体报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
     let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
@@ -698,6 +707,45 @@ fn parent_keywords(text: &str, max: usize) -> Vec<String> {
         }
     }
     out
+}
+
+/// Hard fallback for entity inheritance: after LLM/rule-based query rewrite,
+/// ensure that core entity keywords from the parent question are present in
+/// the rewritten query. When the LLM rewrite drops a distinguishing entity
+/// (e.g. a person name or case name), prepend the missing entities so BM25,
+/// vector, and path channels can still hit the correct documents.
+///
+/// Uses `extract_retrieval_keywords` (Search tokenization mode) on the
+/// parent to capture proper nouns like "毛弟" / "常宏" / "万城" that jieba
+/// cut mode may split.
+fn ensure_parent_entities(search_q: &str, parent_q: &str) -> String {
+    if parent_q.trim().is_empty() || parent_q.trim() == search_q.trim() {
+        return search_q.to_string();
+    }
+    let parent_entities = extract_retrieval_keywords(parent_q);
+    if parent_entities.is_empty() {
+        return search_q.to_string();
+    }
+    let lower = search_q.to_lowercase();
+    let missing: Vec<&str> = parent_entities
+        .iter()
+        .filter(|kw| !lower.contains(&kw.to_lowercase()))
+        .map(|s| s.as_str())
+        .collect();
+    if missing.is_empty() {
+        return search_q.to_string();
+    }
+    format!("{} {}", missing.join(" "), search_q)
+}
+
+/// Whether a prior turn's source file should be carried forward as evidence
+/// for the current follow-up turn. A file is kept when the follow-up question
+/// names it OR when the current turn found no hits at all (so history is the
+/// only available evidence). Prevents the cross-turn evidence gap where a
+/// generic follow-up ("列出清单/把时间列出来") drops the prior turn's cited
+/// documents because the question never names the file.
+fn carry_forward_source(is_named: bool, all_hits_empty: bool) -> bool {
+    is_named || all_hits_empty
 }
 
 /// Reciprocal Rank Fusion: score = Σ 1/(k + rank) summed over two
@@ -1037,6 +1085,18 @@ pub(crate) async fn prepare_conversation_prompt(
             _ => rule.query.clone(),
         }
     };
+    // 硬性兜底：LLM 重写可能丢失上一轮问句的核心实体（人名/案名/项目名）。
+    // 把父问句缺失的实体词补进检索 query，保证三通道能命中正确的实体文档。
+    let search_q = {
+        let parent_q = messages
+            .iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.trim())
+            .find(|c| !c.is_empty() && *c != last_q.trim())
+            .unwrap_or("");
+        ensure_parent_entities(&search_q, parent_q)
+    };
     let rewritten = search_q != last_q.trim();
     log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten);
     events.push(("query_rewrite".into(), serde_json::json!({
@@ -1080,7 +1140,10 @@ pub(crate) async fn prepare_conversation_prompt(
                         scope_file_resolved.push((rec.id, rec.path));
                         continue;
                     }
-            // 否则按相对路径前缀过滤（子目录/文件夹）
+            // 否则按相对路径前缀过滤（子目录/文件夹）。scope 是文件树里的
+            // 真实目录，直接锚定原始路径前缀过滤；不做任何模糊/片段解析——
+            // 字符级模糊会把仅含相同字符子序列的范围外目录（如真实库中并存的
+            // "案件/HJ 和嘉 名誉权案"）误收进允许前缀，造成跨目录证据泄漏。
             path_prefixes.push(p.to_string());
         }
         drop(conn);
@@ -1104,7 +1167,7 @@ pub(crate) async fn prepare_conversation_prompt(
                     dir_ids.push(r);
                     continue;
                 }
-            // 否则按相对路径前缀过滤（子目录/文件夹）
+            // 否则按相对路径前缀过滤（子目录/文件夹）：直接锚定原始路径前缀
             path_prefixes.push(p.to_string());
         }
         drop(conn);
@@ -1201,7 +1264,7 @@ pub(crate) async fn prepare_conversation_prompt(
         };
         let bm25_hits = bm25_relevant_hits(
             state, &bm25_query, (total_files as usize).max(500), crate::ai::embedding_enabled(),
-            dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, path_prefixes_opt.clone(), mention_file_ids.clone(),
+            dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
         for hit in bm25_hits {
@@ -1322,6 +1385,19 @@ pub(crate) async fn prepare_conversation_prompt(
                 }
             }
         }
+        // 硬性范围拦截：向量/chunk/path 三通道都是全库扫描，把范围外文件混进
+        // all_hits。合并完成后立即按 path_prefixes 前缀过滤（与 BM25 一致），
+        // 让范围外文件连排序/计数都进不来，杜绝证据泄漏。
+        if let Some(prefixes) = &path_prefixes_opt {
+            let mention_ids: std::collections::HashSet<&str> = mention_file_ids
+                .as_ref()
+                .map(|ids| ids.iter().map(|s| s.as_str()).collect())
+                .unwrap_or_default();
+            all_hits.retain(|h| {
+                if mention_ids.contains(h.file_id.as_str()) { return true; }
+                prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
+            });
+        }
         // 统一排序：三通道命中按混合分（weighted_mix）降序排列，而非按通道
         // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
         // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。
@@ -1381,24 +1457,35 @@ pub(crate) async fn prepare_conversation_prompt(
         }
     }
 
-    // 旧来源保留：对话中明确提到过的文件优先补入
-    if !strict_docs && all_hits.len() < MAX_CONTENT_INJECT {
+    // 旧来源保留：同一会话的追问（messages.len() > 1 说明有历史轮次）延续讨论
+    // 上一轮引用的证据。即使追问未显式点名文件名（如"列出清单/把时间列出来"），
+    // 上一轮已注入引用的文件也应作为保底候选带入本轮，避免历史证据断层。
+    // 仅在 strict 模式（要求严格依据当前范围）下不自动保留，避免越界引用。
+    let is_follow_up = messages.len() > 1;
+    let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
+    if !strict_docs && is_follow_up && all_hits.len() < MAX_CONTENT_INJECT {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
         for fid in source_ids.iter().rev() {
             if all_hits.len() >= MAX_CONTENT_INJECT { break; }
             if all_seen.contains(fid) { continue; }
             let Some(rec) = rec_by_id.get(fid) else { continue };
-            if rec.status == "active" && rec.md5.is_some() {
+            if rec.status != "active" || rec.md5.is_none() { continue; }
+            // 追问未点名文件时也保留（保底证据），而非要求文件名出现在问句中
+            let named = {
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
-                if !stem.is_empty() && message_text.contains(stem.as_str()) {
-                    all_seen.insert(fid.clone());
-                    all_hits.push(ScoredHit { file_id: fid.clone(), path: rec.path.clone(), bm25_score: None, semantic_score: None, rrf_score: None, from_history: true, from_chunk: false, hit_chunks: Vec::new() });
+                !stem.is_empty() && message_text.contains(stem.as_str())
+            };
+            if carry_forward_source(named, all_hits.is_empty()) {
+                all_seen.insert(fid.clone());
+                // 记入 history_resolved，稍后随 Layer 0.5 注入为实际材料
+                if !history_resolved.iter().any(|(id, _)| id == fid) {
+                    history_resolved.push((fid.clone(), rec.path.clone()));
                 }
             }
         }
     }
 
-    let from_history_count = all_hits.iter().filter(|h| h.from_history).count();
+    let from_history_count = history_resolved.len();
     events.push(("retrieval".into(), serde_json::json!({
         "search_query": search_q,
         "total_matches": all_hits.len(),
@@ -1454,18 +1541,61 @@ pub(crate) async fn prepare_conversation_prompt(
         log::info!("[AI]   Layer0 mentions: {} files, {:.1}k/{}k budget used", mention_files_with_content.len(), mention_budget_used as f64 / 1000.0, mention_total_budget as f64 / 1000.0);
     }
 
-    // Layer 1: Additional BM25 hits (not already in scope).
-    // 严格模式（仅依据文档）：scope/mention 文件已在 Layer0 全部注入，
-    // 这里不再注入任何全库命中，避免无关文件混入 evidence。
+    // Layer 0.5: 上一轮引用的证据随追问带入本轮为保底材料（缺陷 3 修复）。
+    // 与 mention 共摊 Layer0 预算，按文件份数均分；证据条目标记 from_history=true。
+    let history_total_budget = CONTEXT_BUDGET / 3;
+    let history_files_with_content: Vec<(String, String, String, String)> = history_resolved
+        .iter()
+        .filter_map(|(fid, path)| {
+            let rec = rec_by_id.get(fid)?;
+            let md5 = rec.md5.as_ref()?;
+            let text = md5_to_text.get(md5)?;
+            if text.trim().is_empty() { return None; }
+            Some((fid.clone(), path.clone(), md5.clone(), text.clone()))
+        })
+        .collect();
+    let per_history_file = history_total_budget / history_files_with_content.len().max(1);
+    let mut history_budget_used = 0usize;
+    for (fid, resolved_path, md5, text) in history_files_with_content.iter() {
+        let n = docs.len() + 1;
+        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_history_file, &[]);
+        if !injected.trim().is_empty() {
+            docs.push(format!("[{n}]（{resolved_path}）\n{injected}"));
+            history_budget_used = history_budget_used.saturating_add(injected.chars().count());
+            mention_index.insert(resolved_path.clone(), n);
+            evidence.push(EvidenceItem {
+                file_id: fid.clone(),
+                path: resolved_path.clone(),
+                snippet: truncate_text(text, 200),
+                bm25_score: None,
+                semantic_score: None,
+                rrf_score: None,
+                rewritten,
+                rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
+                from_history: true,
+            });
+        }
+    }
+    if !history_files_with_content.is_empty() {
+        log::info!("[AI]   Layer0.5 history: {} files carried forward, {:.1}k/{}k budget used", history_files_with_content.len(), history_budget_used as f64 / 1000.0, history_total_budget as f64 / 1000.0);
+    }
+
+    // Layer 1: Additional retrieval hits (not already in scope).
+    // 范围过滤：向量/chunk 通道是全库扫描，会把范围外无关文件混进 all_hits。
+    // 注入前按 path_prefixes 前缀过滤（与 BM25 安全网一致），mention 文件
+    // （Layer 0 已注入，且可能不在前缀内）除外。全库范围（无前缀）不过滤。
+    // strict_docs 不再硬性跳过注入——改为始终用 scoped 过滤，确保严格模式
+    // 下目录范围内的命中也能注入（否则目录引用 + strict = 零材料 = 无法回答）。
     let inject_limit = if full_recall { all_hits.len().max(1) } else { MAX_CONTENT_INJECT };
-    let content_hits: Vec<&ScoredHit> = if strict_docs {
-        Vec::new()
-    } else {
-        all_hits.iter()
-            .filter(|h| !h.from_history && !mention_index.contains_key(&h.path))
-            .take(inject_limit)
-            .collect()
+    let scoped = |h: &ScoredHit| -> bool {
+        let Some(prefixes) = &path_prefixes_opt else { return true; };
+        if mention_file_ids.as_ref().is_some_and(|ids| ids.contains(&h.file_id)) { return true; }
+        prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
     };
+    let content_hits: Vec<&ScoredHit> = all_hits.iter()
+        .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && scoped(h))
+        .take(inject_limit)
+        .collect();
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
         .saturating_sub(ANSWER_RESERVE);
@@ -3438,5 +3568,206 @@ mod chunk_budget_tests {
         let hit_idx = chunks.last().unwrap().chunk_index as usize;
         let out = chunked_or_truncated_with_budget(&conn, md5, &long, "无关词", 700, &[(hit_idx, 0.9)]);
         assert!(out.contains(&format!("第{}", chunks.last().unwrap().start_char)), "hit chunk not prioritized: {out}");
+    }
+
+    /// 追问泛词（检索关键词为空）时，LLM 重写丢失父问句核心实体 → 硬性兜底补全。
+    /// 对应缺陷 1：首问"毛弟是否被人辱骂？"，追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"
+    /// 改写后 query 若不包含"毛弟"，必须把父问句实体合并进去。
+    #[test]
+    fn ensure_parent_entities_reinjects_missing_core_entity() {
+        let parent = "毛弟是否被人辱骂？";
+        let rewritten = "辱骂清单 时间 辱骂人 完整辱骂内容"; // 假设 LLM 丢了"毛弟"
+        let merged = ensure_parent_entities(rewritten, parent);
+        assert!(merged.contains("毛弟"), "父问句核心实体必须补回: {merged}");
+        assert!(merged.contains("辱骂清单"), "原改写 query 内容应保留: {merged}");
+        // 顺序：父实体在前
+        assert!(merged.starts_with("毛弟"), "父实体应前置: {merged}");
+    }
+
+    /// 改写 query 已包含父实体 → 兜底不动，避免重复。
+    #[test]
+    fn ensure_parent_entities_noop_when_entity_present() {
+        let parent = "毛弟是否被人辱骂？";
+        let rewritten = "毛弟 辱骂清单";
+        assert_eq!(ensure_parent_entities(rewritten, parent), rewritten);
+    }
+
+    /// 父消息为空 / 与当前问句相同 → 兜底跳过。
+    #[test]
+    fn ensure_parent_entities_skips_empty_or_same_parent() {
+        assert_eq!(ensure_parent_entities("abc", ""), "abc");
+        assert_eq!(ensure_parent_entities("问句", "问句"), "问句");
+    }
+
+    /// 缺陷 3：追问泛词（未点名文件名）时，上一轮证据仍应被保留为保底依据。
+    /// 追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"不含"聊天记录"等
+    /// 文件名，但只要本轮检索 0 命中，历史证据必须带入，避免跨轮断层。
+    #[test]
+    fn carry_forward_source_keeps_history_when_unamed_or_no_hits() {
+        // 追问未点名文件 + 本轮有其它命中 → 不强制保留（避免引入无关历史文件）
+        assert!(!carry_forward_source(false, false));
+        // 追问未点名文件 + 本轮 0 命中 → 必须保留历史证据
+        assert!(carry_forward_source(false, true));
+        // 追问点名了文件 → 无条件保留
+        assert!(carry_forward_source(true, false));
+        assert!(carry_forward_source(true, true));
+    }
+
+    /// 端到端回归：复现导出的"毛弟被辱骂"会话（首问"毛弟是否被人辱骂？" →
+    /// 追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"），走真实
+    /// `prepare_conversation_prompt` 管线，验证三处缺陷均已修复：
+    /// 1) 改写后的 search_q 保留父问句实体"毛弟"（缺陷 1）
+    /// 2) 逻辑范围"案件/和嘉案/聊天记录"解析为真实前缀"案件/HJ 和嘉 名誉权案/…"（缺陷 2）
+    /// 3) 上轮引用证据随追问带入本轮 evidence（缺陷 3）
+    #[tokio::test]
+    async fn e2e_hejia_followup_retains_entity_scope_and_history() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        // 临时数据目录 + 基于文件的 SQLite DB
+        let dir = std::env::temp_dir().join(format!("ls_ai_e2e_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("data.db");
+        let db_str = db_path.to_str().unwrap().to_string();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            crate::db::init_db(&conn).unwrap();
+            drop(conn);
+        }
+        let pool = crate::db::get_pool(&db_str).unwrap();
+
+        let index_dir = dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(crate::indexer::IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            pool, im, indexer, scanner,
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            dir.clone(), index_dir, db_path, dummy_tx, None,
+        );
+
+        // 真实目录布局：scope 指向的 "案件/和嘉案/聊天记录" 是真实存在的目录
+        // （125 个聊天记录截图/PDF）。范围外另有一个目录 "案件/HJ 和嘉 名誉权案"
+        // 与 scope 目录并存（326 个文件，含 "和嘉" 子串与同名 "聊天记录" 文件），
+        // 是字符级模糊解析误收泄漏的历史现场，必须被锚定前缀过滤拦在范围外。
+        let c = state.db.get().unwrap();
+        // scope 目录内文件（上一轮引用的证据）。文件名含检索实体词"毛弟"，
+        // 确保经 path 通道确定性进入候选集后被 scoped 注入。
+        let f1 = crate::db::tracker::upsert_file(&c, "案件/和嘉案/聊天记录/毛弟 辱骂 04聊天记录.pdf", "d1", 1700, 1000, Some("md5-04")).unwrap();
+        let f2 = crate::db::tracker::upsert_file(&c, "案件/和嘉案/聊天记录/毛弟 06辱骂摘要.pdf", "d1", 1700, 1000, Some("md5-06")).unwrap();
+        // 范围外干扰 1：HJ 和嘉 名誉权案目录与 scope 目录并存，路径同样含
+        // "毛弟/辱骂"片段（会被 path 通道命中进入候选），文件名与内容同 scope
+        // 内文件几乎一致——专门验证锚定前缀拦截而非内容相关度。
+        let hj = crate::db::tracker::upsert_file(&c, "案件/HJ 和嘉 名誉权案/起诉文件/黄 诉 孙唐 辱骂/毛弟 04聊天记录.pdf", "d1", 1700, 1000, Some("md5-hj")).unwrap();
+        // 范围外干扰 2：无关案件
+        crate::db::tracker::upsert_file(&c, "案件/WC 万城/诉讼案件/股东资格/卷宗/001.pdf", "d1", 1700, 1000, Some("md5-wc")).unwrap();
+        // 写入内容供注入（store_content 按 md5 存取，两处干扰项内容与 scope 内文件高度同词）
+        crate::db::tracker::store_content(&c, "md5-04", "毛弟 唐晨骞 辱骂 缩货 老无赖 侬则缩货", false, None).unwrap();
+        crate::db::tracker::store_content(&c, "md5-06", "孙孟燕 毛弟 辱骂 人模狗样 老逼样子 不要脸", false, None).unwrap();
+        crate::db::tracker::store_content(&c, "md5-hj", "毛弟 唐晨骞 辱骂 缩货 老无赖 起诉状 名誉权", false, None).unwrap();
+        crate::db::tracker::store_content(&c, "md5-wc", "万城 股东资格 庄建军 股权转让", false, None).unwrap();
+        drop(c);
+
+        // 会话历史：首问+答+追问（与导出完全一致）
+        let messages = vec![
+            ChatMessage { role: "user".into(), content: "毛弟是否被人辱骂？".into() },
+            ChatMessage { role: "assistant".into(), content: "根据材料，毛弟（即原告黄树荪）确实被人辱骂。唐晨骞在微信群中多次辱骂毛弟。".into() },
+            ChatMessage { role: "user".into(), content: "列出清单，把时间、辱骂人以及完整的辱骂内容列出".into() },
+        ];
+        // 上一轮引用的 2 份证据
+        let source_ids = vec![f1.clone(), f2.clone()];
+        let scope = TurnScope { mention_files: vec![], mention_dirs: vec![], inherit_from: vec![], conditions: vec![] };
+        let session_scope = vec!["案件/和嘉案/聊天记录".to_string()];
+        let strict = false;
+
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "").await.unwrap();
+
+        // 缺陷 1：改写 query 必须保留父问句实体"毛弟"
+        assert!(prep.search_query.contains("毛弟"), "改写 query 必须含毛弟: {:?}", prep.search_query);
+        // 缺陷 3：上一轮证据文件已注入为本轮材料（缺陷 1 补全的实体词使它们可被命中，
+        // 或在本轮检索 0 命中时经 Layer 0.5 历史注入）。
+        assert!(prep.evidence.iter().any(|e| e.file_id == f1), "上轮聊天记录证据必须带入: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert!(prep.evidence.iter().any(|e| e.file_id == f2), "上轮辱骂摘要证据必须带入: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
+        // 目录纪律：范围外目录（HJ 和嘉 名誉权案 / WC 万城）不得泄漏进 evidence——
+        // 即使干扰项路径含检索词片段、内容与 scope 内文件高度同词。
+        assert!(!prep.evidence.iter().any(|e| e.path.contains("HJ 和嘉")), "范围外 HJ 和嘉 名誉权案不得注入: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert!(!prep.evidence.iter().any(|e| e.path.contains("万城")), "范围外万城文件不得注入 evidence: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert!(
+            prep.evidence.iter().all(|e| e.path.starts_with("案件/和嘉案/聊天记录")),
+            "evidence 必须全部位于 scope 目录内: {:?}",
+            prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>()
+        );
+        let _ = &hj; // hj 仅作为干扰项存在，evidence 必须不含它
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Layer 0.5 历史注入：当本轮检索 0 命中（追问与历史文件内容无词重叠）时，
+    /// 上一轮引用的证据必须经历史通道注入，并带 from_history 标记。
+    #[tokio::test]
+    async fn e2e_history_injects_when_bm25_misses() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        let dir = std::env::temp_dir().join(format!("ls_ai_e2e_hist_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("data.db");
+        let db_str = db_path.to_str().unwrap().to_string();
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            crate::db::init_db(&conn).unwrap();
+            drop(conn);
+        }
+        let pool = crate::db::get_pool(&db_str).unwrap();
+        let index_dir = dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(crate::indexer::IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let state = AppState::new(
+            pool, im, indexer, scanner,
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            dir.clone(), index_dir, db_path, dummy_tx, None,
+        );
+
+        // 历史证据文件：内容与追问（"整理一下摘要"）零词重叠 → BM25 0 命中
+        let c = state.db.get().unwrap();
+        let f1 = crate::db::tracker::upsert_file(&c, "案卷/和嘉/起诉状.pdf", "d1", 1700, 1000, Some("mh1")).unwrap();
+        crate::db::tracker::store_content(&c, "mh1", "原告黄树荪 被告孙孟燕 被告唐晨骞 名誉权纠纷", false, None).unwrap();
+        drop(c);
+
+        let messages = vec![
+            ChatMessage { role: "user".into(), content: "这个案子是谁起诉的？".into() },
+            ChatMessage { role: "assistant".into(), content: "黄树荪起诉孙孟燕、唐晨骞，案由名誉权纠纷。".into() },
+            ChatMessage { role: "user".into(), content: "帮我整理一下摘要".into() },
+        ];
+        let source_ids = vec![f1.clone()];
+        let scope = TurnScope { mention_files: vec![], mention_dirs: vec![], inherit_from: vec![], conditions: vec![] };
+        let session_scope = vec![];
+        let strict = false;
+
+        // skip_llm_rewrite=true 走规则改写（无 LLM 网关）→ 追问"帮我整理一下摘要"检索关键词为空，
+        // 父实体经 rewrite 补入 → 但父文件内容无词重叠 → BM25 0 命中 → 历史注入兜底。
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "").await.unwrap();
+        assert!(
+            prep.evidence.iter().any(|e| e.from_history && e.file_id == f1),
+            "BM25 0 命中时历史证据必须经 Layer 0.5 注入且带 from_history: {:?}",
+            prep.evidence.iter().map(|e| (&e.path, e.from_history)).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

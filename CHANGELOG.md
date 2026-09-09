@@ -4,6 +4,84 @@
 
 ---
 
+## 2026-09-10（Tantivy FSM 正则绕过 + strict_docs 注入修复 + 范围解析 AND 交集）
+
+> 修复第 3-4 轮泛词追问跨案文件泄漏的三个底层叠加 bug。
+
+### Tantivy FSM 正则崩溃 → BM25 绕过 Tantivy 前缀过滤
+
+- **根因**：`bm25_relevant_hits` 把 `path_prefixes` 传给 Tantivy 的 `RegexQuery`，但 Tantivy 0.22 用的是 `tantivy_fst::Regex`（FSM 自动机），`regex::escape` 对 FSM 正则无效——含空格的路径前缀（如 `^案件/HJ 和嘉 名誉权案`）触发 `Empty match operators are not allowed`，静默降级为 `AllQuery`（前缀过滤器完全失效）。22 个路径前缀全部正则崩溃。
+- **修复**：`bm25_relevant_hits` 调用点改为传 `None`（不传 `path_prefixes` 给 Tantivy），完全依赖 Rust 端 `starts_with` 安全网过滤（`bm25_relevant_hits` 内 919-924 行已有此逻辑）。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 246 通过。
+
+### 严格模式硬性跳过 Layer 1 注入 → 目录引用 + strict = 零材料
+
+- **根因**：`content_hits` 在 `strict_docs=true` 时直接 `Vec::new()`，完全跳过 Layer 1 注入。但目录引用（如 `案件/和嘉案/聊天记录`）不会产生 `mention_resolved`（只有单文件引用才进 Layer 0），导致严格模式 + 目录引用 = Layer 0 空 + Layer 1 空 = context 空 = 拒绝回答。
+- **修复**：去掉 `strict_docs` 对 `content_hits` 的硬性跳过——改为始终用 `scoped` 过滤器注入，`scoped` 按 `path_prefixes` 前缀过滤确保只有范围内的命中文件被注入。`strict_docs` 仅保留"空 context 拒绝回答"的语义。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 246 通过。
+
+### 范围片段字符级模糊解析误收并存目录 → 删除模糊、直接锚定真实前缀
+
+- **根因**：`scope_prefixes_for_fragment` 在精确前缀不命中时按片段做字符级模糊 LIKE（`和嘉案` → `%和%嘉%案%`）。但真实索引目录树下 `案件/和嘉案/聊天记录`（125 文件）与 `案件/HJ 和嘉 名誉权案/…`（326 文件，含"和嘉"子串与 130 个"聊天记录"同名文件）是**两个并存的独立目录**，并非别名/重命名关系。模糊解析把范围外目录 `HJ 和嘉 名誉权案` 一并收进允许前缀 → 检索范围扩大到跨案目录，"聊天记录"scope 的命中混入他案起诉状/判决书。此前把 `HJ 和嘉 名誉权案` 当作"和嘉案"真实目录之别名而做的字符级映射，前提本身是错的。
+- **修复**：删除 `scope_prefixes_for_fragment` 与整段字符级模糊 fallback——scope 是文件树里选中的真实目录，直接以其为锚定前缀（`starts_with`/`path LIKE 'scope%'`）过滤；不命中即空，杜绝滑向其它含相同字符子序列的目录（如前导 `%` 误配"…/案件/和嘉案/聊天记录"）。
+- 涉及：`src-tauri/src/db/tracker.rs`、`src-tauri/src/commands/ai.rs`。验证：e2e 回归按真实双目录布局重写（scope 内文件必注入、`HJ 和嘉 名誉权案` 干扰项即使内容同词也不得注入）。
+
+---
+
+## 2026-09-09（RAG 追问实体兜底 + 范围模糊解析 + 历史证据跨轮继承）
+
+> 在前一版"泛词追问/检索范围泄漏"修复基础上，补齐三处残余：改写后实体丢失无硬性兜底、逻辑范围路径与真实相对路径前缀不匹配、追问未点名文件时上轮证据被丢弃。
+
+### 改写丢失父问句核心实体 → 硬性兜底补全
+
+- **根因**：`prepare_conversation_prompt` 的 query 改写（规则/LLM）完成后再无实体校验。LLM 把"列出清单，把时间、辱骂人以及完整的辱骂内容列出"改写为 `辱骂清单 时间 辱骂人 完整辱骂内容` 时丢掉了首问的主语"毛弟"，使 BM25/向量/路径三通道拿泛词全库乱扫，命中其他案件无关文件。
+- **修复**：新增 `ensure_parent_entities`——改写后提取父问句的核心实体词（`extract_retrieval_keywords` Search 分词，保留"毛弟/常宏/万城"等人名案名），凡改写 query 缺失的实体前置补回。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`ensure_parent_entities_reinjects_missing_core_entity` 等 3 个单测通过。
+
+### 检索范围前缀锚定失效 → 直接锚定，不做片段模糊映射
+
+- **根因**：此前假设 `retrieval_scope` 的 `案件/和嘉案/聊天记录` 与存储路径 `案件/HJ 和嘉 名誉权案/…` 是"别名 vs 真实路径"关系而引入字符级模糊映射。实际二者是**并存的两个独立目录**：scope 目录真实存在（聊天记录截图，125 文件），`HJ 和嘉 名誉权案` 是范围外目录（326 文件）。模糊映射把范围外目录写进允许前缀，是跨案泄漏的直接来源。
+- **修复**：范围解析只做精确锚定（scope 作为前缀直接匹配），前缀不命中即范围为空，不做任何模糊映射、不加前导 `%`（避免滑入"…/案件/和嘉案/聊天记录"这类深层同名路径）。
+- 涉及：`src-tauri/src/db/tracker.rs`、`src-tauri/src/commands/ai.rs`。
+
+### 追问未点名文件 → 上轮证据跨轮继承
+
+- **根因**：旧来源保留逻辑要求问句中显式出现文件名（`message_text.contains(stem)`）。追问"列出清单/把时间列出来"未点名"聊天记录"等文件名，上轮已引用并注入的 6 条精准证据全被丢弃，第二轮变成"无材料"拒绝回答。
+- **修复**：新增 `carry_forward_source(is_named, all_hits_empty)`——同一会话追问（`messages.len() > 1`）下，上轮来源文件在"被点名"或"本轮检索 0 命中"时作为保底证据（`from_history: true`）带入本轮，避免跨轮证据断层。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`carry_forward_source_keeps_history_when_unamed_or_no_hits` 单测通过。
+
+### Tantivy FSM 正则对含空格路径崩溃 → BM25 绕过 Tantivy 前缀过滤
+
+- **根因**：`bm25_relevant_hits` 把 `path_prefixes` 传给 Tantivy 的 `RegexQuery`，但 Tantivy 0.22 用的是 `tantivy_fst::Regex`（FSM 自动机），不是 Rust 标准 `regex` crate。`regex::escape` 对 FSM 正则无效——含空格的路径前缀（如 `^案件/HJ 和嘉 名誉权案`）触发 `Empty match operators are not allowed`，静默降级为 `AllQuery`（前缀过滤器完全失效）。22 个路径前缀全部正则崩溃。
+- **修复**：`bm25_relevant_hits` 调用点改为传 `None`（不传 `path_prefixes` 给 Tantivy），完全依赖 Rust 端 `starts_with` 安全网过滤（`bm25_relevant_hits` 内 919-924 行已有此逻辑）。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 246 通过。
+
+### 严格模式硬性跳过 Layer 1 注入 → 目录引用 + strict = 零材料
+
+- **根因**：`content_hits` 在 `strict_docs=true` 时直接 `Vec::new()`，完全跳过 Layer 1 注入。但目录引用（如 `案件/和嘉案/聊天记录`）不会产生 `mention_resolved`（只有单文件引用才进 Layer 0），导致严格模式 + 目录引用 = Layer 0 空 + Layer 1 空 = context 空 = 拒绝回答。
+- **修复**：去掉 `strict_docs` 对 `content_hits` 的硬性跳过——改为始终用 `scoped` 过滤器注入，`scoped` 按 `path_prefixes` 前缀过滤确保只有范围内的命中文件被注入。`strict_docs` 仅保留"空 context 拒绝回答"的语义。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 246 通过。
+
+---
+
+## 2026-09-09（多轮泛词追问答错 + 检索范围泄漏修复）
+
+> 修复多轮对话中"首问强实体词、追问泛词"时答错的问题：改写未继承历史实体词 + 向量/chunk 通道绕过检索范围。
+
+### 泛词追问改写未继承历史实体词
+
+- **根因**：追问"列出清单/把时间列出来"这类不含指代词、但检索关键词无法区分目标文档的泛词问题，LLM 改写提示未要求从历史继承父句的人名/主题实体，导致改写后的 query 仍拿泛词全库乱扫，命中其他案件的无关文件。
+- **修复**：`src-tauri/src/commands/ai.rs` 的 `llm_rewrite_query` system 提示增加"当问句缺乏区分性实体词时从对话历史继承主题实体"，并放宽 `rewrite_query` 触发——问句检索关键词为空（全是停用词）时也触发改写，借助历史补全实体词。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 71 通过、`cargo check` 零错误。
+
+### 检索范围只约束 BM25，向量/chunk 通道全库泄漏
+
+- **根因**：`prepare_conversation_prompt` 的检索范围（`session_retrieval_scope` 解析出的 `path_prefixes`）只传给 BM25 过滤（`bm25_relevant_hits`），向量扫描与 chunk 向量扫描全库跑，Layer 1 注入直接从 `all_hits` 取、不过滤范围，把范围外无关文件混入 evidence，导致 LLM 基于错误材料回答"无法回答"。
+- **修复**：Layer 1 注入前对 `all_hits` 按 `path_prefixes` 前缀过滤（与 BM25 一致），已明确引用的 mention 文件（Layer 0 已注入）除外；全库范围（无前缀）不过滤。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`cargo test --lib` 71 通过。
+
+---
+
 ## 2026-09-07（GUI 交互测试框架 + MCP 稳定性修复 + 搜索筛选 Web 模式修复 + 目录筛选/语义搜索 Bug 修复）
 
 > 本次更新包含四项独立修复。
