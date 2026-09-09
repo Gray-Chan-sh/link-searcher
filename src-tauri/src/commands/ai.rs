@@ -1693,7 +1693,20 @@ pub(crate) async fn prepare_conversation_prompt(
             return Err("未在与当前范围匹配的文档中找到依据".into());
         }
     }
-    let system = format!("你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n引用材料时在文件名后标注 [N]（N 为材料编号），便于用户查阅原文。\n\n材料：\n{}{}", context, recall_section);
+    // 材料编号每轮从 [1] 重新计数（随命中变化），模型若引用对话历史里的
+    // 旧编号会错位。明确告知本轮范围 + 历史编号已失效，杜绝跨轮引用。
+    // 上限按"截断后实际可见"的材料编号计算——context 可能被 50k 截断，
+    // 尾部材料并未进入 prompt，声明范围过大同样会造成悬空引用。
+    let visible_max = visible_material_count(&context);
+    let material_note = if visible_max == 0 {
+        String::new()
+    } else {
+        format!("本轮共提供 {} 份材料，编号为 [1]-[{}]。", visible_max, visible_max)
+    };
+    let system = format!(
+        "你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n{material_note}引用材料时在对应内容后标注 [N]（N 为材料编号）。只允许引用本轮 [1]-[{}] 范围内的编号；对话历史中出现的 [N] 编号属于当时轮次、已失效，不得引用。\n\n材料：\n{}{}",
+        visible_max, context, recall_section
+    );
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");
@@ -2673,6 +2686,8 @@ pub struct AiEventJson {
     pub event_type: String,
     pub payload: serde_json::Value,
     pub created_at: i64,
+    /// 事件时间（本地时区可读格式，如 `2026-09-10 13:15:08`）。
+    pub created_at_readable: String,
 }
 
 /// Convert a stored [`crate::db::ai_events::AiEvent`] row to its JSON shape.
@@ -2685,7 +2700,29 @@ pub(crate) fn ai_event_to_json(e: &crate::db::ai_events::AiEvent) -> AiEventJson
         event_type: e.event_type.clone(),
         payload: e.payload.clone(),
         created_at: e.created_at,
+        created_at_readable: fmt_event_time(e.created_at),
     }
+}
+
+/// Format a Unix timestamp (seconds) as local-time `YYYY-MM-DD HH:MM:SS`.
+fn fmt_event_time(ts: i64) -> String {
+    chrono::DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M:%S").to_string())
+        .unwrap_or_default()
+}
+
+/// 从（可能被 50k 截断的）context 反推实际可见的最大材料编号。
+/// 材料块格式为 `[N]（路径）…`；无匹配返回 0。
+fn visible_material_count(context: &str) -> usize {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // nosemgrep: rust-expect-panic — compile-time verified regex literal
+        regex::Regex::new(r"\[(\d+)\]（").expect("material-number regex is valid")
+    });
+    re.captures_iter(context)
+        .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<usize>().ok()))
+        .max()
+        .unwrap_or(0)
 }
 
 #[tauri::command]
@@ -3028,8 +3065,26 @@ mod history_tests {
         assert_eq!(log[0]["payload"]["rewritten"], serde_json::json!("毛弟 辱骂"));
         assert_eq!(log[1]["event_type"], serde_json::json!("retrieval"));
         assert_eq!(log[1]["payload"]["bm25_hits"], serde_json::json!(132));
+        // 事件可读时间：本地时区 YYYY-MM-DD HH:MM:SS
+        let ts_str = log[0]["created_at_readable"].as_str().unwrap_or_default().to_string();
+        assert_eq!(ts_str.len(), 19, "created_at_readable 应为可读时间: {ts_str}");
+        assert_eq!(log[0]["created_at_readable"].as_str().unwrap_or_default().as_bytes()[4], b'-');
+        assert_eq!(log[0]["created_at_readable"].as_str().unwrap_or_default().as_bytes()[10], b' ');
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 材料可见编号：从完整/截断 context 反推最大编号。
+    #[test]
+    fn visible_material_count_detects_max_from_context() {
+        // 完整 3 份材料。
+        let ctx = "[1]（a/1.pdf）\n内容一\n\n---\n\n[2]（a/2.pdf）\n内容二\n\n---\n\n[3]（a/3.pdf）\n内容三";
+        assert_eq!(visible_material_count(ctx), 3);
+        // 截断（第 3 份只剩开头，正则要求 [N]（ 完整出现才算可见）。
+        let truncated = "[1]（a/1.pdf）\n内容一\n\n---\n\n[2]（a/2.pdf）\n内容二\n\n---\n\n[3";
+        assert_eq!(visible_material_count(truncated), 2);
+        // 无材料。
+        assert_eq!(visible_material_count(""), 0);
     }
 
     #[test]

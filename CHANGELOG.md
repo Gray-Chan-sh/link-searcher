@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-09-10（导出 log 加可读时间 + 跨轮材料编号错位修复）
+
+> 导出 JSON 的 log 事件只有 Unix 时间戳不直观；多轮追问时模型引用上一轮材料编号（如 [49]/[31]）造成跨轮错位。
+
+### log 事件时间可读化
+
+- 每个 ai_events 事件的导出增加 `created_at_readable`（本地时区 `YYYY-MM-DD HH:MM:SS`），`get_ai_events`/导出共用。
+- 涉及：`src-tauri/src/commands/ai.rs`。
+
+### 跨轮材料编号错位 → prompt 声明本轮范围 + 历史编号失效
+
+- **根因**：材料编号每轮从 [1] 重新计数（随检索命中变化）。上一轮注入 49 份、本轮 27 份时，模型在推理中沿用历史轮次的 [49]/[31] 等编号。`sanitize_citations` 虽会把越界 [N] 剥成纯数字止血，但模型认知层面仍混乱，回答中出现"49、31 等材料编号在当前材料中不存在"的自我困惑。
+- **修复**：system prompt 明确声明"本轮共 N 份材料、编号 [1]-[N]、只允许引用本轮编号、对话历史中的编号已失效不得引用"。N 由 `visible_material_count` 从**截断后实际可见**的 context 反推（context 可能被 50k 截断，尾部材料未进 prompt，用 docs.len() 会声明出悬空编号）。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`visible_material_count_detects_max_from_context`、`export_json_includes_per_turn_events` 单测通过，`cargo test --lib` 248 passed。
+
+---
+
 ## 2026-09-10（AI 聊天 JSON 导出每轮附加 log 段：RAG 管线调试日志）
 
 > 导出 JSON 仅含问答/依据，缺管线过程日志，跨轮检索异常难以复盘。
