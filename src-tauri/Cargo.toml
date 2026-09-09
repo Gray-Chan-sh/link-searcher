@@ -79,8 +79,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
-# MCP (Model Context Protocol) — debug-only AI agent integration
-tauri-plugin-mcp = { path = "/Users/gray/.cargo/git/checkouts/tauri-plugin-mcp-2fd5dc058bb53a96/c7d271a" }
+# MCP (Model Context Protocol) — debug-only AI agent integration.
+# 固定上游 commit（不得改为本机绝对路径，否则 CI/其它机器无法解析）。
+tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp", rev = "c7d271a06469bdf4744bfdeadca7458a1f3d02e5" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-10（CI 修复：tauri-plugin-mcp 绝对路径依赖 → 固定上游 git 依赖）
+
+> GitHub CI 三平台（mac/win/linux）在 `cargo test --lib` 全部失败：`failed to read ~/.cargo/git/checkouts/tauri-plugin-mcp-*/Cargo.toml: No such file or directory`。
+
+- **根因**：`Cargo.toml` 把 `tauri-plugin-mcp` 写成 `path = "/Users/gray/.cargo/git/checkouts/tauri-plugin-mcp-2fd5dc058bb53a96/c7d271a"`——本机 cargo git 检出的绝对路径。本机可编译，CI/其它机器无此路径直接解析失败（09-07 起全红）。
+- **修复**：改为标准 git 依赖并锁定上游 commit `c7d271a`（`github.com/P3GLEG/tauri-plugin-mcp`），Cargo.lock 同步记录 git source。
+- 涉及：`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`。验证：`cargo test --lib` 248 passed；CI 三平台将恢复。
+
+---
+
 ## 2026-09-10（引用交互升级：悬浮卡片预览 + 点击就地展开）
 
 > 原引用编号是跳转链接，点击整页切到浏览页打断阅读流。改为不离开对话的两种查看方式。
