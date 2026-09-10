@@ -19,6 +19,8 @@ pub struct FileItem {
     pub error_msg: Option<String>,
     pub file_size: u64,
     pub mtime: i64,
+    /// `active` | `deleted`（Browse 的"已删除"视图据此显示与提供恢复）。
+    pub status: String,
 }
 
 #[derive(Serialize)]
@@ -81,7 +83,13 @@ pub async fn list_files_db(
     let p = page.unwrap_or(1).max(1);
     let offset = (p - 1) * ps;
 
-    let mut wheres: Vec<&str> = vec!["status = 'active'"];
+    // deleted 视图查看被扫描标记删除的记录（如目录瞬断误删），可据此恢复；
+    // 其余筛选一律只看 active 文件。
+    let mut wheres: Vec<&str> = if filter.as_deref() == Some("deleted") {
+        vec!["status = 'deleted'"]
+    } else {
+        vec!["status = 'active'"]
+    };
     let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
 
     match filter.as_deref() {
@@ -119,7 +127,7 @@ pub async fn list_files_db(
 
     // Build data SQL with named params to avoid positional conflicts
     let data_sql = format!(
-        "SELECT id, path, size, mtime, indexed, error_msg \
+        "SELECT id, path, size, mtime, indexed, error_msg, status \
          FROM file_tracking WHERE {where_clause} \
          ORDER BY {sort_col} {order_dir} \
          LIMIT ?{} OFFSET ?{}",
@@ -152,6 +160,7 @@ pub async fn list_files_db(
             error_msg: row.get("error_msg")?,
             file_size: row.get::<_, i64>("size")? as u64,
             mtime: row.get("mtime")?,
+            status: row.get("status")?,
         }))
         .map_err(|e| format!("query error: {e}"))?;
 

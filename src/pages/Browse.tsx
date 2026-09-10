@@ -6,7 +6,7 @@ import { toast } from '../utils/toast'
 import { useI18n } from '../i18n'
 import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, previewFile } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
-import { reindexFiles } from '../api/index'
+import { reindexFiles, restoreFiles } from '../api/index'
 import { LoadingSpinner, SearchIcon } from '../icons'
 import { usePersistentState } from '../hooks/usePersistentState'
 import { useSearch as useFtsSearch } from '../hooks/useSearch'
@@ -39,7 +39,8 @@ const LS_KEY_SORT = 'ls_browse_sort'
 const LS_KEY_ORDER = 'ls_browse_order'
 const LS_KEY_COLS = 'ls_browse_cols'
 
-function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string) {
+function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string, status?: string) {
+  if (status === 'deleted') return <span className="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400" title={t('deleted_hint')}>🗑 {t('deleted')}</span>
   if (indexed === 1) return <span className="inline-flex items-center gap-1 text-xs text-green-600 dark:text-green-400">✓ {t('indexed')}</span>
   if (indexed === 3) return <span className="inline-flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400" title={t('extracted_but_not_indexed')}>◐ {t('indexing')}</span>
   if (indexed === 2) return <span className="inline-flex items-center gap-1 text-xs text-red-600 dark:text-red-400" title={error_msg ?? undefined}>✗ {t('failed')}</span>
@@ -368,6 +369,7 @@ return (
             <option value="indexed">{t('indexed')}</option>
             <option value="pending">{t('pending')}</option>
             <option value="failed">{t('failed')}</option>
+            <option value="deleted">{t('deleted')}</option>
           </select>
 
           <select
@@ -562,7 +564,7 @@ return (
                     <td className="px-2 py-1">
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>
                     </td>
-                    <td className="px-2 py-1">{statusBadge(item.indexed, item.error_msg, t)}</td>
+                    <td className="px-2 py-1">{statusBadge(item.indexed, item.error_msg, t, item.status)}</td>
                   </tr>
                 ))}
                 {!loading && items.length === 0 && (
@@ -810,6 +812,30 @@ return (
           >
             {selectedIds.size > 1 ? t('batch_reindex', { n: selectedIds.size }) : t('reindex')}
           </button>
+          {(contextMenu.item.status === 'deleted' || items.some(i => selectedIds.has(i.file_id) && i.status === 'deleted')) && (
+            <button
+              className="w-full px-3 py-1.5 text-left text-sm text-green-700 dark:text-green-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={async () => {
+                const ids = selectedIds.size > 1 ? [...selectedIds] : [contextMenu.item.file_id]
+                const deletedIds = new Set(items.filter(i => i.status === 'deleted').map(i => i.file_id))
+                const targets = ids.filter(id => deletedIds.has(id))
+                setContextMenu(null)
+                if (targets.length === 0) return
+                try {
+                  const n = await restoreFiles(targets)
+                  toast(t('restored_n', { n }), 'success')
+                } catch (e) {
+                  toast(t('restore_failed', { error: e instanceof Error ? e.message : String(e) }), 'error')
+                }
+                setSelectedIds(new Set())
+                loadFiles()
+              }}
+            >
+              {selectedIds.size > 1
+                ? t('batch_restore', { n: items.filter(i => selectedIds.has(i.file_id) && i.status === 'deleted').length })
+                : t('restore')}
+            </button>
+          )}
           {selectedIds.size <= 1 ? (
             <button
               className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"

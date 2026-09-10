@@ -260,18 +260,24 @@ impl Scanner {
         }
 
         // Mark files in DB but absent from disk as deleted.
-        let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
-        for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
-            if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
-                // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
-                if include_exts.is_some()
-                    && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
-                    && std::path::Path::new(dir_root).join(&rec.path).exists()
-                {
-                    continue;
+        // 遍历出现错误（目录瞬断/权限/IO）时磁盘清单可能不完整，据此标删会把
+        // 仍存在的文件误标 deleted——跳过本轮删除检测，等下次无错扫描再回收。
+        if errors > 0 {
+            log::warn!("[SCAN] 遍历发生 {errors} 个错误，跳过删除检测以防目录瞬断误标删除");
+        } else {
+            let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
+            for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
+                if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
+                    // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
+                    if include_exts.is_some()
+                        && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
+                        && std::path::Path::new(dir_root).join(&rec.path).exists()
+                    {
+                        continue;
+                    }
+                    let _ = self.indexer.delete_file(&rec.id);
+                    deleted += 1;
                 }
-                let _ = self.indexer.delete_file(&rec.id);
-                deleted += 1;
             }
         }
 
@@ -395,20 +401,25 @@ impl Scanner {
             return Ok(ScanResult { total_files, indexed, added, deleted: 0, modified, errors, duration_ms });
         }
 
-        // Detect and remove deleted files.
-        let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
+        // Detect and remove deleted files. 遍历出错时同样跳过（磁盘清单不完整，
+        // 据此标删会把仍存在的文件误标 deleted）。
         let mut deleted = 0u64;
-        for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
-            if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
-                // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
-                if include_exts.is_some()
-                    && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
-                    && std::path::Path::new(dir_root).join(&rec.path).exists()
-                {
-                    continue;
+        if errors > 0 {
+            log::warn!("[SCAN] 遍历发生 {errors} 个错误，跳过删除检测以防目录瞬断误标删除");
+        } else {
+            let disk_set: std::collections::HashSet<&str> = on_disk.iter().map(|e| e.rel_path.as_str()).collect();
+            for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
+                if rec.status == "active" && !disk_set.contains(rec.path.as_str()) {
+                    // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
+                    if include_exts.is_some()
+                        && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
+                        && std::path::Path::new(dir_root).join(&rec.path).exists()
+                    {
+                        continue;
+                    }
+                    let _ = self.indexer.delete_file(&rec.id);
+                    deleted += 1;
                 }
-                let _ = self.indexer.delete_file(&rec.id);
-                deleted += 1;
             }
         }
 
@@ -541,6 +552,10 @@ impl Scanner {
             by_name_size.entry((entry.name.clone(), entry.size)).or_default().push(entry.clone());
         }
 
+        if errors > 0 {
+            log::warn!("[STARTUP] 遍历发生 {errors} 个错误，跳过删除检测以防目录瞬断误标删除");
+        }
+
         for rec in &tracker::get_files_by_dir(&conn, dir_id)? {
             if rec.status != "active" || disk_set.contains(&rec.path) {
                 continue;
@@ -587,6 +602,12 @@ impl Scanner {
                 && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
                 && std::path::Path::new(&config.path).join(&rec.path).exists()
             {
+                continue;
+            }
+
+            // 遍历出错（目录瞬断/权限/IO）时磁盘清单不完整，不能据此判定文件
+            // 缺失——保留记录，等下次无错扫描再回收，避免批量误标 deleted。
+            if errors > 0 {
                 continue;
             }
 

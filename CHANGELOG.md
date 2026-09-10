@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-10（文档图表迁移：全部替换为 Archify 交互式 HTML 图表）
+
+- **图表全面重画**：将文档中所有流程图、架构图、ASCII 图替换为 [archify](https://github.com/tt-a1i/archify) 生成的交互式 HTML 图表（17 个图表），支持缩放、搜索、聚焦、关系追踪等交互功能。
+- **覆盖范围**：`docs/ARCHITECTURE.md`（7 个 SVG + 5 个 ASCII 图）、`docs/08-ai-features.md`（2 个 Mermaid 流程图）、`docs/03-wait-index.md` / `docs/04-search.md` / `docs/07-index-manage.md` / `docs/09-backup-migrate.md`（4 个 Excalidraw PNG）
+- **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
+- **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
+
+## 2026-09-10（已删除视图与恢复 + 扫描容错：目录瞬断不再批量误标删除）
+
+> 背景：Syncthing 目录瞬断/IO 期间扫描把仍存在的文件批量标 deleted，用户既看不到（Browse 只列 active）也无法恢复，AI 引用显示"未索引"。
+
+### 扫描容错：遍历出错时跳过删除检测
+
+- **根因**：三个扫描路径（full/incremental/startup）在遍历出错（目录瞬断/权限/IO）导致磁盘清单不完整时，仍按清单差集把 active 记录标 deleted，造成整个目录批量误删。
+- **修复**：遍历 `errors > 0` 时跳过本轮删除检测并告警（保留记录，等下轮无错扫描再回收真删文件）。
+- 涉及：`src-tauri/src/scanner/mod.rs`。
+
+### Browse「已删除」视图 + 恢复
+
+- **后端**：`list_files_db` 支持 `filter=deleted`（其余筛选仍只看 active）；`FileItem` 增加 `status` 字段；新增 `restore_files` 命令——将 deleted 记录恢复为 active 并就地重建索引（先校验磁盘存在；内容缓存按 md5 保留，不重新 OCR/转写）。
+- **前端**：Browse 筛选新增"已删除"、行内灰色徽章与提示、右键菜单「恢复」（支持批量）；i18n 中英日韩文案。
+- 涉及：`src-tauri/src/commands/files.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`src/api/files.ts`、`src/api/index.ts`、`src/pages/Browse.tsx`、`src/i18n/*.ts`。验证：`cargo test --lib` 248 passed、`tsc -b` 零错误、oxlint 0 errors。
+
+---
+
 ## v1.1.0（2026-09-10）
 
 > 版本号从 tag 同步（tauri.conf.json / package.json → 1.1.0）。自 v0.2.0 以来：检索范围锚定修复、索引完整性自愈、AI 聊天导出增强（文件名时间序列 + 每轮 log 段 + 可读时间）、引用交互（悬浮预览/就地展开/连写编号分隔）、CI 依赖修复。

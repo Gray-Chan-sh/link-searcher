@@ -284,6 +284,8 @@ export interface FileItem {
   error_msg: string | null
   file_size: number
   mtime: number
+  /** active | deleted（"已删除"视图据此显示并提供恢复） */
+  status: string
 }
 
 export interface FileListResponse {
@@ -293,7 +295,7 @@ export interface FileListResponse {
   page_size: number
 }
 
-export type FilterType = 'all' | 'indexed' | 'pending' | 'failed'
+export type FilterType = 'all' | 'indexed' | 'pending' | 'failed' | 'deleted'
 export type SortKey = 'name' | 'size' | 'mtime' | 'ext'
 export type SortOrder = 'asc' | 'desc'
 

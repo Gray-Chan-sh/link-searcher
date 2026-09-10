@@ -806,6 +806,74 @@ pub async fn heal_index_integrity(state: State<'_, AppState>) -> Result<IndexHea
         .map_err(|e| format!("heal task panicked: {e}"))?
 }
 
+/// Restore soft-deleted records to `active` and re-index them in place.
+///
+/// Used from the Browse "已删除" view: files wrongly marked deleted by a
+/// transient directory outage come back without re-OCR/re-transcription
+/// (content cache is keyed by md5 and untouched by soft-delete).
+/// Records whose file is genuinely gone from disk are left deleted.
+#[tauri::command]
+pub async fn restore_files(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<u64, String> {
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || restore_files_core(&db_pool, &indexer, &ids))
+        .await
+        .map_err(|e| format!("restore task panicked: {e}"))?
+}
+
+fn restore_files_core(
+    db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    indexer: &std::sync::Arc<crate::indexer::IndexerService>,
+    ids: &[String],
+) -> Result<u64, String> {
+    let _guard = crate::state::TaskGuard::new("restore-files");
+    let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+
+    // dir_id → monitor root for disk existence checks.
+    let dir_roots: std::collections::HashMap<String, String> = crate::db::dir_config::list_dirs(&conn)
+        .map_err(|e| format!("{e}"))?
+        .into_iter()
+        .map(|d| (d.id, d.path))
+        .collect();
+
+    let mut restored = 0u64;
+    for id in ids {
+        let Some(rec) = crate::db::tracker::get_file_by_id(&conn, id).map_err(|e| format!("{e}"))? else {
+            continue;
+        };
+        if rec.status != "deleted" {
+            continue;
+        }
+        let disk_ok = dir_roots
+            .get(&rec.dir_id)
+            .map(|root| std::path::Path::new(root).join(&rec.path).exists())
+            .unwrap_or(false);
+        if !disk_ok {
+            log::info!("[RESTORE] {} 磁盘上已不存在，保持删除状态", rec.path);
+            continue;
+        }
+        conn.execute(
+            "UPDATE file_tracking SET status='active', indexed=0, error_msg=NULL, updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), id],
+        )
+        .map_err(|e| format!("restore update failed for {id}: {e}"))?;
+
+        let full_path = std::path::Path::new(dir_roots.get(&rec.dir_id).map(String::as_str).unwrap_or("")).join(&rec.path);
+        match indexer.index_file(id, &full_path, &rec.dir_id) {
+            Ok(()) => restored += 1,
+            Err(e) => log::warn!("[RESTORE] 重建索引失败 {}: {e}", rec.path),
+        }
+    }
+    if restored > 0 {
+        let _ = indexer.commit_now();
+        crate::state::push_task_brief("restore-files", format!("已恢复 {restored} 个文件"));
+    }
+    Ok(restored)
+}
+
 /// Backfill missing semantic embeddings for already-indexed files.
 ///
 /// Reads each indexed file's extracted text from `content_index` (via md5 —

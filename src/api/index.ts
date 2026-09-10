@@ -71,6 +71,12 @@ export async function reindexFiles(ids: string[]): Promise<ReextractReport> {
   return client.invoke<ReextractReport>('reindex_files', { fileIds: ids })
 }
 
+/** Restore soft-deleted records (Browse「已删除」视图) and re-index them.
+ *  Returns the number of files actually restored (disk-present ones). */
+export async function restoreFiles(ids: string[]): Promise<number> {
+  return client.invoke<number>('restore_files', { ids })
+}
+
 export async function cancelScan(): Promise<void> {
   return client.invoke('cancel_scan')
 }

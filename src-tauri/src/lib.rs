@@ -22,7 +22,7 @@ use crate::commands::ai::{ai_capabilities, ai_topic_clusters, ask_documents, can
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, heal_index_integrity, rebuild_index, reextract_missing_content, reindex_file, reindex_files, trigger_scan, verify_index_content};
+use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, heal_index_integrity, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
@@ -149,6 +149,7 @@ get_dir_children,
             check_index_health,
             check_index_integrity,
             heal_index_integrity,
+            restore_files,
             backfill_embeddings,
             backfill_chunk_embeddings,
             get_logs,
