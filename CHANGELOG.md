@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-09-10（Release 管线：macOS 签名/公证基础设施）
+
+- **条件签名**：`release.yml` 透传 Apple 签名/公证 secrets（`APPLE_CERTIFICATE` / `APPLE_SIGNING_IDENTITY` / `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` / API Key 路线），并在 macOS runner 增加证书导入步骤（base64 解码 `.p12` → 临时 Keychain）。Secrets 未配置时全部 env 为空 → 构建行为与 v1.1.1 无签名版完全一致，不会失败（`.github/workflows/release.yml`）。
+- **启用方式**：在仓库 Settings → Secrets 添加上述 secrets 后，下一 tag 的 macOS 产物自动带签名 + 公证，同步修复 updater 签名 JSON 生成。
+
+---
+
 ## 2026-09-10（AI 聊天空回答修复 + max_tokens 自动检测）
 
 ### 第一轮回答为空（ai-done 被守卫丢弃）

@@ -31,6 +31,18 @@ jobs:
             target: x86_64-unknown-linux-gnu
 
     runs-on: ${{ matrix.platform }}
+    # macOS 签名/公证：仓库 Secrets 就绪时 tauri-action 自动签名 + notarize；
+    # secrets 缺省时这些 env 为空 → tauri 跳过签名（与 v1.1.1 之前的无签行为一致）。
+    env:
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_PATH: /tmp/apple-api-key.p8
 
     steps:
       # dispatch 手动触发时 checkout 指定 tag；tag push 时 checkout 该 tag。
@@ -87,6 +99,25 @@ jobs:
           json.dump(c, open(p, "w"), indent=2, ensure_ascii=False)
           print(f"tauri.conf.json version -> {ver}")
           PY
+
+      # macOS 证书导入：APPLE_CERTIFICATE 为 base64 的 .p12。Secrets 未配置时
+      # 跳过（env.APPLE_CERTIFICATE 为空），构建保持无签名。
+      - name: Import Apple certificate (macOS, if configured)
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        shell: bash
+        run: |
+          CERT_PATH="$RUNNER_TEMP/certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KC_PASSWORD=$(openssl rand -hex 18)
+          echo -n "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+          security create-keychain -p "$KC_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KC_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -k "$KC_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+          rm -f "$CERT_PATH"
+          echo "certificate imported: $(security find-identity -v -p codesigning | head -2)"
 
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
