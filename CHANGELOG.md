@@ -11,6 +11,16 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（AI 聊天导出支持勾选轮次）
+
+> 导出只能全量导出整个会话，无法只导其中几轮。
+
+- **后端**：`export_chat_session` / `export_chat_session_json` 增加可选 `turns: Vec<usize>`（1-based 轮次编号，缺省=全部）；md 与 json 在轮次循环处过滤，json 的 `turn_index` 保持原始编号。webapi 导出接口接收 `{"turns":[...]}`（body），REST 映射同步。
+- **前端**：点「导出 JSON / 导出 Markdown」先弹出轮次选择框——列出每轮提问、默认全选，支持全选/反选、空选禁用导出；确认后按所选轮次生成文件（文件名仍为 `标题_时间序列.ext`）。
+- 涉及：`src-tauri/src/commands/ai.rs`、`src-tauri/src/webapi/routes/ai.rs`、`src/api/files.ts`、`src/api/client.ts`、`src/pages/AiChat.tsx`、`src/i18n/*.ts`。验证：`export_selected_turns_only` 单测、`cargo test --lib` 251 passed、`tsc -b` 零错误、oxlint 0 errors。
+
+---
+
 ## 2026-09-10（AI 聊天单条导出支持 Markdown）
 
 > 后端 `export_chat_session` 早已生成 Markdown（此前只有批量导出在用），单条会话导出只给了 JSON。

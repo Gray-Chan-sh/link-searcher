@@ -277,29 +277,35 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
   }, [])
 
-  const handleExport = useCallback(async () => {
+  // 轮次选择导出：点导出先弹窗勾选轮次（默认全选），再生成 json/md。
+  const [exportPick, setExportPick] = useState<{ format: 'json' | 'md'; selected: Set<number> } | null>(null)
+  const userTurns = useMemo(
+    () => (activeSession?.messages ?? []).filter(m => m.role === 'user').map(m => m.content),
+    [activeSession?.messages],
+  )
+
+  const openExport = useCallback((format: 'json' | 'md') => {
     if (!activeId) return
+    setExportPick({ format, selected: new Set(userTurns.map((_, i) => i + 1)) })
+  }, [activeId, userTurns])
+
+  const doExport = useCallback(async () => {
+    if (!activeId || !exportPick) return
+    const { format, selected } = exportPick
+    const turns = [...selected].sort((a, b) => a - b)
+    setExportPick(null)
+    if (turns.length === 0) return
     try {
-      const content = await exportChatSessionJson(activeId)
+      const content = format === 'json'
+        ? await exportChatSessionJson(activeId, turns)
+        : await exportChatSession(activeId, turns)
       const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
-      await saveFile(content, `${title}_${exportStamp()}.json`)
+      await saveFile(content, `${title}_${exportStamp()}.${format}`)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [activeId, activeSession?.title, exportStamp])
-
-  // Markdown 导出：保留表格/引用标记，便于阅读与归档。
-  const handleExportMarkdown = useCallback(async () => {
-    if (!activeId) return
-    try {
-      const md = await exportChatSession(activeId)
-      const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
-      await saveFile(md, `${title}_${exportStamp()}.md`)
-    } catch (e) {
-      alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
-    }
-  }, [activeId, activeSession?.title, exportStamp])
+  }, [activeId, activeSession?.title, exportPick, exportStamp])
 
   // 批量管理模式
   const [selectMode, setSelectMode] = useState(false)
@@ -623,14 +629,14 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
           </span>
           <div className="flex items-center gap-2">
             <button
-              onClick={handleExport}
+              onClick={() => openExport('json')}
               disabled={!activeId}
               className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
             >
               {t('export_json')}
             </button>
             <button
-              onClick={handleExportMarkdown}
+              onClick={() => openExport('md')}
               disabled={!activeId}
               className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
             >
@@ -663,6 +669,64 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
           </div>
         )}
       </div>
+
+      {/* 轮次选择导出弹窗：默认全选，可勾选部分轮次导出 json/md */}
+      {exportPick && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center" onClick={() => setExportPick(null)}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl w-[460px] max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+              <span className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('export_turns_title')}</span>
+              <span className="text-xs text-gray-400">{exportPick.format.toUpperCase()} · {exportPick.selected.size}/{userTurns.length}</span>
+            </div>
+            <div className="flex-1 overflow-y-auto py-1">
+              {userTurns.map((q, i) => {
+                const n = i + 1
+                const on = exportPick.selected.has(n)
+                return (
+                  <label key={n} className="flex items-start gap-2 px-4 py-1.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800">
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => setExportPick(p => {
+                        if (!p) return p
+                        const next = new Set(p.selected)
+                        if (next.has(n)) next.delete(n); else next.add(n)
+                        return { ...p, selected: next }
+                      })}
+                      className="mt-0.5"
+                    />
+                    <span className="shrink-0 text-xs text-gray-500 dark:text-gray-400">{t('turn_label', { n })}</span>
+                    <span className="text-sm text-gray-700 dark:text-gray-300 truncate">{q}</span>
+                  </label>
+                )
+              })}
+            </div>
+            <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex items-center justify-between gap-2">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setExportPick(p => p && ({ ...p, selected: new Set(userTurns.map((_, i) => i + 1)) }))}
+                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                >{t('select_all')}</button>
+                <button
+                  onClick={() => setExportPick(p => p && ({ ...p, selected: new Set(userTurns.map((_, i) => i + 1).filter(n => !p.selected.has(n))) }))}
+                  className="text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                >{t('invert')}</button>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setExportPick(null)}
+                  className="px-3 py-1 text-xs rounded border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800"
+                >{t('cancel')}</button>
+                <button
+                  onClick={doExport}
+                  disabled={exportPick.selected.size === 0}
+                  className="px-3 py-1 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                >{t('export_selected')}</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

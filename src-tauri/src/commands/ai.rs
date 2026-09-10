@@ -2504,12 +2504,21 @@ fn fmt_evidence_item(e: &EvidenceItem, index: usize) -> String {
 
 /// Export a session as Markdown text (chat transcript with full traceability:
 /// per-turn references, retrieval evidence, strict/focus mode, timestamps).
+/// `selected_turns`（1-based turn_index）为 None 时导出全部轮次。
 #[tauri::command]
-pub fn export_chat_session(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    export_chat_session_impl(&state.data_dir, &id)
+pub fn export_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    turns: Option<Vec<usize>>,
+) -> Result<String, String> {
+    export_chat_session_impl(&state.data_dir, &id, turns.as_deref())
 }
 
-pub fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<String, String> {
+pub fn export_chat_session_impl(
+    data_dir: &std::path::Path,
+    id: &str,
+    selected_turns: Option<&[usize]>,
+) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
@@ -2545,6 +2554,11 @@ pub fn export_chat_session_impl(data_dir: &std::path::Path, id: &str) -> Result<
     for (i, m) in session.messages.iter().enumerate() {
         if m.role == "user" {
             turn_idx += 1;
+            // 轮次选择导出：未勾选的轮次整段跳过（含其问题、范围、依据与回答）。
+            if let Some(sel) = selected_turns
+                && !sel.contains(&turn_idx) {
+                    continue;
+                }
             md.push_str(&format!("---\n\n## 第 {turn_idx} 轮\n\n### 问\n\n{}\n", m.content));
             // 本轮范围快照（跨轮累计合并后）
             if let Some(sc) = session.per_turn_scopes.iter().find(|s| s.turn_index == turn_idx - 1) {
@@ -2652,14 +2666,19 @@ struct TurnExport {
 /// 每轮附带 `log` 段（ai_events 表中的结构化管线事件，需传 DB pool；为
 /// None 时省略 log 段，便于无 DB 的纯历史导出场景）。
 #[tauri::command]
-pub fn export_chat_session_json(state: State<'_, AppState>, id: String) -> Result<String, String> {
-    export_chat_session_json_impl(&state.data_dir, &id, Some(&state.db))
+pub fn export_chat_session_json(
+    state: State<'_, AppState>,
+    id: String,
+    turns: Option<Vec<usize>>,
+) -> Result<String, String> {
+    export_chat_session_json_impl(&state.data_dir, &id, Some(&state.db), turns.as_deref())
 }
 
 pub fn export_chat_session_json_impl(
     data_dir: &std::path::Path,
     id: &str,
     db: Option<&r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>,
+    selected_turns: Option<&[usize]>,
 ) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
@@ -2685,6 +2704,11 @@ pub fn export_chat_session_json_impl(
     for (i, m) in session.messages.iter().enumerate() {
         if m.role == "user" {
             turn_idx += 1;
+            // 轮次选择导出：未勾选的轮次不进入 turns 数组（turn_index 保持原始编号）。
+            if let Some(sel) = selected_turns
+                && !sel.contains(&turn_idx) {
+                    continue;
+                }
             let scope = session
                 .per_turn_scopes
                 .iter()
@@ -2955,7 +2979,7 @@ mod history_tests {
             strict_docs: true,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s1").unwrap();
+        let md = export_chat_session_impl(&dir, "s1", None).unwrap();
         assert!(md.contains("# 克虏伯项目"));
         assert!(md.contains("## 追溯信息"), "头部应有追溯信息块: {md}");
         assert!(md.contains("LLM 模型"), "追溯块应含模型: {md}");
@@ -3002,7 +3026,7 @@ mod history_tests {
             strict_docs: false,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s3").unwrap();
+        let md = export_chat_session_impl(&dir, "s3", None).unwrap();
         assert!(!md.contains("> 📁 检索范围"), "顶部空会话范围不显示: {md}");
         assert!(md.contains("**检索范围:**\n- 未指定（全库）"), "每轮空范围应标注: {md}");
 
@@ -3053,7 +3077,7 @@ mod history_tests {
             strict_docs: false,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let json_str = export_chat_session_json_impl(&dir, "s2", None).unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s2", None, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         // schema v3：无 ai_events 记录时省略 log 段（向后兼容）。
@@ -3081,6 +3105,53 @@ mod history_tests {
 
     fn msg(role: &str, content: &str) -> ChatMessage {
         ChatMessage { role: role.into(), content: content.into() }
+    }
+
+    /// 轮次选择导出：仅导出勾选的轮次（json 的 turn_index 保持原始编号）。
+    #[test]
+    fn export_selected_turns_only() {
+        let dir = std::env::temp_dir().join(format!("ls_export_turns_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = ChatSession {
+            id: "s-turns".into(),
+            title: "轮次选择".into(),
+            created_at: 0,
+            updated_at: 0,
+            messages: vec![
+                msg("user", "第一轮问题"),
+                msg("assistant", "第一轮回答"),
+                msg("user", "第二轮问题"),
+                msg("assistant", "第二轮回答"),
+            ],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![],
+            retrieval_scope: vec![],
+            strict_docs: false,
+        };
+        save_chat_session_impl(&dir, session).unwrap();
+
+        // 全部轮次（turns=None）。
+        let all = export_chat_session_json_impl(&dir, "s-turns", None, None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&all).unwrap();
+        assert_eq!(v["turns"].as_array().map(Vec::len), Some(2));
+
+        // 仅第 2 轮：turns 数组只含 turn_index=2。
+        let only2 = export_chat_session_json_impl(&dir, "s-turns", None, Some(&[2])).unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&only2).unwrap();
+        let ts = v2["turns"].as_array().unwrap();
+        assert_eq!(ts.len(), 1, "应只导出第 2 轮: {ts:?}");
+        assert_eq!(ts[0]["turn_index"], serde_json::json!(2));
+
+        // Markdown 同样支持轮次选择：只含第 1 轮标题，不含第 2 轮。
+        let md = export_chat_session_impl(&dir, "s-turns", Some(&[1])).unwrap();
+        assert!(md.contains("## 第 1 轮"), "md 应含第 1 轮");
+        assert!(!md.contains("## 第 2 轮"), "md 不应含未选轮次");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// export JSON 每轮 log 段：ai_events 的结构化管线事件按轮次写入导出。
@@ -3129,7 +3200,7 @@ mod history_tests {
             drop(c);
         }
 
-        let json_str = export_chat_session_json_impl(&dir, "s-evt", Some(&pool)).unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s-evt", Some(&pool), None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(v["schema_version"], serde_json::json!(3));
         let log = &v["turns"][0]["log"];
@@ -3545,7 +3616,7 @@ mod mention_resolve_tests {
             strict_docs: false,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s1").unwrap();
+        let md = export_chat_session_impl(&dir, "s1", None).unwrap();
         assert!(md.contains("全库"), "empty scope should render as 全库: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -3575,7 +3646,7 @@ mod mention_resolve_tests {
             strict_docs: false,
         };
         save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s2").unwrap();
+        let md = export_chat_session_impl(&dir, "s2", None).unwrap();
         assert!(!md.contains("检索范围"), "no per_turn_scopes should not render scope: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);

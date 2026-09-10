@@ -8,6 +8,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use serde::Deserialize;
 use tauri::Manager;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
@@ -154,19 +155,32 @@ async fn chat_session_delete_handler(
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
+/// 导出请求体：`{"turns":[1,3]}`；缺省/为空表示导出全部轮次。
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct ExportBody {
+    turns: Option<Vec<usize>>,
+}
+
 async fn chat_session_export_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    axum::Json(body): axum::Json<ExportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let md = crate::commands::ai::export_chat_session_impl(&app_state.data_dir, &id)
+    let md = crate::commands::ai::export_chat_session_impl(&app_state.data_dir, &id, body.turns.as_deref())
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;
-    let json = crate::commands::ai::export_chat_session_json_impl(&app_state.data_dir, &id, Some(&app_state.db))
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
+    let json = crate::commands::ai::export_chat_session_json_impl(
+        &app_state.data_dir,
+        &id,
+        Some(&app_state.db),
+        body.turns.as_deref(),
+    )
+    .map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
     Ok(Json(serde_json::json!({ "markdown": md, "json": json })))
 }
 

@@ -234,12 +234,13 @@ export async function saveChatSession(session: ChatSession): Promise<void> {
   return client.invoke<void>('save_chat_session', { session })
 }
 
-export async function exportChatSession(id: string): Promise<string> {
-  return client.invoke<string>('export_chat_session', { id })
+export async function exportChatSession(id: string, turns?: number[]): Promise<string> {
+  return client.invoke<string>('export_chat_session', { id, turns })
 }
 
-export async function exportChatSessionJson(id: string): Promise<string> {
-  return client.invoke<string>('export_chat_session_json', { id })
+/** JSON 导出；turns 为 1-based 轮次编号，缺省导出全部轮次。 */
+export async function exportChatSessionJson(id: string, turns?: number[]): Promise<string> {
+  return client.invoke<string>('export_chat_session_json', { id, turns })
 }
 
 export async function getFile(id: string): Promise<FileDetail> {

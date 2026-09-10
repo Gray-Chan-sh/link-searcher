@@ -147,10 +147,12 @@ const MAPPINGS: Record<string, Mapping> = {
   }),
   export_chat_session: (a) => ({
     method: 'POST', path: `/api/chat/sessions/${a.id}/export`,
+    body: { turns: a.turns },
     transform: (data) => (data as Record<string, unknown>)?.markdown,
   }),
   export_chat_session_json: (a) => ({
     method: 'POST', path: `/api/chat/sessions/${a.id}/export`,
+    body: { turns: a.turns },
     transform: (data) => (data as Record<string, unknown>)?.json,
   }),
 
