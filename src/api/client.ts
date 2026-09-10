@@ -104,6 +104,8 @@ const MAPPINGS: Record<string, Mapping> = {
   get_index_errors: { method: 'GET', path: '/api/index/errors' },
   check_index_integrity: { method: 'GET', path: '/api/index/integrity' },
   backfill_embeddings: { method: 'POST', path: '/api/index/backfill-embeddings' },
+  backfill_chunk_embeddings: { method: 'POST', path: '/api/index/backfill-chunk-embeddings' },
+  heal_index_integrity: { method: 'POST', path: '/api/index/heal' },
 
   // ── Dirs ──
   list_dirs: {

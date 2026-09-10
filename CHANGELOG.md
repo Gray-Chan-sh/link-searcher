@@ -11,6 +11,16 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（补齐 Web 映射：索引自愈 / chunk 向量回填）
+
+> 对比前端 RPC 映射与 webapi 路由后发现两处遗漏：Web 模式下调用会静默返回空。
+
+- 新增 `POST /api/index/heal`（复用 `heal_index_integrity`）与 `POST /api/index/backfill-chunk-embeddings`（复用 `backfill_chunk_embeddings`），均 detach 后台执行并立即返回 202（与既有 backfill-embeddings 一致）；前端映射同步补 `heal_index_integrity` / `backfill_chunk_embeddings`。
+- 保留 GUI 专属（Web 无路由，符合预期）：BGE/FunASR 安装与自定义 provider 连通性测试。
+- 涉及：`src-tauri/src/webapi/routes/index.rs`、`src/api/client.ts`。验证：`cargo check` 零错误、`tsc -b` 零错误、映射/路由对比脚本收敛为预期 4 项。
+
+---
+
 ## 2026-09-10（AI 聊天文件树全部显示"未索引"：绝对/相对路径坐标系不一致）
 
 > Web UI（与桌面版共用同一命令）中，AI 聊天侧栏文件树里所有文件都标"未索引"，已索引文件的绿点也不出现。

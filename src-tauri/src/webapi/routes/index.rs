@@ -33,6 +33,11 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/index/backfill-embeddings",
             post(backfill_handler),
         )
+        .route(
+            "/api/index/backfill-chunk-embeddings",
+            post(backfill_chunk_embeddings_handler),
+        )
+        .route("/api/index/heal", post(heal_index_handler))
 }
 
 /// OS thread, not tokio::spawn: the command futures borrow an AppState owned
@@ -356,6 +361,44 @@ async fn integrity_handler(
     let report = crate::commands::index::check_index_integrity(app_state)
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(report))
+}
+
+/// 触发 chunk 级向量回填（可能耗时，detach 后立即返回 202）。
+async fn backfill_chunk_embeddings_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) = tauri::async_runtime::block_on(
+            crate::commands::index::backfill_chunk_embeddings(st),
+        ) {
+            log::error!("[WEBAPI] backfill-chunk-embeddings failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
+}
+
+/// 触发索引完整性自愈（重灌 DB↔Tantivy 缺失文件 + 去重，可能耗时，detach 202）。
+async fn heal_index_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) =
+            tauri::async_runtime::block_on(crate::commands::index::heal_index_integrity(st))
+        {
+            log::error!("[WEBAPI] heal-index failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
 }
 
 async fn backfill_handler(
