@@ -433,7 +433,7 @@ fn semantic_rerank_worker(
 /// and limits the captured word to avoid whole-paragraph highlighting.
 /// Falls back to the document opening when nothing overlaps.
 fn semantic_snippet(content: &str, query: &str) -> String {
-    let jieba = crate::search::schema::JIEBA.lock().unwrap();
+    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
     let terms: Vec<String> = jieba
         .cut(query, false)
         .into_iter()

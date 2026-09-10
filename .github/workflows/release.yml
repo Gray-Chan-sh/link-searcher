@@ -86,8 +86,10 @@ jobs:
       # 用 `python` 而非 `python3`：Windows runner 无 python3（有 python）。
       - name: Set version from tag
         shell: bash
+        env:
+          RELEASE_TAG_INPUT: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          RELEASE_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          RELEASE_TAG="${RELEASE_TAG_INPUT}"
           echo "RELEASE_TAG=$RELEASE_TAG" >> "$GITHUB_ENV"
           VER="${RELEASE_TAG#v}"
           python - "$VER" <<'PY'

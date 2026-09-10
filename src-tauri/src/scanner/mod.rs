@@ -657,6 +657,11 @@ impl Scanner {
                 }
                 let meta = crate::scanner::helpers::metadata_timeout(file_path, std::time::Duration::from_secs(10))
                     .with_context(|| format!("failed to stat {path_str}"))?;
+                // 目录事件（notify 对 Folder Create/Modify 也触发）不能当文件登记，
+                // 否则 upsert 后 index_file 读目录 → EISDIR (os error 21)
+                if !meta.is_file() {
+                    return Ok(());
+                }
                 let mtime = mtime_micros(&meta).unwrap_or(0);
                 let size = meta.len();
 
@@ -845,5 +850,67 @@ mod watcher_skip_tests {
         assert!(!super::should_skip_watcher_event(&rec(1), 100, 6));
         assert!(!super::should_skip_watcher_event(&rec(0), 100, 5));
         assert!(!super::should_skip_watcher_event(&rec(3), 100, 5));
+    }
+}
+#[cfg(test)]
+mod watcher_dir_tests {
+    use super::*;
+    use crate::db;
+    use crate::search::IndexManager;
+    use tantivy::Index;
+    use std::sync::Arc;
+    use crate::scanner::watcher::{FileChangeEvent, ChangeKind};
+
+    fn setup_env() -> (Pool<SqliteConnectionManager>, Arc<IndexerService>, String) {
+        let pool = r2d2::Pool::builder().max_size(2)
+            .build(r2d2_sqlite::SqliteConnectionManager::memory()).unwrap();
+        {
+            let c = pool.get().unwrap();
+            db::run_migrations(&c).unwrap();
+        }
+        let schema = crate::search::schema::build_schema();
+        let _index = Index::create_in_ram(schema);
+        crate::search::schema::register_tokenizers(&_index);
+        let im = Arc::new(std::sync::RwLock::new(IndexManager::create_in_ram()));
+        let svc = Arc::new(IndexerService::new(pool.clone(), im));
+        let dir_id = {
+            let c = pool.get().unwrap();
+            dir_config::add_dir(&c, std::env::temp_dir().to_str().unwrap(),
+                Some("test-wd"), None, None, None, true).unwrap().id
+        };
+        (pool, svc, dir_id)
+    }
+
+    /// 缺陷回归：watcher 对 Folder Create/Modify 也触发事件，目录曾被当文件
+    /// 登记进 file_tracking（size=256）后 index_file 读目录 → EISDIR。
+    /// handle_event 必须跳过目录，不产生任何追踪行。
+    #[test]
+    fn handle_event_ignores_directory_events() {
+        let dir = std::env::temp_dir().join(format!("watcher_dir_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let subdir = dir.join("新加坡");
+        std::fs::create_dir_all(&subdir).unwrap();
+        std::fs::write(subdir.join("x.txt"), "hello").unwrap();
+
+        let (pool, svc, dir_id) = setup_env();
+        {
+            let c = pool.get().unwrap();
+            c.execute("UPDATE dir_config SET path=?1 WHERE id=?2",
+                rusqlite::params![dir.to_str().unwrap(), dir_id]).unwrap();
+        }
+        let scanner = Scanner::new(pool.clone(), svc);
+
+        for kind in [ChangeKind::Create, ChangeKind::Modify] {
+            scanner.handle_event(FileChangeEvent {
+                dir_id: dir_id.clone(),
+                path: subdir.clone(),
+                kind,
+            }).unwrap();
+        }
+
+        let c = pool.get().unwrap();
+        let gone = crate::db::tracker::get_file_by_path(&c, "新加坡").unwrap();
+        assert!(gone.is_none(), "directory must not be tracked: {:?}", gone.map(|r| (r.path, r.size)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

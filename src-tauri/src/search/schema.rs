@@ -104,7 +104,7 @@ impl Tokenizer for JiebaTokenizer {
     type TokenStream<'a> = JiebaTokenStream<'a>;
 
     fn token_stream<'a>(&mut self, text: &'a str) -> JiebaTokenStream<'a> {
-        let jieba = JIEBA.lock().unwrap();
+        let jieba = JIEBA.lock().unwrap_or_else(|e| e.into_inner());
         let jieba_tokens = jieba.tokenize(text, jieba_rs::TokenizeMode::Search, true);
         let token = jieba_tokens.first().map(|t| Token {
             offset_from: t.word.as_ptr() as usize - text.as_ptr() as usize,

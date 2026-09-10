@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-09-11（watcher 将目录当文件登记 → EISDIR 修复 + 历史污染清理）
+
+- **根因**：notify 对 Folder Create/Modify 同样触发事件，`classify_event` 仅按 EventKind 分类不区分文件/目录，`Scanner::handle_event` 未做 `is_file` 校验即 `upsert_file`（size=APFS 目录 st_size 64~256）后 `index_file` 读目录 → `read: Is a directory (os error 21)`。全量/增量扫描路径均有 `is_file()` 过滤，仅 watcher 漏掉。
+- **修复**：`handle_event` 在 stat 后、upsert 前 `if !meta.is_file() { return Ok(()); }`（`src-tauri/src/scanner/mod.rs`）。回归测试 `handle_event_ignores_directory_events`（先 RED 后 GREEN）。
+- **历史数据清理**：`/Volumes/Data/index/data.db` 共检出 **15 条**磁盘验证为目录的污染行（`案件/ZF 振飞/新加坡`、常宏案 `20260908` 目录、万城多处 `新建文件夹` 等，状态均含 deleted），全部删除并同步清理孤儿 content_index/doc_embeddings/index_errors。
+- **附带**：jieba `Mutex` 化时引入的 `lock().unwrap()` 全部改为 `unwrap_or_else(|e| e.into_inner())`（5 处，消除锁中毒 panic 路径）；`release.yml` 的 `${{ }}` 直接插值改为 env 传递（semgrep run-shell-injection）。semgrep ERROR 归零。
+
+---
+
 ## 2026-09-10（Release 管线：macOS 签名/公证基础设施）
 
 - **条件签名**：`release.yml` 透传 Apple 签名/公证 secrets（`APPLE_CERTIFICATE` / `APPLE_SIGNING_IDENTITY` / `APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` / API Key 路线），并在 macOS runner 增加证书导入步骤（base64 解码 `.p12` → 临时 Keychain）。Secrets 未配置时全部 env 为空 → 构建行为与 v1.1.1 无签名版完全一致，不会失败（`.github/workflows/release.yml`）。
