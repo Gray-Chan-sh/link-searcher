@@ -23,7 +23,7 @@ interface AiTabProps {
   newProv: { name: string; baseUrl: string; apiKey: string }
   modelFilter: Record<string, string>
   expandedGroups: Set<string>
-  aiTest: { kind: string; ok: boolean; detail: string }[] | null
+  aiTest: { kind: string; ok: boolean; detail: string; max_output_tokens?: number }[] | null
   aiTestLoading: boolean
   onSaveSemanticWeight: () => void
   onActiveModel: (kind: 'embedding' | 'llm', modelId: string) => void

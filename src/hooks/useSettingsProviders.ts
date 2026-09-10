@@ -20,7 +20,7 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
   const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [modelFilter, setModelFilter] = useState<Record<string, string>>({})
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-  const [aiTest, setAiTest] = useState<{ kind: string; ok: boolean; detail: string }[] | null>(null)
+  const [aiTest, setAiTest] = useState<{ kind: string; ok: boolean; detail: string; max_output_tokens?: number }[] | null>(null)
   const [aiTestLoading, setAiTestLoading] = useState(false)
 
   const persistProviders = async (providers: ProviderInfo[]) => {
