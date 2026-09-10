@@ -304,44 +304,70 @@ pub fn get_dir_tree(state: State<'_, AppState>, dir_id: String, include_files: O
     build_dir_tree(&dir.path, include_files.unwrap_or(false), &mut budget)
 }
 
+/// 磁盘绝对条目路径 → 与 `file_tracking.path`（相对监控根）同一坐标系的键。
+/// root 未命中时退化为绝对路径字符串（保持旧行为，避免误报已索引）。
+pub(crate) fn indexed_key(dir_root: Option<&str>, abs: &std::path::Path) -> String {
+    dir_root
+        .and_then(|root| crate::scanner::helpers::to_relative(root, abs).ok())
+        .unwrap_or_else(|| abs.to_string_lossy().to_string())
+}
+
 /// 懒加载：返回 `parent_path` 目录的单层子项（文件+目录，隐藏已过滤）。
 /// 同时返回每文件的 indexed 状态（从 file_tracking 表查询）。
 #[tauri::command]
 pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Result<Vec<DirTreeNode>, String> {
     let mut children = Vec::new();
 
-    let indexed_set: Result<std::collections::HashSet<String>, String> = (|| {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        let mut stmt = conn.prepare(
-            "SELECT path FROM file_tracking WHERE status='active' AND indexed=1"
-        ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        let mut set = std::collections::HashSet::new();
-        for path in rows.flatten() { set.insert(path); }
-        Ok(set)
-    })();
+    // file_tracking.path 存的是相对监控根的路径（启动时已 migrate_paths_to_relative），
+    // 而 read_dir 给出的是绝对路径——两者必须统一坐标系，否则 indexed 判定
+    // 永远为 false，文件树里全部文件显示"未索引"。
+    let mut indexed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut indexed_known = false;
+    let mut dir_root: Option<String> = None;
+    if let Ok(conn) = state.db.get() {
+        if let Ok(dirs) = crate::db::dir_config::list_dirs(&conn) {
+            dir_root = dirs
+                .iter()
+                .filter(|d| {
+                    parent_path == d.path
+                        || parent_path.starts_with(&format!("{}/", d.path.trim_end_matches('/')))
+                })
+                .max_by_key(|d| d.path.len())
+                .map(|d| d.path.clone());
+        }
+        if let Ok(mut stmt) = conn
+            .prepare("SELECT path FROM file_tracking WHERE status='active' AND indexed=1")
+            && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(0))
+        {
+            indexed_known = true;
+            for path in rows.flatten() {
+                indexed_set.insert(path);
+            }
+        }
+    }
 
     if let Ok(entries) = std::fs::read_dir(&parent_path) {
         for entry in entries.flatten() {
             if let Ok(ft) = entry.file_type() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with('.') { continue; }
-                let path = entry.path().to_string_lossy().to_string();
+                let abs = entry.path();
+                let path = abs.to_string_lossy().to_string();
+                let key = indexed_key(dir_root.as_deref(), &abs);
                 let is_file = !ft.is_dir();
-                let (_, status) = if is_file {
-                    if let Ok(set) = &indexed_set {
-                        if set.contains(&path) { (true, Some("indexed".to_string())) }
-                        else { (false, Some("unindexed".to_string())) }
-                    } else { (false, None) }
-                } else { (false, None) };
+                let is_indexed = is_file && indexed_known && indexed_set.contains(&key);
+                let status = if is_file && indexed_known {
+                    Some(if is_indexed { "indexed" } else { "unindexed" }.to_string())
+                } else {
+                    None
+                };
 
                 children.push(DirTreeNode {
                     name,
-                    path: path.clone(),
+                    path,
                     is_dir: ft.is_dir(),
                     children: vec![],
-                    indexed: Some(is_file && matches!(indexed_set, Ok(ref s) if s.contains(&path))),
+                    indexed: Some(is_indexed),
                     status,
                 });
             }
@@ -392,4 +418,30 @@ fn build_dir_tree(root_path: &str, include_files: bool, budget: &mut usize) -> R
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     Ok(DirTreeNode { name, path: root_path.to_string(), is_dir: true, children, indexed: None, status: None })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// 磁盘绝对路径必须映射到与 file_tracking.path 一致的相对路径键，
+    /// 否则文件树里所有文件都会被误判为"未索引"。
+    #[test]
+    fn indexed_key_maps_absolute_to_relative_under_root() {
+        let root = "/data/工作日志";
+        assert_eq!(
+            indexed_key(Some(root), Path::new("/data/工作日志/案件/X/a.pdf")),
+            "案件/X/a.pdf"
+        );
+        // root 不匹配（文件不在该 root 下）→ 退化为绝对路径，不误报已索引。
+        assert_eq!(
+            indexed_key(Some(root), Path::new("/other/案件/X/a.pdf")),
+            "/other/案件/X/a.pdf"
+        );
+        // root 未知 → 绝对路径。
+        assert_eq!(
+            indexed_key(None, Path::new("/data/工作日志/案件/X/a.pdf")),
+            "/data/工作日志/案件/X/a.pdf"
+        );
+    }
 }

@@ -11,6 +11,16 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（AI 聊天文件树全部显示"未索引"：绝对/相对路径坐标系不一致）
+
+> Web UI（与桌面版共用同一命令）中，AI 聊天侧栏文件树里所有文件都标"未索引"，已索引文件的绿点也不出现。
+
+- **根因**：`get_dir_children` 用 `SELECT path FROM file_tracking WHERE status='active' AND indexed=1` 构建已索引集合，但 `file_tracking.path` 存的是**相对监控根**的路径（启动流程已 `migrate_paths_to_relative`）；而比对时用的是 `read_dir` 得到的**绝对路径** → 永不匹配 → 全部判为 `unindexed`。
+- **修复**：新增 `indexed_key(dir_root, abs)` 把磁盘绝对路径按所属监控根转成相对键（root 未命中时退化为绝对路径，保持旧行为不误报）。`get_dir_children` 先用 `dir_config` 找出包含 `parent_path` 的最长 root，再用该键查集合；查询失败时 status 仍为 None（与旧语义一致）。
+- 涉及：`src-tauri/src/commands/dirs.rs`。验证：`indexed_key_maps_absolute_to_relative_under_root` 单测，`cargo test --lib` 252 passed。
+
+---
+
 ## 2026-09-10（AI 聊天导出支持勾选轮次）
 
 > 导出只能全量导出整个会话，无法只导其中几轮。
