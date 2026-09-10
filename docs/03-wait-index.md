@@ -74,7 +74,7 @@
 
 以下流程图展示了文件从扫描到索引完成的完整过程：
 
-![文件扫描与索引流程](screenshots/excalidraw-scan-index.png)
+📋 **文件扫描与索引流程**：[查看交互式图表](diagrams/09-scan-index.html)
 
 ## ✅ 本章验证清单
 

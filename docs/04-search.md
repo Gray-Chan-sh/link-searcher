@@ -124,7 +124,7 @@
 
 以下流程图展示了搜索请求从输入到返回结果的完整过程：
 
-![搜索流程](screenshots/excalidraw-search-flow.png)
+🔍 **搜索流程**：[查看交互式图表](diagrams/10-search-flow.html)
 
 ## ✅ 本章验证清单
 

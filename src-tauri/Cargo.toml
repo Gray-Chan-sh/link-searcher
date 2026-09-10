@@ -105,3 +105,8 @@ tauri = { version = "2", features = ["test", "dynamic-acl"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Debug 模式下所有第三方依赖开 O3，业务代码保持 O0 可调试
+# tract-core/tract-linalg/tokenizers 等重度计算依赖由此获得 SIMD 加速
+[profile.dev.package."*"]
+opt-level = 3

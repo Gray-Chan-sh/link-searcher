@@ -179,53 +179,11 @@ AI 问答在将文档内容注入 LLM 时，受限于上下文窗口大小和性
 
 ### 无引用提问（全库检索）
 
-```mermaid
-flowchart TD
-    A[用户输入问题] --> B[前端 ChatPanel]
-    B --> C{有 @引用 / 选了文件?}
-    C -- 否 --> D[scope 为空<br/>source_ids 为空<br/>strict_docs=true 默认]
-    C -- 是 --> D2[走引用注入流程<br/>见下图]
-    D --> E[conversation_ask_stream<br/>检查 LLM 已配置]
-    E -- 未配置 --> E1[报错: AI 服务未配置]
-    E -- 已配置 --> F[查询改写 rewrite_query]
-    F --> F1{自包含问句<br/>字数>=4 且无指代词?}
-    F1 -- 是 --> F2[不改写<br/>search_q=原问句]
-    F1 -- 否 --> F3[规则/LLM 改写<br/>补全指代或提炼关键词]
-    F2 --> G[extract_retrieval_keywords<br/>jieba 提炼核心实体词]
-    F3 --> G
-    G --> H[三路检索 全库扫描]
-    H --> H1[BM25 关键词检索<br/>Tantivy 索引]
-    H --> H2[语义向量检索<br/>embed 一次 → 文件级+chunk级]
-    H --> H3[路径 LIKE 匹配<br/>文件名含实体词]
-    H1 --> I[合并去重 all_hits]
-    H2 --> I
-    H3 --> I
-    I --> J[注入前 30 命中文件全文<br/>按预算截取/选相关块]
-    J --> K{strict_docs<br/>仅依据文档?}
-    K -- 是 --> K1{context 为空?<br/>检索 0 命中}
-    K1 -- 是 --> K2[拒绝回答<br/>'未在与当前范围匹配的<br/>文档中找到依据']
-    K1 -- 否 --> L[构造 system prompt<br/>'你是严谨的文档分析助手<br/>仅基于以下材料回答']
-    K -- 否 --> L
-    L --> M[LLM 流式回答 chat_stream]
-    M --> N[前端逐字显示<br/>带 [N] 引用标注]
-```
+🔀 **无引用提问流程**：[查看交互式图表](diagrams/07-no-ref-flow.html)
 
 ### 有引用提问（@文件 / 检索范围）
 
-```mermaid
-flowchart TD
-    A2[用户输入 + @引用 / 范围] --> B2[scope 含路径<br/>source_ids 有值]
-    B2 --> C2[解析 mention_resolved<br/>得到 file_ids]
-    C2 --> D2[BM25 限定 file_ids 范围<br/>⚠️ 向量通道跳过]
-    D2 --> E2[Layer 0 无条件注入<br/>被引用文件全文]
-    E2 --> F2[再补 Layer 1 检索命中]
-    F2 --> G2{strict_docs<br/>仅依据文档?}
-    G2 -- 是 --> H2{引用文件缺失<br/>或无内容?}
-    H2 -- 是 --> I2[拒绝回答<br/>'找不到引用文件' /<br/>'引用文件无可用内容']
-    H2 -- 否 --> J2[LLM 基于引用文件回答]
-    G2 -- 否 --> J2
-    J2 --> K2[@路径替换为 [N] 编号<br/>回答带引用标注]
-```
+🔗 **有引用提问流程**：[查看交互式图表](diagrams/08-with-ref-flow.html)
 
 ### 两种模式的差异
 

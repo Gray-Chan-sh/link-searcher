@@ -1,0 +1,208 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AI 聊天面板组件架构",
+    "locale": "zh-CN",
+    "quality_profile": "standard"
+  },
+  "components": [
+    {
+      "id": "chatPanel",
+      "type": "frontend",
+      "label": "AI 聊天面板",
+      "sublabel": "ChatPanel.tsx",
+      "pos": [
+        400,
+        280
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "msgList",
+      "type": "frontend",
+      "label": "消息列表",
+      "sublabel": "用户/助手消息",
+      "pos": [
+        100,
+        100
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "evidence",
+      "type": "frontend",
+      "label": "检索依据面板",
+      "sublabel": "评分+路径+片段",
+      "pos": [
+        100,
+        200
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "timeline",
+      "type": "frontend",
+      "label": "推理时间线",
+      "sublabel": "步骤追溯",
+      "pos": [
+        100,
+        300
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "thinking",
+      "type": "frontend",
+      "label": "思考中指示器",
+      "sublabel": "+ 取消按钮",
+      "pos": [
+        100,
+        400
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "scopeBar",
+      "type": "frontend",
+      "label": "范围条",
+      "sublabel": "文件/目录 chips",
+      "pos": [
+        700,
+        100
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "strictToggle",
+      "type": "frontend",
+      "label": "严格模式开关",
+      "sublabel": "仅依据文档",
+      "pos": [
+        700,
+        200
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "fullRecall",
+      "type": "frontend",
+      "label": "全量召回开关",
+      "sublabel": "注入量控制",
+      "pos": [
+        700,
+        300
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "inputBox",
+      "type": "frontend",
+      "label": "输入框",
+      "sublabel": "+ 发送按钮",
+      "pos": [
+        700,
+        400
+      ],
+      "size": [
+        160,
+        56
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "msgList",
+      "to": "chatPanel",
+      "label": "渲染消息"
+    },
+    {
+      "from": "evidence",
+      "to": "chatPanel",
+      "label": "展示来源"
+    },
+    {
+      "from": "timeline",
+      "to": "chatPanel",
+      "label": "追溯步骤"
+    },
+    {
+      "from": "thinking",
+      "to": "chatPanel",
+      "label": "等待状态"
+    },
+    {
+      "from": "scopeBar",
+      "to": "chatPanel",
+      "label": "范围控制"
+    },
+    {
+      "from": "strictToggle",
+      "to": "chatPanel",
+      "label": "严格检索"
+    },
+    {
+      "from": "fullRecall",
+      "to": "chatPanel",
+      "label": "召回控制"
+    },
+    {
+      "from": "inputBox",
+      "to": "chatPanel",
+      "label": "发送问题"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "消息展示",
+      "items": [
+        "用户/助手消息富文本渲染",
+        "检索依据面板含评分",
+        "推理时间线全链路追溯"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "交互控制",
+      "items": [
+        "范围条跨轮累计",
+        "严格模式拒绝编造",
+        "全量召回控制注入量"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "状态管理",
+      "items": [
+        "思考中+取消按钮",
+        "父组件持有当前会话",
+        "每次变更自动保存"
+      ]
+    }
+  ]
+}

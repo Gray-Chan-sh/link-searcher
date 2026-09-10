@@ -1,0 +1,212 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "目录扫描与文件监控",
+    "locale": "zh-CN",
+    "quality_profile": "standard",
+    "viewBox": [
+      900,
+      680
+    ]
+  },
+  "lanes": [
+    {
+      "id": "scan",
+      "label": "扫描"
+    },
+    {
+      "id": "process",
+      "label": "处理"
+    },
+    {
+      "id": "monitor",
+      "label": "监控"
+    },
+    {
+      "id": "exception",
+      "label": "异常",
+      "variant": "exception"
+    }
+  ],
+  "mainPath": [
+    "start",
+    "walk",
+    "check",
+    "mtime",
+    "hash",
+    "extract",
+    "index"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "scan",
+      "col": 0,
+      "type": "backend",
+      "label": "启动扫描",
+      "sublabel": "全量/增量/启动"
+    },
+    {
+      "id": "walk",
+      "lane": "scan",
+      "col": 1,
+      "type": "backend",
+      "label": "遍历目录",
+      "sublabel": "收集文件列表"
+    },
+    {
+      "id": "check",
+      "lane": "scan",
+      "col": 2,
+      "type": "security",
+      "label": "排除检查",
+      "sublabel": "隐藏/临时/缓存"
+    },
+    {
+      "id": "mtime",
+      "lane": "process",
+      "col": 2,
+      "type": "backend",
+      "label": "mtime 判断",
+      "sublabel": "是否变化"
+    },
+    {
+      "id": "hash",
+      "lane": "process",
+      "col": 3,
+      "type": "database",
+      "label": "MD5 哈希",
+      "sublabel": "内容去重"
+    },
+    {
+      "id": "extract",
+      "lane": "process",
+      "col": 4,
+      "type": "backend",
+      "label": "文本提取",
+      "sublabel": "格式路由"
+    },
+    {
+      "id": "index",
+      "lane": "process",
+      "col": 5,
+      "type": "database",
+      "label": "写入索引",
+      "sublabel": "Tantivy writer"
+    },
+    {
+      "id": "watcher",
+      "lane": "monitor",
+      "col": 0,
+      "type": "messagebus",
+      "label": "文件监控",
+      "sublabel": "notify + 300ms 防抖"
+    },
+    {
+      "id": "event",
+      "lane": "monitor",
+      "col": 1,
+      "type": "messagebus",
+      "label": "变更事件",
+      "sublabel": "新增/修改/删除"
+    },
+    {
+      "id": "timeout",
+      "lane": "exception",
+      "col": 2,
+      "type": "security",
+      "label": "超时保护",
+      "sublabel": "3 秒上限"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "walk",
+      "label": "开始",
+      "variant": "emphasis"
+    },
+    {
+      "from": "walk",
+      "to": "check",
+      "label": "文件列表"
+    },
+    {
+      "from": "check",
+      "to": "mtime",
+      "label": "通过",
+      "variant": "emphasis"
+    },
+    {
+      "from": "mtime",
+      "to": "hash",
+      "label": "有变化"
+    },
+    {
+      "from": "hash",
+      "to": "extract",
+      "label": "新内容"
+    },
+    {
+      "from": "extract",
+      "to": "index",
+      "label": "纯文本"
+    },
+    {
+      "from": "watcher",
+      "to": "event",
+      "label": "检测变更",
+      "variant": "emphasis"
+    },
+    {
+      "from": "event",
+      "to": "mtime",
+      "label": "增量处理",
+      "role": "async"
+    },
+    {
+      "from": "walk",
+      "to": "timeout",
+      "label": "超大目录",
+      "role": "error",
+      "variant": "security"
+    },
+    {
+      "from": "index",
+      "to": "start",
+      "label": "继续",
+      "role": "return",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "增量更新",
+      "items": [
+        "只处理 mtime 变化的文件",
+        "未变文件直接跳过",
+        "日常维护近乎零成本"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "数据安全",
+      "items": [
+        "每 100 文件自动 commit",
+        "内容哈希识别文件搬家",
+        "相对路径跨平台共享"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "实时监控",
+      "items": [
+        "notify 文件系统事件",
+        "300ms 防抖合并",
+        "新增/修改/删除即时同步"
+      ]
+    }
+  ]
+}

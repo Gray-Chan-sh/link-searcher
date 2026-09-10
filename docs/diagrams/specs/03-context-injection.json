@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "上下文三层注入",
+    "locale": "zh-CN",
+    "quality_profile": "standard"
+  },
+  "components": [
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "LLM",
+      "sublabel": "上下文窗口",
+      "pos": [
+        700,
+        250
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "layer0",
+      "type": "backend",
+      "label": "Layer 0 引用文件",
+      "sublabel": "用户 @ 文件全文",
+      "pos": [
+        100,
+        100
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "无条件注入"
+    },
+    {
+      "id": "layer1",
+      "type": "backend",
+      "label": "Layer 1 检索命中",
+      "sublabel": "BM25 前 30 命中",
+      "pos": [
+        100,
+        250
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "按预算精选"
+    },
+    {
+      "id": "layer2",
+      "type": "backend",
+      "label": "Layer 2 摘要兜底",
+      "sublabel": "剩余文件摘要",
+      "pos": [
+        100,
+        400
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "不遗漏大方向"
+    },
+    {
+      "id": "strictMode",
+      "type": "security",
+      "label": "严格模式",
+      "sublabel": "仅依据文档",
+      "pos": [
+        700,
+        150
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "tag": "可选"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "注入优先级",
+      "wraps": [
+        "layer0",
+        "layer1",
+        "layer2"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "layer0",
+      "to": "llm",
+      "label": "全量注入 (50k 截断)",
+      "variant": "emphasis"
+    },
+    {
+      "from": "layer1",
+      "to": "llm",
+      "label": "精选注入 (按配额)",
+      "labelAt": [
+        480,
+        320
+      ]
+    },
+    {
+      "from": "layer2",
+      "to": "llm",
+      "label": "摘要注入 (总上限)",
+      "variant": "dashed"
+    },
+    {
+      "from": "strictMode",
+      "to": "llm",
+      "label": "引用必须在依据中",
+      "variant": "security",
+      "labelAt": [
+        770,
+        220
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "三层优先级",
+      "items": [
+        "Layer 0: 用户引用无条件全进",
+        "Layer 1: 检索命中按预算精选",
+        "Layer 2: 摘要兜底不遗漏"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "截断保护",
+      "items": [
+        "引用文档超 50k 截断",
+        "每份命中按配额截取",
+        "总长度 50k/140k 硬限制"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "严格模式",
+      "items": [
+        "引用文件必须在检索结果中",
+        "范围内无命中拒绝回答",
+        "旧来源不混入本轮"
+      ]
+    }
+  ]
+}

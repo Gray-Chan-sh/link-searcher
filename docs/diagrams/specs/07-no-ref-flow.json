@@ -1,0 +1,80 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "无引用提问流程（全库检索）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "input", "label": "用户输入" },
+    { "id": "preprocess", "label": "预处理" },
+    { "id": "retrieve", "label": "检索" },
+    { "id": "inject", "label": "注入" },
+    { "id": "generate", "label": "生成" },
+    { "id": "exception", "label": "异常", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "query", "label": "查询处理", "fromCol": 0, "toCol": 2 },
+    { "id": "search", "label": "检索", "fromCol": 3, "toCol": 3, "variant": "emphasis" },
+    { "id": "answer", "label": "回答", "fromCol": 4, "toCol": 5 }
+  ],
+  "mainPath": [
+    "userInput",
+    "chatPanel",
+    "askStream",
+    "rewrite",
+    "keywords",
+    "retrieve3",
+    "merge",
+    "inject",
+    "prompt",
+    "llm",
+    "display"
+  ],
+  "nodes": [
+    { "id": "userInput", "lane": "input", "col": 0, "type": "frontend", "label": "用户输入问题" },
+    { "id": "chatPanel", "lane": "input", "col": 1, "type": "frontend", "label": "前端 ChatPanel", "sublabel": "检查 @引用" },
+    { "id": "askStream", "lane": "preprocess", "col": 1, "type": "backend", "label": "conversation_ask_stream", "sublabel": "检查 LLM 配置", "width": 160 },
+    { "id": "rewrite", "lane": "preprocess", "col": 2, "type": "backend", "label": "查询改写", "sublabel": "自包含判断" },
+    { "id": "keywords", "lane": "preprocess", "col": 3, "type": "backend", "label": "jieba 提词", "sublabel": "核心实体词" },
+    { "id": "retrieve3", "lane": "retrieve", "col": 3, "type": "database", "label": "三路检索", "sublabel": "全库扫描" },
+    { "id": "merge", "lane": "retrieve", "col": 4, "type": "backend", "label": "合并去重", "sublabel": "all_hits" },
+    { "id": "inject", "lane": "inject", "col": 4, "type": "backend", "label": "注入前 30 命中", "sublabel": "按预算截取" },
+    { "id": "prompt", "lane": "generate", "col": 4, "type": "backend", "label": "构造 system prompt", "sublabel": "仅基于材料回答", "width": 130 },
+    { "id": "llm", "lane": "generate", "col": 5, "type": "cloud", "label": "LLM 流式回答", "sublabel": "chat_stream" },
+    { "id": "display", "lane": "generate", "col": 5, "type": "frontend", "label": "前端逐字显示", "sublabel": "[N] 引用标注", "yOffset": 80 },
+    { "id": "reject", "lane": "exception", "col": 4, "type": "security", "label": "拒绝回答", "sublabel": "无依据" }
+  ],
+  "edges": [
+    { "from": "userInput", "to": "chatPanel" },
+    { "from": "chatPanel", "to": "askStream", "label": "无引用" },
+    { "from": "askStream", "to": "rewrite", "label": "LLM 已配置" },
+    { "from": "rewrite", "to": "keywords", "label": "改写/原句" },
+    { "from": "keywords", "to": "retrieve3" },
+    { "from": "retrieve3", "to": "merge", "label": "三路命中" },
+    { "from": "merge", "to": "inject" },
+    { "from": "inject", "to": "prompt", "label": "strict_docs 通过" },
+    { "from": "inject", "to": "reject", "label": "context 为空", "role": "error", "variant": "security" },
+    { "from": "prompt", "to": "llm" },
+    { "from": "llm", "to": "display", "label": "流式回答" },
+    { "from": "askStream", "to": "reject", "label": "LLM 未配置", "role": "error", "variant": "security" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "全库检索",
+      "items": ["无 @引用时 scope 为空", "三路扫描全库", "BM25 + 语义 + 路径"]
+    },
+    {
+      "dot": "rose",
+      "title": "拒绝条件",
+      "items": ["LLM 未配置直接报错", "strict_docs 且 context 空时拒绝", "无依据时不编造"]
+    },
+    {
+      "dot": "emerald",
+      "title": "回答链路",
+      "items": ["查询改写补全指代", "jieba 提炼关键词", "LLM 流式生成带引用"]
+    }
+  ]
+}

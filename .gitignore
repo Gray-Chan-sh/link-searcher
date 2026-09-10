@@ -67,3 +67,9 @@ test-visual/report/
 test-visual/report.html
 test-visual/results.tsv
 ~/ls-shots/
+
+# 图表工具临时/本地产物
+.drawio-tmp/
+.freebuff/
+.mcp.json
+docs/link-searcher-architecture.visual-check.json

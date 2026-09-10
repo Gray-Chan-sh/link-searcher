@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "RAG 管线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "user", "label": "用户" },
+    { "id": "query", "label": "查询处理" },
+    { "id": "retrieve", "label": "检索" },
+    { "id": "assemble", "label": "组装" },
+    { "id": "generate", "label": "生成" }
+  ],
+  "mainPath": ["userInput", "rewrite", "scope", "retrieval", "merge", "inject", "llm"],
+  "nodes": [
+    { "id": "userInput", "lane": "user", "col": 0, "type": "frontend", "label": "用户输入", "sublabel": "问题 + @引用" },
+    { "id": "rewrite", "lane": "query", "col": 1, "type": "backend", "label": "查询改写", "sublabel": "补全指代/提炼关键词" },
+    { "id": "scope", "lane": "query", "col": 2, "type": "backend", "label": "范围解析", "sublabel": "@文件 / 目录 / 类型 / 日期", "width": 120 },
+    { "id": "retrieval", "lane": "retrieve", "col": 3, "type": "database", "label": "三路检索", "sublabel": "BM25 + 语义 + 路径" },
+    { "id": "merge", "lane": "retrieve", "col": 4, "type": "backend", "label": "合并去重", "sublabel": "候选文件集合" },
+    { "id": "inject", "lane": "assemble", "col": 4, "type": "backend", "label": "三层注入", "sublabel": "Layer 0 引用 → Layer 1 检索 → Layer 2 摘要", "width": 160 },
+    { "id": "llm", "lane": "generate", "col": 5, "type": "cloud", "label": "LLM 回答", "sublabel": "流式生成 + [N] 引用" }
+  ],
+  "edges": [
+    { "from": "userInput", "to": "rewrite", "label": "问题", "variant": "emphasis", "route": "drop", "fromSide": "bottom", "toSide": "top" },
+    { "from": "rewrite", "to": "scope", "label": "完整句" },
+    { "from": "scope", "to": "retrieval", "label": "过滤条件", "variant": "emphasis", "route": "drop", "fromSide": "bottom", "toSide": "top" },
+    { "from": "retrieval", "to": "merge", "label": "三路命中" },
+    { "from": "merge", "to": "inject", "label": "候选文件" },
+    { "from": "inject", "to": "llm", "label": "组装材料", "variant": "emphasis", "route": "drop", "fromSide": "bottom", "toSide": "top" },
+    { "from": "llm", "to": "userInput", "label": "流式回答", "role": "return", "variant": "dashed", "route": "outside-right", "fromSide": "right", "toSide": "right" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "五步管线", "items": ["查询改写补全省略句", "范围解析限定检索边界", "三路检索合并去重", "三层注入按优先级组装", "LLM 流式生成带引用"] },
+    { "dot": "emerald", "title": "检索增强", "items": ["回答有据可依", "标注来源文件", "模型不需要预装私有知识"] }
+  ]
+}

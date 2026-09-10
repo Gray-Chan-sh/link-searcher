@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "实时文件监控",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "watch", "label": "监控" },
+    { "id": "process", "label": "处理" },
+    { "id": "index", "label": "索引" }
+  ],
+  "phases": [
+    { "id": "watch", "label": "监控", "fromCol": 0, "toCol": 1 },
+    { "id": "handle", "label": "处理", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "update", "label": "索引更新", "fromCol": 4, "toCol": 5 }
+  ],
+  "mainPath": ["notify", "debounce", "classify", "extract", "write", "update"],
+  "nodes": [
+    { "id": "notify", "lane": "watch", "col": 0, "type": "messagebus", "label": "notify 监听", "sublabel": "文件系统事件" },
+    { "id": "debounce", "lane": "watch", "col": 1, "type": "backend", "label": "300ms 防抖", "sublabel": "合并事件" },
+    { "id": "classify", "lane": "process", "col": 2, "type": "backend", "label": "事件分类", "sublabel": "新增/修改/删除" },
+    { "id": "extract", "lane": "process", "col": 3, "type": "backend", "label": "文本提取", "sublabel": "新增/修改" },
+    { "id": "remove", "lane": "process", "col": 3, "type": "security", "label": "移除索引", "sublabel": "删除", "yOffset": 72 },
+    { "id": "write", "lane": "index", "col": 4, "type": "database", "label": "更新索引", "sublabel": "Tantivy" },
+    { "id": "update", "lane": "index", "col": 5, "type": "database", "label": "更新数据库", "sublabel": "文件追踪表" }
+  ],
+  "edges": [
+    { "from": "notify", "to": "debounce", "label": "原始事件" },
+    { "from": "debounce", "to": "classify", "label": "合并后" },
+    { "from": "classify", "to": "extract", "label": "新增/修改" },
+    { "from": "classify", "to": "remove", "label": "删除", "role": "branch", "variant": "security" },
+    { "from": "extract", "to": "write", "label": "提取后" },
+    { "from": "remove", "to": "update", "label": "删除标记" },
+    { "from": "write", "to": "update", "label": "索引更新" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "实时监控", "items": ["notify 文件系统事件监听", "300ms 防抖合并密集事件", "文件新增修改删除即时同步"] },
+    { "dot": "emerald", "title": "自动处理", "items": ["新增/修改触发提取", "删除自动移除索引", "无需手动操作"] }
+  ]
+}

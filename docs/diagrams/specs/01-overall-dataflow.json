@@ -1,0 +1,220 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "Link-Searcher 数据流总览",
+    "locale": "zh-CN",
+    "quality_profile": "standard",
+    "viewBox": [
+      1100,
+      680
+    ]
+  },
+  "stages": [
+    {
+      "label": "用户输入"
+    },
+    {
+      "label": "前端处理"
+    },
+    {
+      "label": "查询处理"
+    },
+    {
+      "label": "检索"
+    },
+    {
+      "label": "回答与输出"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "user",
+      "type": "external",
+      "label": "用户",
+      "sublabel": "输入问题",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "chatPanel",
+      "type": "frontend",
+      "label": "聊天面板",
+      "sublabel": "React 前端",
+      "stage": 1,
+      "row": 0
+    },
+    {
+      "id": "backend",
+      "type": "backend",
+      "label": "后端命令",
+      "sublabel": "Tauri / HTTP",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "rewrite",
+      "type": "backend",
+      "label": "查询改写",
+      "sublabel": "补全指代词",
+      "stage": 2,
+      "row": 1
+    },
+    {
+      "id": "scopeParse",
+      "type": "backend",
+      "label": "范围解析",
+      "sublabel": "@文件 / 目录",
+      "stage": 2,
+      "row": 2
+    },
+    {
+      "id": "bm25",
+      "type": "database",
+      "label": "BM25 检索",
+      "sublabel": "Tantivy 索引",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "vector",
+      "type": "database",
+      "label": "向量检索",
+      "sublabel": "语义相似度",
+      "stage": 3,
+      "row": 1
+    },
+    {
+      "id": "context",
+      "type": "backend",
+      "label": "三层注入",
+      "sublabel": "组装上下文",
+      "stage": 4,
+      "row": 0
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "LLM 回答",
+      "sublabel": "流式生成",
+      "stage": 4,
+      "row": 1
+    },
+    {
+      "id": "result",
+      "type": "frontend",
+      "label": "前端显示",
+      "sublabel": "打字机效果",
+      "stage": 4,
+      "row": 2
+    }
+  ],
+  "flows": [
+    {
+      "from": "user",
+      "to": "chatPanel",
+      "label": "输入问题"
+    },
+    {
+      "from": "chatPanel",
+      "to": "backend",
+      "label": "发送请求",
+      "variant": "emphasis"
+    },
+    {
+      "from": "backend",
+      "to": "rewrite",
+      "label": "改写查询",
+      "labelAt": [
+        530,
+        200
+      ]
+    },
+    {
+      "from": "rewrite",
+      "to": "scopeParse",
+      "label": "完整句",
+      "labelAt": [
+        530,
+        320
+      ]
+    },
+    {
+      "from": "scopeParse",
+      "to": "bm25",
+      "label": "关键词"
+    },
+    {
+      "from": "scopeParse",
+      "to": "vector",
+      "label": "语义",
+      "labelAt": [
+        586,
+        340
+      ]
+    },
+    {
+      "from": "bm25",
+      "to": "context",
+      "label": "命中文件"
+    },
+    {
+      "from": "vector",
+      "to": "context",
+      "label": "语义命中",
+      "labelAt": [
+        934,
+        220
+      ]
+    },
+    {
+      "from": "context",
+      "to": "llm",
+      "label": "组装材料",
+      "variant": "emphasis",
+      "labelAt": [
+        960,
+        200
+      ]
+    },
+    {
+      "from": "llm",
+      "to": "result",
+      "label": "流式回答",
+      "variant": "emphasis",
+      "labelAt": [
+        970,
+        310
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "检索三路",
+      "items": [
+        "BM25 关键词命中",
+        "语义向量相似度",
+        "SQL 路径模糊匹配"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "RAG 管线",
+      "items": [
+        "查询改写补全指代",
+        "三层注入按优先级组装",
+        "流式逐字返回前端"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "双端复用",
+      "items": [
+        "桌面走 Tauri 原生通道",
+        "浏览器走 HTTP API",
+        "事件桥推送流式片段"
+      ]
+    }
+  ]
+}

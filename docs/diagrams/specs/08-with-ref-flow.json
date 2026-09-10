@@ -1,0 +1,70 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "有引用提问流程（@文件 / 检索范围）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "input", "label": "用户输入" },
+    { "id": "parse", "label": "解析" },
+    { "id": "retrieve", "label": "检索" },
+    { "id": "inject", "label": "注入" },
+    { "id": "generate", "label": "生成" },
+    { "id": "exception", "label": "异常", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "parse", "label": "范围解析", "fromCol": 0, "toCol": 2 },
+    { "id": "inject", "label": "双层注入", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "answer", "label": "回答", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": [
+    "userInput",
+    "scope",
+    "mention",
+    "bm25",
+    "layer0",
+    "layer1",
+    "llm",
+    "refNum"
+  ],
+  "nodes": [
+    { "id": "userInput", "lane": "input", "col": 0, "type": "frontend", "label": "用户输入 + @引用", "sublabel": "含路径范围", "width": 120 },
+    { "id": "scope", "lane": "parse", "col": 1, "type": "backend", "label": "scope 解析", "sublabel": "source_ids 有值" },
+    { "id": "mention", "lane": "parse", "col": 2, "type": "backend", "label": "解析 mention_resolved", "sublabel": "得到 file_ids", "width": 150 },
+    { "id": "bm25", "lane": "retrieve", "col": 2, "type": "database", "label": "BM25 限定范围", "sublabel": "向量通道跳过" },
+    { "id": "layer0", "lane": "inject", "col": 3, "type": "backend", "label": "Layer 0 注入", "sublabel": "引用文件全文", "tag": "无条件" },
+    { "id": "layer1", "lane": "inject", "col": 4, "type": "backend", "label": "Layer 1 补充", "sublabel": "检索命中" },
+    { "id": "llm", "lane": "generate", "col": 5, "type": "cloud", "label": "LLM 回答", "sublabel": "基于引用文件" },
+    { "id": "refNum", "lane": "generate", "col": 5, "type": "backend", "label": "[N] 编号引用", "sublabel": "@路径 转 [N]", "yOffset": 80 },
+    { "id": "reject", "lane": "exception", "col": 3, "type": "security", "label": "拒绝回答", "sublabel": "引用缺失/无内容" }
+  ],
+  "edges": [
+    { "from": "userInput", "to": "scope" },
+    { "from": "scope", "to": "mention" },
+    { "from": "mention", "to": "bm25", "label": "file_ids" },
+    { "from": "bm25", "to": "layer0", "label": "限定范围" },
+    { "from": "layer0", "to": "layer1", "label": "无条件注入后" },
+    { "from": "layer1", "to": "llm", "label": "strict 通过" },
+    { "from": "layer1", "to": "reject", "label": "引用缺失", "role": "error", "variant": "security" },
+    { "from": "llm", "to": "refNum", "label": "回答" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "引用注入",
+      "items": ["Layer 0 引用文件无条件全进", "Layer 1 在范围内补充检索", "向量通道跳过"]
+    },
+    {
+      "dot": "rose",
+      "title": "拒绝条件",
+      "items": ["引用文件找不到报错", "引用文件无可用内容报错", "strict_docs 严格检查"]
+    },
+    {
+      "dot": "emerald",
+      "title": "编号引用",
+      "items": ["@路径替换为 [N] 编号", "回答精确引用来源", "引用文件带标记"]
+    }
+  ]
+}

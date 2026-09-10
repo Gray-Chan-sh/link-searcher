@@ -1,0 +1,194 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "事件总线架构",
+    "locale": "zh-CN",
+    "quality_profile": "standard",
+    "viewBox": [
+      1100,
+      520
+    ]
+  },
+  "components": [
+    {
+      "id": "eventBus",
+      "type": "messagebus",
+      "label": "事件总线",
+      "sublabel": "Tauri EventBus",
+      "pos": [
+        400,
+        200
+      ],
+      "size": [
+        180,
+        70
+      ]
+    },
+    {
+      "id": "desktop",
+      "type": "frontend",
+      "label": "桌面前端",
+      "sublabel": "实时接收",
+      "pos": [
+        700,
+        100
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "eventBridge",
+      "type": "messagebus",
+      "label": "事件桥",
+      "sublabel": "白名单转发",
+      "pos": [
+        100,
+        200
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "webFrontend",
+      "type": "frontend",
+      "label": "网页前端",
+      "sublabel": "SSE 接收",
+      "pos": [
+        100,
+        350
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "typewriter",
+      "type": "frontend",
+      "label": "打字机效果",
+      "sublabel": "逐字显示",
+      "pos": [
+        860,
+        180
+      ],
+      "size": [
+        160,
+        56
+      ]
+    },
+    {
+      "id": "thinkingEnd",
+      "type": "frontend",
+      "label": "结束思考中",
+      "sublabel": "清除状态",
+      "pos": [
+        700,
+        400
+      ],
+      "size": [
+        160,
+        56
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "bus-to-desktop",
+      "from": "eventBus",
+      "to": "desktop",
+      "label": "ai-chunk",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "bus-to-bridge",
+      "from": "eventBus",
+      "to": "eventBridge",
+      "label": "转发",
+      "variant": "dashed",
+      "fromSide": "left",
+      "toSide": "right"
+    },
+    {
+      "id": "bridge-to-web",
+      "from": "eventBridge",
+      "to": "webFrontend",
+      "label": "SSE 推送",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        100,
+        310
+      ]
+    },
+    {
+      "id": "desktop-to-tw",
+      "from": "desktop",
+      "to": "typewriter",
+      "label": "逐字渲染",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        780,
+        170
+      ]
+    },
+    {
+      "id": "desktop-to-te",
+      "from": "desktop",
+      "to": "thinkingEnd",
+      "label": "ai-done",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        780,
+        250
+      ]
+    },
+    {
+      "id": "web-to-tw",
+      "from": "webFrontend",
+      "to": "typewriter",
+      "label": "逐字渲染",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "web-to-te",
+      "from": "webFrontend",
+      "to": "thinkingEnd",
+      "label": "ai-done",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "事件分发",
+      "items": [
+        "ai-chunk 流式片段广播",
+        "ai-done 回答完成通知",
+        "桌面前端实时收到"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "事件桥",
+      "items": [
+        "白名单事件转发",
+        "网页前端通过 SSE 接收",
+        "ai-progress 不在白名单"
+      ]
+    }
+  ]
+}

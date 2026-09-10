@@ -1,0 +1,234 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "全文搜索架构",
+    "locale": "zh-CN",
+    "quality_profile": "standard"
+  },
+  "components": [
+    {
+      "id": "userInput",
+      "type": "external",
+      "label": "用户查询",
+      "sublabel": "关键词",
+      "pos": [
+        40,
+        250
+      ],
+      "size": [
+        120,
+        56
+      ]
+    },
+    {
+      "id": "tokenizer",
+      "type": "backend",
+      "label": "jieba 分词器",
+      "sublabel": "中英文混合切词",
+      "pos": [
+        240,
+        250
+      ],
+      "size": [
+        140,
+        56
+      ]
+    },
+    {
+      "id": "indexer",
+      "type": "backend",
+      "label": "Tantivy Writer",
+      "sublabel": "串行写入",
+      "pos": [
+        480,
+        80
+      ],
+      "size": [
+        140,
+        56
+      ]
+    },
+    {
+      "id": "reader",
+      "type": "backend",
+      "label": "Tantivy Reader",
+      "sublabel": "读端缓存",
+      "pos": [
+        480,
+        280
+      ],
+      "size": [
+        140,
+        56
+      ],
+      "tag": "复用"
+    },
+    {
+      "id": "bm25",
+      "type": "backend",
+      "label": "BM25 排序",
+      "sublabel": "相关性评分",
+      "pos": [
+        700,
+        250
+      ],
+      "size": [
+        120,
+        56
+      ]
+    },
+    {
+      "id": "fuzzy",
+      "type": "backend",
+      "label": "模糊匹配",
+      "sublabel": "容错距离 1",
+      "pos": [
+        700,
+        350
+      ],
+      "size": [
+        120,
+        56
+      ]
+    },
+    {
+      "id": "index",
+      "type": "database",
+      "label": "倒排索引",
+      "sublabel": "词到文件列表",
+      "pos": [
+        480,
+        180
+      ],
+      "size": [
+        140,
+        56
+      ]
+    },
+    {
+      "id": "suggest",
+      "type": "backend",
+      "label": "搜索建议",
+      "sublabel": "前缀补全",
+      "pos": [
+        240,
+        400
+      ],
+      "size": [
+        140,
+        56
+      ]
+    },
+    {
+      "id": "result",
+      "type": "frontend",
+      "label": "结果列表",
+      "sublabel": "排序+分页",
+      "pos": [
+        880,
+        250
+      ],
+      "size": [
+        120,
+        56
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": "userInput",
+      "to": "tokenizer",
+      "label": "查询"
+    },
+    {
+      "from": "tokenizer",
+      "to": "reader",
+      "label": "切词后"
+    },
+    {
+      "from": "reader",
+      "to": "bm25",
+      "label": "检索"
+    },
+    {
+      "from": "reader",
+      "to": "fuzzy",
+      "label": "可选"
+    },
+    {
+      "from": "indexer",
+      "to": "index",
+      "label": "写入",
+      "labelAt": [
+        460,
+        150
+      ]
+    },
+    {
+      "from": "index",
+      "to": "reader",
+      "label": "查询",
+      "labelAt": [
+        630,
+        250
+      ]
+    },
+    {
+      "from": "bm25",
+      "to": "result",
+      "label": "排序结果"
+    },
+    {
+      "from": "fuzzy",
+      "to": "result",
+      "label": "纠错结果",
+      "variant": "dashed"
+    },
+    {
+      "from": "tokenizer",
+      "to": "suggest",
+      "label": "前缀",
+      "variant": "dashed",
+      "labelAt": [
+        200,
+        400
+      ]
+    },
+    {
+      "from": "suggest",
+      "to": "result",
+      "label": "补全",
+      "variant": "dashed"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "索引先行",
+      "items": [
+        "文件内容切碎分析建索引",
+        "搜索时查索引而非翻文件",
+        "倒排索引: 词到文件列表"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "中文分词",
+      "items": [
+        "jieba 中文分词器",
+        "中英文混合搜索",
+        "读写共用同一分词器"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "容错设计",
+      "items": [
+        "模糊匹配容错 1 字符",
+        "搜索建议前缀补全",
+        "读端缓存避免反复开磁盘"
+      ]
+    }
+  ]
+}

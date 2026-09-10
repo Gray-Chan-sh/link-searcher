@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "数据生命周期",
+    "locale": "zh-CN",
+    "quality_profile": "standard"
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "正常生命周期"
+    },
+    {
+      "id": "maintenance",
+      "label": "维护操作"
+    },
+    {
+      "id": "terminal",
+      "label": "终态"
+    }
+  ],
+  "states": [
+    {
+      "id": "idle",
+      "type": "start",
+      "label": "空闲",
+      "sublabel": "等待操作",
+      "lane": "main",
+      "col": 0
+    },
+    {
+      "id": "scanning",
+      "type": "active",
+      "label": "扫描中",
+      "sublabel": "全量/增量扫描",
+      "lane": "main",
+      "col": 1,
+      "tag": "活跃"
+    },
+    {
+      "id": "indexed",
+      "type": "success",
+      "label": "已索引",
+      "sublabel": "可搜索",
+      "lane": "main",
+      "col": 2,
+      "tag": "正常"
+    },
+    {
+      "id": "backup",
+      "type": "waiting",
+      "label": "备份中",
+      "sublabel": "手动/自动",
+      "lane": "main",
+      "col": 3,
+      "tag": "可选"
+    },
+    {
+      "id": "migrated",
+      "type": "success",
+      "label": "已迁移",
+      "sublabel": "新目录",
+      "lane": "main",
+      "col": 4,
+      "tag": "可选"
+    },
+    {
+      "id": "rebuilt",
+      "type": "success",
+      "label": "索引重建",
+      "sublabel": "清空重来",
+      "lane": "maintenance",
+      "col": 1,
+      "tag": "重置",
+      "yOffset": 80
+    }
+  ],
+  "transitions": [
+    {
+      "from": "idle",
+      "to": "scanning",
+      "label": "触发扫描",
+      "labelAt": [
+        171,
+        205
+      ],
+      "labelDy": 0
+    },
+    {
+      "from": "scanning",
+      "to": "indexed",
+      "label": "完成",
+      "labelAt": [
+        325,
+        122
+      ],
+      "labelDy": -6
+    },
+    {
+      "from": "indexed",
+      "to": "scanning",
+      "label": "增量更新",
+      "note": "文件变更",
+      "fromSide": "top",
+      "toSide": "top",
+      "route": "top-channel",
+      "channelY": 55,
+      "labelAt": [
+        325,
+        45
+      ],
+      "labelDy": 0
+    },
+    {
+      "from": "indexed",
+      "to": "backup",
+      "label": "手动/自动",
+      "labelAt": [
+        479,
+        205
+      ],
+      "labelDy": 0
+    },
+    {
+      "from": "backup",
+      "to": "indexed",
+      "label": "完成",
+      "note": "恢复",
+      "fromSide": "top",
+      "toSide": "top",
+      "route": "top-channel",
+      "channelY": 75,
+      "labelAt": [
+        479,
+        65
+      ],
+      "labelDy": 0
+    },
+    {
+      "from": "indexed",
+      "to": "migrated",
+      "label": "迁移数据",
+      "fromSide": "top",
+      "toSide": "top",
+      "route": "top-channel",
+      "channelY": 95,
+      "labelAt": [
+        590,
+        85
+      ],
+      "labelDy": 0
+    },
+    {
+      "from": "indexed",
+      "to": "rebuilt",
+      "label": "索引重建",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "drop"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "正常生命周期",
+      "items": [
+        "空闲到扫描到已索引",
+        "文件变更触发增量更新",
+        "定期备份保护数据"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "维护操作",
+      "items": [
+        "数据迁移到新目录",
+        "索引重建清空重来",
+        "备份恢复保障安全"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "删除路径",
+      "items": [
+        "文件删除软删除标记",
+        "保留索引记录可追溯",
+        "非物理删除"
+      ]
+    }
+  ]
+}

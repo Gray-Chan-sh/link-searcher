@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "前端思考中状态机",
+    "locale": "zh-CN",
+    "quality_profile": "standard",
+    "viewBox": [
+      840,
+      640
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "主流程"
+    },
+    {
+      "id": "terminal",
+      "label": "终止"
+    }
+  ],
+  "states": [
+    {
+      "id": "idle",
+      "type": "start",
+      "label": "空闲",
+      "sublabel": "等待发送",
+      "lane": "main",
+      "col": 0
+    },
+    {
+      "id": "thinking",
+      "type": "active",
+      "label": "思考中",
+      "sublabel": "记时间戳 + 取消按钮",
+      "lane": "main",
+      "col": 1,
+      "tag": "发送"
+    },
+    {
+      "id": "streaming",
+      "type": "active",
+      "label": "流式接收",
+      "sublabel": "逐字追加",
+      "lane": "main",
+      "col": 2,
+      "tag": "ai-chunk"
+    },
+    {
+      "id": "done",
+      "type": "success",
+      "label": "回答完成",
+      "sublabel": "显示完整回答",
+      "lane": "main",
+      "col": 3,
+      "tag": "ai-done"
+    },
+    {
+      "id": "saved",
+      "type": "success",
+      "label": "会话已保存",
+      "sublabel": "持久化",
+      "lane": "main",
+      "col": 4
+    },
+    {
+      "id": "cancelled",
+      "type": "failure",
+      "label": "已取消",
+      "sublabel": "保留已输出",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "用户取消"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "send",
+      "from": "idle",
+      "to": "thinking",
+      "label": "发送"
+    },
+    {
+      "id": "chunk",
+      "from": "thinking",
+      "to": "streaming",
+      "label": "ai-chunk",
+      "labelAt": [
+        325,
+        200
+      ]
+    },
+    {
+      "id": "done-t",
+      "from": "streaming",
+      "to": "done",
+      "label": "ai-done",
+      "labelAt": [
+        479,
+        200
+      ]
+    },
+    {
+      "id": "save",
+      "from": "done",
+      "to": "saved",
+      "label": "自动保存",
+      "labelAt": [
+        633,
+        200
+      ]
+    },
+    {
+      "id": "cancel-thinking",
+      "from": "thinking",
+      "to": "cancelled",
+      "label": "用户取消",
+      "variant": "security",
+      "route": "drop",
+      "labelAt": [
+        325,
+        360
+      ],
+      "labelDx": 40
+    },
+    {
+      "id": "cancel-streaming",
+      "from": "streaming",
+      "to": "cancelled",
+      "label": "用户取消",
+      "variant": "security",
+      "route": "drop",
+      "labelAt": [
+        479,
+        360
+      ],
+      "labelDx": 40
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "正常流程",
+      "items": [
+        "发送时记录时间戳",
+        "流式逐字追加显示",
+        "完成后保存会话"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "取消路径",
+      "items": [
+        "用户可随时取消",
+        "终止 LLM 生成",
+        "保留已输出内容 + 标记已取消"
+      ]
+    }
+  ]
+}

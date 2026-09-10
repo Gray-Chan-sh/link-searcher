@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "diagram_type": "dataflow",
+  "meta": {
+    "title": "事件桥数据流",
+    "locale": "zh-CN",
+    "quality_profile": "standard",
+    "viewBox": [
+      1100,
+      400
+    ]
+  },
+  "stages": [
+    {
+      "label": "后端"
+    },
+    {
+      "label": "事件桥"
+    },
+    {
+      "label": "事件通道"
+    },
+    {
+      "label": "网页 API"
+    },
+    {
+      "label": "浏览器"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "backend",
+      "type": "backend",
+      "label": "桌面/后端",
+      "sublabel": "发出 ai-chunk",
+      "stage": 0,
+      "row": 0
+    },
+    {
+      "id": "bridge",
+      "type": "messagebus",
+      "label": "事件桥",
+      "sublabel": "捕获事件",
+      "stage": 1,
+      "row": 0,
+      "tag": "白名单"
+    },
+    {
+      "id": "channel",
+      "type": "messagebus",
+      "label": "事件通道",
+      "sublabel": "广播",
+      "stage": 2,
+      "row": 0
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "/api/events",
+      "sublabel": "SSE 消息流",
+      "stage": 3,
+      "row": 0
+    },
+    {
+      "id": "browser",
+      "type": "frontend",
+      "label": "浏览器",
+      "sublabel": "实时收到",
+      "stage": 4,
+      "row": 0
+    }
+  ],
+  "flows": [
+    {
+      "id": "backend-to-bridge",
+      "from": "backend",
+      "to": "bridge",
+      "label": "ai-chunk"
+    },
+    {
+      "id": "bridge-to-channel",
+      "from": "bridge",
+      "to": "channel",
+      "label": "白名单通过"
+    },
+    {
+      "id": "channel-to-api",
+      "from": "channel",
+      "to": "api",
+      "label": "广播"
+    },
+    {
+      "id": "api-to-browser",
+      "from": "api",
+      "to": "browser",
+      "label": "SSE 推送"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "流式推送",
+      "items": [
+        "后端发出 ai-chunk 事件",
+        "事件桥白名单过滤",
+        "浏览器 SSE 实时接收"
+      ]
+    }
+  ]
+}

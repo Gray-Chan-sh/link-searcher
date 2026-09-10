@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "搜索流程",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "input", "label": "输入" },
+    { "id": "process", "label": "处理" },
+    { "id": "search", "label": "检索" },
+    { "id": "output", "label": "输出" }
+  ],
+  "phases": [
+    { "id": "input", "label": "输入", "fromCol": 0, "toCol": 0 },
+    { "id": "query", "label": "查询", "fromCol": 1, "toCol": 3, "variant": "emphasis" },
+    { "id": "display", "label": "展示", "fromCol": 4, "toCol": 5 }
+  ],
+  "mainPath": ["input", "tokenize", "query", "bm25", "filter", "display"],
+  "nodes": [
+    { "id": "input", "lane": "input", "col": 0, "type": "frontend", "label": "输入关键词", "sublabel": "搜索框" },
+    { "id": "tokenize", "lane": "process", "col": 1, "type": "backend", "label": "jieba 分词", "sublabel": "中英文切词" },
+    { "id": "fuzzy", "lane": "process", "col": 1, "type": "backend", "label": "模糊匹配", "sublabel": "容错 1 字符", "yOffset": 72 },
+    { "id": "query", "lane": "search", "col": 2, "type": "database", "label": "查询索引", "sublabel": "Tantivy" },
+    { "id": "bm25", "lane": "search", "col": 3, "type": "backend", "label": "BM25 排序", "sublabel": "相关性评分" },
+    { "id": "suggest", "lane": "search", "col": 2, "type": "backend", "label": "搜索建议", "sublabel": "前缀补全", "yOffset": 72 },
+    { "id": "filter", "lane": "output", "col": 4, "type": "security", "label": "结果筛选", "sublabel": "目录/类型" },
+    { "id": "display", "lane": "output", "col": 5, "type": "frontend", "label": "结果列表", "sublabel": "排序+分页" },
+    { "id": "preview", "lane": "output", "col": 5, "type": "frontend", "label": "预览面板", "sublabel": "点击查看", "yOffset": 72 }
+  ],
+  "edges": [
+    { "from": "input", "to": "tokenize", "label": "回车" },
+    { "from": "input", "to": "fuzzy", "label": "可选", "variant": "dashed" },
+    { "from": "input", "to": "suggest", "label": "输入时", "variant": "dashed", "role": "async" },
+    { "from": "tokenize", "to": "query", "label": "切词" },
+    { "from": "fuzzy", "to": "query", "label": "纠错" },
+    { "from": "query", "to": "bm25", "label": "命中" },
+    { "from": "bm25", "to": "filter", "label": "排序后" },
+    { "from": "filter", "to": "display", "label": "筛选后" },
+    { "from": "display", "to": "preview", "label": "点击", "role": "branch" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "查询处理", "items": ["jieba 中英文分词", "模糊匹配容错 1 字符", "输入时前缀补全建议"] },
+    { "dot": "emerald", "title": "检索排序", "items": ["Tantivy 倒排索引查询", "BM25 相关性评分排序", "毫秒级响应"] },
+    { "dot": "amber", "title": "结果展示", "items": ["目录类型筛选", "自适应分页", "点击预览文件内容"] }
+  ]
+}

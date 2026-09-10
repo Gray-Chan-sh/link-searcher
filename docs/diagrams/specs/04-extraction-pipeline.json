@@ -1,0 +1,49 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "文本提取管线",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "input", "label": "输入" },
+    { "id": "route", "label": "路由" },
+    { "id": "extract", "label": "提取" },
+    { "id": "output", "label": "输出" }
+  ],
+  "mainPath": ["file", "router", "pdf", "hash", "textOut"],
+  "nodes": [
+    { "id": "file", "lane": "input", "col": 0, "type": "external", "label": "任意文件", "sublabel": "20+ 格式" },
+    { "id": "router", "lane": "route", "col": 1, "type": "backend", "label": "格式路由", "sublabel": "按扩展名分发" },
+    { "id": "pdf", "lane": "extract", "col": 2, "type": "backend", "label": "PDF 提取", "sublabel": "文本抽取 / OCR", "yOffset": -150 },
+    { "id": "office", "lane": "extract", "col": 2, "type": "backend", "label": "Office 提取", "sublabel": "Word/Excel/PPT 原生", "yOffset": -75 },
+    { "id": "image", "lane": "extract", "col": 2, "type": "backend", "label": "图片 OCR", "sublabel": "PaddleOCR", "yOffset": 0 },
+    { "id": "audio", "lane": "extract", "col": 2, "type": "backend", "label": "音频转写", "sublabel": "FunASR 语音识别", "yOffset": 75 },
+    { "id": "text", "lane": "extract", "col": 2, "type": "backend", "label": "纯文本", "sublabel": "直接读取", "yOffset": 225 },
+    { "id": "archive", "lane": "extract", "col": 2, "type": "backend", "label": "压缩包", "sublabel": "解包后逐条目", "yOffset": 150 },
+    { "id": "hash", "lane": "output", "col": 3, "type": "database", "label": "内容哈希", "sublabel": "MD5 去重" },
+    { "id": "textOut", "lane": "output", "col": 4, "type": "database", "label": "纯文本", "sublabel": "存入索引" }
+  ],
+  "edges": [
+    { "from": "file", "to": "router", "label": "文件", "variant": "emphasis", "route": "drop", "fromSide": "bottom", "toSide": "top" },
+    { "from": "router", "to": "pdf", "label": ".pdf" },
+    { "from": "router", "to": "office", "label": ".docx/.xlsx/.pptx" },
+    { "from": "router", "to": "image", "label": ".png/.jpg" },
+    { "from": "router", "to": "audio", "label": ".mp3/.wav" },
+    { "from": "router", "to": "text", "label": ".txt/.md/.csv" },
+    { "from": "router", "to": "archive", "label": ".zip/.tar" },
+    { "from": "pdf", "to": "hash", "label": "提取文本" },
+    { "from": "office", "to": "hash", "label": "提取文本" },
+    { "from": "image", "to": "hash", "label": "OCR 文本" },
+    { "from": "audio", "to": "hash", "label": "转写文本" },
+    { "from": "text", "to": "hash", "label": "直接文本" },
+    { "from": "archive", "to": "hash", "label": "解包文本" },
+    { "from": "hash", "to": "textOut", "label": "去重后", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "格式路由", "items": ["按扩展名自动分发", "新增格式只需加提取器", "主流程不变"] },
+    { "dot": "emerald", "title": "去重设计", "items": ["MD5 内容哈希去重", "相同内容只提取一次", "后续文件复用索引"] },
+    { "dot": "amber", "title": "OCR 多引擎", "items": ["内置 PaddleOCR 优先", "系统原生引擎降级", "Tesseract 备选"] }
+  ]
+}

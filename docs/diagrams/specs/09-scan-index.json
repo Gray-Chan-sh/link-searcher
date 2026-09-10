@@ -1,0 +1,48 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "文件扫描与索引流程",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "scan", "label": "扫描" },
+    { "id": "extract", "label": "提取" },
+    { "id": "index", "label": "索引" },
+    { "id": "done", "label": "完成" }
+  ],
+  "phases": [
+    { "id": "scan", "label": "扫描", "fromCol": 0, "toCol": 2 },
+    { "id": "process", "label": "提取+索引", "fromCol": 3, "toCol": 4, "variant": "emphasis" },
+    { "id": "finish", "label": "完成", "fromCol": 5, "toCol": 5 }
+  ],
+  "mainPath": ["start", "walk", "filter", "check", "extract", "hash", "write", "commit", "complete"],
+  "nodes": [
+    { "id": "start", "lane": "scan", "col": 0, "type": "backend", "label": "开始扫描", "sublabel": "全量/增量" },
+    { "id": "walk", "lane": "scan", "col": 1, "type": "backend", "label": "遍历目录", "sublabel": "收集文件" },
+    { "id": "filter", "lane": "scan", "col": 2, "type": "security", "label": "排除过滤", "sublabel": "隐藏/临时/缓存" },
+    { "id": "check", "lane": "scan", "col": 3, "type": "backend", "label": "mtime 检查", "sublabel": "是否变化" },
+    { "id": "extract", "lane": "extract", "col": 3, "type": "backend", "label": "文本提取", "sublabel": "格式路由" },
+    { "id": "hash", "lane": "extract", "col": 4, "type": "database", "label": "MD5 哈希", "sublabel": "内容去重" },
+    { "id": "write", "lane": "index", "col": 4, "type": "database", "label": "写入索引", "sublabel": "Tantivy" },
+    { "id": "commit", "lane": "index", "col": 5, "type": "backend", "label": "批量提交", "sublabel": "每 100 文件" },
+    { "id": "complete", "lane": "done", "col": 5, "type": "frontend", "label": "索引完成", "sublabel": "状态更新" }
+  ],
+  "edges": [
+    { "from": "start", "to": "walk" },
+    { "from": "walk", "to": "filter", "label": "文件列表" },
+    { "from": "filter", "to": "check", "label": "通过" },
+    { "from": "check", "to": "extract", "label": "有变化" },
+    { "from": "extract", "to": "hash", "label": "提取文本" },
+    { "from": "hash", "to": "write", "label": "去重" },
+    { "from": "write", "to": "commit", "label": "批量写入" },
+    { "from": "commit", "to": "complete", "label": "全部完成" },
+    { "from": "check", "to": "complete", "label": "无变化跳过", "role": "branch", "variant": "dashed", "route": "outside-right", "fromSide": "right", "toSide": "right" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "扫描阶段", "items": ["遍历目录收集文件", "排除隐藏临时缓存", "mtime 检查增量更新"] },
+    { "dot": "emerald", "title": "提取+索引", "items": ["格式路由分发提取器", "MD5 去重复用", "Tantivy 批量写入"] },
+    { "dot": "amber", "title": "完成状态", "items": ["每 100 文件自动提交", "无变化文件跳过", "索引完成更新状态"] }
+  ]
+}
