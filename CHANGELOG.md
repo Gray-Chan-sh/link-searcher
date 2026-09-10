@@ -11,6 +11,15 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（LLM 改写结果有效性校验：无检索词即无效，回退规则链）
+
+> 「先 LLM 改写、再做停用词过滤」的顺序本就是现状（每轮无条件尝试 LLM 改写，失败/无增益才回退规则）。缺的是对改写结果的实体校验：LLM 若只把问题换成"文档/内容/材料"这类泛词，过滤后照样为空。
+
+- **修复**：`valid_rewrite_output` 增加可检索性校验——改写结果经 `extract_retrieval_keywords` 后必须至少剩一个检索词，否则视为无效（记日志 `llm rewrite rejected: no retrievable term`）并回退规则链，再由 strict 目录/范围兜底接手。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`valid_rewrite_output_requires_retrievable_term` 等单测，`cargo test --lib` 250 passed。
+
+---
+
 ## 2026-09-10（strict + 目录引用零检索兜底：范围内有索引文件不再拒答）
 
 > 场景：引用目录（如 `.../0002.庭前会议笔录、法庭笔录及相关材料`）问"这是什么文档"，日志显示 `retrieval_kws=["这是"]`、BM25 泛词命中被范围拦掉、向量 0 命中（阈值 0.65）→ strict 下零材料直接拒绝（answer=null），尽管范围内 5 个转写文件都已索引。

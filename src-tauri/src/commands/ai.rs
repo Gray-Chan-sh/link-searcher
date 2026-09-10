@@ -591,10 +591,20 @@ pub fn merge_scope_prefixes(
 }
 
 /// Validate an LLM rewrite response: non-empty, not longer than the input
-/// query's practical retrieval ceiling, and not echoing the original.
+/// query's practical retrieval ceiling, not echoing the original, and — the
+/// key point — carrying at least one *retrievable* term.
+///
+/// 「先改写再做停用词过滤」的前置保证就在这里：若改写结果经停用词过滤后
+/// 一个检索词都不剩（例如 LLM 只把问题换成"文档 内容"这类泛词），它并不比
+/// 原句更有用，视为无效 → 回退规则链（再由目录/范围兜底接手），避免把一次
+/// 无效的 LLM 往返当成有效改写继续往下走。
 fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
     let t = s.trim().trim_matches(['"', '\'', '“', '”']);
     if t.is_empty() || t == original.trim() || t.chars().count() > 80 {
+        return None;
+    }
+    if extract_retrieval_keywords(t).is_empty() {
+        log::info!("[AI]   llm rewrite rejected: no retrievable term in {:?}", truncate_text(t, 40));
         return None;
     }
     Some(t.to_string())
@@ -3210,6 +3220,22 @@ mod history_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 改写结果必须携带可检索词，否则视为无效（回退规则链 + 范围兜底），
+    /// 避免"LLM 改成泛词 → 过滤后仍为空"。
+    #[test]
+    fn valid_rewrite_output_requires_retrievable_term() {
+        // 带实体：有效
+        assert_eq!(
+            valid_rewrite_output("毛弟 辱骂 聊天记录", "列出表格").as_deref(),
+            Some("毛弟 辱骂 聊天记录")
+        );
+        // 全是停用词/泛词：无效
+        assert!(valid_rewrite_output("文档 内容 材料", "这是什么文档").is_none());
+        // 空 / 回显原句：无效
+        assert!(valid_rewrite_output("", "这是什么文档").is_none());
+        assert!(valid_rewrite_output("这是什么文档", "这是什么文档").is_none());
+    }
+
     #[test]
     fn rewrite_query_expands_demonstrative_followup_with_parent_keywords() {
         let history = vec![
@@ -3261,7 +3287,9 @@ mod history_tests {
     fn valid_rewrite_output_rejects_garbage_and_echoes() {
         assert!(valid_rewrite_output("", "原问题").is_none());
         assert!(valid_rewrite_output("  原问题  ", "原问题").is_none());
-        assert!(valid_rewrite_output("x", "原问题").is_some());
+        // 无检索词（单字符）同样无效：不会比原句更有用。
+        assert!(valid_rewrite_output("x", "原问题").is_none());
+        assert!(valid_rewrite_output("营收", "原问题").is_some());
         let good = valid_rewrite_output("季度报告的风险有哪些", "它的风险有哪些");
         assert_eq!(good.as_deref(), Some("季度报告的风险有哪些"));
     }
