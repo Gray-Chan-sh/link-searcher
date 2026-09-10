@@ -11,6 +11,16 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（strict + 目录引用零检索兜底：范围内有索引文件不再拒答）
+
+> 场景：引用目录（如 `.../0002.庭前会议笔录、法庭笔录及相关材料`）问"这是什么文档"，日志显示 `retrieval_kws=["这是"]`、BM25 泛词命中被范围拦掉、向量 0 命中（阈值 0.65）→ strict 下零材料直接拒绝（answer=null），尽管范围内 5 个转写文件都已索引。
+
+- **根因**：目录引用的语义是"以该目录文件为资料"，但注入只在检索命中时发生；泛问句无实体词时三通道可能全空，strict 便拒绝，未回退到"目录内已索引文件"。
+- **修复**：`prepare_conversation_prompt` 新增兜底——strict + docs/evidence 为空 + 有目录前缀时，按路径顺序查出范围内 `active AND indexed=1` 且内容缓存非空的文件（每前缀上限 50），按预算注入为材料并产出 evidence。日志 `[AI] scope fallback: ...`。
+- 涉及：`src-tauri/src/commands/ai.rs`。验证：`e2e_strict_dir_scope_falls_back_to_scoped_files` 单测通过，`cargo test --lib` 249 passed。
+
+---
+
 ## 2026-09-10（已删除视图与恢复 + 扫描容错：目录瞬断不再批量误标删除）
 
 > 背景：Syncthing 目录瞬断/IO 期间扫描把仍存在的文件批量标 deleted，用户既看不到（Browse 只列 active）也无法恢复，AI 引用显示"未索引"。

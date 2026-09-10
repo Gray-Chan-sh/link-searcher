@@ -1638,6 +1638,69 @@ pub(crate) async fn prepare_conversation_prompt(
         }
     }
 
+    // ── strict + 目录引用兜底 ──────────────────────────────────────────
+    // 目录引用的语义是"以该目录下的文件为资料"。泛问句（如"这是什么文档"）
+    // 没有实体词时三通道可能全空（BM25 泛词命中被范围拦掉、向量低于阈值、
+    // 文件名不含词），但范围内明明有已索引文件——此时按路径顺序回退注入
+    // 这些文件（走内容缓存），而不是直接拒答。
+    if strict_docs
+        && docs.is_empty()
+        && evidence.is_empty()
+        && let Some(prefixes) = &path_prefixes_opt
+        && !prefixes.is_empty()
+    {
+        let mut scope_files: Vec<(String, String, String, String)> = Vec::new(); // (id, path, md5, text)
+        let mut seen_ids = std::collections::HashSet::new();
+        for p in prefixes {
+            let pat = format!("{}%", p.trim_end_matches('/'));
+            let Ok(mut stmt) = conn.prepare(
+                "SELECT id, path, md5, \
+                        (SELECT text_content FROM content_index WHERE md5 = file_tracking.md5) \
+                 FROM file_tracking \
+                 WHERE status='active' AND indexed=1 AND path LIKE ?1 \
+                 ORDER BY path LIMIT 50",
+            ) else { continue };
+            let Ok(rows) = stmt.query_map(rusqlite::params![&pat], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            }) else { continue };
+            for row in rows.flatten() {
+                let (id, path, md5, text) = row;
+                let (Some(md5), Some(text)) = (md5, text) else { continue };
+                if text.trim().is_empty() || !seen_ids.insert(id.clone()) { continue }
+                scope_files.push((id, path, md5, text));
+            }
+        }
+        if !scope_files.is_empty() {
+            let budget = if content_budget > 0 { content_budget } else { CONTEXT_BUDGET / 3 };
+            let per_file = (budget / scope_files.len()).max(500);
+            let mut injected_n = 0usize;
+            for (fid, path, md5, text) in &scope_files {
+                let n = docs.len() + 1;
+                let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &[]);
+                if injected.trim().is_empty() { continue }
+                docs.push(format!("[{n}]（{path}）\n{injected}"));
+                evidence.push(EvidenceItem {
+                    file_id: fid.clone(),
+                    path: path.clone(),
+                    snippet: truncate_text(text, 200),
+                    bm25_score: None,
+                    semantic_score: None,
+                    rrf_score: None,
+                    rewritten,
+                    rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
+                    from_history: false,
+                });
+                injected_n += 1;
+            }
+            log::info!("[AI] scope fallback: strict+目录引用零检索，回退注入范围内 {injected_n}/{} 份文件", scope_files.len());
+        }
+    }
+
     drop(conn);
 
     // source_ids/source_files 必须与 evidence 严格同序同长（只含实际注入的
@@ -3085,6 +3148,66 @@ mod history_tests {
         assert_eq!(visible_material_count(truncated), 2);
         // 无材料。
         assert_eq!(visible_material_count(""), 0);
+    }
+
+    /// strict + 目录引用 + 检索零命中：回退注入范围内已索引文件，而非拒答。
+    #[tokio::test]
+    async fn e2e_strict_dir_scope_falls_back_to_scoped_files() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::{Arc, Mutex, RwLock};
+        use crate::scanner::Scanner;
+        use crate::search::IndexManager;
+        use crate::state::{AppState, ScanDelta};
+
+        let dir = std::env::temp_dir().join(format!("ls_scope_fb_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("data.db");
+        let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
+        {
+            let c = pool.get().unwrap();
+            crate::db::init_db(&c).unwrap();
+            let d = crate::db::dir_config::add_dir(&c, dir.to_str().unwrap(), None, None, None, None, true).unwrap();
+            // 范围内两个已索引文件（内容与问句"这是什么文档"无词重叠）。
+            for (rel, md5, text) in [
+                ("案件/X/庭审录音/0001 录音.txt", "md5-f1", "审判长：现在开庭。原告陈述诉讼请求。"),
+                ("案件/X/庭审录音/0002 录音.txt", "md5-f2", "被告：对证据三的真实性没有异议。"),
+            ] {
+                let id = crate::db::tracker::upsert_file(&c, rel, &d.id, 100, 10, Some(md5)).unwrap();
+                crate::db::tracker::store_content(&c, md5, text, false, None).unwrap();
+                crate::db::tracker::update_indexed(&c, &id, Some(md5)).unwrap();
+            }
+            drop(c);
+        }
+
+        let im = Arc::new(RwLock::new(IndexManager::create_in_ram()));
+        let indexer = Arc::new(crate::indexer::IndexerService::new(pool.clone(), im.clone()));
+        let scanner = Arc::new(Scanner::new(pool.clone(), indexer.clone()));
+        let (dummy_tx, _) = std::sync::mpsc::channel();
+        let index_dir = dir.join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        let state = AppState::new(
+            pool, im, indexer, scanner,
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(ScanDelta::default())),
+            dir.clone(), index_dir, db_path, dummy_tx, None,
+        );
+
+        let messages = vec![ChatMessage { role: "user".into(), content: "这是什么文档".into() }];
+        let scope = TurnScope { mention_files: vec![], mention_dirs: vec![], inherit_from: vec![], conditions: vec![] };
+        let session_scope = vec!["案件/X/庭审录音".to_string()];
+
+        let prep = prepare_conversation_prompt(
+            &state, &messages, &[], &scope, &session_scope, true, false, true, None, "",
+        )
+        .await
+        .expect("strict 目录引用在检索零命中时应回退注入范围内文件，而非报错");
+
+        assert!(!prep.evidence.is_empty(), "应注入范围内已索引文件: {:?}", prep.evidence);
+        assert!(prep.evidence.iter().all(|e| e.path.starts_with("案件/X/庭审录音")), "材料应在范围目录内");
+        assert!(!prep.system.contains("本轮共提供 0 份材料"), "system 材料数应包含兜底文件");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
