@@ -37,6 +37,26 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/files/download", post(desktop_only_stub))
         .route("/api/files/open", post(desktop_only_stub))
         .route("/api/files/reveal", post(desktop_only_stub))
+        .route("/api/files/restore", post(restore_handler))
+}
+
+/// Body for the restore endpoint: `{ "ids": ["<file_id>", ...] }`.
+#[derive(Deserialize)]
+struct RestoreBody {
+    ids: Vec<String>,
+}
+
+/// Restore soft-deleted records (Browse「已删除」视图) — reuses the Tauri
+/// command so desktop and web modes behave identically.
+async fn restore_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<RestoreBody>,
+) -> Result<Json<u64>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let restored = crate::commands::index::restore_files(app_state, body.ids)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(restored))
 }
 
 fn path_to_ext(path: &str) -> String {
@@ -144,7 +164,12 @@ async fn files_handler(
     let p = params.page.unwrap_or(1).max(1);
     let offset = (p - 1) * ps;
 
-    let mut wheres: Vec<&str> = vec!["status = 'active'"];
+    // deleted 视图（与 Tauri list_files_db 保持一致）：其余筛选只看 active。
+    let mut wheres: Vec<&str> = if params.filter.as_deref() == Some("deleted") {
+        vec!["status = 'deleted'"]
+    } else {
+        vec!["status = 'active'"]
+    };
     let mut sql_params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
 
     match params.filter.as_deref() {
@@ -192,7 +217,7 @@ async fn files_handler(
     };
 
     let data_sql = format!(
-        "SELECT id, path, size, mtime, indexed FROM file_tracking WHERE {where_clause} ORDER BY {sort_col} {order_dir} LIMIT ?{} OFFSET ?{}",
+        "SELECT id, path, size, mtime, indexed, status FROM file_tracking WHERE {where_clause} ORDER BY {sort_col} {order_dir} LIMIT ?{} OFFSET ?{}",
         sql_params.len() + 1,
         sql_params.len() + 2,
     );
@@ -222,6 +247,7 @@ async fn files_handler(
                     "mtime": row.get::<_, i64>(3)?,
                     "indexed": row.get::<_, i64>(4)?,
                     "error_msg": serde_json::Value::Null,
+                    "status": row.get::<_, String>(5)?,
                 }))
             },
         )

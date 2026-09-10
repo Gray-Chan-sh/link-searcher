@@ -25,7 +25,8 @@
 
 - **后端**：`list_files_db` 支持 `filter=deleted`（其余筛选仍只看 active）；`FileItem` 增加 `status` 字段；新增 `restore_files` 命令——将 deleted 记录恢复为 active 并就地重建索引（先校验磁盘存在；内容缓存按 md5 保留，不重新 OCR/转写）。
 - **前端**：Browse 筛选新增"已删除"、行内灰色徽章与提示、右键菜单「恢复」（支持批量）；i18n 中英日韩文案。
-- 涉及：`src-tauri/src/commands/files.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`src/api/files.ts`、`src/api/index.ts`、`src/pages/Browse.tsx`、`src/i18n/*.ts`。验证：`cargo test --lib` 248 passed、`tsc -b` 零错误、oxlint 0 errors。
+- **Web 模式同步**：`/api/files` 支持 `filter=deleted` 且返回 `status` 字段；新增 `POST /api/files/restore`（复用同一命令）；前端 REST 映射补 `restore_files`。此前 Web 模式（浏览器访问）切「已删除」无效、显示全库 active 数即因 webapi 实现未同步。
+- 涉及：`src-tauri/src/commands/files.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/webapi/routes/files.rs`、`src/api/files.ts`、`src/api/index.ts`、`src/api/client.ts`、`src/pages/Browse.tsx`、`src/i18n/*.ts`。验证：`cargo test --lib` 248 passed、`tsc -b` 零错误、oxlint 0 errors。
 
 ---
 

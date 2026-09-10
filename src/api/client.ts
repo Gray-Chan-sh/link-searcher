@@ -98,6 +98,7 @@ const MAPPINGS: Record<string, Mapping> = {
   reindex_file: (a) => ({ method: 'POST', path: '/api/reindex', body: { file_id: a.fileId } }),
   rebuild_index: { method: 'POST', path: '/api/index/rebuild' },
   reindex_files: (a) => ({ method: 'POST', path: '/api/index/reindex-batch', body: a }),
+  restore_files: (a) => ({ method: 'POST', path: '/api/files/restore', body: a }),
   reextract_missing_content: (a) => ({ method: 'POST', path: '/api/index/reextract', body: a }),
   verify_index_content: (a) => ({ method: 'POST', path: '/api/index/verify', body: a }),
   get_index_errors: { method: 'GET', path: '/api/index/errors' },

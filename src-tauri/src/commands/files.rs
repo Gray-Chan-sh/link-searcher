@@ -109,6 +109,7 @@ pub async fn list_files_db(
     }
 
     let where_clause = wheres.join(" AND ");
+    log::info!("[FILES] list_files_db filter={:?} where={where_clause}", filter);
 
     let count_sql = format!("SELECT COUNT(*) FROM file_tracking WHERE {where_clause}");
     let total: u64 = conn
