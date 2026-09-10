@@ -4029,6 +4029,7 @@ dependencies = [
  "tokio-util",
  "tower-http",
  "tract-onnx",
+ "unicode-normalization",
  "ureq",
  "uuid",
  "walkdir",
