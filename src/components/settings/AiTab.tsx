@@ -145,6 +145,9 @@ export function AiTab({
                   <span>{r.ok ? '✓' : '✗'}</span>
                   <span className="font-medium">{r.kind === 'embedding' ? t('embedding_gateway') : t('llm_gateway')}</span>
                   <span className="text-gray-500 dark:text-gray-400 truncate max-w-48">{r.detail}</span>
+                  {r.max_output_tokens != null && (
+                    <span className="text-gray-400 dark:text-gray-500">max={r.max_output_tokens.toLocaleString()}</span>
+                  )}
                 </div>
               ))}
             </div>

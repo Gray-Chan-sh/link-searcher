@@ -131,6 +131,24 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
     Some(ActiveEndpoint::new(provider, model_id))
 }
 
+const DEFAULT_MAX_TOKENS: u32 = 16384;
+
+/// Look up the active LLM model's `max_output_tokens` from the provider config
+/// (populated by `list_provider_models` from the gateway's `/v1/models` response).
+/// Falls back to [`DEFAULT_MAX_TOKENS`] when the value hasn't been detected yet.
+fn active_max_tokens() -> u32 {
+    let cfg = crate::config::load_config();
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
+        return DEFAULT_MAX_TOKENS;
+    };
+    let (pid, mid) = cfg.active_llm_model_id.split_once(':').unwrap_or(("", &cfg.active_llm_model_id));
+    cfg.providers.iter()
+        .find(|p| p.id == pid)
+        .and_then(|p| p.models.iter().find(|m| m.id == mid))
+        .and_then(|m| m.max_output_tokens)
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+}
+
 /// Classify a model id by name heuristics. Pure function, user-overridable.
 pub fn classify_model_by_name(id: &str) -> ModelType {
     let lower = id.to_lowercase();
@@ -440,7 +458,7 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
             ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
         ],
         temperature: 0.3,
-        max_tokens: 4096,
+        max_tokens: active_max_tokens(),
         stream: false,
     };
     let req_body = match serde_json::to_string(&req) {
@@ -525,7 +543,7 @@ pub fn chat_stream(
             ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
         ],
         temperature: 0.3,
-        max_tokens: 4096,
+        max_tokens: active_max_tokens(),
         stream: true,
     }) {
         Ok(b) => b,
@@ -775,6 +793,9 @@ pub struct GatewayTest {
     pub ok: bool,
     /// Short reason when not ok (unconfigured / URL / HTTP status / parse).
     pub detail: String,
+    /// Detected max output tokens from `/v1/models` capabilities (None = unavailable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// Frontend-facing capability flags (from a cached test).
@@ -795,7 +816,7 @@ impl AiCapabilities {
 /// parallel: the LLM one may take many seconds to schedule a model, and
 /// serial order would make it start only after the embedding probe finishes.
 pub fn test_gateways() -> Vec<GatewayTest> {
-    let failed = |kind: &'static str| GatewayTest { kind, ok: false, detail: "probe panicked".into() };
+    let failed = |kind: &'static str| GatewayTest { kind, ok: false, detail: "probe panicked".into(), max_output_tokens: None };
     let emb_handle = std::thread::spawn(test_embedding);
     let llm_handle = std::thread::spawn(test_llm);
     let tests = vec![
@@ -827,6 +848,13 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
     #[derive(Deserialize)]
     struct ModelEntry {
         id: String,
+        #[serde(default)]
+        capabilities: Option<ModelCapabilities>,
+    }
+    #[derive(Deserialize)]
+    struct ModelCapabilities {
+        #[serde(default, rename = "maxOutput")]
+        max_output: Option<u32>,
     }
 
     let url = format!("{}/models", base_url.trim_end_matches('/'));
@@ -846,11 +874,15 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
                 .data
                 .into_iter()
                 .map(|m| {
-                    let id = m.id;
+                    let id = m.id.clone();
+                    let max_output_tokens = m.capabilities
+                        .and_then(|c| c.max_output)
+                        .filter(|&v| v > 0);
                     crate::config::ModelConfig {
                         id: id.clone(),
                         model_type: classify_model_by_name(&id),
                         enabled: false,
+                        max_output_tokens,
                     }
                 })
                 .collect::<Vec<_>>();
@@ -865,28 +897,28 @@ fn test_embedding() -> GatewayTest {
     if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
         let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
         if !local_embed::bge_model_ready(&cfg.data_dir, model_name) {
-            return GatewayTest { kind: "embedding", ok: false, detail: format!("{model_name} 模型未下载") };
+            return GatewayTest { kind: "embedding", ok: false, detail: format!("{model_name} 模型未下载"), max_output_tokens: None };
         }
         return match local_embed::init_local_embedder(&cfg.data_dir, model_name) {
-            Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: format!("内置 {model_name}") },
-            Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
+            Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: format!("内置 {model_name}"), max_output_tokens: None },
+            Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e, max_output_tokens: None },
         };
     }
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
-        return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into() };
+        return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into(), max_output_tokens: None };
     };
     let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "model": ep.model_id, "input": [""] });
     match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(5)) {
-        Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into() },
-        Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e },
+        Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into(), max_output_tokens: None },
+        Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e, max_output_tokens: None },
     }
 }
 
 fn test_llm() -> GatewayTest {
     let cfg = crate::config::load_config();
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
-        return GatewayTest { kind: "llm", ok: false, detail: "未配置".into() };
+        return GatewayTest { kind: "llm", ok: false, detail: "未配置".into(), max_output_tokens: None };
     };
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -895,9 +927,43 @@ fn test_llm() -> GatewayTest {
         "max_tokens": 1
     });
     match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(30)) {
-        Ok(()) => GatewayTest { kind: "llm", ok: true, detail: "OK".into() },
-        Err(e) => GatewayTest { kind: "llm", ok: false, detail: e },
+        Ok(()) => {
+            // 检测值优先；网关不报 capabilities 时显示实际会使用的 fallback
+            let max_out = fetch_llm_max_output(&ep.base_url, &ep.api_key, &ep.model_id)
+                .or_else(|| Some(active_max_tokens()));
+            if let Some(m) = max_out {
+                log::info!("[AI] LLM model max_output_tokens = {m}");
+            }
+            GatewayTest { kind: "llm", ok: true, detail: "OK".into(), max_output_tokens: max_out }
+        }
+        Err(e) => GatewayTest { kind: "llm", ok: false, detail: e, max_output_tokens: None },
     }
+}
+
+/// Query the gateway's `/v1/models` endpoint for the active model's
+/// `capabilities.maxOutput`. Gateway model ids may carry a namespace prefix
+/// (9router: `agnes/agnes-3.0-flash` vs configured `agnes-3.0-flash`), so the
+/// lookup matches by exact id or by the last `/`-separated segment.
+fn fetch_llm_max_output(base_url: &str, api_key: &str, model_id: &str) -> Option<u32> {
+    let models_url = format!("{}/models", base_url.trim_end_matches('/'));
+    let agent = ureq::builder().timeout(std::time::Duration::from_secs(10)).build();
+    let resp = agent.get(&models_url)
+        .set("Authorization", &format!("Bearer {}", api_key))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_str(&resp).ok()?;
+    v.get("data")?.as_array()?.iter()
+        .find(|m| {
+            let gid = m.get("id").and_then(|id| id.as_str()).unwrap_or("");
+            gid == model_id || gid.split('/').next_back() == Some(model_id)
+        })
+        .and_then(|m| {
+            m.get("capabilities").and_then(|c| c.get("maxOutput")).and_then(|v| v.as_u64())
+                .or_else(|| m.get("max_completion_tokens").and_then(|v| v.as_u64()))
+        })
+        .map(|v| v as u32)
 }
 
 /// Issue a tiny POST and return Ok on any 2xx. Rejects 4xx/5xx with the
@@ -1047,7 +1113,7 @@ mod tests {
                 name: "x".into(),
                 base_url: "http://x/v1".into(),
                 api_key: "k".into(),
-                models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false }],
+                models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false, max_output_tokens: None }],
             }],
             active_embedding_model_id: "p1:m1".into(),
             active_llm_model_id: "p1:ghost".into(),
@@ -1079,7 +1145,7 @@ mod tests {
             name: "x".into(),
             base_url: "http://x/v1".into(),
             api_key: "k".into(),
-            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Llm, enabled: true }],
+            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Llm, enabled: true, max_output_tokens: None }],
         };
         let with_active = |active: &str, providers: Vec<ProviderConfig>| AppConfig {
             active_llm_model_id: active.into(),

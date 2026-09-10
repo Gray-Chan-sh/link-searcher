@@ -182,7 +182,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       p => {
         console.log('[AI-DEBUG] ai-done received', { sessionId: p.session_id, loadingRef: loadingRef.current, disposed, fullTextLen: p.full_text?.length, cancelled: p.cancelled })
         if (disposed) return
-        if (!loadingRef.current) { console.warn('[AI-DEBUG] ai-done dropped: loadingRef is false'); setStreaming(null); setProgress(null); return }
         setStreaming(null)
         setProgress(null)
         if (p.cancelled) return

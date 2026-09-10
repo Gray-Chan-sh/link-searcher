@@ -121,7 +121,7 @@ export default function AiChat() {
         messages: [],
         source_ids: [], source_files: paths,
         retrieval_scope: paths,
-        strict_docs: true, full_recall: true,
+        strict_docs: true, full_recall: false,
         pending_query: pendingQuery,
         pending_started_at: pendingQuery ? Date.now() : null,
       }
@@ -219,7 +219,7 @@ export default function AiChat() {
     if (sessions.length === 0) {
       createChatSession().then(id => {
         setActiveId(id)
-setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: true })
+setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
         refreshList()
       }).catch(() => {})
     } else {
@@ -249,10 +249,10 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
   const handleNewSession = useCallback(async () => {
     try {
       const id = await createChatSession()
-      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: true })
-      setActiveId(id)
-      refreshList()
-    } catch { /* ignore */ }
+setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
+    setActiveId(id)
+    refreshList()
+  } catch { /* ignore */ }
   }, [refreshList])
 
   const handleDelete = useCallback(async (id: string) => {

@@ -42,6 +42,10 @@ pub struct ModelConfig {
     /// list and becomes eligible for the active embedding/LLM selection.
     #[serde(default)]
     pub enabled: bool,
+    /// Max output tokens reported by the gateway's `/v1/models` endpoint.
+    /// `None` means the value hasn't been detected yet (fallback to default).
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
 }
 
 /// An AI gateway the user manages (base_url + optional api_key). Models are
@@ -259,6 +263,7 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
                 id: config.embedding_model.clone(),
                 model_type: ModelType::Embedding,
                 enabled: true,
+                max_output_tokens: None,
             });
             config.active_embedding_model_id = format!("{provider_id}:{}", config.embedding_model);
         }
@@ -279,6 +284,7 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
                 id: config.llm_model.clone(),
                 model_type: ModelType::Llm,
                 enabled: true,
+                max_output_tokens: None,
             });
             config.active_llm_model_id = format!("{provider_id}:{}", config.llm_model);
         }
@@ -319,7 +325,7 @@ mod tests {
 
     #[test]
     fn auto_enable_first_per_type_enables_one_embedding_and_one_llm() {
-        let mk = |id: &str, ty: ModelType| ModelConfig { id: id.into(), model_type: ty, enabled: false };
+        let mk = |id: &str, ty: ModelType| ModelConfig { id: id.into(), model_type: ty, enabled: false, max_output_tokens: None };
         let models = vec![
             mk("llm-a", ModelType::Llm),
             mk("emb-a", ModelType::Embedding),
@@ -362,9 +368,9 @@ mod tests {
                 base_url: "http://x/v1".into(),
                 api_key: String::new(),
                 models: vec![
-                    ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false },
-                    ModelConfig { id: "m2".into(), model_type: ModelType::Llm, enabled: false },
-                    ModelConfig { id: "m3".into(), model_type: ModelType::Llm, enabled: true },
+                    ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false, max_output_tokens: None },
+                    ModelConfig { id: "m2".into(), model_type: ModelType::Llm, enabled: false, max_output_tokens: None },
+                    ModelConfig { id: "m3".into(), model_type: ModelType::Llm, enabled: true, max_output_tokens: None },
                 ],
             }],
             active_embedding_model_id: "p1:m1".into(),
@@ -392,7 +398,7 @@ mod tests {
             name: "x".into(),
             base_url: "http://x/v1".into(),
             api_key: String::new(),
-            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false }],
+            models: vec![ModelConfig { id: "m1".into(), model_type: ModelType::Embedding, enabled: false, max_output_tokens: None }],
         };
         assert!(provider.find_model("m1").is_some());
         assert!(provider.find_model("ghost").is_none());

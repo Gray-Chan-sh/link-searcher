@@ -681,7 +681,7 @@ fn extract_retrieval_keywords(query: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut out: Vec<String> = Vec::new();
-    for t in crate::search::schema::JIEBA.tokenize(q, jieba_rs::TokenizeMode::Search, true) {
+    for t in crate::search::schema::JIEBA.lock().unwrap().tokenize(q, jieba_rs::TokenizeMode::Search, true) {
         // jieba-rs 的 Token 直接带 word（&str），无需手动切片
         let w = t.word.trim();
         if w.is_empty() || w.chars().count() < 2 || is_retrieval_stopword(w) {
@@ -704,7 +704,7 @@ fn extract_retrieval_keywords(query: &str) -> Vec<String> {
 
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
-    for t in crate::search::schema::JIEBA.cut(text, false) {
+    for t in crate::search::schema::JIEBA.lock().unwrap().cut(text, false) {
         let w = t.word.trim();
         if w.chars().count() < 2 || is_rewrite_stopword(w) {
             continue;
@@ -1905,13 +1905,14 @@ pub fn sanitize_citations(answer: &str, evidence_len: usize) -> String {
 
 /// Jaccard-like keyword overlap score between two strings.
 fn keyword_overlap(a: &str, b: &str) -> f64 {
-    let a_words: std::collections::HashSet<String> = crate::search::schema::JIEBA
+    let jieba = crate::search::schema::JIEBA.lock().unwrap();
+    let a_words: std::collections::HashSet<String> = jieba
         .cut(a, true)
         .iter()
         .map(|w| w.word.to_lowercase())
         .filter(|w| w.chars().count() >= 2)
         .collect();
-    let b_words: std::collections::HashSet<String> = crate::search::schema::JIEBA
+    let b_words: std::collections::HashSet<String> = jieba
         .cut(b, true)
         .iter()
         .map(|w| w.word.to_lowercase())
