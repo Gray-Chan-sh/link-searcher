@@ -12,8 +12,33 @@ mod text;
 use std::io::Read;
 use std::path::Path;
 use std::sync::LazyLock;
+use unicode_normalization::UnicodeNormalization;
 
 use anyhow::Result;
+
+pub fn sanitize_text(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    if text.contains('\0') {
+        return String::new();
+    }
+
+    let mut cleaned: String = text
+        .nfkc()
+        .filter(|c| !c.is_control() || *c == '\n' || *c == '\r' || *c == '\t')
+        .collect();
+
+    let replacement_count = cleaned.chars().filter(|&c| c == '\u{FFFD}').count();
+    let total_chars = cleaned.chars().count();
+
+    if total_chars > 0 && (replacement_count as f64 / total_chars as f64) > 0.15 {
+        cleaned = cleaned.replace('\u{FFFD}', " ");
+    }
+
+    cleaned.trim().to_string()
+}
 
 /// Trait for extracting plain text from files.
 pub trait Extractor: Send + Sync {
@@ -40,7 +65,7 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    match ext.as_str() {
+    let raw_res = match ext.as_str() {
         // Text formats
         "txt" | "md" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg"
         | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql" | "sh" | "bat"
@@ -76,7 +101,9 @@ pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>)
                 Err(_) => Err(anyhow::anyhow!("unsupported format '{ext}': binary content, cannot read as text")),
             }
         }
-    }
+    };
+
+    raw_res.map(|t| sanitize_text(&t))
 }
 
 /// Classify a file extension into a high-level type string.

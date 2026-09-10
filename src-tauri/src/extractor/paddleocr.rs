@@ -151,7 +151,14 @@ pub fn health_check() -> Result<(), String> {
 pub fn recognize_from_path(path: &Path) -> Result<String> {
     with_engine(|eng| {
         eng.run_from_path(path)
-            .map(|results| results.into_iter().map(|r| r.text).collect::<Vec<_>>().join(" "))
+            .map(|results| {
+                results
+                    .into_iter()
+                    .filter(|r| r.confidence >= 0.5)
+                    .map(|r| r.text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))
     })
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -170,13 +177,18 @@ pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), 
         let run = eng
             .run_with_metrics_from_path(path)
             .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))?;
-        let text = run
+        let filtered: Vec<_> = run
             .results
+            .into_iter()
+            .filter(|r| r.confidence >= 0.5)
+            .collect();
+        let text = filtered
             .iter()
             .map(|r| r.text.clone())
             .collect::<Vec<_>>()
             .join(" ");
-        Ok((text, run.results.len()))
+        let count = filtered.len();
+        Ok((text, count))
     })
     .map_err(|e| e.to_string())
 }

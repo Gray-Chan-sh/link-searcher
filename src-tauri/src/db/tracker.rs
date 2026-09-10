@@ -898,6 +898,91 @@ pub fn get_summary(conn: &Connection, file_id: &str) -> Result<Option<String>> {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct QualityReport {
+    pub total_active: u64,
+    pub failed_count: u64,
+    pub failed_samples: Vec<String>,
+    pub errors_by_type: Vec<ErrorTypeCount>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ErrorTypeCount {
+    pub error_msg: String,
+    pub count: u64,
+}
+
+pub fn get_quality_report(conn: &Connection) -> Result<QualityReport> {
+    let total_active: u64 = count_active_files(conn)?;
+
+    let failed_count: u64 = conn.query_row(
+        "SELECT COUNT(*) FROM file_tracking WHERE status='active' AND indexed=2",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n as u64)
+    .context("count failed")?;
+
+    let mut stmt = conn
+        .prepare("SELECT path FROM file_tracking WHERE status='active' AND indexed=2 LIMIT 10")
+        .context("prepare failed samples")?;
+    let failed_samples: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .context("query failed samples")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect failed samples")?;
+
+    let mut err_stmt = conn
+        .prepare(
+            "SELECT COALESCE(error_msg, 'unknown') AS err, COUNT(*) AS cnt \
+             FROM file_tracking WHERE status='active' AND indexed=2 \
+             GROUP BY err ORDER BY cnt DESC LIMIT 20",
+        )
+        .context("prepare error types")?;
+    let errors_by_type: Vec<ErrorTypeCount> = err_stmt
+        .query_map([], |row| {
+            Ok(ErrorTypeCount {
+                error_msg: row.get::<_, String>(0)?,
+                count: row.get::<_, i64>(1)? as u64,
+            })
+        })
+        .context("query error types")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect error types")?;
+
+    Ok(QualityReport {
+        total_active,
+        failed_count,
+        failed_samples,
+        errors_by_type,
+    })
+}
+
+pub fn mark_failed_for_reindex(conn: &Connection) -> Result<u64> {
+    let n = conn
+        .execute(
+            "UPDATE file_tracking SET indexed=0, error_msg=NULL, updated_at=?1 \
+             WHERE status='active' AND indexed=2",
+            rusqlite::params![chrono::Utc::now().timestamp()],
+        )
+        .context("mark_failed_for_reindex")?;
+    log::info!("[Quality] reset {} failed files for re-indexing", n);
+    Ok(n as u64)
+}
+
+pub fn mark_file_for_reindex(conn: &Connection, file_id: &str) -> Result<()> {
+    let n = conn
+        .execute(
+            "UPDATE file_tracking SET indexed=0, error_msg=NULL, updated_at=?1 WHERE id=?2",
+            rusqlite::params![chrono::Utc::now().timestamp(), file_id],
+        )
+        .context("mark_file_for_reindex")?;
+    if n == 0 {
+        anyhow::bail!("file not found: {file_id}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

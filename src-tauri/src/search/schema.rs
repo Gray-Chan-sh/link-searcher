@@ -1,18 +1,22 @@
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use jieba_rs::Jieba;
 use tantivy::schema::*;
 use tantivy::tokenizer::{LowerCaser, SimpleTokenizer, TextAnalyzer, Token, TokenStream, Tokenizer};
 use tantivy::Index;
 
-/// Name for the jieba Chinese segmentation tokenizer registered with tantivy.
 pub const JIEBA_TOKENIZER_NAME: &str = "jieba";
-
-/// Name for the suggest/autocomplete tokenizer that n-grams substrings.
 pub const SUGGEST_TOKENIZER_NAME: &str = "suggest";
 
-/// Global jieba instance, lazy-initialized with the built-in dictionary.
-pub static JIEBA: LazyLock<Jieba> = LazyLock::new(Jieba::new);
+pub static JIEBA: LazyLock<Mutex<Jieba>> = LazyLock::new(|| Mutex::new(Jieba::new()));
+
+pub fn load_custom_words(words: &[&str]) {
+    if let Ok(mut jieba) = JIEBA.lock() {
+        for word in words {
+            jieba.add_word(word, Some(100), None);
+        }
+    }
+}
 
 /// Register custom tokenizers (jieba, suggest) on the index.
 ///
@@ -100,7 +104,8 @@ impl Tokenizer for JiebaTokenizer {
     type TokenStream<'a> = JiebaTokenStream<'a>;
 
     fn token_stream<'a>(&mut self, text: &'a str) -> JiebaTokenStream<'a> {
-        let jieba_tokens = JIEBA.tokenize(text, jieba_rs::TokenizeMode::Search, true);
+        let jieba = JIEBA.lock().unwrap();
+        let jieba_tokens = jieba.tokenize(text, jieba_rs::TokenizeMode::Search, true);
         let token = jieba_tokens.first().map(|t| Token {
             offset_from: t.word.as_ptr() as usize - text.as_ptr() as usize,
             offset_to: t.word.as_ptr() as usize - text.as_ptr() as usize + t.word.len(),

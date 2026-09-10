@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-10（AI 聊天空回答修复 + max_tokens 自动检测）
+
+### 第一轮回答为空（ai-done 被守卫丢弃）
+
+- **根因**：`ChatPanel.tsx` 的 ai-done 处理器用 `loadingRef` 做守卫，当会话 `pending_started_at` 被竞态 effect 提前清空时 `loadingRef=false`，后端已成功生成的回答整个被丢弃（ai_events 有 turn_complete 记录但会话里 answer=null）。ai-done 事件本身携带 session_id 隔离，不需要额外状态守卫。
+- **修复**：移除 `loadingRef` 守卫；仅保留 `disposed` / `cancelled` 两个判断（`src/components/ChatPanel.tsx`）。
+- **附带**：新建会话默认 `full_recall=false`，避免全量召回拖慢首轮（`src/pages/AiChat.tsx`）。
+
+### LLM 输出截断 → max_tokens 自动检测
+
+- **根因**：`chat()` / `chat_stream()` 硬编码 `max_tokens=4096`，长文档梳理（如 30 份卷宗时间线）输出至 6778 字符即被网关截断。
+- **修复**：`ModelConfig` 新增 `max_output_tokens` 字段；`list_provider_models` 解析网关 `/v1/models` 的 `capabilities.maxOutput` 并缓存；新增 `active_max_tokens()` 在每次请求时读取（未检测到回退 16384）；「测试连接」按钮结果旁显示实际生效的 `max=值`（`config.rs`、`ai/mod.rs`、`AiTab.tsx`）。验证：`cargo test --lib` 252 通过。
+
+---
+
+## 2026-09-10（索引质量治理：文本清洗 + OCR 置信度过滤 + Jieba 自定义词典 + 质量诊断）
+
+- **文本清洗 `sanitize_text`**：所有提取文本在入索引前统一经过 NFKC 归一化、控制字符过滤、null 字节/乱码检测、`\u{FFFD}` 高占比清洗，杜绝二进制残留污染 Tantivy 倒排索引（`extractor/mod.rs`）。
+- **OCR 置信度过滤**：PaddleOCR 引擎池 `recognize_from_path` 与 `recognize_from_path_with_regions` 增加 `confidence >= 0.5` 阈值，过滤低置信度噪点文本框，减少幻觉字符入库（`extractor/paddleocr.rs`）。
+- **Jieba 自定义词典支持**：`JIEBA` 静态改为 `Mutex<Jieba>` 以支持运行时 `add_word`；新增 `load_custom_words` 接口，可在启动或设置变更时加载用户自定义词库，提升专有名词召回率（`search/schema.rs`）。
+- **质量诊断 API**：`db/tracker.rs` 新增 `get_quality_report`（统计失败文件数、错误类型分布、采样路径）与 `mark_failed_for_reindex` / `mark_file_for_reindex`（重置状态为 Pending 触发增量重索引），前端可在索引状态页展示低质量索引诊断（`db/tracker.rs`）。
+- 涉及文件：`src-tauri/src/extractor/mod.rs`、`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/search/schema.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/search.rs`、`src-tauri/src/db/tracker.rs`、`Cargo.toml`。验证：`cargo test --lib` 252 通过、0 失败。
+
+---
+
 ## 2026-09-10（文档图表迁移：全部替换为 Archify 交互式 HTML 图表）
 
 - **图表全面重画**：将文档中所有流程图、架构图、ASCII 图替换为 [archify](https://github.com/tt-a1i/archify) 生成的交互式 HTML 图表（17 个图表），支持缩放、搜索、聚焦、关系追踪等交互功能。
