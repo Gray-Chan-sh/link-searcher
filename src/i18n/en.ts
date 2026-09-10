@@ -78,6 +78,8 @@ const en: Record<string, string> = {
     sessions: 'Sessions',
     delete: 'Delete',
     export: 'Export',
+    export_json: 'Export JSON',
+    export_md: 'Export Markdown',
     chat_placeholder: 'Ask a question, AI answers based on your documents…',
     ask_question: 'Ask a question…',
     ask_followup: 'Follow-up…',

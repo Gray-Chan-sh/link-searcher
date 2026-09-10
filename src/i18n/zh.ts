@@ -78,6 +78,8 @@ const zh: Record<string, string> = {
     sessions: '会话',
     delete: '删除',
     export: '导出',
+    export_json: '导出 JSON',
+    export_md: '导出 Markdown',
     chat_placeholder: '输入问题，AI 基于你的文档回答…',
     ask_question: '输入问题…',
     ask_followup: '继续追问…',

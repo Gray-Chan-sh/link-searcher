@@ -78,6 +78,8 @@ const ja: Record<string, string> = {
     sessions: 'セッション',
     delete: '削除',
     export: 'エクスポート',
+    export_json: 'JSON を書き出す',
+    export_md: 'Markdown を書き出す',
     chat_placeholder: '質問を入力、AIがドキュメントに基づいて回答…',
     ask_question: '質問を入力…',
     ask_followup: 'フォローアップ…',

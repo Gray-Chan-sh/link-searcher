@@ -11,6 +11,15 @@
 - **图表清单**：数据流总览、RAG 管线、上下文三层注入、文本提取管线、全文搜索架构、目录扫描与文件监控、无引用/有引用提问流程、文件扫描与索引流程、搜索流程、实时文件监控、数据生命周期、AI 聊天面板组件架构、事件桥数据流、事件总线架构、思考中状态机、Web API 服务器架构
 - **文件变更**：新增 17 个 HTML + 17 个 JSON spec（`docs/diagrams/`），修改 6 个 Markdown 文件引用（`ARCHITECTURE.md`、`08-ai-features.md`、`03-wait-index.md`、`04-search.md`、`07-index-manage.md`、`09-backup-migrate.md`）
 
+## 2026-09-10（AI 聊天单条导出支持 Markdown）
+
+> 后端 `export_chat_session` 早已生成 Markdown（此前只有批量导出在用），单条会话导出只给了 JSON。
+
+- **修复**：单条导出区新增「导出 Markdown」按钮，文件名与 JSON 一致采用 `标题_YYYYMMDD_HHMMSS.md`；原「导出」按钮明确为「导出 JSON」。时间戳生成抽为 `exportStamp()` 供三处导出复用。
+- 涉及：`src/pages/AiChat.tsx`、`src/i18n/*.ts`（export_json / export_md，中英日韩）。验证：`tsc -b` 零错误、oxlint 0 errors。
+
+---
+
 ## 2026-09-10（LLM 改写结果有效性校验：无检索词即无效，回退规则链）
 
 > 「先 LLM 改写、再做停用词过滤」的顺序本就是现状（每轮无条件尝试 LLM 改写，失败/无增益才回退规则）。缺的是对改写结果的实体校验：LLM 若只把问题换成"文档/内容/材料"这类泛词，过滤后照样为空。

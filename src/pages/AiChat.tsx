@@ -270,20 +270,36 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     } catch { /* ignore */ }
   }, [activeId, refreshList])
 
+  // 导出文件名时间序列：YYYYMMDD_HHMMSS（本地时区）
+  const exportStamp = useCallback(() => {
+    const d = new Date()
+    const pad = (n: number) => String(n).padStart(2, '0')
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
+  }, [])
+
   const handleExport = useCallback(async () => {
     if (!activeId) return
     try {
       const content = await exportChatSessionJson(activeId)
       const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
-      const d = new Date()
-      const pad = (n: number) => String(n).padStart(2, '0')
-      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
-      await saveFile(content, `${title}_${ts}.json`)
+      await saveFile(content, `${title}_${exportStamp()}.json`)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [activeId, activeSession?.title])
+  }, [activeId, activeSession?.title, exportStamp])
+
+  // Markdown 导出：保留表格/引用标记，便于阅读与归档。
+  const handleExportMarkdown = useCallback(async () => {
+    if (!activeId) return
+    try {
+      const md = await exportChatSession(activeId)
+      const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
+      await saveFile(md, `${title}_${exportStamp()}.md`)
+    } catch (e) {
+      alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
+    }
+  }, [activeId, activeSession?.title, exportStamp])
 
   // 批量管理模式
   const [selectMode, setSelectMode] = useState(false)
@@ -336,10 +352,7 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
       }
       if (parts.length === 0) { alert(t('export_failed', { error: t('no_sessions_match') })); return }
       const combined = parts.join('\n\n---\n\n')
-      const d = new Date()
-      const pad = (n: number) => String(n).padStart(2, '0')
-      const ts = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
-      await saveFile(combined, `ai-chats-batch_${ts}.md`)
+      await saveFile(combined, `ai-chats-batch_${exportStamp()}.md`)
     } catch (e) {
       alert(t('export_failed', { error: e instanceof Error ? e.message : String(e) }))
     }
@@ -614,7 +627,14 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
               disabled={!activeId}
               className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
             >
-              {t('export')}
+              {t('export_json')}
+            </button>
+            <button
+              onClick={handleExportMarkdown}
+              disabled={!activeId}
+              className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-40"
+            >
+              {t('export_md')}
             </button>
           </div>
         </div>

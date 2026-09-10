@@ -78,6 +78,8 @@ const ko: Record<string, string> = {
     sessions: '세션',
     delete: '삭제',
     export: '내보내기',
+    export_json: 'JSON 내보내기',
+    export_md: 'Markdown 내보내기',
     chat_placeholder: '질문을 입력하면 AI가 문서를 기반으로 답변…',
     ask_question: '질문 입력…',
     ask_followup: '후속 질문…',
