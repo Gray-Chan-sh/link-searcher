@@ -6,8 +6,10 @@
 
 ## 2026-09-11（AI 聊天文件树 Windows 全部显示"未索引"修复）
 
-- **根因**：Windows 上 `read_dir` 返回反斜杠绝对路径（`D:\foo\bar`），而 `dir_config.path` 存正斜杠（`D:/foo/bar`）。根层 `parent_path == d.path` 命中没问题，但**展开子目录时**传入的是 read_dir 原样路径（反斜杠），`starts_with("D:/foo/bar/")` 永远 false → `dir_root=None` → `indexed_key` 退化为绝对路径，查不进相对路径的 `indexed_set` → 子目录所有文件显示"未索引"。macOS/Linux 分隔符一致所以无感。
-- **修复**：`get_dir_children` 比较前将 `parent_path` 归一化为正斜杠（`replace('\\', "/")`），`read_dir` 仍用原始路径（`src-tauri/src/commands/dirs.rs`）。
+- **根因**：`add_dir` 把目录选择对话框返回的路径**原样**存入 `dir_config.path`，Windows 上即反斜杠（`D:\我的目录`）。`get_dir_children` 定位 dir_root 的字符串比较假设正斜杠：
+  - 修复前：根层 `==` 精确匹配（两边都是原始反斜杠）能命中，子目录 `starts_with("D:\foo/")` 失败 → 子目录全"未索引"；
+  - 第一版修复只把 `parent_path` 归一化为正斜杠，`d.path` 未动，反而连根层精确匹配也失配 → **全部**"未索引"（macOS/Linux 分隔符天然一致所以无感）。
+- **修复**：比较时对 `d.path` 与 `parent_path` **两侧同时**归一化为正斜杠；`dir_root` 保留原始格式返回（`strip_prefix` 按组件比较，Windows 混合分隔符可命中），扫描器不受影响（`src-tauri/src/commands/dirs.rs`）。
 
 ---
 
