@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-11（跨平台路径归一化 Wave 2：前端边界）
+
+- **新增 `src/utils/normalizePath.ts`**：`\`→`/` 单点归一化工具。
+- **IPC 边界统一归一**：`api/dirs.ts` 的 `listDirs` / `getDirChildren` / `getDirTree`（含子树递归）与 `api/files.ts` 的 `searchFilePaths` / `searchTreePrune` / `listenAiStream`（`source_files` + `evidence[].path`）全部在进入 UI 前归一化——目录 label `split('/')`、evidence 引用 chip、`/browse?path=` 深链与 `data-relpath` 对齐随之修复。
+- **TreeFileList rel 兜底**：`AiChat.tsx` 相对路径计算改为剥 `/\` 双前导分隔符 + 反斜杠转换，杜绝 `D:\dir` slice 出 `\sub\a.pdf` 脏路径流入 scope/mention（Windows AI 聊天"严格模式拒绝"——范围匹配 0 命中——即此根因）。
+- **`scopeMerge` 接入归一**：父吞子前缀比较分隔符无关，并把输出统一为正斜杠；`scopeMerge.test.ts` 补 3 个反斜杠/混配/尾 `\` 用例（16/16 绿）。
+
+## 2026-09-11（跨平台路径归一化 Wave 3：平台补充）
+
+- **Windows 揭示文件不再闪控制台**：`explorer /select` 子进程改走 `process::new()`（CREATE_NO_WINDOW），与其它 CLI 工具一致（`commands/files.rs`）。
+- **Windows ffmpeg 定位扩充**：搜寻路径补 winget Links shim（`%LOCALAPPDATA%\Microsoft\WinGet\Links`）、chocolatey（`C:\ProgramData\chocolatey\bin`）、scoop（`%USERPROFILE%\scoop\apps\ffmpeg\current\bin`）——GUI 程序不继承 shell PATH 时仍能定位（`extractor/audio.rs`）。
+- **导出文件名非法字符**：审计确认 `AiChat.tsx` 导出标题已含 `<>:"|?*` 过滤，无需改动。
+- **明确不做**（记录原因）：build.rs/tauri.conf 的 Windows 版 poppler/ffmpeg 打包（当前设计即 Windows 用系统安装 + setup 脚本预装，盲改需 Windows CI 实测防回归）；musl Linux 无操作提示；PaddleOCR 三平台线程优先级对齐。
+
+---
+
 ## 2026-09-11（跨平台路径归一化 Wave 1：Rust 存储层）
 
 全面审计（前端 16 处 / Rust 49 处 / 平台矩阵）确认根因：`dir_config.path` 由 OS 来源原样入库（Windows 反斜杠、`canonicalize` 的 `\\?\` 前缀），下游所有分隔符敏感比较（strip_prefix/LIKE 前缀/HashMap 键/AI 范围 starts_with）在 Windows 失配。Wave 1 落地「入口归一」：

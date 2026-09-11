@@ -1,4 +1,5 @@
 import * as client from './client'
+import { normalizePath } from '../utils/normalizePath'
 
 export interface FileDetail {
   id: string
@@ -173,11 +174,13 @@ export async function conversationAskStream(messages: ChatMessage[], sourceIds: 
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {
-  return client.invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
+  const items = await client.invoke<string[]>('search_file_paths', { prefix, limit: limit ?? 20 })
+  return items.map(normalizePath)
 }
 
 export async function searchTreePrune(term: string): Promise<string[]> {
-  return client.invoke<string[]>('search_tree_prune', { term })
+  const items = await client.invoke<string[]>('search_tree_prune', { term })
+  return items.map(normalizePath)
 }
 
 /** Listen for streaming chunks/done of one session. Returns an unlisten fn. */
@@ -190,7 +193,15 @@ export async function listenAiStream(
     if (e.session_id === sessionId) onChunk(e.delta, e.reasoning)
   })
   const unDone = await client.listen<AiDonePayload>('ai-done', e => {
-    if (e.session_id === sessionId) onDone(e)
+    if (e.session_id === sessionId) {
+      // Evidence/source paths come from the DB in forward-slash form but on
+      // Windows can round-trip OS paths; normalize before UI consumption.
+      onDone({
+        ...e,
+        source_files: e.source_files.map(normalizePath),
+        evidence: e.evidence?.map(ev => ({ ...ev, path: normalizePath(ev.path) })),
+      })
+    }
   })
   return () => { unChunk(); unDone() }
 }

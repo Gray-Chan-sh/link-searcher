@@ -1,4 +1,5 @@
 import * as client from './client'
+import { normalizePath } from '../utils/normalizePath'
 
 export interface DirConfig {
   id: string
@@ -21,8 +22,13 @@ export async function removeDir(id: string): Promise<void> {
   return client.invoke('remove_dir', { id })
 }
 
+function normNode(n: DirTreeNode): DirTreeNode {
+  return { ...n, path: normalizePath(n.path), children: n.children.map(normNode) }
+}
+
 export async function listDirs(): Promise<DirConfig[]> {
-  return client.invoke<DirConfig[]>('list_dirs')
+  const dirs = await client.invoke<DirConfig[]>('list_dirs')
+  return dirs.map(d => ({ ...d, path: normalizePath(d.path) }))
 }
 
 export interface DirTreeNode {
@@ -35,11 +41,12 @@ export interface DirTreeNode {
 }
 
 export async function getDirTree(dirId: string, includeFiles?: boolean): Promise<DirTreeNode> {
-  return client.invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false })
+  return normNode(await client.invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false }))
 }
 
 export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]> {
-  return client.invoke<DirTreeNode[]>('get_dir_children', { parentPath })
+  const items = await client.invoke<DirTreeNode[]>('get_dir_children', { parentPath })
+  return items.map(normNode)
 }
 
 export async function updateDir(id: string, alias?: string, ocrLang?: string, excludePatterns?: string, includeExts?: string, recursive?: boolean, private_?: boolean): Promise<void> {

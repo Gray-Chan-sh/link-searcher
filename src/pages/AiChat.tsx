@@ -767,9 +767,12 @@ function TreeFileList({ node, basePath, onPick, onScope, filter }: {
   const [loading, setLoading] = useState(false)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const isDir = node.is_dir || node.children.length > 0
+  // rel 统一为正斜杠且无前导分隔符：slice 出的碎片在 Windows 上是反斜杠
+  // （`D:\dir` - `D:\dir` → `\二审\a.pdf`），旧正则只剥 '/'，脏路径流入
+  // scope/mention 后与 DB 正斜杠相对路径永不相配。
   const rel = node.path.startsWith(basePath)
-    ? node.path.slice(basePath.length).replace(/^\/+/, '')
-    : node.path
+    ? node.path.slice(basePath.length).replace(/^[/\\]+/, '').replace(/\\/g, '/')
+    : node.path.replace(/\\/g, '/')
 
   const sortedChildren = children ? sortTreeNodes(children) : null
   const filteredChildren = sortedChildren && filter ? sortedChildren.filter(c => passesFilter(c, filter)) : sortedChildren

@@ -53,4 +53,18 @@ describe('mergeScopePrefixes', () => {
   it('whitespace trimmed: [" A", " A/B"] → ["A"]', () => {
     expect(mergeScopePrefixes([' A', ' A/B'])).toEqual(['A'])
   })
+
+  // Windows 反斜杠来源（文件树 rel / 拖拽 / 旧会话存量）必须与正斜杠同语义，
+  // 且输出统一为正斜杠形式
+  it('backslash separator: ["A\\\\B", "A\\\\B\\\\C"] → ["A/B"]', () => {
+    expect(mergeScopePrefixes(['A\\B', 'A\\B\\C'])).toEqual(['A/B'])
+  })
+
+  it('mixed separators: ["A/B", "A\\\\B\\\\C"] → ["A/B"]', () => {
+    expect(mergeScopePrefixes(['A/B', 'A\\B\\C'])).toEqual(['A/B'])
+  })
+
+  it('trailing backslash: ["A\\\\", "A\\\\B"] → ["A"]', () => {
+    expect(mergeScopePrefixes(['A\\', 'A\\B'])).toEqual(['A'])
+  })
 })
