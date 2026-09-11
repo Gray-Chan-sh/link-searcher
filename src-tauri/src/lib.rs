@@ -36,11 +36,31 @@ use crate::state::ScanDelta;
 
 use tauri::Emitter;
 use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri_plugin_autostart::MacosLauncher;
 
 pub fn run() {
     run_with_config(config::load_config());
 }
+
+// 切回 Regular activation policy 会重置 Dock 图标，需重新应用
+#[cfg(target_os = "macos")]
+fn restore_dock_icon() {
+    use objc2::{AllocAnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let data = NSData::with_bytes(include_bytes!("../icons/icon.png"));
+    if let Some(icon) = NSImage::initWithData(NSImage::alloc(), &data) {
+        unsafe {
+            NSApplication::sharedApplication(mtm).setApplicationIconImage(Some(&icon));
+        }
+    }
+}
+#[cfg(not(target_os = "macos"))]
+fn restore_dock_icon() {}
 
 pub fn run_with_data_dir(data_dir: std::path::PathBuf) {
     let mut app_config = config::load_config();
@@ -544,6 +564,103 @@ get_dir_children,
                     let rgba = img.into_raw();
                     let _ = window.set_icon(tauri::image::Image::new(&rgba, w, h));
                 }
+            }
+
+            // System tray: "显示/隐藏" + "退出"，左键点击切换窗口
+            let show_hide = MenuItemBuilder::with_id("toggle", "显示/隐藏").build(app)?;
+            let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
+            let menu = MenuBuilder::new(app)
+                .item(&show_hide)
+                .separator()
+                .item(&quit)
+                .build()?;
+
+            let tray_icon = image::load_from_memory(include_bytes!("../icons/32x32.png"))
+                .ok()
+                .map(|i| {
+                    let rgba = i.into_rgba8();
+                    let (w, h) = rgba.dimensions();
+                    tauri::image::Image::new_owned(rgba.into_raw(), w, h)
+                });
+
+            let mut tray_builder = TrayIconBuilder::new()
+                .menu(&menu)
+                .tooltip("Link-Searcher")
+                .show_menu_on_left_click(false);
+            if let Some(icon) = tray_icon {
+                tray_builder = tray_builder.icon(icon);
+            }
+
+            let _tray = tray_builder
+                .on_menu_event(move |app, event| match event.id().as_ref() {
+                    "toggle" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                                #[cfg(target_os = "macos")]
+                                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                                log::info!("[TRAY] 隐藏窗口");
+                            } else {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                                    restore_dock_icon();
+                                }
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                log::info!("[TRAY] 显示窗口");
+                            }
+                        }
+                    }
+                    "quit" => {
+                        log::info!("[TRAY] 用户退出");
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            if window.is_visible().unwrap_or(false) {
+                                let _ = window.hide();
+                                #[cfg(target_os = "macos")]
+                                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                                log::info!("[TRAY] 左键隐藏窗口");
+                            } else {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+                                    restore_dock_icon();
+                                }
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                log::info!("[TRAY] 左键显示窗口");
+                            }
+                        }
+                    }
+                })
+                .build(app)?;
+
+            // 窗口关闭 → 隐藏到托盘而非退出
+            if let Some(window) = app.get_webview_window("main") {
+                let window_clone = window.clone();
+                #[cfg(target_os = "macos")]
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = window_clone.hide();
+                        #[cfg(target_os = "macos")]
+                        let _ = app_handle.set_activation_policy(tauri::ActivationPolicy::Accessory);
+                        log::info!("[WINDOW] 关闭请求 → 隐藏到托盘");
+                    }
+                });
             }
 
             Ok(())

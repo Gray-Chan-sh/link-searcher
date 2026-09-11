@@ -75,6 +75,27 @@ fn create_engine(lang: &str) -> Result<windows::Media::Ocr::OcrEngine, String> {
         ))
 }
 
+/// Windows OCR `MaxImageDimension` ≈ 4096; resize if either axis exceeds this.
+const WIN_OCR_MAX_DIM: u32 = 4000;
+
+#[cfg(target_os = "windows")]
+/// Resize oversized images to fit within Windows OCR's dimension limit.
+/// Returns the original path when no resize is needed; temp BMP otherwise.
+fn resize_for_ocr(path: &Path) -> Result<std::path::PathBuf, String> {
+    use image::GenericImageView;
+    let img = image::open(path).map_err(|e| format!("Failed to load image for resize: {e}"))?;
+    let (w, h) = img.dimensions();
+    if w <= WIN_OCR_MAX_DIM && h <= WIN_OCR_MAX_DIM {
+        return Ok(path.to_path_buf());
+    }
+    let resized = img.resize(WIN_OCR_MAX_DIM, WIN_OCR_MAX_DIM, image::imageops::FilterType::Lanczos3);
+    let out = std::env::temp_dir().join(format!("ls_winocr_{}.bmp", uuid::Uuid::new_v4()));
+    resized
+        .save(&out)
+        .map_err(|e| format!("Failed to save resized image: {e}"))?;
+    Ok(out)
+}
+
 #[cfg(target_os = "windows")]
 fn recognize_from_path_inner(path: &Path, lang: &str) -> Result<(String, usize), String> {
     use windows::core::HSTRING;
@@ -82,7 +103,10 @@ fn recognize_from_path_inner(path: &Path, lang: &str) -> Result<(String, usize),
     use windows::Storage::FileAccessMode;
     use windows::Storage::StorageFile;
 
-    let path_str = path
+    let ocr_path = resize_for_ocr(path)?;
+    let needs_cleanup = ocr_path != path;
+
+    let path_str = ocr_path
         .canonicalize()
         .map_err(|e| format!("Failed to resolve path: {e}"))?
         .to_string_lossy()
@@ -137,6 +161,10 @@ fn recognize_from_path_inner(path: &Path, lang: &str) -> Result<(String, usize),
             text.push_str(&trimmed);
             region_count += 1;
         }
+    }
+
+    if needs_cleanup {
+        let _ = std::fs::remove_file(&ocr_path);
     }
 
     Ok((text, region_count))

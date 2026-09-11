@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-09-11（Windows OCR 大图识别失败修复）
+
+- **大图 OCR 失败**：手机拍摄的高分辨率照片（> 4000px）经 Windows OCR `RecognizeAsync` 时报错 `Image dimensions are too large! Check MaxImageDimension`。根因：`windows_ocr.rs` 直接将原始尺寸 bitmap 传给 OCR 引擎，未做缩放。修复：新增 `resize_for_ocr()`，超过 `WIN_OCR_MAX_DIM`（4000px）时用 `image` crate Lanczos3 缩放后保存临时 BMP 再识别，识别完成后清理临时文件（`src-tauri/src/extractor/windows_ocr.rs`）。
+
+---
+
+## 2026-09-11（系统托盘 + 关闭隐藏）
+
+- **系统托盘图标**：`lib.rs` setup 中创建 `TrayIcon`，含"显示/隐藏"和"退出"菜单项。左键点击切换窗口可见性，右键弹出菜单（`tauri::tray` + `tauri::menu`）。
+- **托盘点击无反应修复**：`tauri.conf.json` 的 `trayIcon` 自动生成的托盘无菜单/事件，与代码创建的托盘重复且代码托盘缺 icon 不可见——删除配置项，改为代码内 `TrayIconBuilder.icon()` 加载 32x32 图标。
+- **关闭窗口 → 隐藏到托盘**：`on_window_event` 拦截 `CloseRequested`，调用 `api.prevent_close()` + `window.hide()`，窗口关闭时不再退出程序（`lib.rs`）。
+- **隐藏后 Dock 图标仍显示修复**：macOS `window.hide()` 不影响 Dock 图标，隐藏到托盘时同步 `set_activation_policy(Accessory)`（Dock 图标消失），显示窗口前切回 `Regular`；托盘菜单/左键/关闭窗口三条路径统一处理（`lib.rs`）。
+- **恢复后 Dock 图标变成默认灰色图标修复**：运行时切换 activation policy 会重置 Dock 图像，新增 `restore_dock_icon()` 用 objc2-app-kit 重新 `setApplicationIconImage`（icons/icon.png），在两条"显示"路径切回 Regular 后调用；新增依赖 `objc2-app-kit 0.3`（`Cargo.toml`）。
+- **跨平台编译修复**：`set_activation_policy` 是 macOS 专属 API，托盘/关闭窗口三处调用加 `#[cfg(target_os = "macos")]` 条件编译；Windows/Linux 行为为 `window.hide()` 后任务栏图标自动消失、托盘图标保留，无需额外处理。
+
+---
+
 ## 2026-09-11（watcher 将目录当文件登记 → EISDIR 修复 + 历史污染清理）
 
 - **根因**：notify 对 Folder Create/Modify 同样触发事件，`classify_event` 仅按 EventKind 分类不区分文件/目录，`Scanner::handle_event` 未做 `is_file` 校验即 `upsert_file`（size=APFS 目录 st_size 64~256）后 `index_file` 读目录 → `read: Is a directory (os error 21)`。全量/增量扫描路径均有 `is_file()` 过滤，仅 watcher 漏掉。
