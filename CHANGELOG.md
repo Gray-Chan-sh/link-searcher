@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-09-11（AI 聊天文件树 Windows 全部显示"未索引"修复）
+
+- **根因**：Windows 上 `read_dir` 返回反斜杠绝对路径（`D:\foo\bar`），而 `dir_config.path` 存正斜杠（`D:/foo/bar`）。根层 `parent_path == d.path` 命中没问题，但**展开子目录时**传入的是 read_dir 原样路径（反斜杠），`starts_with("D:/foo/bar/")` 永远 false → `dir_root=None` → `indexed_key` 退化为绝对路径，查不进相对路径的 `indexed_set` → 子目录所有文件显示"未索引"。macOS/Linux 分隔符一致所以无感。
+- **修复**：`get_dir_children` 比较前将 `parent_path` 归一化为正斜杠（`replace('\\', "/")`），`read_dir` 仍用原始路径（`src-tauri/src/commands/dirs.rs`）。
+
+---
+
 ## 2026-09-11（Windows OCR 大图识别失败修复）
 
 - **大图 OCR 失败**：手机拍摄的高分辨率照片（> 4000px）经 Windows OCR `RecognizeAsync` 时报错 `Image dimensions are too large! Check MaxImageDimension`。根因：`windows_ocr.rs` 直接将原始尺寸 bitmap 传给 OCR 引擎，未做缩放。修复：新增 `resize_for_ocr()`，超过 `WIN_OCR_MAX_DIM`（4000px）时用 `image` crate Lanczos3 缩放后保存临时 BMP 再识别，识别完成后清理临时文件（`src-tauri/src/extractor/windows_ocr.rs`）。

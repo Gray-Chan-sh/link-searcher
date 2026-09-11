@@ -321,6 +321,11 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
     // file_tracking.path 存的是相对监控根的路径（启动时已 migrate_paths_to_relative），
     // 而 read_dir 给出的是绝对路径——两者必须统一坐标系，否则 indexed 判定
     // 永远为 false，文件树里全部文件显示"未索引"。
+    //
+    // Windows 下 read_dir 返回反斜杠路径（D:\foo\bar），但 dir_config.path
+    // 存的是正斜杠（D:/foo/bar）——starts_with 比较会失败，导致 dir_root 为 None，
+    // 所有文件都显示"未索引"。这里统一归一化为正斜杠再比较。
+    let parent_path_norm = parent_path.replace('\\', "/");
     let mut indexed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut indexed_known = false;
     let mut dir_root: Option<String> = None;
@@ -329,8 +334,8 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
             dir_root = dirs
                 .iter()
                 .filter(|d| {
-                    parent_path == d.path
-                        || parent_path.starts_with(&format!("{}/", d.path.trim_end_matches('/')))
+                    parent_path_norm == d.path
+                        || parent_path_norm.starts_with(&format!("{}/", d.path.trim_end_matches('/')))
                 })
                 .max_by_key(|d| d.path.len())
                 .map(|d| d.path.clone());
