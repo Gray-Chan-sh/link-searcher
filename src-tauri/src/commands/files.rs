@@ -428,7 +428,8 @@ fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
 
 #[cfg(target_os = "windows")]
 fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
-    std::process::Command::new("explorer")
+    // process::new adds CREATE_NO_WINDOW — bare std spawn flashes a console.
+    crate::process::new("explorer")
         .arg(format!("/select,{}", path.to_string_lossy()))
         .spawn()
         .map(|_| ())

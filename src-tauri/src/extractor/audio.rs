@@ -23,10 +23,25 @@ fn find_ffmpeg_binary() -> Option<PathBuf> {
             }
         }
     #[cfg(target_os = "windows")]
-    for prefix in ["C:\\ffmpeg\\bin", "C:\\Program Files\\ffmpeg\\bin"] {
-        let candidate = PathBuf::from(prefix).join(&dev_name);
-        if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
-            return Some(candidate);
+    {
+        // 经 setup 脚本/winget 安装后 GUI 程序常不继承 shell PATH，需
+        // 显式枚举 winget Links shim、chocolatey、scoop 的固定落点。
+        let mut prefixes: Vec<PathBuf> = vec![
+            PathBuf::from("C:\\ffmpeg\\bin"),
+            PathBuf::from("C:\\Program Files\\ffmpeg\\bin"),
+            PathBuf::from("C:\\ProgramData\\chocolatey\\bin"),
+        ];
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            prefixes.push(PathBuf::from(local).join("Microsoft\\WinGet\\Links"));
+        }
+        if let Ok(profile) = std::env::var("USERPROFILE") {
+            prefixes.push(PathBuf::from(profile).join("scoop\\apps\\ffmpeg\\current\\bin"));
+        }
+        for prefix in &prefixes {
+            let candidate = prefix.join(&dev_name);
+            if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
+                return Some(candidate);
+            }
         }
     }
     #[cfg(not(target_os = "windows"))]
