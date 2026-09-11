@@ -590,6 +590,66 @@ pub fn merge_scope_prefixes(
     (dir_ids.to_vec(), result)
 }
 
+/// 统一范围判定（合并后硬过滤与注入过滤共用同一份语义）：
+/// - 有目录前缀：命中 = 任意前缀内 ∪ scope 点名文件
+///   （点名文件可能不在任何前缀下，必须白名单放行）
+/// - 无目录前缀且点名了文件：范围只由文件构成 → 纯白名单硬拦，
+///   堵住 BM25/向量/文件名三个全库通道把范围外文件卷进证据的泄漏
+///   （strict 语义要求：范围=文件集合时，证据只能来自该集合）
+/// - 两类条目皆无（空范围）：全库检索，不过滤
+fn hit_in_scope(
+    file_id: &str,
+    path: &str,
+    prefixes: Option<&[String]>,
+    scope_ids: Option<&[String]>,
+) -> bool {
+    if scope_ids.is_some_and(|ids| ids.iter().any(|i| i == file_id)) {
+        return true;
+    }
+    match prefixes {
+        Some(ps) => ps.iter().any(|p| path.starts_with(p.trim_end_matches('/'))),
+        // 无目录前缀但范围点了文件（scope_ids 非空）：非白名单成员一律拦截；
+        // 无任何范围条目：全库检索放行。
+        None => scope_ids.is_none(),
+    }
+}
+
+#[cfg(test)]
+mod hit_in_scope_tests {
+    use super::*;
+
+    fn ps(items: &[&str]) -> Option<Vec<String>> {
+        Some(items.iter().map(|s| s.to_string()).collect())
+    }
+    fn ids(items: &[&str]) -> Option<Vec<String>> {
+        Some(items.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn prefixes_rule_with_mention_exception() {
+        // 目录前缀内命中 → 放行
+        assert!(hit_in_scope("f1", "案件/一审/a.pdf", ps(&["案件"]).as_deref(), ids(&[]).as_deref()));
+        // 目录前缀外的命中 → 拦截
+        assert!(!hit_in_scope("f2", "其它/b.txt", ps(&["案件"]).as_deref(), ids(&[]).as_deref()));
+        // 点名文件即使不在前缀内（文件条目也进了 scope_ids）→ 放行
+        assert!(hit_in_scope("f2", "其它/b.txt", ps(&["案件"]).as_deref(), ids(&["f2"]).as_deref()));
+    }
+
+    #[test]
+    fn file_only_scope_is_pure_allowlist() {
+        // 回归核心场景：范围=文件，全库通道命中范围外文件 → 必须拦截
+        assert!(hit_in_scope("f1", "二审/x.pdf", None, ids(&["f1"]).as_deref()));
+        assert!(!hit_in_scope("f2", "一审/y.pdf", None, ids(&["f1"]).as_deref()));
+    }
+
+    #[test]
+    fn empty_scope_is_unfiltered_full_library() {
+        // 两类条目皆无 → 全库检索（宽松语义），不过滤
+        assert!(hit_in_scope("f1", "任意/a.txt", None, None));
+        assert!(hit_in_scope("f2", "任意/b.txt", None, None));
+    }
+}
+
 /// Validate an LLM rewrite response: non-empty, not longer than the input
 /// query's practical retrieval ceiling, not echoing the original, and — the
 /// key point — carrying at least one *retrievable* term.
@@ -1395,19 +1455,18 @@ pub(crate) async fn prepare_conversation_prompt(
                 }
             }
         }
-        // 硬性范围拦截：向量/chunk/path 三通道都是全库扫描，把范围外文件混进
-        // all_hits。合并完成后立即按 path_prefixes 前缀过滤（与 BM25 一致），
-        // 让范围外文件连排序/计数都进不来，杜绝证据泄漏。
-        if let Some(prefixes) = &path_prefixes_opt {
-            let mention_ids: std::collections::HashSet<&str> = mention_file_ids
-                .as_ref()
-                .map(|ids| ids.iter().map(|s| s.as_str()).collect())
-                .unwrap_or_default();
-            all_hits.retain(|h| {
-                if mention_ids.contains(h.file_id.as_str()) { return true; }
-                prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
-            });
-        }
+        // 硬性范围拦截：向量/chunk/path 三通道都是全库扫描，会把范围外文件
+        // 混进 all_hits。合并完成后立即统一过滤：目录前缀规则 ∪ scope 文件
+        // 白名单；范围只点名文件时（无前缀）为纯白名单——三个通道全拦，
+        // 杜绝"范围=文件，证据却混入同名泛词文件"的泄漏。
+        all_hits.retain(|h| {
+            hit_in_scope(
+                &h.file_id,
+                &h.path,
+                path_prefixes_opt.as_deref(),
+                mention_file_ids.as_deref(),
+            )
+        });
         // 统一排序：三通道命中按混合分（weighted_mix）降序排列，而非按通道
         // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
         // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。
@@ -1598,9 +1657,7 @@ pub(crate) async fn prepare_conversation_prompt(
     // 下目录范围内的命中也能注入（否则目录引用 + strict = 零材料 = 无法回答）。
     let inject_limit = if full_recall { all_hits.len().max(1) } else { MAX_CONTENT_INJECT };
     let scoped = |h: &ScoredHit| -> bool {
-        let Some(prefixes) = &path_prefixes_opt else { return true; };
-        if mention_file_ids.as_ref().is_some_and(|ids| ids.contains(&h.file_id)) { return true; }
-        prefixes.iter().any(|p| h.path.starts_with(p.trim_end_matches('/')))
+        hit_in_scope(&h.file_id, &h.path, path_prefixes_opt.as_deref(), mention_file_ids.as_deref())
     };
     let content_hits: Vec<&ScoredHit> = all_hits.iter()
         .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && scoped(h))
