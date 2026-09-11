@@ -556,8 +556,10 @@ impl IndexerService {
         // Compute relative path for index storage.
         let file_path_str = match crate::db::dir_config::get_dir(&conn, dir_id) {
             Ok(Some(cfg)) => crate::scanner::helpers::to_relative(&cfg.path, file_path)
-                .unwrap_or_else(|_| file_path.to_string_lossy().to_string()),
-            _ => file_path.to_string_lossy().to_string(),
+                .unwrap_or_else(|_| {
+                    crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy())
+                }),
+            _ => crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy()),
         };
 
         let job = BatchJob {

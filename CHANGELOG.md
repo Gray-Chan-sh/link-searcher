@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-09-11（跨平台路径归一化 Wave 1：Rust 存储层）
+
+全面审计（前端 16 处 / Rust 49 处 / 平台矩阵）确认根因：`dir_config.path` 由 OS 来源原样入库（Windows 反斜杠、`canonicalize` 的 `\\?\` 前缀），下游所有分隔符敏感比较（strip_prefix/LIKE 前缀/HashMap 键/AI 范围 starts_with）在 Windows 失配。Wave 1 落地「入口归一」：
+
+- **新增 `normalize_os_path()`**：`\`→`/`、剥 `\\?\` / `\\?\UNC\` 前缀、去尾斜杠（保留盘根 `D:/` 与 `/`），含全用例单测（`scanner/helpers.rs`）。
+- **`add_dir` 入库归一**：`db/dir_config.rs` 存储前经 `normalize_os_path`，覆盖 GUI 对话框与 CLI `ensure_dir_config` 两条入口。
+- **启动迁移升级**：`migrate_paths_to_relative` 重写为分隔符无关——按 dir_id 全量取行、Rust 侧归一化后剥前缀，替换失效的 SQL LIKE 前缀匹配（历史上 Windows 静默迁移 0 条）；新增 `migrate_dir_paths_to_forward_slash` 一次性洗存量 `dir_config.path`；两者在 `db/mod.rs`（洗根先于相对化）与 `lib.rs` 启动扫描前按序执行，幂等（二跑零改动），混配场景回归测试覆盖（反斜杠/UNC 混配 → 全部收敛为相对正斜杠 + 幂等断言）。
+- **索引回退串归一**：`indexer.rs` 中 `to_relative` 失败的绝对路径回退串同样归一化，消灭 Tantivy/DB 坐标分叉；scanner HashMap 查找/误删检测随根修复自动免疫。
+
+---
+
 ## 2026-09-11（AI 聊天文件树 Windows 全部显示"未索引"修复）
 
 - **根因**：`add_dir` 把目录选择对话框返回的路径**原样**存入 `dir_config.path`，Windows 上即反斜杠（`D:\我的目录`）。`get_dir_children` 定位 dir_root 的字符串比较假设正斜杠：

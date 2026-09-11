@@ -263,30 +263,65 @@ pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
         .context("failed to list dirs for migration")?;
     let mut count = 0u64;
     for dir in &dirs {
-        let prefix = format!("{}/", dir.path.trim_end_matches('/'));
+        // Norm 相对化必须分隔符无关：Windows 老库里 dir.path 可能是反斜杠或
+        // \\?\ 前缀、file_tracking.path 可能是绝对反斜杠——LIKE 前缀 + String
+        // strip_prefix 在这种混配下全部失配（历史上在 Windows 静默迁移 0 条）。
+        // 改为按 dir_id 全量取行、Rust 侧统一归一化后再剥前缀。
+        let root_norm = crate::scanner::helpers::normalize_os_path(&dir.path);
+        let prefix = format!("{}/", root_norm.trim_end_matches('/'));
         let mut stmt = conn
-            .prepare("SELECT id, path FROM file_tracking WHERE dir_id=?1 AND path LIKE ?2")
+            .prepare("SELECT id, path FROM file_tracking WHERE dir_id=?1")
             .context("prepare migration select")?;
         let rows = stmt
-            .query_map(
-                rusqlite::params![dir.id, format!("{prefix}%")],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
+            .query_map(rusqlite::params![dir.id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .context("query migration rows")?;
         for row in rows {
             let (id, path) = row.context("read migration row")?;
-            if let Some(rel) = path.strip_prefix(&prefix) {
-                let file_ext = extension_of(rel);
-                conn.execute(
-                    "UPDATE file_tracking SET path=?1, file_ext=?2 WHERE id=?3",
-                    rusqlite::params![rel, file_ext, id],
-                )
-                .context("update migrated path")?;
-                count += 1;
+            let norm = crate::scanner::helpers::normalize_os_path(&path);
+            let Some(rel) = norm.strip_prefix(&prefix).map(str::to_string) else {
+                continue;
+            };
+            if rel == path {
+                continue; // already canonical
             }
+            let file_ext = extension_of(&rel);
+            conn.execute(
+                "UPDATE file_tracking SET path=?1, file_ext=?2 WHERE id=?3",
+                rusqlite::params![rel, file_ext, id],
+            )
+            .context("update migrated path")?;
+            count += 1;
         }
     }
     log::info!("[DB] 路径迁移: {} 条记录", count);
+    Ok(count)
+}
+
+/// One-time normalization of `dir_config.path` rows stored before
+/// normalize-on-write existed (Windows: backslashes / `\\?\` prefixes).
+/// Runs inside the schema-migration window alongside
+/// `migrate_paths_to_relative`; returns the number of rewritten rows.
+pub fn migrate_dir_paths_to_forward_slash(conn: &Connection) -> Result<u64> {
+    let dirs = crate::db::dir_config::list_dirs(conn)
+        .context("failed to list dirs for dir-path migration")?;
+    let mut count = 0u64;
+    for dir in dirs {
+        let normalized = crate::scanner::helpers::normalize_os_path(&dir.path);
+        if normalized == dir.path {
+            continue;
+        }
+        conn.execute(
+            "UPDATE dir_config SET path=?1 WHERE id=?2",
+            rusqlite::params![normalized, dir.id],
+        )
+        .context("update dir_config path")?;
+        count += 1;
+    }
+    if count > 0 {
+        log::info!("[DB] dir_config 路径归一化: {} 条", count);
+    }
     Ok(count)
 }
 
@@ -987,6 +1022,50 @@ pub fn mark_file_for_reindex(conn: &Connection, file_id: &str) -> Result<()> {
 mod tests {
     use super::*;
     fn db() -> Connection { let c = Connection::open_in_memory().unwrap(); crate::db::run_migrations(&c).unwrap(); c }
+
+    fn insert_raw_dir(conn: &Connection, id: &str, path: &str) {
+        conn.execute(
+            "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at) \
+             VALUES (?1, ?2, NULL, 'eng', NULL, NULL, 1, 0, 0)",
+            rusqlite::params![id, path],
+        ).unwrap();
+    }
+
+    fn insert_raw_file(conn: &Connection, path: &str, dir_id: &str) {
+        conn.execute(
+            "INSERT INTO file_tracking (id, path, dir_id, mtime, size, md5, status, indexed, error_msg, created_at, updated_at, dead_content) \
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, 0, 0, NULL, 'active', 1, NULL, 0, 0, 0)",
+            rusqlite::params![path, dir_id],
+        ).unwrap();
+    }
+
+    #[test]
+    fn test_migrate_normalizes_legacy_separator_mix() {
+        let conn = db();
+        insert_raw_dir(&conn, "d1", r"D:\我的目录");
+        insert_raw_dir(&conn, "d2", r"\\?\D:\unc");
+        insert_raw_file(&conn, r"D:\我的目录\二审\a.pdf", "d1");
+        insert_raw_file(&conn, r"\\?\D:\我的目录\b.txt", "d1");
+        insert_raw_file(&conn, r"D:\unc\sub\c.md", "d2");
+        insert_raw_file(&conn, "already/relative.txt", "d1");
+
+        let normed = migrate_dir_paths_to_forward_slash(&conn).unwrap();
+        assert_eq!(normed, 2);
+
+        let migrated = migrate_paths_to_relative(&conn).unwrap();
+        assert_eq!(migrated, 3);
+
+        let rows = |id: &str| -> Vec<String> {
+            let mut stmt = conn.prepare("SELECT path FROM file_tracking WHERE dir_id=?1 ORDER BY path").unwrap();
+            stmt.query_map([id], |r| r.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(rows("d1"), vec!["already/relative.txt", "b.txt", "二审/a.pdf"]);
+        assert_eq!(rows("d2"), vec!["sub/c.md"]);
+
+        // Idempotent: second pass is a no-op.
+        assert_eq!(migrate_dir_paths_to_forward_slash(&conn).unwrap(), 0);
+        assert_eq!(migrate_paths_to_relative(&conn).unwrap(), 0);
+    }
 
     #[test]
     fn test_absorb_subdir_reroots_paths_and_dir_id() {

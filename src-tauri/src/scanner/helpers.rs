@@ -154,6 +154,32 @@ pub fn to_absolute(dir_root: &str, rel_path: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(dir_root).join(rel_path)
 }
 
+/// Normalize an OS path string to the internal canonical form used by the
+/// database and frontend: forward slashes only, no Windows verbatim prefix.
+///
+/// Windows sources (folder dialog, `read_dir`, `canonicalize`) all produce
+/// backslash paths, and `canonicalize` additionally emits `\\?\` verbatim
+/// prefixes; unnormalized storage made every separator-sensitive comparison
+/// downstream (strip_prefix, starts_with, LIKE prefixes, HashMap keys) fail
+/// on Windows while macOS/Linux were unaffected. All persisted paths
+/// (dir_config.path, file_tracking.path, Tantivy path) go through this.
+pub fn normalize_os_path(input: &str) -> String {
+    let stripped = if let Some(rest) = input.strip_prefix(r"\\?\UNC\") {
+        // \\?\UNC\server\share -> //server/share (network path)
+        format!("//{rest}")
+    } else {
+        input.strip_prefix(r"\\?\").map(str::to_string).unwrap_or_else(|| input.to_string())
+    };
+    let mut out = stripped.replace('\\', "/");
+    while let Some(trimmed) = out.strip_suffix('/') {
+        if trimmed.is_empty() || trimmed.ends_with(':') {
+            break;
+        }
+        out = trimmed.to_string();
+    }
+    out
+}
+
 pub fn needs_reindex(existing: &Option<FileRecord>, mtime: i64) -> bool {
     match existing {
         // Extracted (Phase-1 done, Tantivy write pending) is treated as
@@ -247,5 +273,16 @@ mod tests {
         assert_eq!(to_relative(root, Path::new("/tmp/foo/sub/deep.txt")).unwrap(), "sub/deep.txt");
         // sibling with shared prefix must NOT match
         assert!(to_relative(root, Path::new("/tmp/foobar/x.txt")).is_err());
+    }
+
+    #[test]
+    fn normalize_os_path_converts_and_strips_verbatim_prefix() {
+        assert_eq!(normalize_os_path(r"D:\我的目录\子目录"), "D:/我的目录/子目录");
+        assert_eq!(normalize_os_path(r"\\?\D:\foo\bar"), "D:/foo/bar");
+        assert_eq!(normalize_os_path(r"\\?\UNC\server\share\x.txt"), "//server/share/x.txt");
+        assert_eq!(normalize_os_path("/tmp/foo/"), "/tmp/foo");
+        assert_eq!(normalize_os_path("D:/"), "D:/");
+        assert_eq!(normalize_os_path("/"), "/");
+        assert_eq!(normalize_os_path("already/normal.txt"), "already/normal.txt");
     }
 }

@@ -414,8 +414,11 @@ get_dir_children,
                 return Ok(());
             }
 
-            // One-time migration: convert absolute paths to relative
+            // One-time migration: normalize legacy separator variants, then
+            // convert absolute paths to relative (order matters — the relative
+            // migration derives its strip prefix from dir_config roots).
             if let Ok(conn) = db_ref.get() {
+                let _ = crate::db::tracker::migrate_dir_paths_to_forward_slash(&conn);
                 let _ = crate::db::tracker::migrate_paths_to_relative(&conn);
             }
 

@@ -86,6 +86,14 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // `private` column on dir_config.
     drop_dir_config_private_column(&tx)?;
 
+    // One-time normalization of dir_config.path rows stored before
+    // normalize-on-write (Windows backslashes / \\?\ verbatim prefixes);
+    // must run BEFORE migrate_paths_to_relative derives prefixes from roots.
+    let dirs_normed = tracker::migrate_dir_paths_to_forward_slash(&tx).unwrap_or(0);
+    if dirs_normed > 0 {
+        log::info!("[DB] dir_config paths normalized: {}", dirs_normed);
+    }
+
     // Migrate any absolute paths stored in file_tracking.path to relative
     // form (relative to each dir_config root), fixing a historic bug where
     // migration was never actually invoked at startup.

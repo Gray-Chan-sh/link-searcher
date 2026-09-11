@@ -48,6 +48,7 @@ pub fn add_dir(
     let id = Uuid::new_v4().to_string();
     let lang = ocr_lang.unwrap_or("eng");
     let rec_i64: i64 = if recursive { 1 } else { 0 };
+    let path = crate::scanner::helpers::normalize_os_path(path);
 
     conn.execute(
         "INSERT INTO dir_config (id, path, alias, ocr_lang, exclude_patterns, include_exts, recursive, created_at, updated_at) \
