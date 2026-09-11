@@ -1,0 +1,4 @@
+{"image":"hello_ocr.png","expected_text":"Hello OCR 123","max_cer":0.15}
+{"image":"numbers.png","expected_text":"1234567890","max_cer":0.0}
+{"image":"chinese_contract.png","expected_text":"合同编号 2024","max_cer":0.20}
+{"image":"test_text.png","expected_text":"测试文本 ABC","max_cer":0.20}

@@ -5,8 +5,9 @@ mod image;
 pub mod ocr;
 pub mod office;
 pub mod paddleocr;
-pub mod windows_ocr;
 pub mod pdf;
+pub mod quality;
+pub mod windows_ocr;
 mod text;
 
 use std::io::Read;

@@ -103,6 +103,9 @@ windows = { version = "0.61", features = [
 [dev-dependencies]
 dirs = "5"
 tauri = { version = "2", features = ["test", "dynamic-acl"] }
+image = "0.25"
+imageproc = "0.25"
+ab_glyph = "0.2"
 
 [features]
 default = ["custom-protocol"]

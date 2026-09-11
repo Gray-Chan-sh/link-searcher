@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 0：质量评分模块 + CER 回归基线）
+
+- **新增质量评分模块 `extractor/quality.rs`**：纯函数 `compute_quality()` 用 5 项**无真值**指标（可打印字符比例 / `U+FFFD` 乱码比例 / OCR 平均置信度 / 字符密度 / 词典命中率）加权合成 0–1 质量分，红黄绿三档阈值，并产出 `QualityFlag`（`low_printable`/`high_fffd`/`low_confidence`/`low_density`/`low_lexicon`/`exhausted`/`max_reextract`）；`ExtractMeta` 承载 OCR 是否使用、平均置信度、PDF 页数、图片尺寸。
+- **新增 `cer()` 字符错误率**：去空白后归一化 Levenshtein 距离，作为金标准评测指标（替换旧的"只断言检测到区域"式假测试）。
+- **新增词典数据**：`extractor/lexicons/top3500_cjk.txt`（3500 常用汉字）+ `top3000_en.txt`（3000 常用英文词），经 `LazyLock` 载入。
+- **新增 OCR 金标准回归评测（F2）**：`tests/ocr_eval.rs` + `scripts/eval/ocr_fixtures/`（合成样本 manifest，运行时用 ab_glyph 渲染已知文本）+ `scripts/eval/run_ocr_eval.sh`；逐条断言 `CER <= max_cer` 并输出平均 CER，无 OCR 引擎时优雅跳过。真实样本目录 `real/` 全量 gitignore（隐私）。
+- **测试**：quality 单测 10 例全绿；OCR CER 评测 4/4 通过（平均 CER 0.0000，Apple Vision 引擎）；全量 `cargo test` 无新增回归（`integration.rs` 的 2 例失败经 `git stash` 复核为 master 既有问题，与本次改动无关）。
+- **新增 dev-dependencies**：`image` / `imageproc` / `ab_glyph`（供合成样本渲染，均已在 `[dependencies]`）。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。
