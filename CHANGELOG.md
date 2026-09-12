@@ -67,6 +67,14 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 6：存量库质量分回填）
+
+- **存量质量分回填**：新增 `backfill_quality(limit?)` 命令 + `tracker::get_content_missing_quality` / `update_content_quality`——遍历 `content_index` 中 `quality_score IS NULL` 的存量行，**直接读取已存文本**算分（**不重跑 OCR/提取**）；PDF 用 `get_pdf_page_count`（改为 `pub(crate)`）补页数、图片用 `image::image_dimensions` 补尺寸，使「字符密度」指标对存量数据同样有效。默认 2000 条、上限 20000，走 `spawn_blocking` + `TaskGuard` + 状态栏任务简报；一条 md5 对应多文件时 `GROUP BY md5` 去重。
+- **UI**：索引状态页「质量体检」卡片新增「补齐质量分」按钮，完成后显示处理/补齐数量并刷新分布与审计清单；i18n 四语言（zh/en/ja/ko）补齐键。
+- **测试**：`cargo test --lib` 298 全绿（+6）；`cargo check --all-targets` 零错误；`npx tsc --noEmit` 零错误；`npm run build` 成功；`semgrep` ERROR 级 0 findings。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

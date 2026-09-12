@@ -505,5 +505,9 @@ const ko: Record<string, string> = {
     quality_not_evaluated: '미평가',
     quality_re_extract: '재추출',
     quality_re_extracting: '추출 중…',
+    backfill_quality: '품질 점수 보충',
+    backfill_quality_busy: '보충 중…',
+    backfill_quality_done: '{processed}개 처리, {scored}개 점수 부여',
+    backfill_quality_noop: '보충 불필요 — 모든 파일에 이미 점수가 있습니다',
 }
 export default ko

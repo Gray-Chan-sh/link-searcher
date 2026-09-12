@@ -126,6 +126,15 @@ export async function reExtractLowQuality(limit?: number): Promise<ReextractRepo
   })
 }
 
+export interface QualityBackfillReport {
+  processed: number
+  scored: number
+}
+
+export async function backfillQuality(limit?: number): Promise<QualityBackfillReport> {
+  return client.invoke<QualityBackfillReport>('backfill_quality', { limit })
+}
+
 /** Restore soft-deleted records (Browse「已删除」视图) and re-index them.
  *  Returns the number of files actually restored (disk-present ones). */
 export async function restoreFiles(ids: string[]): Promise<number> {

@@ -505,5 +505,9 @@ const ja: Record<string, string> = {
     quality_not_evaluated: '未評価',
     quality_re_extract: '再抽出',
     quality_re_extracting: '抽出中…',
+    backfill_quality: '品質スコアを補完',
+    backfill_quality_busy: '補完中…',
+    backfill_quality_done: '{processed} 件処理、{scored} 件スコア付与',
+    backfill_quality_noop: '補完不要 — 全ファイルに既にスコアがあります',
 }
 export default ja

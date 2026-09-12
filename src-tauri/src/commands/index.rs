@@ -1670,6 +1670,98 @@ pub async fn re_extract_low_quality(
     .map_err(|e| format!("task panicked: {e}"))?
 }
 
+#[derive(Serialize)]
+pub struct QualityBackfillReport {
+    pub processed: usize,
+    pub scored: usize,
+}
+
+#[tauri::command]
+pub async fn backfill_quality(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<QualityBackfillReport, String> {
+    let limit = limit.unwrap_or(2000).min(20000);
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = crate::state::TaskGuard::new("quality-backfill");
+        let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+
+        let dir_roots: std::collections::HashMap<String, String> =
+            crate::db::dir_config::list_dirs(&conn)
+                .map_err(|e| format!("{e}"))?
+                .into_iter()
+                .map(|d| (d.id, d.path))
+                .collect();
+
+        let rows = tracker::get_content_missing_quality(&conn, limit)
+            .map_err(|e| format!("{e}"))?;
+        let mut processed = 0usize;
+        let mut scored = 0usize;
+
+        for row in &rows {
+            processed += 1;
+            let ext = row
+                .rel_path
+                .as_deref()
+                .and_then(|p| std::path::Path::new(p).extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+
+            let mut meta = crate::extractor::quality::ExtractMeta {
+                ocr_used: row.ocr_used,
+                mean_confidence: None,
+                page_count: None,
+                image_dims: None,
+            };
+
+            if ext == "pdf" {
+                if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
+                    if let Some(root) = dir_roots.get(dir_id) {
+                        let abs = std::path::Path::new(root).join(rel);
+                        meta.page_count =
+                            crate::extractor::pdf::get_pdf_page_count(&abs).ok();
+                    }
+                }
+            } else if matches!(
+                ext.as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
+            ) {
+                if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
+                    if let Some(root) = dir_roots.get(dir_id) {
+                        let abs = std::path::Path::new(root).join(rel);
+                        meta.image_dims = ::image::image_dimensions(&abs).ok();
+                    }
+                }
+            }
+
+            let quality =
+                crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
+            let flags_json =
+                crate::extractor::quality::flags_to_json(&quality.flags);
+            if let Err(e) =
+                tracker::update_content_quality(&conn, &row.md5, quality.score as f64, &flags_json)
+            {
+                log::warn!("[QUALITY-BACKFILL] update failed {}: {e}", row.md5);
+                continue;
+            }
+            scored += 1;
+        }
+
+        log::info!(
+            "[QUALITY-BACKFILL] done: {processed} processed, {scored} scored"
+        );
+        crate::state::push_task_brief(
+            "quality-backfill",
+            format!("质量评分回填完成: {processed} 处理, {scored} 评分"),
+        );
+        Ok(QualityBackfillReport { processed, scored })
+    })
+    .await
+    .map_err(|e| format!("quality-backfill task panicked: {e}"))?
+}
+
 /// Manual re-index of a single file. Looks up the DB record, resolves the
 /// full disk path from dir_config, and re-extracts + re-indexes.
 #[tauri::command]
@@ -1981,6 +2073,50 @@ mod tests {
         let (count, exhausted) = next_reextract_state(2, None, None);
         assert_eq!(count, 3);
         assert!(!exhausted);
+    }
+
+    #[test]
+    fn backfill_quality_scores_text_without_file_access() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        crate::db::dir_config::add_dir(&conn, "/nonexistent", None, None, None, None, true).unwrap();
+        let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
+
+        let fid_a = crate::db::tracker::upsert_file(&conn, "a.txt", &d.id, 100, 10, Some("md5_a")).unwrap();
+        crate::db::tracker::update_indexed(&conn, &fid_a, Some("md5_a")).unwrap();
+        crate::db::tracker::store_content(&conn, "md5_a", "Hello World 你好世界 test text 12345", false, None).unwrap();
+
+        let fid_b = crate::db::tracker::upsert_file(&conn, "b.pdf", &d.id, 100, 10, Some("md5_b")).unwrap();
+        crate::db::tracker::update_indexed(&conn, &fid_b, Some("md5_b")).unwrap();
+        crate::db::tracker::store_content(&conn, "md5_b", "PDF extracted text content here with enough chars", false, None).unwrap();
+
+        let missing = crate::db::tracker::get_content_missing_quality(&conn, 100).unwrap();
+        assert_eq!(missing.len(), 2);
+
+        for row in &missing {
+            let ext = row.rel_path.as_deref()
+                .and_then(|p| std::path::Path::new(p).extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let meta = crate::extractor::quality::ExtractMeta {
+                ocr_used: row.ocr_used,
+                mean_confidence: None,
+                page_count: None,
+                image_dims: None,
+            };
+            let quality = crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
+            let flags_json = crate::extractor::quality::flags_to_json(&quality.flags);
+            crate::db::tracker::update_content_quality(&conn, &row.md5, quality.score as f64, &flags_json).unwrap();
+        }
+
+        let still_missing = crate::db::tracker::get_content_missing_quality(&conn, 100).unwrap();
+        assert_eq!(still_missing.len(), 0, "all rows should be scored");
+
+        let (score_a, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
+        assert!(score_a.unwrap() > 0.5, "score_a={score_a:?}");
+        let (score_b, _) = crate::db::tracker::get_content_quality(&conn, "md5_b").unwrap().unwrap();
+        assert!(score_b.unwrap() > 0.5, "score_b={score_b:?}");
     }
 }
 #[cfg(test)]

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, type IndexError, type QualityAuditEntry } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, backfillQuality, type IndexError, type QualityAuditEntry } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -42,6 +42,8 @@ export default function IndexStatus() {
   const [auditEntries, setAuditEntries] = useState<QualityAuditEntry[]>([])
   const [showAudit, setShowAudit] = useState(false)
   const [auditing, setAuditing] = useState(false)
+  const [backfillingQuality, setBackfillingQuality] = useState(false)
+  const [qualityBackfillMsg, setQualityBackfillMsg] = useState<string | null>(null)
   const [reextractingId, setReextractingId] = useState<string | null>(null)
 
   useEffect(() => {
@@ -251,6 +253,28 @@ export default function IndexStatus() {
     }
   }
 
+  const handleBackfillQuality = async () => {
+    setBackfillingQuality(true)
+    setQualityBackfillMsg(null)
+    try {
+      const r = await backfillQuality()
+      setQualityBackfillMsg(
+        r.processed > 0
+          ? t('backfill_quality_done', { processed: r.processed, scored: r.scored })
+          : t('backfill_quality_noop')
+      )
+      fetchQualityData()
+      if (showAudit) {
+        const entries = await qualityAudit(0.5, 100)
+        setAuditEntries(entries)
+      }
+    } catch (e) {
+      setQualityBackfillMsg(String(e))
+    } finally {
+      setBackfillingQuality(false)
+    }
+  }
+
   const handleReExtract = async (fileId: string) => {
     setReextractingId(fileId)
     try {
@@ -452,14 +476,24 @@ export default function IndexStatus() {
                   <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('quality_health')}</h3>
                   <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('quality_health_desc')}</p>
                 </div>
-                <button
-                  onClick={handleAudit}
-                  disabled={auditing}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
-                >
-                  {auditing && <LoadingSpinner className="size-3" />}
-                  {showAudit ? t('close') : t('audit_low_quality')}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleBackfillQuality}
+                    disabled={backfillingQuality}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/40 disabled:opacity-50 transition-colors"
+                  >
+                    {backfillingQuality && <LoadingSpinner className="size-3" />}
+                    {backfillingQuality ? t('backfill_quality_busy') : t('backfill_quality')}
+                  </button>
+                  <button
+                    onClick={handleAudit}
+                    disabled={auditing}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
+                  >
+                    {auditing && <LoadingSpinner className="size-3" />}
+                    {showAudit ? t('close') : t('audit_low_quality')}
+                  </button>
+                </div>
               </div>
 
               <div className="flex items-center gap-3 text-xs">
@@ -476,6 +510,12 @@ export default function IndexStatus() {
                   {qualityData.unevaluated > 0 && <span className="text-gray-400 dark:text-gray-500">{t('quality_unevaluated')} {qualityData.unevaluated}</span>}
                 </span>
               </div>
+
+              {qualityBackfillMsg && (
+                <div className="mt-2 px-3 py-2 text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                  {qualityBackfillMsg}
+                </div>
+              )}
 
               {showAudit && (
                 <div className="mt-3 border-t border-gray-200 dark:border-gray-800 pt-3">

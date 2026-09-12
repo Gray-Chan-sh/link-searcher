@@ -78,7 +78,7 @@ fn pdfinfo_path() -> Option<&'static Path> {
 
 /// Get the number of pages in a PDF. Uses pdfinfo first (tolerant of
 /// malformed PDFs that lopdf rejects), falling back to lopdf.
-fn get_pdf_page_count(path: &Path) -> Result<u32> {
+pub(crate) fn get_pdf_page_count(path: &Path) -> Result<u32> {
     // Try pdfinfo first — handles broken streams that lopdf rejects
     if let Some(bin) = pdfinfo_path() {
         let mut cmd = crate::process::new(bin);

@@ -214,6 +214,7 @@ const MAPPINGS: Record<string, Mapping> = {
     method: 'POST', path: '/api/quality/re-extract-low-quality',
     body: { limit: a.limit },
   }),
+  backfill_quality: { method: 'POST', path: '/api/quality/backfill' },
 
   // ── Model installers ──
   check_bge_installed: { method: 'GET', path: '/api/ai/install/bge/status' },

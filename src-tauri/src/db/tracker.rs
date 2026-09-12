@@ -665,6 +665,51 @@ pub fn update_reextract_state(conn: &Connection, md5: &str, count: i64, flags_js
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct MissingQualityRow {
+    pub md5: String,
+    pub text_content: String,
+    pub ocr_used: bool,
+    pub rel_path: Option<String>,
+    pub dir_id: Option<String>,
+}
+
+pub fn get_content_missing_quality(conn: &Connection, limit: usize) -> Result<Vec<MissingQualityRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ci.md5, ci.text_content, ci.ocr_used, MAX(ft.path), MAX(ft.dir_id) \
+             FROM content_index ci \
+             LEFT JOIN file_tracking ft ON ci.md5 = ft.md5 \
+             WHERE ci.quality_score IS NULL \
+             GROUP BY ci.md5 \
+             ORDER BY ci.indexed_at DESC \
+             LIMIT ?1",
+        )
+        .context("prepare get_content_missing_quality")?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit as i64], |row| {
+            Ok(MissingQualityRow {
+                md5: row.get(0)?,
+                text_content: row.get(1)?,
+                ocr_used: row.get::<_, i64>(2)? != 0,
+                rel_path: row.get(3)?,
+                dir_id: row.get(4)?,
+            })
+        })
+        .context("query get_content_missing_quality")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect get_content_missing_quality")
+}
+
+pub fn update_content_quality(conn: &Connection, md5: &str, score: f64, flags_json: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE content_index SET quality_score=?1, quality_flags=?2 WHERE md5=?3",
+        rusqlite::params![score, flags_json, md5],
+    )
+    .context("update_content_quality failed")?;
+    Ok(())
+}
+
 pub fn count_reextractable(conn: &Connection, max_score: f64, cap: i64) -> Result<i64> {
     let count = conn.query_row(
         "SELECT COUNT(*) FROM content_index \
@@ -1558,5 +1603,87 @@ mod tests {
 
         let count = count_reextractable(&conn, 0.5, 10).unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_get_content_missing_quality_returns_null_score_rows() {
+        let conn = db();
+        insert_raw_dir(&conn, "bqd1", "/docs");
+        insert_raw_file_with_md5(&conn, "a.txt", "bqd1", "md5_a");
+        insert_raw_file_with_md5(&conn, "b.txt", "bqd1", "md5_b");
+
+        // md5_a: NULL quality → should be returned
+        store_content(&conn, "md5_a", "hello world", false, None).unwrap();
+        // md5_b: has quality → should NOT be returned
+        let qr = quality_result(0.8, vec![]);
+        store_content_with_quality(&conn, "md5_b", "good text", false, None, Some(&qr)).unwrap();
+
+        let rows = get_content_missing_quality(&conn, 100).unwrap();
+        assert_eq!(rows.len(), 1, "only md5_a has NULL quality: {rows:?}");
+        assert_eq!(rows[0].md5, "md5_a");
+        assert_eq!(rows[0].text_content, "hello world");
+        assert_eq!(rows[0].rel_path.as_deref(), Some("a.txt"));
+    }
+
+    #[test]
+    fn test_get_content_missing_quality_deduplicates_by_md5() {
+        let conn = db();
+        insert_raw_dir(&conn, "bqd2", "/docs");
+        // Two file_tracking rows sharing the same md5
+        insert_raw_file_with_md5(&conn, "a.txt", "bqd2", "shared_md5");
+        insert_raw_file_with_md5(&conn, "b.txt", "bqd2", "shared_md5");
+        store_content(&conn, "shared_md5", "shared content", false, None).unwrap();
+
+        let rows = get_content_missing_quality(&conn, 100).unwrap();
+        assert_eq!(rows.len(), 1, "shared md5 must be deduped: {rows:?}");
+        assert_eq!(rows[0].md5, "shared_md5");
+    }
+
+    #[test]
+    fn test_get_content_missing_quality_respects_limit() {
+        let conn = db();
+        insert_raw_dir(&conn, "bqd3", "/docs");
+        insert_raw_file_with_md5(&conn, "a.txt", "bqd3", "m1");
+        insert_raw_file_with_md5(&conn, "b.txt", "bqd3", "m2");
+        insert_raw_file_with_md5(&conn, "c.txt", "bqd3", "m3");
+        store_content(&conn, "m1", "text1", false, None).unwrap();
+        store_content(&conn, "m2", "text2", false, None).unwrap();
+        store_content(&conn, "m3", "text3", false, None).unwrap();
+
+        let rows = get_content_missing_quality(&conn, 2).unwrap();
+        assert_eq!(rows.len(), 2, "limit=2 should return at most 2");
+    }
+
+    #[test]
+    fn test_update_content_quality_sets_score_and_flags() {
+        let conn = db();
+        store_content(&conn, "ucq1", "test", false, None).unwrap();
+        assert!(get_content_quality(&conn, "ucq1").unwrap().unwrap().0.is_none());
+
+        update_content_quality(&conn, "ucq1", 0.85, r#"["low_printable"]"#).unwrap();
+
+        let (score, _count) = get_content_quality(&conn, "ucq1").unwrap().unwrap();
+        assert!((score.unwrap() - 0.85).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_update_content_quality_makes_row_disappear_from_missing() {
+        let conn = db();
+        insert_raw_dir(&conn, "bqd4", "/docs");
+        insert_raw_file_with_md5(&conn, "a.txt", "bqd4", "ucq2");
+        store_content(&conn, "ucq2", "text", false, None).unwrap();
+
+        assert_eq!(get_content_missing_quality(&conn, 100).unwrap().len(), 1);
+
+        update_content_quality(&conn, "ucq2", 0.9, "[]").unwrap();
+        assert_eq!(get_content_missing_quality(&conn, 100).unwrap().len(), 0);
+    }
+
+    fn insert_raw_file_with_md5(conn: &Connection, path: &str, dir_id: &str, md5: &str) {
+        conn.execute(
+            "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,error_msg,created_at,updated_at,dead_content) \
+             VALUES (lower(hex(randomblob(16))), ?1, ?2, 0, 0, ?3, 'active', 1, NULL, 0, 0, 0)",
+            rusqlite::params![path, dir_id, md5],
+        ).unwrap();
     }
 }

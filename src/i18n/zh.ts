@@ -514,5 +514,9 @@ const zh: Record<string, string> = {
     quality_reextract_done: '✓ 重新提取完成',
     quality_reextract_failed: '重新提取失败',
     quality_unknown_path: '(未知路径)',
+    backfill_quality: '补齐质量分',
+    backfill_quality_busy: '补齐中…',
+    backfill_quality_done: '已处理 {processed}，补齐 {scored} 个',
+    backfill_quality_noop: '无需补齐，所有文件已有评分',
 }
 export default zh

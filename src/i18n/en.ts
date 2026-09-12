@@ -514,5 +514,9 @@ const en: Record<string, string> = {
     quality_reextract_done: '✓ Re-extraction complete',
     quality_reextract_failed: 'Re-extraction failed',
     quality_unknown_path: '(unknown path)',
+    backfill_quality: 'Backfill Quality Scores',
+    backfill_quality_busy: 'Backfilling…',
+    backfill_quality_done: 'Processed {processed}, scored {scored}',
+    backfill_quality_noop: 'Nothing to backfill — all files already scored',
 }
 export default en
