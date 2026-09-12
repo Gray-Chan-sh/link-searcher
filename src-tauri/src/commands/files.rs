@@ -21,6 +21,8 @@ pub struct FileItem {
     pub mtime: i64,
     /// `active` | `deleted`（Browse 的"已删除"视图据此显示与提供恢复）。
     pub status: String,
+    pub quality_score: Option<f64>,
+    pub quality_flags: String,
 }
 
 #[derive(Serialize)]
@@ -73,102 +75,23 @@ pub async fn list_files_db(
     order: Option<String>,
     page: Option<usize>,
     page_size: Option<usize>,
+    quality: Option<String>,
 ) -> Result<FileListResponse, String> {
     if state.is_rebuilding.load(Ordering::SeqCst) {
         return Err("索引重建中，请稍后再试".to_string());
     }
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-
-    let ps = page_size.unwrap_or(50).clamp(1, 1000);
-    let p = page.unwrap_or(1).max(1);
-    let offset = (p - 1) * ps;
-
-    // deleted 视图查看被扫描标记删除的记录（如目录瞬断误删），可据此恢复；
-    // 其余筛选一律只看 active 文件。
-    let mut wheres: Vec<&str> = if filter.as_deref() == Some("deleted") {
-        vec!["status = 'deleted'"]
-    } else {
-        vec!["status = 'active'"]
-    };
-    let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
-
-    match filter.as_deref() {
-        Some("indexed") => { wheres.push("indexed = 1"); }
-        Some("pending") => { wheres.push("indexed IN (0, 3)"); }
-        Some("failed") => { wheres.push("indexed = 2"); }
-        _ => {}
-    }
-
-    if let Some(e) = &ext {
-        wheres.push("path LIKE ?");
-        params.push(Box::new(format!("%.{e}")));
-    }
-    if let Some(s) = &search {
-        wheres.push("path LIKE ?");
-        params.push(Box::new(format!("%{s}%")));
-    }
-
-    let where_clause = wheres.join(" AND ");
-    log::info!("[FILES] list_files_db filter={:?} where={where_clause}", filter);
-
-    let count_sql = format!("SELECT COUNT(*) FROM file_tracking WHERE {where_clause}");
-    let total: u64 = conn
-        .query_row(&count_sql, rusqlite::params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| row.get(0))
-        .map_err(|e| format!("count query error: {e}"))?;
-
-    let sort_col = match sort.as_deref().unwrap_or("path") {
-        "name" => "path".to_string(),
-        "path" => "path".to_string(),
-        "ext" => "file_ext".to_string(),
-        "size" => "size".to_string(),
-        "mtime" => "mtime".to_string(),
-        _ => "path".to_string(),
-    };
-    let order_dir = if order.as_deref() == Some("desc") { "DESC" } else { "ASC" };
-
-    // Build data SQL with named params to avoid positional conflicts
-    let data_sql = format!(
-        "SELECT id, path, size, mtime, indexed, error_msg, status \
-         FROM file_tracking WHERE {where_clause} \
-         ORDER BY {sort_col} {order_dir} \
-         LIMIT ?{} OFFSET ?{}",
-        params.len() + 1,
-        params.len() + 2,
-    );
-    let mut data_params: Vec<Box<dyn rusqlite::ToSql + Send>> = params;
-    data_params.push(Box::new(ps as i64));
-    data_params.push(Box::new(offset as i64));
-
-    let mut stmt = conn
-        .prepare(&data_sql)
-        .map_err(|e| format!("prepare error: {e}"))?;
-
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(data_params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| Ok(FileItem {
-            file_id: row.get("id")?,
-            file_name: std::path::Path::new(&row.get::<_, String>("path")?)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            rel_path: row.get("path")?,
-            file_ext: std::path::Path::new(&row.get::<_, String>("path")?)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_string(),
-            indexed: row.get("indexed")?,
-            error_msg: row.get("error_msg")?,
-            file_size: row.get::<_, i64>("size")? as u64,
-            mtime: row.get("mtime")?,
-            status: row.get("status")?,
-        }))
-        .map_err(|e| format!("query error: {e}"))?;
-
-    let items: Vec<FileItem> = rows.collect::<rusqlite::Result<_>>()
-        .map_err(|e| format!("collect error: {e}"))?;
-
-    Ok(FileListResponse { items, total, page: p, page_size: ps })
+    query_file_list(
+        &conn,
+        filter.as_deref(),
+        ext.as_deref(),
+        search.as_deref(),
+        sort.as_deref(),
+        order.as_deref(),
+        page.unwrap_or(1),
+        page_size.unwrap_or(50),
+        quality.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -588,6 +511,138 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
     })
 }
 
+/// Shared query logic extracted from `list_files_db` so tests can call it
+/// with a bare `&Connection` without constructing Tauri `State`.
+pub(crate) fn query_file_list(
+    conn: &rusqlite::Connection,
+    filter: Option<&str>,
+    ext: Option<&str>,
+    search: Option<&str>,
+    sort: Option<&str>,
+    order: Option<&str>,
+    page: usize,
+    page_size: usize,
+    quality: Option<&str>,
+) -> Result<FileListResponse, String> {
+    let ps = page_size.clamp(1, 1000);
+    let p = page.max(1);
+    let offset = (p - 1) * ps;
+
+    // deleted 视图查看被扫描标记删除的记录（如目录瞬断误删），可据此恢复；
+    // 其余筛选一律只看 active 文件。
+    let mut wheres: Vec<String> = if filter == Some("deleted") {
+        vec!["status = 'deleted'".into()]
+    } else {
+        vec!["status = 'active'".into()]
+    };
+    let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
+
+    match filter {
+        Some("indexed") => { wheres.push("indexed = 1".into()); }
+        Some("pending") => { wheres.push("indexed IN (0, 3)".into()); }
+        Some("failed") => { wheres.push("indexed = 2".into()); }
+        _ => {}
+    }
+
+    if let Some(e) = ext {
+        wheres.push("path LIKE ?".into());
+        params.push(Box::new(format!("%.{e}")));
+    }
+    if let Some(s) = search {
+        wheres.push("path LIKE ?".into());
+        params.push(Box::new(format!("%{s}%")));
+    }
+
+    let quality_join = match quality {
+        Some("low") | Some("red") => {
+            wheres.push("ci.quality_score < 0.5".into());
+            "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
+        }
+        Some("yellow") => {
+            wheres.push("ci.quality_score >= 0.5 AND ci.quality_score <= 0.75".into());
+            "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
+        }
+        Some("green") => {
+            wheres.push("ci.quality_score > 0.75".into());
+            "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
+        }
+        _ => "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5",
+    };
+
+    let where_clause = wheres.join(" AND ");
+    log::info!("[FILES] query_file_list filter={:?} where={where_clause}", filter);
+
+    let count_sql = format!("SELECT COUNT(*) FROM file_tracking {quality_join} WHERE {where_clause}");
+    let total: u64 = conn
+        .query_row(&count_sql, rusqlite::params_from_iter(params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| row.get(0))
+        .map_err(|e| format!("count query error: {e}"))?;
+
+    let (sort_col, nulls_last) = match sort {
+        Some("quality") => ("ci.quality_score ASC NULLS LAST".to_string(), true),
+        Some("name") | Some("path") | None => ("file_tracking.path".to_string(), false),
+        Some("ext") => ("file_tracking.file_ext".to_string(), false),
+        Some("size") => ("file_tracking.size".to_string(), false),
+        Some("mtime") => ("file_tracking.mtime".to_string(), false),
+        _ => ("file_tracking.path".to_string(), false),
+    };
+    let order_dir = if order == Some("desc") && !nulls_last { "DESC" } else { "ASC" };
+    let order_clause = if nulls_last {
+        sort_col
+    } else {
+        format!("{sort_col} {order_dir}")
+    };
+
+    let data_sql = format!(
+        "SELECT file_tracking.id, file_tracking.path, file_tracking.size, file_tracking.mtime, \
+         file_tracking.indexed, file_tracking.error_msg, file_tracking.status, \
+         ci.quality_score, ci.quality_flags \
+         FROM file_tracking {quality_join} WHERE {where_clause} \
+         ORDER BY {order_clause} \
+         LIMIT ?{} OFFSET ?{}",
+        params.len() + 1,
+        params.len() + 2,
+    );
+    let mut data_params: Vec<Box<dyn rusqlite::ToSql + Send>> = params;
+    data_params.push(Box::new(ps as i64));
+    data_params.push(Box::new(offset as i64));
+
+    let mut stmt = conn
+        .prepare(&data_sql)
+        .map_err(|e| format!("prepare error: {e}"))?;
+
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(data_params.iter().map(|p| p as &dyn rusqlite::ToSql)), |row| {
+            let path: String = row.get("path")?;
+            Ok(FileItem {
+                file_id: row.get("id")?,
+                file_name: std::path::Path::new(&path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown")
+                    .to_string(),
+                rel_path: path.clone(),
+                file_ext: std::path::Path::new(&path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_string(),
+                indexed: row.get("indexed")?,
+                error_msg: row.get("error_msg")?,
+                file_size: row.get::<_, i64>("size")? as u64,
+                mtime: row.get("mtime")?,
+                status: row.get("status")?,
+                quality_score: row.get("quality_score")?,
+                quality_flags: row.get::<_, Option<String>>("quality_flags")?.unwrap_or_else(|| "[]".into()),
+            })
+        })
+        .map_err(|e| format!("query error: {e}"))?;
+
+    let items: Vec<FileItem> = rows.collect::<rusqlite::Result<_>>()
+        .map_err(|e| format!("collect error: {e}"))?;
+
+    Ok(FileListResponse { items, total, page: p, page_size: ps })
+}
+
 /// Shared logic: build a FilePreview from a DB FileRecord.
 async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker::FileRecord) -> Result<FilePreview, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -627,4 +682,115 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
     };
 
     Ok(FilePreview { content, image_path, image_base64, file_type, char_count, ocr_used })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        conn
+    }
+
+    fn insert_file_with_md5(conn: &rusqlite::Connection, path: &str, md5: &str) {
+        db::tracker::upsert_file(conn, path, "d1", 1000, 10, Some(md5)).unwrap();
+        db::tracker::update_indexed(conn, &db::tracker::get_file_by_path(conn, path).unwrap().unwrap().id, Some(md5)).unwrap();
+    }
+
+    fn insert_content(conn: &rusqlite::Connection, md5: &str, score: Option<f64>, flags: &str) {
+        let now = chrono::Utc::now().timestamp();
+        conn.execute(
+            "INSERT OR REPLACE INTO content_index (md5,text_content,indexed_at,char_count,ocr_used,ocr_duration_ms,quality_score,quality_flags,reextract_count) \
+             VALUES (?1,'x',?2,0,0,NULL,?3,?4,0)",
+            rusqlite::params![md5, now, score, flags],
+        ).unwrap();
+    }
+
+    fn seed_quality_data(conn: &rusqlite::Connection) {
+        db::dir_config::add_dir(conn, "/tmp/test", None, None, None, None, true).unwrap();
+        insert_file_with_md5(conn, "a.pdf", "md5_a");
+        insert_file_with_md5(conn, "b.pdf", "md5_b");
+        insert_file_with_md5(conn, "c.pdf", "md5_c");
+        insert_file_with_md5(conn, "d.pdf", "md5_d");
+        insert_content(conn, "md5_a", Some(0.2), r#"["short"]"#);
+        insert_content(conn, "md5_b", Some(0.6), r#"["medium"]"#);
+        insert_content(conn, "md5_c", Some(0.9), r#"["ok"]"#);
+        insert_content(conn, "md5_d", None, "[]");
+    }
+
+    #[test]
+    fn quality_low_returns_only_red() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low")).unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].rel_path, "a.pdf");
+    }
+
+    #[test]
+    fn quality_red_same_as_low() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("red")).unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].rel_path, "a.pdf");
+    }
+
+    #[test]
+    fn quality_yellow_returns_mid_range() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("yellow")).unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].rel_path, "b.pdf");
+    }
+
+    #[test]
+    fn quality_green_returns_high() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green")).unwrap();
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].rel_path, "c.pdf");
+    }
+
+    #[test]
+    fn quality_none_returns_all_rows() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, None).unwrap();
+        assert_eq!(resp.items.len(), 4);
+        assert_eq!(resp.total, 4);
+    }
+
+    #[test]
+    fn sort_quality_ascending_nulls_last() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, Some("quality"), None, 1, 50, None).unwrap();
+        let paths: Vec<&str> = resp.items.iter().map(|i| i.rel_path.as_str()).collect();
+        assert_eq!(paths, vec!["a.pdf", "b.pdf", "c.pdf", "d.pdf"]);
+    }
+
+    #[test]
+    fn quality_filter_populates_score_and_flags() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green")).unwrap();
+        let item = &resp.items[0];
+        assert!((item.quality_score.unwrap() - 0.9).abs() < 0.01);
+        assert_eq!(item.quality_flags, r#"["ok"]"#);
+    }
+
+    #[test]
+    fn existing_filters_unaffected_by_quality_param() {
+        let conn = setup();
+        seed_quality_data(&conn);
+        let resp = query_file_list(&conn, Some("indexed"), None, None, None, None, 1, 50, None).unwrap();
+        assert_eq!(resp.items.len(), 4);
+        let resp_ext = query_file_list(&conn, None, Some("pdf"), None, None, None, 1, 50, None).unwrap();
+        assert_eq!(resp_ext.items.len(), 4);
+    }
 }

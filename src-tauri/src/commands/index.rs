@@ -1385,6 +1385,291 @@ fn run_verify_core(
         Ok(VerifyReport { checked, recovered, dead, failed })
 }
 
+/// Returns (new_reextract_count, is_exhausted).
+pub(crate) fn next_reextract_state(
+    old_count: i64,
+    old_score: Option<f64>,
+    new_score: Option<f64>,
+) -> (i64, bool) {
+    if let (Some(old), Some(new)) = (old_score, new_score) {
+        if (new - old) < 0.1 {
+            return (3, true);
+        }
+    }
+    let new_count = std::cmp::min(old_count + 1, 3);
+    (new_count, false)
+}
+
+#[derive(Serialize)]
+pub struct ReextractOutcome {
+    pub reextracted: bool,
+    pub old_score: Option<f64>,
+    pub new_score: Option<f64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct QualityReextractReport {
+    pub processed: usize,
+    pub ok: usize,
+    pub failed: usize,
+    pub exhausted: usize,
+}
+
+#[tauri::command]
+pub async fn get_quality_summary(
+    state: State<'_, AppState>,
+) -> Result<tracker::QualitySummary, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    tracker::get_quality_summary(&conn).map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+pub async fn quality_audit(
+    state: State<'_, AppState>,
+    min_score: Option<f64>,
+    limit: Option<usize>,
+) -> Result<Vec<tracker::LowQualityRow>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let score = min_score.unwrap_or(0.5);
+    let lim = limit.unwrap_or(100).min(1000);
+    tracker::get_low_quality_files(&conn, score, lim).map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+pub async fn re_extract_file(
+    state: State<'_, AppState>,
+    file_id: String,
+    engine: Option<String>,
+) -> Result<ReextractOutcome, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let rec = tracker::get_file_by_id(&conn, &file_id)
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "file not found".to_string())?;
+    let dir = db::dir_config::get_dir(&conn, &rec.dir_id)
+        .map_err(|e| format!("{e}"))?
+        .ok_or_else(|| "dir config not found".to_string())?;
+    let md5 = rec.md5.clone().ok_or_else(|| "file has no md5".to_string())?;
+
+    let (old_score, old_count) = match tracker::get_content_quality(&conn, &md5)
+        .map_err(|e| format!("{e}"))?
+    {
+        Some(v) => v,
+        None => (None, 0),
+    };
+
+    if old_count >= 3 {
+        return Ok(ReextractOutcome {
+            reextracted: false,
+            old_score,
+            new_score: old_score,
+            reason: Some("max_reextract".into()),
+        });
+    }
+
+    let engine_override = engine.map(|s| ocr::map_engine(&s));
+
+    // ponytail: delete_content clears md5 cache so index_file re-extracts
+    let _ = tracker::delete_content(&conn, &md5);
+    let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+    drop(conn);
+
+    // Must delete stale Tantivy doc — re-adding without it leaves duplicates.
+    let _ = state.indexer.delete_document_only(&file_id);
+    state
+        .indexer
+        .index_file(&file_id, &full_path, &rec.dir_id, engine_override)
+        .map_err(|e| format!("{e}"))?;
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let (new_score, _new_count) = match tracker::get_content_quality(&conn, &md5)
+        .map_err(|e| format!("{e}"))?
+    {
+        Some(v) => v,
+        None => (None, 0),
+    };
+
+    let (next_count, exhausted) = next_reextract_state(old_count, old_score, new_score);
+
+    if exhausted {
+        let mut flags: Vec<String> = {
+            let flags_str: String = conn
+                .query_row(
+                    "SELECT quality_flags FROM content_index WHERE md5 = ?1",
+                    rusqlite::params![md5],
+                    |row| row.get(0),
+                )
+                .unwrap_or_else(|_| "[]".into());
+            serde_json::from_str::<Vec<String>>(&flags_str).unwrap_or_default()
+        };
+        if !flags.contains(&"exhausted".to_string()) {
+            flags.push("exhausted".into());
+        }
+        let flags_json =
+            serde_json::to_string(&flags).unwrap_or_else(|_| "[\"exhausted\"]".into());
+        let _ = tracker::update_reextract_state(&conn, &md5, 3, &flags_json);
+        return Ok(ReextractOutcome {
+            reextracted: true,
+            old_score,
+            new_score: old_score,
+            reason: Some("exhausted".into()),
+        });
+    }
+
+    let flags_str: String = conn
+        .query_row(
+            "SELECT quality_flags FROM content_index WHERE md5 = ?1",
+            rusqlite::params![md5],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| "[]".into());
+    let _ = tracker::update_reextract_state(&conn, &md5, next_count, &flags_str);
+
+    Ok(ReextractOutcome {
+        reextracted: true,
+        old_score,
+        new_score,
+        reason: None,
+    })
+}
+
+#[tauri::command]
+pub async fn re_extract_low_quality(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<QualityReextractReport, String> {
+    let limit = limit.unwrap_or(100);
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = crate::state::TaskGuard::new("re-extract-low");
+        let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+        let rows = tracker::get_low_quality_files(&conn, 0.5, limit)
+            .map_err(|e| format!("{e}"))?;
+        drop(conn);
+
+        let mut processed = 0usize;
+        let mut ok = 0usize;
+        let mut failed = 0usize;
+        let mut exhausted = 0usize;
+
+        for row in &rows {
+            let Some(ref file_id) = row.file_id else {
+                continue;
+            };
+            if row.reextract_count >= 3 {
+                exhausted += 1;
+                continue;
+            }
+
+            processed += 1;
+            let conn = match db_pool.get() {
+                Ok(c) => c,
+                Err(_) => {
+                    failed += 1;
+                    continue;
+                }
+            };
+            let rec = match tracker::get_file_by_id(&conn, file_id)
+                .map_err(|e| format!("{e}"))
+                .and_then(|r| r.ok_or_else(|| "file not found".to_string()))
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
+                    failed += 1;
+                    continue;
+                }
+            };
+            let dir = match db::dir_config::get_dir(&conn, &rec.dir_id)
+                .map_err(|e| format!("{e}"))
+                .and_then(|d| d.ok_or_else(|| "dir config not found".to_string()))
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
+                    failed += 1;
+                    continue;
+                }
+            };
+            let md5: String = match rec.md5 {
+                Some(ref m) => m.clone(),
+                None => {
+                    failed += 1;
+                    continue;
+                }
+            };
+
+            // ponytail: delete_content clears md5 cache so index_file re-extracts
+            let _ = tracker::delete_content(&conn, &md5);
+            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            drop(conn);
+
+            // Must delete stale Tantivy doc — re-adding without it leaves duplicates.
+            let _ = indexer.delete_document_only(file_id);
+            match indexer.index_file(file_id, &full_path, &rec.dir_id, None) {
+                Ok(()) => {
+                    let conn = match db_pool.get() {
+                        Ok(c) => c,
+                        Err(_) => {
+                            ok += 1;
+                            continue;
+                        }
+                    };
+                    let old_score = row.quality_score;
+                    let new_quality = tracker::get_content_quality(&conn, &md5)
+                        .ok()
+                        .flatten();
+                    let new_score = new_quality.and_then(|(s, _)| s);
+
+                    let (next_count, is_exhausted) =
+                        next_reextract_state(row.reextract_count, old_score, new_score);
+
+                    if is_exhausted {
+                        let flags_str: String = conn
+                            .query_row(
+                                "SELECT quality_flags FROM content_index WHERE md5 = ?1",
+                                rusqlite::params![md5],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or_else(|_| "[]".into());
+                        let mut flags: Vec<String> =
+                            serde_json::from_str(&flags_str).unwrap_or_default();
+                        if !flags.contains(&"exhausted".to_string()) {
+                            flags.push("exhausted".into());
+                        }
+                        let flags_json = serde_json::to_string(&flags)
+                            .unwrap_or_else(|_| "[\"exhausted\"]".into());
+                        let _ = tracker::update_reextract_state(&conn, &md5, 3, &flags_json);
+                        exhausted += 1;
+                    } else {
+                        let flags_str: String = conn
+                            .query_row(
+                                "SELECT quality_flags FROM content_index WHERE md5 = ?1",
+                                rusqlite::params![md5],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or_else(|_| "[]".into());
+                        let _ = tracker::update_reextract_state(&conn, &md5, next_count, &flags_str);
+                        ok += 1;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
+                    failed += 1;
+                }
+            }
+        }
+        crate::state::push_task_brief(
+            "re-extract-low",
+            format!("低质量文件重提取完成: {processed} 处理, {ok} 成功, {failed} 失败, {exhausted} 耗尽"),
+        );
+        Ok(QualityReextractReport { processed, ok, failed, exhausted })
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?
+}
+
 /// Manual re-index of a single file. Looks up the DB record, resolves the
 /// full disk path from dir_config, and re-extracts + re-indexes.
 #[tauri::command]
@@ -1654,6 +1939,48 @@ mod tests {
         let ex = existing_chunk_indexes(&conn, "md5-b").unwrap();
         assert_eq!(ex.len(), 2);
         assert!(!ex.contains(&chunks_b[2].chunk_index));
+    }
+
+    #[test]
+    fn next_reextract_state_exhausted_when_improvement_tiny() {
+        let (count, exhausted) = next_reextract_state(1, Some(0.3), Some(0.35));
+        assert_eq!(count, 3);
+        assert!(exhausted);
+    }
+
+    #[test]
+    fn next_reextract_state_advances_when_improvement_significant() {
+        let (count, exhausted) = next_reextract_state(1, Some(0.3), Some(0.5));
+        assert_eq!(count, 2);
+        assert!(!exhausted);
+    }
+
+    #[test]
+    fn next_reextract_state_caps_count_at_3() {
+        let (count, exhausted) = next_reextract_state(3, Some(0.3), Some(0.5));
+        assert_eq!(count, 3);
+        assert!(!exhausted);
+    }
+
+    #[test]
+    fn next_reextract_state_handles_none_old_score() {
+        let (count, exhausted) = next_reextract_state(1, None, Some(0.5));
+        assert_eq!(count, 2);
+        assert!(!exhausted);
+    }
+
+    #[test]
+    fn next_reextract_state_handles_none_new_score() {
+        let (count, exhausted) = next_reextract_state(1, Some(0.3), None);
+        assert_eq!(count, 2);
+        assert!(!exhausted);
+    }
+
+    #[test]
+    fn next_reextract_state_handles_both_none() {
+        let (count, exhausted) = next_reextract_state(2, None, None);
+        assert_eq!(count, 3);
+        assert!(!exhausted);
     }
 }
 #[cfg(test)]

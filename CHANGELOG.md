@@ -34,6 +34,20 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 3：质量查询/审计 IPC + 列表筛选 + 前端封装）
+
+- **4 个新 IPC 命令**（`commands/index.rs` + `lib.rs` 注册）：
+  - `get_quality_summary` → 红/黄/绿/未评估四档计数；
+  - `quality_audit(min_score?, limit?)` → 低质量文件清单（含 200 字预览，limit 上限 1000）；
+  - `re_extract_file(file_id, engine?)` → 单文件重提取，带「最多 3 次；重提取后分数提升 < 0.1 即判定 `exhausted` 并停止」防死循环守卫，支持引擎覆盖；
+  - `re_extract_low_quality(limit?)` → 批量重提取（`spawn_blocking` + `TaskGuard` + 状态栏任务简报）。
+- **纯函数 `next_reextract_state()`**：把「推进 / 耗尽」判定从 I/O 中抽离为可单测逻辑（6 例覆盖：微小提升→耗尽、显著提升→推进、封顶 3、None 分支）。
+- **文件列表支持质量维度**（`commands/files.rs`）：`FileItem` 增加 `quality_score` / `quality_flags`；`list_files_db` 新增 `quality` 过滤（low/red/yellow/green）与 `sort=quality`（升序、NULL 置后）；查询逻辑抽为可测的 `query_file_list`，8 例单测（含既有筛选不受影响的回归断言）。
+- **前端 IPC 封装**（`api/index.ts` / `api/files.ts` / `api/client.ts`）：新增 4 个类型 + 4 个调用函数 + HTTP MAPPINGS 条目；`FileItem` 扩展质量字段；`listFilesDb` 增加 `quality` 可选参数。`npx tsc --noEmit` 零错误。
+- **测试**：`cargo test --lib` 292 全绿（+14：6 守卫 + 8 列表）；`integration.rs` 仍仅 2 例既有失败（与本次无关）。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

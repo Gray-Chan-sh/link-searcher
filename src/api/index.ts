@@ -49,6 +49,8 @@ export interface ReextractReport {
   processed: number
   ok: number
   failed: number
+  /** Only present from quality-framework re-extract commands */
+  exhausted?: number
 }
 
 export async function reextractMissingContent(limit?: number): Promise<ReextractReport> {
@@ -69,6 +71,59 @@ export async function reindexFile(fileId: string): Promise<void> {
 
 export async function reindexFiles(ids: string[]): Promise<ReextractReport> {
   return client.invoke<ReextractReport>('reindex_files', { fileIds: ids })
+}
+
+// ── Quality framework ──
+
+export interface QualitySummary {
+  green: number
+  yellow: number
+  red: number
+  unevaluated: number
+  total: number
+}
+
+export async function getQualitySummary(): Promise<QualitySummary> {
+  return client.invoke<QualitySummary>('get_quality_summary')
+}
+
+export interface QualityAuditEntry {
+  md5: string
+  file_id: string | null
+  file_path: string | null
+  quality_score: number | null
+  quality_flags: string
+  reextract_count: number
+  char_count: number
+  ocr_used: boolean
+  preview: string
+}
+
+export async function qualityAudit(minScore?: number, limit?: number): Promise<QualityAuditEntry[]> {
+  return client.invoke<QualityAuditEntry[]>('quality_audit', {
+    minScore: minScore ?? null,
+    limit: limit ?? 100,
+  })
+}
+
+export interface ReextractOutcome {
+  reextracted: boolean
+  old_score: number | null
+  new_score: number | null
+  reason: string | null
+}
+
+export async function reExtractFile(fileId: string, engine?: string): Promise<ReextractOutcome> {
+  return client.invoke<ReextractOutcome>('re_extract_file', {
+    fileId,
+    engine: engine ?? null,
+  })
+}
+
+export async function reExtractLowQuality(limit?: number): Promise<ReextractReport> {
+  return client.invoke<ReextractReport>('re_extract_low_quality', {
+    limit: limit ?? 50,
+  })
 }
 
 /** Restore soft-deleted records (Browse「已删除」视图) and re-index them.

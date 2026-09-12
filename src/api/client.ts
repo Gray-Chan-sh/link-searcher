@@ -203,6 +203,18 @@ const MAPPINGS: Record<string, Mapping> = {
   get_file_type_support: { method: 'GET', path: '/api/ocr/file-type-support' },
   get_unsupported_ext_stats: { method: 'GET', path: '/api/ocr/unsupported-exts' },
 
+  // ── Quality ──
+  get_quality_summary: { method: 'GET', path: '/api/quality/summary' },
+  quality_audit: { method: 'GET', path: '/api/quality/audit', paramMap: { minScore: 'min_score' } },
+  re_extract_file: (a) => ({
+    method: 'POST', path: '/api/quality/re-extract-file',
+    body: { file_id: a.fileId, engine: a.engine },
+  }),
+  re_extract_low_quality: (a) => ({
+    method: 'POST', path: '/api/quality/re-extract-low-quality',
+    body: { limit: a.limit },
+  }),
+
   // ── Model installers ──
   check_bge_installed: { method: 'GET', path: '/api/ai/install/bge/status' },
   install_bge: (a) => ({ method: 'POST', path: '/api/ai/install/bge', body: a }),

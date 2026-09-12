@@ -298,6 +298,8 @@ export interface FileItem {
   mtime: number
   /** active | deleted（"已删除"视图据此显示并提供恢复） */
   status: string
+  quality_score: number | null
+  quality_flags: string
 }
 
 export interface FileListResponse {
@@ -319,6 +321,7 @@ export async function listFilesDb(params: {
   order?: SortOrder
   page?: number
   pageSize?: number
+  quality?: string
 }): Promise<FileListResponse> {
   return client.invoke<FileListResponse>('list_files_db', params)
 }
