@@ -25,6 +25,7 @@
 - **逐页文本层/OCR 决策与拼接**（`pdf.rs`）：新增纯函数 `page_needs_ocr(page_text, page_has_images)` 与 `merge_page_texts(text_layer, ocr_pages)`，以及单页渲染+识别 `ocr_single_pdf_page()`（`pdftoppm -f/-l` 单页 → OCR → 清理临时文件）。混合型 PDF（部分页数字文本 + 部分页扫描）现在逐页决定：健康页用文本层、坏页单独 OCR 后按页序拼接，不再整文档二选一。
 - **关键：不回归统一型 PDF**。逐页逻辑**仅在文档级文本层健康时**启用；文档级不可用（水印/乱码/重复/稀疏）仍走原整文档 OCR 回退。**修复过程中发现并纠正一处顺序错误**——初版把逐页逻辑放在文档级门禁之外，导致真实扫描件只返回 2707 字水印；改为「文档级门禁 → 仅健康时逐页」后恢复 7026 字正文（经真实扫描 PDF 实测）。
 - **测试**：`cargo test --lib` **331** 全绿（+9：`page_needs_ocr` 6 + `merge_page_texts` 3）；`cargo check --all-targets` 零错误；真实扫描 PDF 实测 7026 字（`test_pdf_ocr` 2/2）。
+- **审查加固**：`ocr_single_pdf_page` 不再假设渲染文件名为 `page-{N}.png`（`pdftoppm` 会按整册页数补零，≥10 页文档会变成 `page-0N.png`），改为扫描临时目录取实际生成的 PNG，避免大文档逐页 OCR 因找不到文件而退化为整册 OCR。
 
 ---
 

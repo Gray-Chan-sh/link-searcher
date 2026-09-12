@@ -610,10 +610,10 @@ fn ocr_single_pdf_page(
         return None;
     }
 
-    let page_file = tmp_dir.path().join(format!("page-{page_number}.png"));
-    if !page_file.exists() {
-        return None;
-    }
+    let page_file = std::fs::read_dir(tmp_dir.path())
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))?;
 
     let text = super::ocr::ocr_image_with_engine(&page_file, engine, lang).ok()?;
     let trimmed = text.trim().to_owned();
