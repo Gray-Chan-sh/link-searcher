@@ -590,6 +590,10 @@ pub(crate) fn query_file_list(
             wheres.push("ci.quality_score > 0.75".into());
             "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
         }
+        Some("flagged") => {
+            wheres.push("ci.quality_flags IS NOT NULL AND ci.quality_flags != '[]'".into());
+            "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
+        }
         _ => "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5",
     };
 

@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-12（新增独立「质量」页面）
+
+- **新增 `src/pages/Quality.tsx` + 侧边栏一级入口「质量」**：左侧为问题文件清单（**默认只列有标记的文件**，可切换「全部」、按质量升序、支持搜索与分页），右侧详情面板：
+  - **原文件预览**：图片内嵌显示；PDF/Office 等提供「打开原文件」「在文件夹中显示」按钮（按用户选择，不内嵌渲染 PDF）。
+  - **提取文字预览**：等宽滚动区 + 字符数 + OCR 标记。
+  - **低质量原因 + 推荐方案**：由 `quality_flags` 映射（`low_printable`/`high_fffd`/`low_density`/`low_lexicon`/`low_confidence`/`exhausted`/`max_reextract`，含未知标记兜底）。
+  - **重新提取**：点击后自动刷新清单与预览（防竞态：带版本守卫）。
+- **后端**：`list_files_db` 的 `quality` 筛选新增 `"flagged"`（任意非空标记）；前端 `SortKey` 新增 `'quality'`。
+- **i18n**：zh/en/ja/ko 四语言补齐页面文案与各标记的原因/方案。
+- **验证**：`npm run build`（`tsc -b && vite build`）成功；`npx oxlint` 0 error。
+
+---
+
 ## 2026-09-12（`quality` CLI 子命令：无头质量体检）
 
 - **新增 `link-searcher quality` CLI 子命令**（`cli.rs`）：支持 `backfill`、`audit`、`reextract` 三个子命令，可在无 GUI 环境下运行 OCR 质量健康检查流程。

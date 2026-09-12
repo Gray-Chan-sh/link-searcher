@@ -18,6 +18,7 @@ import LogViewer from './pages/LogViewer'
 import FileTypes from './pages/FileTypes'
 import Browse from './pages/Browse'
 import AiChat from './pages/AiChat'
+import Quality from './pages/Quality'
 import StatusBar from './components/StatusBar'
 import OnboardingWizard from './components/OnboardingWizard'
 import ToastContainer from './components/ToastContainer'
@@ -78,6 +79,7 @@ export default function App() {
     { to: '/browse', label: t('browse'), icon: FolderIcon },
     { to: '/directories', label: t('directories'), icon: FolderIcon },
     { to: '/index', label: t('index_status'), icon: ActivityIcon },
+    { to: '/quality', label: t('quality_page_title'), icon: ActivityIcon },
     { to: '/logs', label: t('logs'), icon: FileTextIcon },
     { to: '/file-types', label: t('file_types'), icon: FileTextIcon },
     { to: '/settings', label: t('settings'), icon: GearIcon },
@@ -228,6 +230,7 @@ export default function App() {
             <Route path="browse" element={<Browse />} />
             <Route path="directories" element={<DirManager />} />
             <Route path="index" element={<IndexStatus />} />
+            <Route path="quality" element={<Quality />} />
             <Route path="logs" element={<LogViewer />} />
             <Route path="file-types" element={<FileTypes />} />
             <Route path="settings" element={<Settings />} />

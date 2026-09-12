@@ -312,7 +312,7 @@ export interface FileListResponse {
 }
 
 export type FilterType = 'all' | 'indexed' | 'pending' | 'failed' | 'deleted'
-export type SortKey = 'name' | 'size' | 'mtime' | 'ext'
+export type SortKey = 'name' | 'size' | 'mtime' | 'ext' | 'quality'
 export type SortOrder = 'asc' | 'desc'
 
 export async function listFilesDb(params: {
