@@ -59,6 +59,14 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 5：文档 + 静态分析）
+
+- **文档**：`README.md` 补充质量体检功能行与「测试 → OCR 质量评估」小节；`docs/USER_MANUAL.md` 新增「附录：提取质量体检」（五项无真值信号、四档阈值、三处查看位置、审计与重提取安全机制）。
+- **静态分析**：`semgrep scan --config .semgrep/custom.yml --config p/owasp-top-ten --config p/secrets --severity ERROR` → **0 findings**（385 个受版本控制文件 / 124 条规则）。
+- **终检**：`cargo test --lib` 292 全绿；`npm run build`（`tsc -b && vite build`）成功；`npx tsc --noEmit` 零错误。既有环境性失败（`integration.rs` 2 例、`test_pdf_ocr::test_ocr_bench_single_page` 因本机 Homebrew pdftoppm 缺 libnss3）经复核与本框架无关。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。
