@@ -727,7 +727,7 @@ pub(crate) fn run_index_integrity_heal(
         // No delete-before-add here: the fresh-reload snapshot above makes
         // `missing` genuinely absent from the committed index, and a
         // same-batch delete+add of one file_id would cancel itself out.
-        match indexer.index_file(file_id, &full_path, dir_id) {
+        match indexer.index_file(file_id, &full_path, dir_id, None) {
             Ok(()) => healed += 1,
             Err(e) => {
                 log::warn!("[HEAL] 重灌失败 {rel_path}: {e}");
@@ -764,7 +764,7 @@ pub(crate) fn run_index_integrity_heal(
                 failed += 1;
                 continue;
             }
-            match indexer.index_file(id, &full_path, dir_id) {
+            match indexer.index_file(id, &full_path, dir_id, None) {
                 Ok(()) => {
                     deduped += 1;
                     log::info!("[HEAL] 重复文件已归一: {rel_path}");
@@ -862,7 +862,7 @@ fn restore_files_core(
         .map_err(|e| format!("restore update failed for {id}: {e}"))?;
 
         let full_path = std::path::Path::new(dir_roots.get(&rec.dir_id).map(String::as_str).unwrap_or("")).join(&rec.path);
-        match indexer.index_file(id, &full_path, &rec.dir_id) {
+        match indexer.index_file(id, &full_path, &rec.dir_id, None) {
             Ok(()) => restored += 1,
             Err(e) => log::warn!("[RESTORE] 重建索引失败 {}: {e}", rec.path),
         }
@@ -1190,7 +1190,7 @@ pub async fn reextract_missing_content(
             if let Err(e) = indexer.delete_document_only(&file_id) {
                 log::warn!("[REEXTRACT] delete stale doc failed {file_id}: {e}");
             }
-            match indexer.index_file(&file_id, &full_path, &dir_id) {
+            match indexer.index_file(&file_id, &full_path, &dir_id, None) {
                 Ok(()) => ok += 1,
                 Err(e) => {
                     log::warn!("[REEXTRACT] {rel_path}: {e}");
@@ -1263,7 +1263,7 @@ pub async fn reindex_files(
             if let Err(e) = indexer.delete_document_only(&file_id) {
                 log::warn!("[REINDEX_FILES] delete stale doc failed {file_id}: {e}");
             }
-            match indexer.index_file(&file_id, &full_path, &rec.dir_id) {
+            match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
                 Ok(()) => ok += 1,
                 Err(e) => {
                     log::warn!("[REINDEX_FILES] {}: {e}", rec.path);
@@ -1349,7 +1349,7 @@ fn run_verify_core(
             if let Err(e) = indexer.delete_document_only(&file_id) {
                 log::warn!("[VERIFY] delete stale doc failed {file_id}: {e}");
             }
-            match indexer.index_file(&file_id, &full_path, &rec.dir_id) {
+            match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
                 Ok(()) => {
                     checked += 1;
                     // Re-check the stored content: recovery only counts when
@@ -1406,7 +1406,7 @@ pub async fn reindex_file(
     }
     let full_path = std::path::Path::new(&dir.path).join(&rec.path);
     drop(conn);
-    state.indexer.index_file(&file_id, &full_path, &rec.dir_id)
+    state.indexer.index_file(&file_id, &full_path, &rec.dir_id, None)
         .map_err(|e| format!("{e}"))
 }
 
@@ -1531,7 +1531,7 @@ mod tests {
 
             // a：正常走完整索引流程（DB=indexed 1 + Tantivy 有文档）。单文件
             // 不触发周期 commit，显式提交使其对 searcher 可见。
-            indexer.index_file(&keep_a, &file_a, &d_id).unwrap();
+            indexer.index_file(&keep_a, &file_a, &d_id, None).unwrap();
             indexer.commit_now().unwrap();
             // b：模拟崩溃/重建把 Tantivy 写入丢了——DB 标 indexed=1 但索引里没有。
             let c = pool.get().unwrap();
@@ -1591,10 +1591,10 @@ mod tests {
 
             let im = Arc::new(std::sync::RwLock::new(IndexManager::create_in_ram()));
             let indexer = Arc::new(crate::indexer::IndexerService::new(pool.clone(), im));
-            indexer.index_file(&keep_a, &file_a, &d_id).unwrap();
+            indexer.index_file(&keep_a, &file_a, &d_id, None).unwrap();
             indexer.commit_now().unwrap();
             // 模拟竞争重复写入同一文件 → 索引里出现 2 份。
-            indexer.index_file(&keep_a, &file_a, &d_id).unwrap();
+            indexer.index_file(&keep_a, &file_a, &d_id, None).unwrap();
             indexer.commit_now().unwrap();
 
             let im = indexer.index_manager.read().unwrap_or_else(|p| p.into_inner());

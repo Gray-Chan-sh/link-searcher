@@ -246,7 +246,7 @@ async fn reindex_handler(
     drop(conn);
     app_state
         .indexer
-        .index_file(file_id, &full_path, &rec.dir_id)
+        .index_file(file_id, &full_path, &rec.dir_id, None)
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;

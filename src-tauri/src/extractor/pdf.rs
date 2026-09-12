@@ -311,6 +311,24 @@ impl PdfExtractor {
         }
         Ok(merged)
     }
+
+    pub fn extract_with_meta(
+        &self,
+        path: &Path,
+        lang: &str,
+        engine: Option<super::ocr::OcrEngineType>,
+    ) -> Result<(String, super::quality::ExtractMeta)> {
+        let text = self.extract_with_lang(path, lang, engine)?;
+        let page_count = get_pdf_page_count(path).ok();
+        // TODO(wave2): thread PDF OCR confidence from try_ocr_fallback
+        let meta = super::quality::ExtractMeta {
+            ocr_used: false,
+            mean_confidence: None,
+            page_count,
+            image_dims: None,
+        };
+        Ok((text, meta))
+    }
 }
 
 /// Detect if extracted PDF text is garbled / corrupted.

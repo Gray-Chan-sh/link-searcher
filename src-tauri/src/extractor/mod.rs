@@ -53,58 +53,91 @@ static OFFICE_EXTRACTOR: LazyLock<office::OfficeExtractor> =
 static ARCHIVE_EXTRACTOR: LazyLock<archive::ArchiveExtractor> = LazyLock::new(archive::ArchiveExtractor::new);
 static AUDIO_EXTRACTOR: LazyLock<audio::AudioExtractor> = LazyLock::new(audio::AudioExtractor::new);
 
-/// Dispatch text extraction based on file extension.
+/// Dispatch text extraction based on file extension, returning both the
+/// extracted text and quality metadata. [`extract_text`] is a thin wrapper
+/// that discards the metadata.
+///
 /// `lang` is the OCR language for PDF/image extraction (from directory config
 /// or global settings). When the extracted text is watermark/garbage, PDFs
 /// fall through to OCR and image files always go through OCR. An unusable or
 /// missing configured OCR engine resolves via [`ocr::preferred_engine`] to the
 /// best engine available on this platform.
-pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>) -> Result<String> {
+pub fn extract_text_with_meta(
+    path: &Path,
+    lang: &str,
+    engine: Option<ocr::OcrEngineType>,
+) -> Result<(String, quality::ExtractMeta)> {
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_lowercase())
         .unwrap_or_default();
 
-    let raw_res = match ext.as_str() {
+    let (raw_res, meta) = match ext.as_str() {
         // Text formats
         "txt" | "md" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "ini" | "cfg"
         | "log" | "py" | "rs" | "ts" | "js" | "html" | "css" | "sql" | "sh" | "bat"
-        | "ps1" | "env" | "conf" | "properties" => TEXT_EXTRACTOR.extract(path),
+        | "ps1" | "env" | "conf" | "properties" => {
+            (TEXT_EXTRACTOR.extract(path), quality::ExtractMeta::default())
+        }
         // Document formats
-        "pdf" => PDF_EXTRACTOR.extract_with_lang(path, lang, engine),
+        "pdf" => {
+            let (text, meta) = PDF_EXTRACTOR.extract_with_meta(path, lang, engine)?;
+            (Ok(text), meta)
+        }
         "doc" | "docx" | "docm" | "xls" | "xlsx" | "xlsm" | "xlsb" | "ppt" | "pptx"
         | "pptm" | "ppsm" | "ppsx" | "pps" | "pot" | "odt" | "ods" | "odp" | "rtf"
-        | "epub" => OFFICE_EXTRACTOR.extract(path),
-        // Image formats (OCR placeholder)
+        | "epub" => {
+            (OFFICE_EXTRACTOR.extract(path), quality::ExtractMeta::default())
+        }
+        // Image formats (OCR)
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif" => {
             let e = ocr::preferred_engine(engine);
-            ocr::ocr_image_with_engine(path, &e, lang)
+            match ocr::ocr_image_with_stats(path, &e, lang) {
+                Ok((text, stats)) => {
+                    let dims = ::image::image_dimensions(path).ok();
+                    let meta = quality::ExtractMeta {
+                        ocr_used: true,
+                        mean_confidence: stats.mean_confidence,
+                        page_count: None,
+                        image_dims: dims,
+                    };
+                    (Ok(text), meta)
+                }
+                Err(e) => (Err(e), quality::ExtractMeta::default()),
+            }
         }
         // Archives
         "zip" | "tar" | "tgz" | "tbz2" | "txz" | "gz" | "bz2" | "xz" => {
-            ARCHIVE_EXTRACTOR.extract_archive(path, lang)
+            (ARCHIVE_EXTRACTOR.extract_archive(path, lang), quality::ExtractMeta::default())
         }
         // Audio
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" => {
-            AUDIO_EXTRACTOR.extract_audio(path)
+            (AUDIO_EXTRACTOR.extract_audio(path), quality::ExtractMeta::default())
         }
         // Unknown format: try reading as plain text (capped — a 50GB video
         // or image file must not be read fully into memory).
         _ => {
             let mut buf = Vec::new();
-            std::fs::File::open(path)
+            let raw_res = std::fs::File::open(path)
                 .and_then(|f| f.take(10 * 1024 * 1024).read_to_end(&mut buf))
-                .map_err(|e| anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}"))?;
-            match std::str::from_utf8(&buf) {
+                .map_err(|e| anyhow::anyhow!("unsupported format '{ext}' and cannot read as text: {e}"));
+            let result = raw_res.and_then(|_| match std::str::from_utf8(&buf) {
                 Ok(text) if !text.trim().is_empty() => Ok(text.to_string()),
                 Ok(_) => Err(anyhow::anyhow!("empty file or binary content: {ext}")),
                 Err(_) => Err(anyhow::anyhow!("unsupported format '{ext}': binary content, cannot read as text")),
-            }
+            });
+            (result, quality::ExtractMeta::default())
         }
     };
 
-    raw_res.map(|t| sanitize_text(&t))
+    raw_res.map(|t| sanitize_text(&t)).map(|t| (t, meta))
+}
+
+/// Dispatch text extraction based on file extension.
+/// Convenience wrapper that discards quality metadata.
+pub fn extract_text(path: &Path, lang: &str, engine: Option<ocr::OcrEngineType>) -> Result<String> {
+    extract_text_with_meta(path, lang, engine).map(|(text, _meta)| text)
 }
 
 /// Classify a file extension into a high-level type string.

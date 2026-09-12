@@ -23,6 +23,17 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 2：索引期计算并持久化质量分）
+
+- **新增 `extract_text_with_meta()`**（`extractor/mod.rs`）：在原有 `extract_text` 基础上同时返回 `ExtractMeta`（图片 = OCR 使用 + 平均置信度 + 尺寸；PDF = 页数；其余默认），`extract_text` 退化为丢弃 meta 的薄封装，文本输出逐字节不变。
+- **PDF `PdfExtractor::extract_with_meta()`**（`extractor/pdf.rs`）：包装 `extract_with_lang` + `get_pdf_page_count`，为字符密度指标提供页数；PDF 的 OCR 置信度穿透标注 `TODO(wave2)` 暂缓，`extract_with_lang` 行为不变。
+- **索引期质量计算**（`indexer.rs`）：提取完成后调用 `compute_quality()` 并经 `store_content_with_quality()` 写入 `content_index.quality_score` / `quality_flags`；去重分支复用已有内容、不重算；图片尺寸改用 `image::image_dimensions`（仅读文件头，避免整图解码）。
+- **修复短文本 OCR 回退硬编码 `"eng"`**：改用实际 `ocr_lang`（此前中文文件回退会被当英文识别）。
+- **内部管道增加 `engine_override` 参数**：`index_file` / `extract_and_index_single` 支持指定 OCR 引擎（`None` = 沿用 DB 配置原行为），为 Wave 3「重提取时引擎轮换」铺路；所有既有调用点传 `None`。
+- **测试**：新增「索引后 `quality_score` 非空」断言（RED→GREEN）；`cargo test --lib` 278 全绿（+1）；`integration.rs` 仍仅 2 例既有失败（与本次无关）。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

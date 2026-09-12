@@ -107,6 +107,7 @@ impl IndexerService {
     fn extract_and_index_single(
         job: &BatchJob,
         conn: &Connection,
+        engine_override: Option<crate::extractor::ocr::OcrEngineType>,
     ) -> Result<ExtractedData, (String, String)> {
         let file_name = job
             .file_path
@@ -196,7 +197,7 @@ impl IndexerService {
                 .flatten()
                 .and_then(|c| {
                     if c.ocr_lang.is_empty() || c.ocr_lang == "eng" {
-                        None // fall through to global default
+                        None
                     } else {
                         Some(c.ocr_lang)
                     }
@@ -210,7 +211,7 @@ impl IndexerService {
                     .ok()
                 })
                 .unwrap_or_else(|| "eng".to_string());
-            let ocr_engine =
+            let db_engine =
                 conn.query_row(
                     "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
                     [],
@@ -218,26 +219,29 @@ impl IndexerService {
                 )
                 .ok()
                 .map(|v| crate::extractor::ocr::map_engine(&v));
-            let extracted = match crate::extractor::extract_text(&job.file_path, &ocr_lang, ocr_engine.clone()) {
-                Ok(t) if t.len() > 10 => t,
-                Ok(t) => {
+            let ocr_engine = engine_override.clone().or(db_engine);
+            let extracted = match crate::extractor::extract_text_with_meta(
+                &job.file_path,
+                &ocr_lang,
+                ocr_engine.clone(),
+            ) {
+                Ok((t, meta)) if t.len() > 10 => (t, meta),
+                Ok((t, meta)) => {
                     if file_ext.eq_ignore_ascii_case("pdf") {
-                        // PDF extraction already runs its own OCR fallback
-                        // internally; short text means the text layer is
-                        // genuinely minimal — OCR-ing the PDF as an image
-                        // would just fail.
                         log::info!("[INDEX] PDF text short ({}), using as-is", t.len());
-                        t
+                        (t, meta)
                     } else {
                         log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
-                        match crate::extractor::ocr::ocr_image(&job.file_path, "eng", ocr_engine.clone()) {
+                        match crate::extractor::ocr::ocr_image(&job.file_path, &ocr_lang, ocr_engine.clone()) {
                             Ok(ocr) if !ocr.is_empty() => {
                                 ocr_used = true;
-                                ocr
+                                let mut m = meta;
+                                m.ocr_used = true;
+                                (ocr, m)
                             }
                             _ => {
                                 log::warn!("[INDEX] OCR 回退也失败, 使用原始内容");
-                                t
+                                (t, meta)
                             }
                         }
                     }
@@ -252,7 +256,7 @@ impl IndexerService {
                     match fallback {
                         Some(t) => {
                             ocr_used = true;
-                            t
+                            (t, crate::extractor::quality::ExtractMeta::default())
                         }
                         None => {
                             return Err((
@@ -263,14 +267,21 @@ impl IndexerService {
                     }
                 }
             };
-            let char_count = extracted.chars().count();
+            let char_count = extracted.0.chars().count();
             log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
-            if let Err(e) =
-                crate::db::tracker::store_content(conn, &hash, &extracted, ocr_used, None)
-            {
+            let quality =
+                crate::extractor::quality::compute_quality(&extracted.0, &extracted.1, &file_ext);
+            if let Err(e) = crate::db::tracker::store_content_with_quality(
+                conn,
+                &hash,
+                &extracted.0,
+                ocr_used,
+                None,
+                Some(&quality),
+            ) {
                 log::warn!("[INDEX] 存储提取内容失败: {e}");
             }
-            extracted
+            extracted.0
         };
 
         let mtime = meta
@@ -394,7 +405,7 @@ impl IndexerService {
                             Ok(c) => c,
                             Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
                         };
-                        Self::extract_and_index_single(job, &conn)
+                        Self::extract_and_index_single(job, &conn, None)
                     })
                     .collect()
             });
@@ -535,6 +546,7 @@ impl IndexerService {
         file_id: &str,
         file_path: &Path,
         dir_id: &str,
+        engine_override: Option<crate::extractor::ocr::OcrEngineType>,
     ) -> Result<()> {
         if self.cancel_scan.load(Ordering::Acquire) {
             log::info!("[INDEX] 跳过 {file_id}: 扫描已取消");
@@ -570,7 +582,7 @@ impl IndexerService {
         };
 
         let result = (|| -> Result<()> {
-            let data = Self::extract_and_index_single(&job, &conn)
+            let data = Self::extract_and_index_single(&job, &conn, engine_override)
                 .map_err(|(_, e)| anyhow::anyhow!(e))?;
 
             let mut guard = self.lock_writer()?;
@@ -849,7 +861,7 @@ mod tests {
         let (svc, fid) = setup();
         let path = tmp_file("test_create.txt", "hello world test content");
 
-        svc.index_file(&fid, &path, "d1").unwrap();
+        svc.index_file(&fid, &path, "d1", None).unwrap();
         svc.commit().unwrap();
 
         // Verify Tantivy has the document.
@@ -885,8 +897,8 @@ mod tests {
         let path1 = tmp_file("a.txt", content);
         let path2 = tmp_file("b.txt", content);
 
-        svc.index_file(&fid1, &path1, "d1").unwrap();
-        svc.index_file(&fid2, &path2, "d1").unwrap();
+        svc.index_file(&fid1, &path1, "d1", None).unwrap();
+        svc.index_file(&fid2, &path2, "d1", None).unwrap();
         svc.commit().unwrap();
 
         // Both should be findable.
@@ -911,7 +923,7 @@ mod tests {
         let (svc, fid) = setup();
         let missing = std::path::Path::new("/tmp/nonexistent_file_xyz.txt");
 
-        let result = svc.index_file(&fid, missing, "d1");
+        let result = svc.index_file(&fid, missing, "d1", None);
         assert!(result.is_err(), "should fail on missing file");
 
         // DB tracking should remain at indexed=0 (inserted but never updated).
@@ -925,7 +937,7 @@ mod tests {
         let (svc, fid) = setup();
         let path = tmp_file("test.txt", "delete test content");
 
-        svc.index_file(&fid, &path, "d1").unwrap();
+        svc.index_file(&fid, &path, "d1", None).unwrap();
         svc.commit().unwrap();
 
         svc.delete_file(&fid).unwrap();
@@ -943,6 +955,32 @@ mod tests {
             .search(&query, &tantivy::collector::TopDocs::with_limit(10))
             .unwrap();
         assert_eq!(top.len(), 0, "deleted doc should not be found");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_quality_score_persisted_after_extraction() {
+        let (svc, fid) = setup();
+        let path = tmp_file(
+            "quality_test.txt",
+            "This is a test document with sufficient content for quality scoring to produce a non-null score",
+        );
+
+        svc.index_file(&fid, &path, "d1", None).unwrap();
+
+        let conn = svc.db.get().unwrap();
+        let rec = crate::db::tracker::get_file_by_id(&conn, &fid)
+            .unwrap()
+            .unwrap();
+        let md5 = rec.md5.expect("md5 should be set after indexing");
+        let (score, _) = crate::db::tracker::get_content_quality(&conn, &md5)
+            .unwrap()
+            .expect("quality row should exist");
+        assert!(
+            score.is_some(),
+            "quality_score must be non-null after extraction"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

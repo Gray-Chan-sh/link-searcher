@@ -152,7 +152,7 @@ fn test_full_indexing_workflow() -> Result<()> {
 
     for (path, _content) in &files {
         let fid = env.track_file(path, 1000);
-        env.indexer.index_file(&fid, path, &env.dir_id)?;
+        env.indexer.index_file(&fid, path, &env.dir_id, None)?;
     }
     env.indexer.commit()?;
 
@@ -180,11 +180,11 @@ fn test_incremental_indexing_dedup() -> Result<()> {
     let p2 = env.create_file("second.txt", content);
 
     let fid1 = env.track_file(&p1, 1000);
-    env.indexer.index_file(&fid1, &p1, &env.dir_id)?;
+    env.indexer.index_file(&fid1, &p1, &env.dir_id, None)?;
     env.indexer.commit()?;
 
     let fid2 = env.track_file(&p2, 1001);
-    env.indexer.index_file(&fid2, &p2, &env.dir_id)?;
+    env.indexer.index_file(&fid2, &p2, &env.dir_id, None)?;
     env.indexer.commit()?;
 
     // Both files should share the same md5.
@@ -317,9 +317,9 @@ fn test_search_with_filters() -> Result<()> {
         .unwrap()
     };
 
-    env.indexer.index_file(&fid1, &p1, &env.dir_id)?;
-    env.indexer.index_file(&fid2, &p2, &env.dir_id)?;
-    env.indexer.index_file(&fid3, &p3, &dir2_id)?;
+    env.indexer.index_file(&fid1, &p1, &env.dir_id, None)?;
+    env.indexer.index_file(&fid2, &p2, &env.dir_id, None)?;
+    env.indexer.index_file(&fid3, &p3, &dir2_id, None)?;
     env.indexer.commit()?;
 
     // dir_id filter.
@@ -352,9 +352,9 @@ fn test_duplicate_detection() -> Result<()> {
     let fid2 = env.track_file(&p2, 1001);
     let fid3 = env.track_file(&p3, 1002);
 
-    env.indexer.index_file(&fid1, &p1, &env.dir_id)?;
-    env.indexer.index_file(&fid2, &p2, &env.dir_id)?;
-    env.indexer.index_file(&fid3, &p3, &env.dir_id)?;
+    env.indexer.index_file(&fid1, &p1, &env.dir_id, None)?;
+    env.indexer.index_file(&fid2, &p2, &env.dir_id, None)?;
+    env.indexer.index_file(&fid3, &p3, &env.dir_id, None)?;
     env.indexer.commit()?;
 
     let c = env.pool.get().unwrap();
@@ -486,7 +486,7 @@ fn test_concurrent_safety() -> Result<()> {
     // tantivy IndexWriter simultaneously.
     let dummy = env.create_file("_preinit_.txt", "preinit");
     let dummy_fid = env.track_file(&dummy, 1);
-    env.indexer.index_file(&dummy_fid, &dummy, &env.dir_id).unwrap();
+    env.indexer.index_file(&dummy_fid, &dummy, &env.dir_id, None).unwrap();
     std::fs::remove_file(dummy).ok();
 
     let indexer1 = env.indexer.clone();
@@ -499,10 +499,10 @@ fn test_concurrent_safety() -> Result<()> {
     let fid2b = fid2.clone();
 
     let jh1 = std::thread::spawn(move || {
-        indexer1.index_file(&fid1b, &p1b, &dir_id1).unwrap();
+        indexer1.index_file(&fid1b, &p1b, &dir_id1, None).unwrap();
     });
     let jh2 = std::thread::spawn(move || {
-        indexer2.index_file(&fid2b, &p2b, &dir_id2).unwrap();
+        indexer2.index_file(&fid2b, &p2b, &dir_id2, None).unwrap();
     });
 
     jh1.join().expect("thread 1 panicked");

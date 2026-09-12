@@ -687,7 +687,7 @@ impl Scanner {
                 if skip {
                     return Ok(());
                 }
-                match self.indexer.index_file(&file_id, file_path, &event.dir_id) {
+                match self.indexer.index_file(&file_id, file_path, &event.dir_id, None) {
                     Ok(()) => log::info!("[WATCHER] indexed: {path_str}"),
                     Err(e) => log::error!("[WATCHER] failed to index {path_str}: {e}"),
                 }
