@@ -56,12 +56,12 @@ export default function Browse() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [filter, setFilter] = usePersistentState<FilterType>(LS_KEY_FILTER, params.get('filter') as FilterType || 'all')
+  const [filter, setFilter] = usePersistentState<string>(LS_KEY_FILTER, params.get('filter') || 'all')
   const [ext, setExt] = usePersistentState<string>(LS_KEY_EXT, params.get('ext') || '')
   const [availableExts, setAvailableExts] = useState<string[]>([])
   const [search, setSearch] = usePersistentState<string>(LS_KEY_SEARCH, params.get('search') || '')
   const [debouncedSearch, setDebouncedSearch] = useState(search)
-  const [sort, setSort] = usePersistentState<SortKey>(LS_KEY_SORT, params.get('sort') as SortKey || 'name')
+  const [sort, setSort] = usePersistentState<string>(LS_KEY_SORT, params.get('sort') || 'name')
   const [order, setOrder] = usePersistentState<SortOrder>(LS_KEY_ORDER, params.get('order') as SortOrder || 'asc')
   const [loading, setLoading] = useState(false)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
@@ -84,8 +84,8 @@ export default function Browse() {
   // 全文搜索模式（与 SearchPage 共享 useSearch hook）
   const fts = useFtsSearch()
   const [selectedSearchHit, setSelectedSearchHit] = useState<SearchHit | null>(null)
-  type ColKey = 'filename' | 'path' | 'type' | 'status'
-  const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, status: 112 })
+  type ColKey = 'filename' | 'path' | 'type' | 'quality' | 'status'
+  const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, quality: 80, status: 112 })
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const rowHeightRef = useRef<number | null>(null)
@@ -147,7 +147,7 @@ return () => document.removeEventListener('click', close)
   }, [colWidths])
 
   const handleAutoFit = useCallback((col: ColKey) => {
-    const colIdx = ({ filename: 0, path: 1, type: 2, status: 3 } as const)[col]
+    const colIdx = ({ filename: 0, path: 1, type: 2, quality: 3, status: 4 } as const)[col]
     const cells = tableRef.current?.querySelectorAll<HTMLTableCellElement>(
       `tbody td:nth-child(${colIdx + 1})`
     )
@@ -193,7 +193,9 @@ return () => document.removeEventListener('click', close)
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const res = await listFilesDb({ filter, ext: ext || undefined, search: (forcedSearch ?? debouncedSearch) || undefined, sort, order, page, pageSize })
+      const apiFilter = filter === 'low_quality' ? 'all' : filter
+      const qualityParam = filter === 'low_quality' ? 'low' : undefined
+      const res = await listFilesDb({ filter: apiFilter as FilterType, ext: ext || undefined, search: (forcedSearch ?? debouncedSearch) || undefined, sort: sort as SortKey, order, page, pageSize, quality: qualityParam })
       setItems(res.items)
       setTotal(res.total)
     } catch {
@@ -370,6 +372,7 @@ return (
             <option value="pending">{t('pending')}</option>
             <option value="failed">{t('failed')}</option>
             <option value="deleted">{t('deleted')}</option>
+            <option value="low_quality">{t('low_quality')}</option>
           </select>
 
           <select
@@ -416,6 +419,8 @@ return (
             <option value="mtime-desc">{t('newest')}</option>
             <option value="mtime-asc">{t('oldest')}</option>
             <option value="ext-asc">{t('ext_az')}</option>
+            <option value="quality-asc">{t('quality_asc')}</option>
+            <option value="quality-desc">{t('quality_desc')}</option>
           </select>
 
           <button
@@ -506,6 +511,10 @@ return (
                     {t('status')}
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'status')} onDoubleClick={() => handleAutoFit('status')} />
                   </th>
+                  <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.quality }}>
+                    {t('quality')}
+                    <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'quality')} onDoubleClick={() => handleAutoFit('quality')} />
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -565,11 +574,19 @@ return (
                       <span className="text-gray-500 dark:text-gray-400 uppercase">{item.file_ext || '—'}</span>
                     </td>
                     <td className="px-2 py-1">{statusBadge(item.indexed, item.error_msg, t, item.status)}</td>
+                    <td className="px-2 py-1">
+                      <span className={`inline-block size-2 rounded-full ${
+                        item.quality_score == null ? 'bg-gray-300 dark:bg-gray-600' :
+                        item.quality_score > 0.75 ? 'bg-green-500' :
+                        item.quality_score >= 0.5 ? 'bg-yellow-500' :
+                        'bg-red-500'
+                      }`} title={item.quality_score != null ? `${t('quality')}: ${item.quality_score.toFixed(2)}` : t('quality')} />
+                    </td>
                   </tr>
                 ))}
                 {!loading && items.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="px-4 py-16 text-center text-gray-400 dark:text-gray-500">
+                    <td colSpan={5} className="px-4 py-16 text-center text-gray-400 dark:text-gray-500">
                       {t('no_files_found')}
                     </td>
                   </tr>

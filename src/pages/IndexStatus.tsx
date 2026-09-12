@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, type IndexError } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, type IndexError, type QualityAuditEntry } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon } from '../icons'
@@ -38,6 +38,11 @@ export default function IndexStatus() {
   const [lastDelta, setLastDelta] = useState<{ added: number; deleted: number; modified: number; errors: number } | null>(null)
   const [scanPhase, setScanPhase] = useState<string | null>(null)
   const [scanCounts, setScanCounts] = useState<{ processed: number; total: number } | null>(null)
+  const [qualityData, setQualityData] = useState<{ green: number; yellow: number; red: number; unevaluated: number; total: number } | null>(null)
+  const [auditEntries, setAuditEntries] = useState<QualityAuditEntry[]>([])
+  const [showAudit, setShowAudit] = useState(false)
+  const [auditing, setAuditing] = useState(false)
+  const [reextractingId, setReextractingId] = useState<string | null>(null)
 
   useEffect(() => {
     aiCapabilities().then(c => { setEmbedCapable(c.embedding); setLlmCapable(c.llm) }).catch(() => {})
@@ -221,6 +226,47 @@ export default function IndexStatus() {
     }
   }
 
+  const fetchQualityData = async () => {
+    try {
+      const s = await getQualitySummary()
+      setQualityData(s)
+    } catch {
+      setQualityData(null)
+    }
+  }
+
+  useEffect(() => { fetchQualityData() }, [])
+
+  const handleAudit = async () => {
+    if (showAudit) { setShowAudit(false); return }
+    setAuditing(true)
+    try {
+      const entries = await qualityAudit(0.5, 100)
+      setAuditEntries(entries)
+      setShowAudit(true)
+    } catch {
+      setAuditEntries([])
+    } finally {
+      setAuditing(false)
+    }
+  }
+
+  const handleReExtract = async (fileId: string) => {
+    setReextractingId(fileId)
+    try {
+      await reExtractFile(fileId)
+    } catch { /* empty */ } finally {
+      setReextractingId(null)
+      fetchQualityData()
+      if (showAudit) {
+        try {
+          const entries = await qualityAudit(0.5, 100)
+          setAuditEntries(entries)
+        } catch { /* empty */ }
+      }
+    }
+  }
+
   const progress = scanCounts
     ? Math.round((scanCounts.processed / scanCounts.total) * 100)
     : (status && status.total_files > 0
@@ -398,6 +444,97 @@ export default function IndexStatus() {
               )}
             </div>
           </div>
+
+          {qualityData && qualityData.total > 0 && (
+            <div className="mb-6 p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <div>
+                  <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100">{t('quality_health')}</h3>
+                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">{t('quality_health_desc')}</p>
+                </div>
+                <button
+                  onClick={handleAudit}
+                  disabled={auditing}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
+                >
+                  {auditing && <LoadingSpinner className="size-3" />}
+                  {showAudit ? t('close') : t('audit_low_quality')}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 text-xs">
+                <span className="text-gray-500 dark:text-gray-400">{t('quality_total', { n: qualityData.total })}</span>
+                <div className="flex-1 h-3 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden flex">
+                  {qualityData.green > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${(qualityData.green / qualityData.total) * 100}%` }} />}
+                  {qualityData.yellow > 0 && <div className="h-full bg-yellow-400 transition-all" style={{ width: `${(qualityData.yellow / qualityData.total) * 100}%` }} />}
+                  {qualityData.red > 0 && <div className="h-full bg-red-400 transition-all" style={{ width: `${(qualityData.red / qualityData.total) * 100}%` }} />}
+                </div>
+                <span className="flex items-center gap-3 tabular-nums">
+                  <span className="text-green-600 dark:text-green-400">{t('quality_green')} {qualityData.green}</span>
+                  <span className="text-yellow-600 dark:text-yellow-400">{t('quality_yellow')} {qualityData.yellow}</span>
+                  <span className="text-red-500 dark:text-red-400">{t('quality_red')} {qualityData.red}</span>
+                  {qualityData.unevaluated > 0 && <span className="text-gray-400 dark:text-gray-500">{t('quality_unevaluated')} {qualityData.unevaluated}</span>}
+                </span>
+              </div>
+
+              {showAudit && (
+                <div className="mt-3 border-t border-gray-200 dark:border-gray-800 pt-3">
+                  {auditing ? (
+                    <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                      <LoadingSpinner className="size-3" /> {t('auditing')}
+                    </div>
+                  ) : auditEntries.length === 0 ? (
+                    <p className="text-xs text-gray-400 dark:text-gray-500">{t('quality_audit_empty')}</p>
+                  ) : (
+                    <div className="max-h-72 overflow-y-auto space-y-2">
+                      {auditEntries.map((entry) => {
+                        const score = entry.quality_score
+                        const badgeColor = score !== null
+                          ? score > 0.75 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                            : score >= 0.5 ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
+                              : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
+                          : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                        const flags: string[] = entry.quality_flags ? JSON.parse(entry.quality_flags) : []
+                        return (
+                          <div key={entry.md5} className="text-xs p-2 bg-gray-50 dark:bg-gray-800/50 border border-gray-100 dark:border-gray-800 rounded">
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="font-medium text-gray-900 dark:text-gray-100 truncate max-w-[60%]" title={entry.file_path ?? undefined}>
+                                {entry.file_path ?? t('quality_unknown_path')}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeColor}`}>
+                                  {score !== null ? score.toFixed(2) : '—'}
+                                </span>
+                                {entry.file_id && (
+                                  <button
+                                    onClick={() => handleReExtract(entry.file_id!)}
+                                    disabled={reextractingId === entry.file_id}
+                                    className="text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+                                  >
+                                    {reextractingId === entry.file_id ? t('quality_re_extracting') : t('quality_re_extract')}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {flags.length > 0 && (
+                              <div className="flex flex-wrap gap-1 mb-1">
+                                {flags.map((f) => (
+                                  <span key={f} className="px-1 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded text-[10px]">{f}</span>
+                                ))}
+                              </div>
+                            )}
+                            {entry.preview && (
+                              <p className="text-gray-400 dark:text-gray-500 truncate">{entry.preview.slice(0, 120)}</p>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="mb-6">
             <div className="flex items-center justify-between mb-2">

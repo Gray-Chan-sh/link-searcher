@@ -279,6 +279,8 @@ pub struct FilePreview {
     pub file_type: String,
     pub char_count: usize,
     pub ocr_used: bool,
+    pub quality_score: Option<f64>,
+    pub quality_flags: String,
 }
 
 #[tauri::command]
@@ -322,7 +324,27 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         (None, 0, false)
     };
 
-    Ok(FilePreview { content, image_path, image_base64, file_type, char_count, ocr_used })
+    let (quality_score, quality_flags) = if let Some(md5) = &file.md5 {
+        conn.query_row(
+            "SELECT quality_score, quality_flags FROM content_index WHERE md5 = ?1",
+            rusqlite::params![md5],
+            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap_or((None, "[]".to_string()))
+    } else {
+        (None, "[]".to_string())
+    };
+
+    Ok(FilePreview {
+        content,
+        image_path,
+        image_base64,
+        file_type,
+        char_count,
+        ocr_used,
+        quality_score,
+        quality_flags,
+    })
 }
 
 #[tauri::command]
@@ -508,6 +530,8 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
         file_type,
         char_count,
         ocr_used: false,
+        quality_score: None,
+        quality_flags: "[]".to_string(),
     })
 }
 
@@ -681,7 +705,27 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         (None, 0, false)
     };
 
-    Ok(FilePreview { content, image_path, image_base64, file_type, char_count, ocr_used })
+    let (quality_score, quality_flags) = if let Some(md5) = &file.md5 {
+        conn.query_row(
+            "SELECT quality_score, quality_flags FROM content_index WHERE md5 = ?1",
+            rusqlite::params![md5],
+            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap_or((None, "[]".to_string()))
+    } else {
+        (None, "[]".to_string())
+    };
+
+    Ok(FilePreview {
+        content,
+        image_path,
+        image_base64,
+        file_type,
+        char_count,
+        ocr_used,
+        quality_score,
+        quality_flags,
+    })
 }
 
 #[cfg(test)]

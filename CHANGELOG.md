@@ -48,6 +48,17 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 4：UI 三处呈现）
+
+- **索引状态页**（`IndexStatus.tsx`）：新增「质量体检」卡片——红/黄/绿/未评估四档分布条 + 「审计低质量文件」按钮，展开低质量清单（截断路径、分数徽章、标记 chips、内容预览），每条支持「重新提取」并在完成后刷新摘要与清单。
+- **浏览页**（`Browse.tsx`）：新增「质量」列（绿 >0.75 / 黄 0.5–0.75 / 红 <0.5 / 灰 = 未评估）；筛选下拉新增「低质量」（映射为 `quality=low`）；排序新增「质量 ↑ / ↓」（`sort=quality`，NULL 置后）。
+- **预览面板**（`PreviewPanel.tsx`）：新增「质量」区块——分数着色 + `quality_flags` chips（JSON 解析带容错）+ 「重新提取」按钮；后端 `get_file_preview` 返回结构扩展 `quality_score` / `quality_flags`（`commands/files.rs`）。
+- **i18n**：zh/en/ja/ko 四语言补齐全部质量相关键（含并发子任务遗漏的 ja/ko 键）。
+- **验证**：`npx tsc --noEmit` 零错误；`oxlint` 0 error（仅既有 warning）；`npm run build`（`tsc -b && vite build`）成功；`cargo check --lib` 与 `cargo test --lib` 292 全绿。
+- **说明**：本轮未做运行时截图 QA（无 GUI 会话），以类型/构建/i18n 键完整性作为静态门禁。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

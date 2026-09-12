@@ -273,6 +273,8 @@ export interface FilePreview {
   file_type: string  // 'image' | 'text' | 'pdf' | 'office' | 'unknown'
   char_count: number
   ocr_used: boolean
+  quality_score: number | null
+  quality_flags: string
 }
 
 export async function getFilePreview(id: string): Promise<FilePreview> {

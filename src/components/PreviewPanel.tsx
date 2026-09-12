@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { resolveAssetUrlSync as resolveAssetUrl } from '../utils/platform'
 import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities } from '../api/files'
+import { reExtractFile } from '../api/index'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
@@ -46,6 +47,16 @@ function countMatches(text: string, query: string): number {
   return count
 }
 
+function parseQualityFlags(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((f): f is string => typeof f === 'string')
+  } catch {
+    return []
+  }
+}
+
 export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPanelProps) {
   const { t } = useI18n()
   const [meta, setMeta] = useState<FileDetail | null>(null)
@@ -60,6 +71,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const [summaryLoading, setSummaryLoading] = useState(false)
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [qualityLoading, setQualityLoading] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
   const resizingRef = useRef(false)
 
@@ -125,6 +137,20 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       setSummaryLoading(false)
     }
   }, [fileId, summaryLoading])
+
+  const handleReExtract = useCallback(async () => {
+    if (!fileId || qualityLoading) return
+    setQualityLoading(true)
+    try {
+      await reExtractFile(fileId)
+      const p = await getFilePreview(fileId)
+      setPreview(p)
+    } catch (e) {
+      toast(e instanceof Error ? e.message : t('quality_re_extract'))
+    } finally {
+      setQualityLoading(false)
+    }
+  }, [fileId, qualityLoading, t])
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -330,6 +356,46 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
             {t('ocr_applied_notice')}
           </div>
         )}
+
+        {preview && !loading && (
+          <div className="px-4 py-3 space-y-2 border-b border-gray-100 dark:border-gray-800">
+            <MetaRow label={t('quality_section')} value={
+              preview.quality_score != null
+                ? `${(preview.quality_score * 100).toFixed(0)}%`
+                : t('quality_not_evaluated')
+            } valueClassName={
+              preview.quality_score == null
+                ? 'text-gray-400 dark:text-gray-500'
+                : preview.quality_score > 0.75
+                  ? 'text-green-600 dark:text-green-400'
+                  : preview.quality_score >= 0.5
+                    ? 'text-yellow-600 dark:text-yellow-400'
+                    : 'text-red-600 dark:text-red-400'
+            } />
+            {(() => {
+              const flags = parseQualityFlags(preview.quality_flags)
+              return flags.length > 0 ? (
+                <div className="flex flex-wrap gap-1 pt-0.5">
+                  {flags.map(f => (
+                    <span key={f} className="px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800/40 rounded">
+                      {f}
+                    </span>
+                  ))}
+                </div>
+              ) : null
+            })()}
+            {meta && (
+              <button
+                onClick={handleReExtract}
+                disabled={qualityLoading}
+                className="px-2.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/40 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {qualityLoading ? <LoadingSpinner className="size-3.5" /> : null}
+                <span className="ml-1">{qualityLoading ? t('quality_re_extracting') : t('quality_re_extract')}</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Match navigation */}
@@ -386,11 +452,11 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   )
 }
 
-function MetaRow({ label, value }: { label: string; value: string }) {
+function MetaRow({ label, value, valueClassName }: { label: string; value: string; valueClassName?: string }) {
   return (
     <div className="flex items-start gap-2">
       <span className="text-xs font-medium text-gray-500 dark:text-gray-400 shrink-0 w-16">{label}</span>
-      <span className="text-xs text-gray-700 dark:text-gray-300 break-all">{value}</span>
+      <span className={`text-xs break-all ${valueClassName ?? 'text-gray-700 dark:text-gray-300'}`}>{value}</span>
     </div>
   )
 }
