@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -270,15 +270,17 @@ impl PdfExtractor {
         let engine = super::ocr::preferred_engine(engine);
         let is_sparse = is_sparse_text_layer(&merged, pages.len());
 
-        // Use pdf-inspector for accurate PDF classification
-        if merged.len() > 100
+        // Capture pdf_inspector page-level info for per-page OCR decisions.
+        // pages_needing_ocr is 0-indexed.
+        let inspector_ocr_pages: Vec<u32> = if merged.len() > 100
             && let Ok(bytes) = std::fs::read(path) {
                 match pdf_inspector::classify_pdf_mem(&bytes) {
                     Ok(class) => {
-                        let need_ocr = !class.pages_needing_ocr.is_empty()
+                        // Preserve existing whole-doc bypass for Scanned/ImageBased
+                        let all_need_ocr = !class.pages_needing_ocr.is_empty()
                             && (class.pages_needing_ocr.len() * 2 > class.page_count as usize
                                 || is_sparse);
-                        if matches!(class.pdf_type, pdf_inspector::PdfType::Scanned | pdf_inspector::PdfType::ImageBased) || need_ocr {
+                        if matches!(class.pdf_type, pdf_inspector::PdfType::Scanned | pdf_inspector::PdfType::ImageBased) || all_need_ocr {
                             log::info!(
                                 "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
                                 path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
@@ -287,18 +289,22 @@ impl PdfExtractor {
                                 return Ok(ocr_text);
                             }
                         }
+                        class.pages_needing_ocr
                     }
-                    Err(e) => log::warn!("[PDF] {:?}: pdf-inspector classify: {e}", path.file_name()),
+                    Err(e) => {
+                        log::warn!("[PDF] {:?}: pdf-inspector classify: {e}", path.file_name());
+                        Vec::new()
+                    }
                 }
-            }
+            } else {
+                Vec::new()
+            };
 
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
-        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse {
-            log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
-            return Ok(merged);
-        }
+        let doc_clean = merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse;
+
         // lopdf can produce whitespace-only text on Quartz/CFF PDFs —
         // pdftotext handles these correctly
         if is_garbled
@@ -306,6 +312,63 @@ impl PdfExtractor {
                 log::info!("[PDF] {:?}: pdftotext recovered {} chars from garbled text", path.file_name(), text.len());
                 return Ok(text);
             }
+
+        // Per-page refinement runs ONLY when the document-level text layer looks
+        // healthy but individual pages may still be scanned/empty. When the
+        // document-level layer is unusable (watermark/garbled/repetitive/sparse)
+        // we must fall through to whole-document OCR, as before.
+        if doc_clean {
+            // Per-page OCR decisions: use pdf_inspector's per-page info when
+            // available; fall back to conservative heuristic (assume images only
+            // when the page text is sparse — the safest false-negative).
+            let inspector_set: HashSet<usize> = inspector_ocr_pages.iter().map(|&p| p as usize).collect();
+            let has_inspector_info = !inspector_set.is_empty();
+            let needs_ocr: Vec<bool> = page_texts
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let has_images = if has_inspector_info {
+                        inspector_set.contains(&i)
+                    } else {
+                        is_sparse_text_layer(text, 1)
+                    };
+                    page_needs_ocr(text, has_images)
+                })
+                .collect();
+            let ocr_count = needs_ocr.iter().filter(|&&b| b).count();
+            let page_count = pages.len();
+
+            if ocr_count == 0 {
+                log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
+                return Ok(merged);
+            }
+            if ocr_count < page_count {
+                // MIXED: splice per-page OCR results into the text layer
+                log::info!(
+                    "[PDF] {:?}: mixed PDF — {}/{} pages need OCR, using per-page splice",
+                    path.file_name(), ocr_count, page_count
+                );
+                let dpi = global_pdf_dpi();
+                let mut ocr_pages = HashMap::new();
+                for (i, &needs) in needs_ocr.iter().enumerate() {
+                    if needs {
+                        if let Some(text) = ocr_single_pdf_page(path, pages[i], dpi, lang, &engine) {
+                            ocr_pages.insert(i, text);
+                        }
+                    }
+                }
+                if ocr_pages.len() == ocr_count {
+                    let merged_text = merge_page_texts(&page_texts, &ocr_pages);
+                    log::info!("[PDF] {:?}: per-page OCR complete, {} chars", path.file_name(), merged_text.len());
+                    return Ok(merged_text);
+                }
+                log::warn!(
+                    "[PDF] {:?}: per-page OCR partially failed ({}/{}), falling back to whole-document OCR",
+                    path.file_name(), ocr_pages.len(), ocr_count
+                );
+            }
+        }
+
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep, is_sparse);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
@@ -475,6 +538,89 @@ pub fn is_sparse_text_layer(text: &str, page_count: usize) -> bool {
     }
     let non_ws = text.chars().filter(|c| !c.is_whitespace()).count();
     non_ws < 50 * page_count
+}
+
+fn page_needs_ocr(page_text: &str, page_has_images: bool) -> bool {
+    if is_sparse_text_layer(page_text, 1) {
+        return true;
+    }
+    if is_garbled_text(page_text) {
+        return true;
+    }
+    if page_has_images && is_repetitive(page_text) {
+        return true;
+    }
+    false
+}
+
+fn merge_page_texts(text_layer: &[String], ocr_pages: &HashMap<usize, String>) -> String {
+    let parts: Vec<&str> = text_layer
+        .iter()
+        .enumerate()
+        .map(|(i, tl)| match ocr_pages.get(&i) {
+            Some(ocr) => ocr.as_str(),
+            None => tl.as_str(),
+        })
+        .collect();
+    parts.join("\n")
+}
+
+fn ocr_single_pdf_page(
+    path: &Path,
+    page_number: u32,
+    dpi: u32,
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Option<String> {
+    let bin = pdftoppm_path()?;
+    let tmp_dir = TempDir::new("ls_pdf_page_ocr").ok()?;
+    let output_prefix = tmp_dir.path().join("page");
+
+    let mut cmd = crate::process::new(bin);
+    cmd.args([
+        "-png",
+        "-r",
+        &dpi.to_string(),
+        "-f",
+        &page_number.to_string(),
+        "-l",
+        &page_number.to_string(),
+    ])
+    .arg(path)
+    .arg(&output_prefix);
+    cmd.stderr(Stdio::null());
+
+    let mut child = cmd.spawn().ok()?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+
+    let page_file = tmp_dir.path().join(format!("page-{page_number}.png"));
+    if !page_file.exists() {
+        return None;
+    }
+
+    let text = super::ocr::ocr_image_with_engine(&page_file, engine, lang).ok()?;
+    let trimmed = text.trim().to_owned();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed)
 }
 
 /// Render PDF pages to images using pdftoppm and run OCR.
@@ -1135,5 +1281,77 @@ mod tests {
         // conjunction of the two resolved-path predicates it derives from.
         let expected = is_pdftoppm_available() && is_pdfimages_available();
         assert_eq!(poppler_available(), expected);
+    }
+
+    #[test]
+    fn test_page_needs_ocr_healthy_text_returns_false() {
+        let text = "This is a well-formed page with substantial body text. \
+            It contains far more than fifty non-whitespace characters and \
+            is not garbled or repetitive.";
+        assert!(!page_needs_ocr(text, false), "healthy text page should not need OCR");
+        assert!(!page_needs_ocr(text, true), "healthy text page should not need OCR even with images");
+    }
+
+    #[test]
+    fn test_page_needs_ocr_sparse_returns_true() {
+        assert!(page_needs_ocr("short", false), "sparse page should need OCR");
+    }
+
+    #[test]
+    fn test_page_needs_ocr_garbled_returns_true() {
+        let garbled = "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}abc";
+        assert!(page_needs_ocr(garbled, false), "garbled page should need OCR");
+    }
+
+    #[test]
+    fn test_page_needs_ocr_empty_with_images_returns_true() {
+        assert!(page_needs_ocr("", true), "empty page with images should need OCR");
+    }
+
+    #[test]
+    fn test_page_needs_ocr_repetitive_with_images_returns_true() {
+        let rep = "CONFIDENTIAL - INTERNAL USE ONLY\n".repeat(5);
+        assert!(page_needs_ocr(&rep, true), "repetitive text with images should need OCR");
+    }
+
+    #[test]
+    fn test_page_needs_ocr_repetitive_without_images_returns_false() {
+        let rep = "CONFIDENTIAL - INTERNAL USE ONLY\n".repeat(5);
+        assert!(!page_needs_ocr(&rep, false), "repetitive text without images should not need OCR");
+    }
+
+    #[test]
+    fn test_merge_page_texts_empty_ocr_map_equals_join() {
+        let text_layer = vec![
+            "Page one content".to_string(),
+            "Page two content".to_string(),
+        ];
+        let ocr_pages = std::collections::HashMap::new();
+        assert_eq!(merge_page_texts(&text_layer, &ocr_pages), "Page one content\nPage two content");
+    }
+
+    #[test]
+    fn test_merge_page_texts_mixed_splices_ocr_in_order() {
+        let text_layer = vec![
+            "Page one content".to_string(),
+            "Page two scan text".to_string(),
+            "Page three content".to_string(),
+        ];
+        let mut ocr_pages = std::collections::HashMap::new();
+        ocr_pages.insert(1, "OCR'd page two".to_string());
+        let result = merge_page_texts(&text_layer, &ocr_pages);
+        assert_eq!(result, "Page one content\nOCR'd page two\nPage three content");
+    }
+
+    #[test]
+    fn test_merge_page_texts_ocr_overrides_text_layer() {
+        let text_layer = vec![
+            "Original text".to_string(),
+            "Original page two".to_string(),
+        ];
+        let mut ocr_pages = std::collections::HashMap::new();
+        ocr_pages.insert(0, "Replacement OCR".to_string());
+        let result = merge_page_texts(&text_layer, &ocr_pages);
+        assert_eq!(result, "Replacement OCR\nOriginal page two");
     }
 }
