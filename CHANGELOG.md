@@ -75,6 +75,16 @@
 
 ---
 
+## 2026-09-12（OCR 质量修复 Phase 2 · Wave 7：渲染 DPI / 检测分辨率 / 置信度过滤）
+
+- **PDF 渲染 DPI 200 → 300（可配置）**：新增 `ocr_pdf_dpi` 设置（默认 `300`，钳制 100–600，空/非法值回落 300）；`pdf.rs` 的 `pdftoppm -r` 改为读取该设置（新增 `normalize_pdf_dpi()` 纯函数 + `global_pdf_dpi()` 读取器）。法律文书的小字/脚注在 200 DPI 下常低于检测阈值。
+- **PaddleOCR 检测分辨率 960 → 1280**（`paddleocr.rs` 的 `det_limit_side_len`）：改善小字/密集排版的检测召回。该参数在引擎构建期生效（进程启动时应用）。
+- **置信度过滤统一**：提取 `const MIN_CONFIDENCE: f32 = 0.5` 应用于全部识别路径；并补上此前 `recognize_from_image` **缺失**的置信度过滤（该路径原样返回低置信噪点）。
+- **测试**：`cargo test --lib` **308** 全绿（+10：6 例 DPI 钳制/回落 + 2 例 seed 幂等 + 1 例白名单 + 1 例常量）；`cargo check --all-targets` 零错误。
+- **未验证**：本机 Homebrew `pdftoppm` 损坏（缺 `libnss3`），300 DPI 的真实渲染路径无法在此环境端到端验证。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

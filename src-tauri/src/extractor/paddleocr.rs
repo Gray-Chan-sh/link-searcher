@@ -9,6 +9,8 @@ use log;
 use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
 use super::ocr::OcrStats;
 
+const MIN_CONFIDENCE: f32 = 0.5;
+
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn pthread_set_qos_class_self_np(qos_class: u32, relative_priority: i32) -> i32;
@@ -117,7 +119,7 @@ fn try_build_engine() -> Result<SendEngine, String> {
         .det_model_path(&det)
         .rec_model_path(&rec)
         .dictionary_path(&dict)
-        .det_limit_side_len(960)
+        .det_limit_side_len(1280)
         .build()
         .map_err(|e| format!("PaddleOCR 引擎初始化失败: {e}"))?;
 
@@ -157,7 +159,7 @@ pub fn recognize_from_path_enriched(
             .map(|results| {
                 let filtered: Vec<_> = results
                     .into_iter()
-                    .filter(|r| r.confidence >= 0.5)
+                    .filter(|r| r.confidence >= MIN_CONFIDENCE)
                     .collect();
                 let text = filtered.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
                 let mean_confidence = if filtered.is_empty() {
@@ -179,6 +181,16 @@ pub fn recognize_from_path(path: &Path) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_confidence_is_expected_value() {
+        assert!((MIN_CONFIDENCE - 0.5).abs() < f32::EPSILON);
+    }
+}
+
 /// Number of engines currently built in the pool (0 if not yet built).
 /// Used for per-page OCR performance diagnosis in `pdf.rs`.
 pub fn active_pool_size() -> usize {
@@ -195,7 +207,7 @@ pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), 
         let filtered: Vec<_> = run
             .results
             .into_iter()
-            .filter(|r| r.confidence >= 0.5)
+            .filter(|r| r.confidence >= MIN_CONFIDENCE)
             .collect();
         let text = filtered
             .iter()
@@ -259,7 +271,14 @@ pub fn recognize_from_image(image: &image::DynamicImage) -> Result<String> {
     let image = image.clone();
     with_engine_timed(move |eng| {
         eng.run_from_image(&image)
-            .map(|results| results.into_iter().map(|r| r.text).collect::<Vec<_>>().join(" "))
+            .map(|results| {
+                results
+                    .into_iter()
+                    .filter(|r| r.confidence >= MIN_CONFIDENCE)
+                    .map(|r| r.text)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .map_err(|e| format!("OCR 引擎无法处理此图片（模型可能不支持该输入格式）: {}", e))
     })
     .map_err(|e| anyhow::anyhow!("{e}"))

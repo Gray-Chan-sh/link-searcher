@@ -426,6 +426,7 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
     let defaults = [
         ("ocr_engine", default_ocr_engine),
         ("ocr_lang", "chi_sim"),
+        ("ocr_pdf_dpi", "300"),
         ("scheduled_scan_time", "02:00"),
         ("max_results", "1000"),
         ("auto_backup", "1"),
@@ -588,5 +589,37 @@ mod tests {
 
         drop(pool);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_ocr_pdf_dpi_seeded_with_default_300() {
+        let conn = setup_conn();
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'ocr_pdf_dpi'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "300");
+    }
+
+    #[test]
+    fn test_ocr_pdf_dpi_not_overwritten_on_rerun() {
+        let conn = setup_conn();
+        conn.execute(
+            "UPDATE app_settings SET value = '600' WHERE key = 'ocr_pdf_dpi'",
+            [],
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'ocr_pdf_dpi'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(val, "600");
     }
 }

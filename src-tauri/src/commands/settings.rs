@@ -8,6 +8,7 @@ use crate::state::AppState;
 const ALLOWED_KEYS: &[&str] = &[
     "ocr_engine",
     "ocr_lang",
+    "ocr_pdf_dpi",
     "max_results",
     "exclude_patterns",
     "scan_time",
@@ -65,4 +66,17 @@ pub fn get_version() -> serde_json::Value {
         "hash": env!("GIT_VERSION"),
         "time": env!("GIT_COMMIT_TIME"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_allowed_keys_contains_ocr_pdf_dpi() {
+        assert!(
+            ALLOWED_KEYS.contains(&"ocr_pdf_dpi"),
+            "ALLOWED_KEYS must contain 'ocr_pdf_dpi'"
+        );
+    }
 }

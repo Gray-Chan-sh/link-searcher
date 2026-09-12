@@ -478,7 +478,8 @@ pub fn ocr_pdf_via_pdftoppm(
     let bin = pdftoppm_path()
         .ok_or_else(|| anyhow::anyhow!("pdftoppm not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
-    cmd.args(["-png", "-r", "200"]).arg(path).arg(&output_prefix);
+    let dpi = global_pdf_dpi();
+    cmd.args(["-png", "-r", &dpi.to_string()]).arg(path).arg(&output_prefix);
     cmd.stderr(Stdio::null());
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
@@ -756,6 +757,43 @@ fn global_ocr_lang() -> String {
     }
 }
 
+/// Parse an optional DPI string into a clamped u32 in [100..=600], defaulting
+/// to 300 on None, empty string, non-numeric, or out-of-range input.
+pub fn normalize_pdf_dpi(raw: Option<&str>) -> u32 {
+    let s = match raw {
+        Some(v) if !v.is_empty() => v,
+        _ => return 300,
+    };
+    let n = match s.parse::<u32>() {
+        Ok(v) => v,
+        Err(_) => return 300,
+    };
+    n.clamp(100, 600)
+}
+
+/// Read the `ocr_pdf_dpi` setting from SQLite, clamped to [100..=600].
+pub fn global_pdf_dpi() -> u32 {
+    static POOL: OnceLock<Option<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
+        OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let data_dir = crate::config::load_config().data_dir;
+        let db_path = data_dir.join("data.db");
+        crate::db::get_pool(&db_path.to_string_lossy()).ok()
+    });
+    let raw = match pool {
+        Some(pool) => pool.get().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'ocr_pdf_dpi'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        }),
+        None => None,
+    };
+    normalize_pdf_dpi(raw.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1041,35 @@ mod tests {
         assert!(is_repetitive(&wm), "repeated watermark line should be detected");
         let varied = (0..20).map(|i| format!("Line {i} of real content")).collect::<Vec<_>>().join("\n");
         assert!(!is_repetitive(&varied), "distinct lines should not be flagged");
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_none_defaults_300() {
+        assert_eq!(normalize_pdf_dpi(None), 300);
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_zero_clamped_to_100() {
+        assert_eq!(normalize_pdf_dpi(Some("0")), 100);
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_too_large_clamped_to_600() {
+        assert_eq!(normalize_pdf_dpi(Some("9999")), 600);
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_valid_passthrough() {
+        assert_eq!(normalize_pdf_dpi(Some("300")), 300);
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_invalid_falls_back_300() {
+        assert_eq!(normalize_pdf_dpi(Some("abc")), 300);
+    }
+
+    #[test]
+    fn test_normalize_pdf_dpi_negative_falls_back_300() {
+        assert_eq!(normalize_pdf_dpi(Some("-5")), 300);
     }
 }
