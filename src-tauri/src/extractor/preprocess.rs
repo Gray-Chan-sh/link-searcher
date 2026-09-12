@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
-use image::GenericImageView;
+use image::{GenericImageView, GrayImage};
 
 /// Monotonically increasing counter for unique temp filenames.
 static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -22,6 +22,106 @@ const TARGET_LONGEST_SIDE: u32 = 1000;
 
 /// Below this spread (p95 − p5 on 0–255) the image is considered low-contrast.
 const LOW_CONTRAST_THRESHOLD: u8 = 100;
+
+/// Longest side used for detection (angle is scale-invariant; smaller = faster).
+const DESKEW_DETECT_MAX_SIDE: u32 = 400;
+
+/// Skew below this (degrees) is left untouched to avoid harming clean docs.
+const DESKEW_MIN_ANGLE_DEG: f32 = 2.0;
+
+/// Skew above this (degrees) is too severe to auto-correct safely.
+const DESKEW_MAX_ANGLE_DEG: f32 = 15.0;
+
+const DESKEW_SEARCH_STEP_DEG: f32 = 0.5;
+const DESKEW_SEARCH_RANGE_DEG: f32 = 10.0;
+
+/// Projection variance below this means no text-line structure to deskew.
+const DESKEW_MIN_PROFILE_VARIANCE: f32 = 1.0;
+
+/// Minimum fraction of rows with zero ink at the detected angle, confirming
+/// horizontal text lines exist (rejects edge/uniform images without structure).
+const DESKEW_MIN_EMPTY_ROW_FRACTION: f32 = 0.02;
+
+/// Detect the rotation (degrees) to apply to deskew a grayscale page.
+///
+/// Coarse projection-profile search: binarize a throwaway copy (Otsu),
+/// rotate it through ±10° in 0.5° steps, and pick the angle whose
+/// horizontal projection profile (per-row ink-count) has the maximum
+/// variance — i.e. text lines collapse into the fewest, most distinct rows.
+/// The OUTPUT image is never binarized; only this detection copy is.
+fn detect_deskew_angle(gray: &GrayImage) -> f32 {
+    use imageproc::contrast::{otsu_level, threshold, ThresholdType};
+    use imageproc::geometric_transformations::{
+        rotate_about_center, Interpolation,
+    };
+
+    let (w, h) = gray.dimensions();
+    let longest = w.max(h);
+    let detect = if longest > DESKEW_DETECT_MAX_SIDE {
+        let scale = DESKEW_DETECT_MAX_SIDE as f64 / longest as f64;
+        let new_w = (w as f64 * scale).round().max(1.0) as u32;
+        let new_h = (h as f64 * scale).round().max(1.0) as u32;
+        image::imageops::resize(gray, new_w, new_h, image::imageops::FilterType::Triangle)
+    } else {
+        gray.clone()
+    };
+
+    // ink = 0, background = 255 (detection only; output stays grayscale).
+    let level = otsu_level(&detect);
+    let binary = threshold(&detect, level, ThresholdType::Binary);
+
+    let (bw, bh) = binary.dimensions();
+    let mut best_angle = 0.0f32;
+    let mut best_score = f32::NEG_INFINITY;
+    let mut best_empty_rows = 0usize;
+
+    let mut angle = -DESKEW_SEARCH_RANGE_DEG;
+    while angle <= DESKEW_SEARCH_RANGE_DEG {
+        let rotated = rotate_about_center(
+            &binary,
+            angle.to_radians(),
+            Interpolation::Nearest,
+            image::Luma([255u8]),
+        );
+
+        let mut row_ink = vec![0u32; bh as usize];
+        for y in 0..bh {
+            let mut count = 0u32;
+            for x in 0..bw {
+                if rotated.get_pixel(x, y)[0] == 0 {
+                    count += 1;
+                }
+            }
+            row_ink[y as usize] = count;
+        }
+
+        let mean = row_ink.iter().sum::<u32>() as f32 / bh as f32;
+        let variance = row_ink
+            .iter()
+            .map(|&c| {
+                let d = c as f32 - mean;
+                d * d
+            })
+            .sum::<f32>()
+            / bh as f32;
+
+        if variance > best_score {
+            best_score = variance;
+            best_angle = angle;
+            best_empty_rows = row_ink.iter().filter(|&&c| c == 0).count();
+        }
+        angle += DESKEW_SEARCH_STEP_DEG;
+    }
+
+    if best_score < DESKEW_MIN_PROFILE_VARIANCE {
+        return 0.0;
+    }
+    let empty_fraction = best_empty_rows as f32 / bh as f32;
+    if empty_fraction < DESKEW_MIN_EMPTY_ROW_FRACTION {
+        return 0.0;
+    }
+    best_angle
+}
 
 /// Returns `Some(temp_png_path)` when the image was transformed, `None` when
 /// the original is already suitable. Caller MUST delete the returned temp file.
@@ -79,11 +179,25 @@ pub fn preprocess_for_ocr(input_path: &Path) -> Result<Option<PathBuf>> {
         }
     }
 
+    // --- Step 4: Deskew (only for clearly-tilted pages) ---
+    let deskew_angle = detect_deskew_angle(&enhanced);
+    if deskew_angle.abs() > DESKEW_MIN_ANGLE_DEG
+        && deskew_angle.abs() <= DESKEW_MAX_ANGLE_DEG
+    {
+        enhanced = imageproc::geometric_transformations::rotate_about_center(
+            &enhanced,
+            deskew_angle.to_radians(),
+            imageproc::geometric_transformations::Interpolation::Bilinear,
+            image::Luma([255u8]),
+        );
+        modified = true;
+    }
+
     if !modified {
         return Ok(None);
     }
 
-    // --- Step 4: Write temp PNG (3-channel RGB so every decoder accepts it) ---
+    // --- Step 5: Write temp PNG (3-channel RGB so every decoder accepts it) ---
     let rgb = image::DynamicImage::ImageLuma8(enhanced).to_rgb8();
     let dyn_rgb = image::DynamicImage::ImageRgb8(rgb);
 
@@ -163,6 +277,47 @@ mod tests {
             seen[v as usize] = true;
         }
         seen.iter().filter(|&&b| b).count()
+    }
+
+    /// Create a synthetic page of horizontal text lines (dark "ink" on white).
+    /// Structured enough for projection-profile skew detection.
+    fn make_text_page(w: u32, h: u32) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+        let mut img = ImageBuffer::from_pixel(w, h, Luma([255u8]));
+        let line_height = 20u32;
+        let line_gap = 16u32;
+        let char_w = 12u32;
+        let char_gap = 6u32;
+
+        let mut y = 50u32;
+        while y + line_height < h - 50 {
+            let mut x = 50u32;
+            while x + char_w < w - 50 {
+                for cy in 0..line_height {
+                    for cx in 0..char_w {
+                        let px = x + cx;
+                        let py = y + cy;
+                        // Leave internal white gaps to mimic letterforms.
+                        if !((cx + cy * 3) % 5 == 0 || (cx * 2 + cy) % 7 == 0) {
+                            img.put_pixel(px, py, Luma([20u8]));
+                        }
+                    }
+                }
+                x += char_w + char_gap;
+            }
+            y += line_height + line_gap;
+        }
+        img
+    }
+
+    /// Rotate a straight text page by +4° to simulate a small scan skew.
+    fn make_skewed_text_page() -> ImageBuffer<Luma<u8>, Vec<u8>> {
+        let straight = make_text_page(1200, 900);
+        imageproc::geometric_transformations::rotate_about_center(
+            &straight,
+            4.0_f32.to_radians(),
+            imageproc::geometric_transformations::Interpolation::Bilinear,
+            image::Luma([255u8]),
+        )
     }
 
     // --- Test 1: Output is NOT binarized (many gray levels preserved) ---
@@ -294,5 +449,52 @@ mod tests {
         let img = image::open(&out_path);
         assert!(img.is_ok(), "output should be a valid decodable image");
         let _ = std::fs::remove_file(&out_path);
+    }
+
+    // --- Test 6: Straight high-contrast large text → not preprocessed (no deskew) ---
+    #[test]
+    fn test_deskew_straight_text_no_rotation() {
+        let text = make_text_page(1200, 900);
+        let path = save_gray_tmp(&text);
+        let result = preprocess_for_ocr(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(
+            result.expect("ok").is_none(),
+            "straight high-contrast large text should not be preprocessed"
+        );
+    }
+
+    // --- Test 7: Skewed text → deskew measurably reduces the skew angle ---
+    #[test]
+    fn test_deskew_reduces_skew() {
+        let skewed = make_skewed_text_page();
+        let path = save_gray_tmp(&skewed);
+
+        let input_angle = super::detect_deskew_angle(&skewed);
+
+        let result = preprocess_for_ocr(&path);
+        let _ = std::fs::remove_file(&path);
+
+        let out_path = result
+            .expect("should return Some for skewed text")
+            .expect("ok");
+        let out_img = image::open(&out_path).expect("decodable").to_luma8();
+        let _ = std::fs::remove_file(&out_path);
+
+        let output_angle = super::detect_deskew_angle(&out_img);
+
+        assert!(
+            input_angle.abs() > 2.0,
+            "input should exhibit skew > 2°, got {input_angle}"
+        );
+        assert!(
+            output_angle.abs() < input_angle.abs(),
+            "output skew ({output_angle}) should be less than input ({input_angle})"
+        );
+        assert!(
+            output_angle.abs() <= 1.0,
+            "output skew should settle within ±1° of horizontal, got {output_angle}"
+        );
     }
 }

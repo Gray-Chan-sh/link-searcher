@@ -127,9 +127,9 @@ pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencySt
             install_guide: "macOS: brew install tesseract\nWindows: winget install -e --id UB-Mannheim.TesseractOCR\nLinux: sudo apt install tesseract-ocr".into(),
         },
         DependencyStatus {
-            name: "PDF Renderer (pdftoppm)".into(),
-            command: "pdftoppm".into(),
-            available: crate::extractor::pdf::is_pdftoppm_available(),
+            name: "PDF Renderer (poppler)".into(),
+            command: "pdftoppm / pdfimages".into(),
+            available: crate::extractor::pdf::poppler_available(),
             install_guide: "macOS: brew install poppler\nWindows: winget install -e --id oschwartz10612.Poppler\nLinux: sudo apt install poppler-utils".into(),
         },
         DependencyStatus {

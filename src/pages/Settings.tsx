@@ -199,9 +199,11 @@ export default function Settings() {
             ocrResult={ocr.ocrResult}
             selectedEngine={selectedEngine}
             ocrLang={settings['ocr_lang'] ?? 'eng'}
+            ocrPdfDpi={settings['ocr_pdf_dpi'] ?? '300'}
             onTestOcr={() => ocr.handleTestOcr(settings['ocr_engine'] ?? 'PaddleOCR')}
             onChangeOcrEngine={engineType => handleFieldChange('ocr_engine', engineType)}
             onChangeOcrLang={v => handleFieldChange('ocr_lang', v)}
+            onChangeOcrPdfDpi={v => handleFieldChange('ocr_pdf_dpi', v)}
           />
         )}
 

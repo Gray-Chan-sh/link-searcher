@@ -518,5 +518,7 @@ const zh: Record<string, string> = {
     backfill_quality_busy: '补齐中…',
     backfill_quality_done: '已处理 {processed}，补齐 {scored} 个',
     backfill_quality_noop: '无需补齐，所有文件已有评分',
+    ocr_pdf_dpi: 'PDF OCR 渲染 DPI',
+    ocr_pdf_dpi_hint: '建议 300，适合小字/模糊文字。数值越高图像越清晰，但速度更慢、内存占用更大。',
 }
 export default zh

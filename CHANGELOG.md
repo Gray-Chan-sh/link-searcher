@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-12（深度学习 OCR 预处理：deskew 纠偏）
+
+- **新增 `detect_deskew_angle()`**（`extractor/preprocess.rs`）：粗粒度投影轮廓法检测页面倾斜角——将灰度图缩小至 ≤400px 后 Otsu 二值化（仅用于检测，输出保持灰度），在 ±10° 范围内以 0.5° 步长旋转，取水平投影（逐行墨迹计数）方差最大角；额外校验最佳角度下空行比例 ≥ 2%，排除非文本结构（如单色边缘图）的假阳性。
+- **`preprocess_for_ocr()` 新增 Step 4 deskew**：仅当检测到的倾斜角在 (2°, 15°] 时才旋转（忽略近直线页面避免二次伤害），使用 `imageproc::geometric_transformations::rotate_about_center`（Bilinear + 白底 255），输出保持 3 通道 RGB 灰度 PNG 不做二值化。
+- **新增测试 2 例**：直文本页不旋转（返回 None）、合成 4° 偏斜文本经 deskew 后偏角显著减小（≤1°）；既有测试 5 例（不二值化 / 大图无操作 / 小图放大 / 低对比增强 / 有效 PNG）全绿，`cargo test --lib` 322 passed / 1 ignored。
+
+---
+
+## 2026-09-12（poppler 可用性检测 + 设置页 OCR DPI 控件）
+
+- **poppler 可用性检测**：新增 `pdf::poppler_available()`（= `is_pdftoppm_available() && is_pdfimages_available()`），接入依赖中心（`commands/tesseract.rs` 的 PDF Renderer 条目）与 `deps/catalog.rs` 的 poppler `is_ready`。**背景**：本机定位到"只识别到水印"的根因之一是 Homebrew `nss` 的 `opt` 符号链接缺失导致 poppler 二进制损坏，而 `pdfimages`/`pdftoppm` 都是 poppler → 扫描件图像 OCR 回退被**静默禁用**，只剩水印文字层。现在依赖检查会如实报告 poppler 不可用。
+- **设置页 OCR DPI 控件**：设置 → 索引标签新增 `ocr_pdf_dpi` 下拉（200 / 300 推荐 / 400 / 600），复用既有设置读写管线；i18n 四语言（zh/en/ja/ko）补齐键。
+- **测试**：`cargo test --lib` 322 全绿（+3：deskew 2 + poppler 1）；`cargo check --all-targets` 零错误；`npx tsc --noEmit` 零错误；`npm run build` 成功。
+
+---
+
 ## 2026-09-12（OCR 提取质量体检框架 Wave 0：质量评分模块 + CER 回归基线）
 
 - **新增质量评分模块 `extractor/quality.rs`**：纯函数 `compute_quality()` 用 5 项**无真值**指标（可打印字符比例 / `U+FFFD` 乱码比例 / OCR 平均置信度 / 字符密度 / 词典命中率）加权合成 0–1 质量分，红黄绿三档阈值，并产出 `QualityFlag`（`low_printable`/`high_fffd`/`low_confidence`/`low_density`/`low_lexicon`/`exhausted`/`max_reextract`）；`ExtractMeta` 承载 OCR 是否使用、平均置信度、PDF 页数、图片尺寸。

@@ -509,5 +509,7 @@ const ko: Record<string, string> = {
     backfill_quality_busy: '보충 중…',
     backfill_quality_done: '{processed}개 처리, {scored}개 점수 부여',
     backfill_quality_noop: '보충 불필요 — 모든 파일에 이미 점수가 있습니다',
+    ocr_pdf_dpi: 'PDF OCR 렌더링 DPI',
+    ocr_pdf_dpi_hint: '300 권장(작거나 흐린 텍스트용). 값이 높을수록 화질이 좋아지지만 속도가 느려지고 메모리 사용량이 증가합니다.',
 }
 export default ko

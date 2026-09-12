@@ -509,5 +509,7 @@ const ja: Record<string, string> = {
     backfill_quality_busy: '補完中…',
     backfill_quality_done: '{processed} 件処理、{scored} 件スコア付与',
     backfill_quality_noop: '補完不要 — 全ファイルに既にスコアがあります',
+    ocr_pdf_dpi: 'PDF OCR レンダリング DPI',
+    ocr_pdf_dpi_hint: '300を推奨（小さな文字や薄い文字向け）。値が高いほど画質が向上しますが、速度が低下しメモリ消費が増加します。',
 }
 export default ja

@@ -578,6 +578,13 @@ pub fn is_pdfimages_available() -> bool {
     pdfimages_path().is_some()
 }
 
+/// Whether the poppler binaries the scanned-PDF OCR fallback needs
+/// (`pdftoppm` AND `pdfimages`) are both runnable; either missing silently
+/// disables image-layer OCR.
+pub fn poppler_available() -> bool {
+    is_pdftoppm_available() && is_pdfimages_available()
+}
+
 /// Render scanned PDF pages via pdfimages (extracts only the image layer,
 /// not overlays/annotations/watermarks). Returns the OCR'd text with far
 /// less watermark contamination than pdftoppm-based rendering.
@@ -1119,5 +1126,14 @@ mod tests {
         // 5 pages × 15 chars = 75 < 50 * 5 = 250 → true
         let wm = "confidential\n".repeat(5);
         assert!(is_sparse_text_layer(&wm, 5));
+    }
+
+    #[test]
+    fn test_poppler_available_is_consistent_with_resolved_paths() {
+        // Environment-dependent value — do NOT assert true/false, only that
+        // the predicate is callable without panicking and equals the
+        // conjunction of the two resolved-path predicates it derives from.
+        let expected = is_pdftoppm_available() && is_pdfimages_available();
+        assert_eq!(poppler_available(), expected);
     }
 }

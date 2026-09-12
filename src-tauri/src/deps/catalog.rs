@@ -206,7 +206,7 @@ pub fn is_ready(def: &DepDef, data_dir: &Path) -> bool {
     // System deps are checked by their own probes.
     match def.id {
         "ffmpeg" => return crate::extractor::audio::ffmpeg_available(),
-        "poppler" => return crate::extractor::pdf::is_pdftoppm_available(),
+        "poppler" => return crate::extractor::pdf::poppler_available(),
         _ => {}
     }
 

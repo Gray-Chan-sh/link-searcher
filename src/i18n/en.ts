@@ -518,5 +518,7 @@ const en: Record<string, string> = {
     backfill_quality_busy: 'Backfilling…',
     backfill_quality_done: 'Processed {processed}, scored {scored}',
     backfill_quality_noop: 'Nothing to backfill — all files already scored',
+    ocr_pdf_dpi: 'PDF OCR DPI',
+    ocr_pdf_dpi_hint: '300 is recommended for small or faint text. Higher values produce sharper images but are slower and use more memory.',
 }
 export default en

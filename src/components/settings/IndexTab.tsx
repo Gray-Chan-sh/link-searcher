@@ -10,18 +10,27 @@ const OCR_LANGS = [
   { value: 'kor', label: 'Korean' },
 ]
 
+const DPI_OPTIONS = [
+  { value: '200', label: '200' },
+  { value: '300', label: '300 (Recommended)' },
+  { value: '400', label: '400' },
+  { value: '600', label: '600' },
+]
+
 interface IndexTabProps {
   ocrEngines: OcrEngineStatus[]
   ocrTesting: boolean
   ocrResult: OcrTestResult | null
   selectedEngine: OcrEngineStatus | undefined
   ocrLang: string
+  ocrPdfDpi: string
   onTestOcr: () => void
   onChangeOcrEngine: (engineType: string) => void
   onChangeOcrLang: (lang: string) => void
+  onChangeOcrPdfDpi: (dpi: string) => void
 }
 
-export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, onTestOcr, onChangeOcrEngine, onChangeOcrLang }: IndexTabProps) {
+export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, ocrPdfDpi, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onChangeOcrPdfDpi }: IndexTabProps) {
   const { t } = useI18n()
 
   return (
@@ -92,6 +101,18 @@ export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, oc
           onChange={onChangeOcrLang}
           options={OCR_LANGS}
         />
+      </Section>
+
+      <Section title={t('ocr_pdf_dpi')}>
+        <SelectField
+          label={t('ocr_pdf_dpi')}
+          value={ocrPdfDpi}
+          onChange={onChangeOcrPdfDpi}
+          options={DPI_OPTIONS}
+        />
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          {t('ocr_pdf_dpi_hint')}
+        </p>
       </Section>
     </div>
   )
