@@ -15,6 +15,14 @@
 
 ---
 
+## 2026-09-12（OCR 提取质量体检框架 Wave 1a：SQLite 持久层）
+
+- **Schema 迁移 v3→v4**：`content_index` 表新增三列 `quality_score`（REAL，NULL=未评估）、`quality_flags`（TEXT NOT NULL DEFAULT '[]'）、`reextract_count`（INTEGER NOT NULL DEFAULT 0）；`db/mod.rs` 新增 `ensure_quality_columns()` 幂等迁移函数 + `CREATE TABLE IF NOT EXISTS` DDL 同步三列（`SCHEMA_VERSION` 从 "3" 升至 "4"）。
+- **数据访问层**：`tracker.rs` 新增 `store_content_with_quality()`（可选写入 quality_score/quality_flags）+ `QualitySummary` / `LowQualityRow` 两个公开结构体 + `get_quality_summary()`（红黄绿未评估四档桶计数）+ `get_low_quality_files()`（LEFT JOIN file_tracking 按 quality_score 升序 + 200 字 preview）+ `get_content_quality()`（读取 quality_score + reextract_count）+ `update_reextract_state()` + `count_reextractable()`。
+- **测试**：8 例新增（schema 列存在性、SCHEMA_VERSION 断言、store_content_with_quality round-trip/NULL 路径、quality_summary 分桶、low_quality_files 阈值过滤 + 排序 + preview 截断、update_reextract_state 递增、count_reextractable 计数），全量 cargo test --lib 277 全绿。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

@@ -102,6 +102,13 @@ pub fn preprocess_image(input_path: &Path) -> Result<PathBuf> {
     Ok(output_path)
 }
 
+/// Per-image OCR statistics surfaced to downstream scoring.
+#[derive(Debug, Clone, Default)]
+pub struct OcrStats {
+    pub region_count: usize,
+    pub mean_confidence: Option<f32>,
+}
+
 /// The OCR engine to use for text extraction.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum OcrEngineType {
@@ -231,6 +238,36 @@ pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) ->
     }
 }
 
+pub fn ocr_image_with_stats(
+    path: &Path,
+    engine: &OcrEngineType,
+    lang: &str,
+) -> Result<(String, OcrStats)> {
+    let _gate = ocr_gate().acquire();
+    match engine {
+        OcrEngineType::PaddleOCR => {
+            paddleocr::recognize_from_path_enriched(path)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        OcrEngineType::AppleVision => {
+            let (text, n) = super::apple_vision::recognize_from_path_with_regions(path, lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok((text, OcrStats { region_count: n, mean_confidence: None }))
+        }
+        OcrEngineType::WindowsOcr => {
+            let (text, n) = super::windows_ocr::recognize_from_path_with_regions(path, lang)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok((text, OcrStats { region_count: n, mean_confidence: None }))
+        }
+        OcrEngineType::Tesseract => {
+            let text = ocr_image_tesseract(path, lang)?;
+            let regions = text.lines().filter(|l| !l.trim().is_empty()).count();
+            Ok((text, OcrStats { region_count: regions, mean_confidence: None }))
+        }
+        OcrEngineType::None => Ok((String::new(), OcrStats::default())),
+    }
+}
+
 /// Like [`ocr_image_with_engine`], but also returns the number of detected
 /// text regions, used for per-page performance diagnostics in PDF OCR.
 pub fn ocr_image_with_regions(
@@ -238,27 +275,8 @@ pub fn ocr_image_with_regions(
     engine: &OcrEngineType,
     lang: &str,
 ) -> Result<(String, usize)> {
-    let _gate = ocr_gate().acquire();
-    match engine {
-        OcrEngineType::PaddleOCR => {
-            paddleocr::recognize_from_path_with_regions(path)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-        OcrEngineType::AppleVision => {
-            super::apple_vision::recognize_from_path_with_regions(path, lang)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-        OcrEngineType::Tesseract => {
-            let text = ocr_image_tesseract(path, lang)?;
-            let regions = text.lines().filter(|l| !l.trim().is_empty()).count();
-            Ok((text, regions))
-        }
-        OcrEngineType::WindowsOcr => {
-            super::windows_ocr::recognize_from_path_with_regions(path, lang)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        }
-        OcrEngineType::None => Ok((String::new(), 0)),
-    }
+    let (text, stats) = ocr_image_with_stats(path, engine, lang)?;
+    Ok((text, stats.region_count))
 }
 
 /// Extract text from an image using Tesseract OCR.
@@ -490,6 +508,35 @@ mod tests {
         assert!(SUPPORTED_LANGUAGES.contains(&"chi_sim"));
         assert!(SUPPORTED_LANGUAGES.contains(&"jpn"));
         assert!(SUPPORTED_LANGUAGES.contains(&"kor"));
+    }
+}
+
+#[cfg(test)]
+mod stats_test {
+    use super::*;
+
+    #[test]
+    fn ocr_image_with_stats_returns_region_count() {
+        let png = create_test_image().expect("create_test_image");
+        let path = std::env::temp_dir().join(format!("ls_stats_test_{}.png", std::process::id()));
+        std::fs::write(&path, &png).expect("write tmp");
+
+        let engine = preferred_engine(None);
+        let result = ocr_image_with_stats(&path, &engine, "chi_sim");
+
+        let _ = std::fs::remove_file(&path);
+
+        match result {
+            Ok((_text, stats)) => {
+                assert!(stats.region_count > 0, "expected ≥1 region, got 0");
+                if matches!(engine, OcrEngineType::PaddleOCR) {
+                    assert!(stats.mean_confidence.is_some(), "PaddleOCR should report mean_confidence");
+                }
+            }
+            Err(e) => {
+                eprintln!("stats_test SKIP: engine {:?} unavailable: {e}", engine);
+            }
+        }
     }
 }
 

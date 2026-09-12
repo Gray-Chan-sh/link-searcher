@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use log;
 use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
+use super::ocr::OcrStats;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
@@ -148,20 +149,34 @@ pub fn health_check() -> Result<(), String> {
     })
 }
 
-pub fn recognize_from_path(path: &Path) -> Result<String> {
+pub fn recognize_from_path_enriched(
+    path: &Path,
+) -> Result<(String, OcrStats), String> {
     with_engine(|eng| {
         eng.run_from_path(path)
             .map(|results| {
-                results
+                let filtered: Vec<_> = results
                     .into_iter()
                     .filter(|r| r.confidence >= 0.5)
-                    .map(|r| r.text)
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                    .collect();
+                let text = filtered.iter().map(|r| r.text.as_str()).collect::<Vec<_>>().join(" ");
+                let mean_confidence = if filtered.is_empty() {
+                    None
+                } else {
+                    let sum: f32 = filtered.iter().map(|r| r.confidence).sum();
+                    Some(sum / filtered.len() as f32)
+                };
+                let stats = OcrStats { region_count: filtered.len(), mean_confidence };
+                (text, stats)
             })
             .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))
     })
-    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+pub fn recognize_from_path(path: &Path) -> Result<String> {
+    recognize_from_path_enriched(path)
+        .map(|(text, _stats)| text)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Number of engines currently built in the pool (0 if not yet built).

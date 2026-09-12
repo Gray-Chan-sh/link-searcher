@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "3";
+const SCHEMA_VERSION: &str = "4";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -81,6 +81,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Schema: add `dead_content` (content-validity marker for empty-content
     // files that already failed verification + retry).
     ensure_dead_content_column(&tx)?;
+
+    // Quality persistence: quality_score, quality_flags, reextract_count.
+    ensure_quality_columns(&tx)?;
 
     // P6 removal: migrate existing databases that still carry the legacy
     // `private` column on dir_config.
@@ -194,6 +197,34 @@ fn drop_dir_config_private_column(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn ensure_quality_columns(tx: &Connection) -> Result<()> {
+    let columns: Vec<String> = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(content_index)")
+            .context("failed to inspect content_index")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+    };
+    let has = |name: &str| columns.iter().any(|n| n == name);
+    if !has("quality_score") {
+        tx.execute_batch("ALTER TABLE content_index ADD COLUMN quality_score REAL")
+            .context("failed to add quality_score")?;
+    }
+    if !has("quality_flags") {
+        tx.execute_batch("ALTER TABLE content_index ADD COLUMN quality_flags TEXT NOT NULL DEFAULT '[]'")
+            .context("failed to add quality_flags")?;
+    }
+    if !has("reextract_count") {
+        tx.execute_batch("ALTER TABLE content_index ADD COLUMN reextract_count INTEGER NOT NULL DEFAULT 0")
+            .context("failed to add reextract_count")?;
+    }
+    Ok(())
+}
+
 const CREATE_TABLES_SQL: &str = "
     CREATE TABLE IF NOT EXISTS file_tracking (
         id          TEXT PRIMARY KEY,
@@ -222,7 +253,10 @@ const CREATE_TABLES_SQL: &str = "
         indexed_at      INTEGER NOT NULL,
         char_count      INTEGER NOT NULL DEFAULT 0,
         ocr_used        INTEGER NOT NULL DEFAULT 0,
-        ocr_duration_ms INTEGER
+        ocr_duration_ms INTEGER,
+        quality_score   REAL,
+        quality_flags   TEXT NOT NULL DEFAULT '[]',
+        reextract_count INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS dir_config (
@@ -505,6 +539,33 @@ mod tests {
         let mut stmt = conn.prepare("SELECT value FROM app_settings WHERE key='schema_version'").unwrap();
         let version: String = stmt.query_row([], |row| row.get(0)).unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_quality_columns_exist_after_migration() {
+        let conn = setup_conn();
+        let mut stmt = conn.prepare("PRAGMA table_info(content_index)").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(names.contains(&"quality_score".to_string()), "missing quality_score: {names:?}");
+        assert!(names.contains(&"quality_flags".to_string()), "missing quality_flags: {names:?}");
+        assert!(names.contains(&"reextract_count".to_string()), "missing reextract_count: {names:?}");
+    }
+
+    #[test]
+    fn test_schema_version_is_4() {
+        let conn = setup_conn();
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key='schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "4");
     }
 
     #[test]

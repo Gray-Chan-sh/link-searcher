@@ -534,6 +534,149 @@ pub fn store_content(conn: &Connection, md5: &str, text: &str, ocr_used: bool, o
     Ok(())
 }
 
+pub fn store_content_with_quality(
+    conn: &Connection,
+    md5: &str,
+    text: &str,
+    ocr_used: bool,
+    ocr_ms: Option<i64>,
+    quality: Option<&crate::extractor::quality::QualityResult>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    let (score, flags_json) = match quality {
+        Some(q) => (Some(q.score as f64), crate::extractor::quality::flags_to_json(&q.flags)),
+        None => (None, "[]".to_string()),
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO content_index \
+         (md5,text_content,indexed_at,char_count,ocr_used,ocr_duration_ms,quality_score,quality_flags,reextract_count) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0)",
+        rusqlite::params![
+            md5,
+            text,
+            now,
+            text.chars().count() as i64,
+            ocr_used as i64,
+            ocr_ms,
+            score,
+            flags_json,
+        ],
+    )
+    .context("store_content_with_quality failed")?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct QualitySummary {
+    pub green: i64,
+    pub yellow: i64,
+    pub red: i64,
+    pub unevaluated: i64,
+    pub total: i64,
+}
+
+pub fn get_quality_summary(conn: &Connection) -> Result<QualitySummary> {
+    let row = conn.query_row(
+        "SELECT \
+            COALESCE(SUM(CASE WHEN quality_score > 0.75 THEN 1 ELSE 0 END), 0) AS green, \
+            COALESCE(SUM(CASE WHEN quality_score >= 0.5 AND quality_score <= 0.75 THEN 1 ELSE 0 END), 0) AS yellow, \
+            COALESCE(SUM(CASE WHEN quality_score < 0.5 THEN 1 ELSE 0 END), 0) AS red, \
+            COALESCE(SUM(CASE WHEN quality_score IS NULL THEN 1 ELSE 0 END), 0) AS unevaluated, \
+            COUNT(*) AS total \
+         FROM content_index",
+        [],
+        |row| {
+            Ok(QualitySummary {
+                green: row.get(0)?,
+                yellow: row.get(1)?,
+                red: row.get(2)?,
+                unevaluated: row.get(3)?,
+                total: row.get(4)?,
+            })
+        },
+    )
+    .context("get_quality_summary failed")?;
+    Ok(row)
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LowQualityRow {
+    pub md5: String,
+    pub file_id: Option<String>,
+    pub file_path: Option<String>,
+    pub quality_score: Option<f64>,
+    pub quality_flags: String,
+    pub reextract_count: i64,
+    pub char_count: i64,
+    pub ocr_used: bool,
+    pub preview: String,
+}
+
+pub fn get_low_quality_files(conn: &Connection, max_score: f64, limit: usize) -> Result<Vec<LowQualityRow>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT ci.md5, ft.id, ft.path, ci.quality_score, ci.quality_flags, \
+                    ci.reextract_count, ci.char_count, ci.ocr_used, \
+                    SUBSTR(ci.text_content, 1, 200) AS preview \
+             FROM content_index ci \
+             LEFT JOIN file_tracking ft ON ci.md5 = ft.md5 \
+             WHERE ci.quality_score IS NOT NULL AND ci.quality_score < ?1 \
+             ORDER BY ci.quality_score ASC \
+             LIMIT ?2",
+        )
+        .context("prepare get_low_quality_files")?;
+    let rows = stmt
+        .query_map(rusqlite::params![max_score, limit as i64], |row| {
+            Ok(LowQualityRow {
+                md5: row.get(0)?,
+                file_id: row.get(1)?,
+                file_path: row.get(2)?,
+                quality_score: row.get(3)?,
+                quality_flags: row.get(4)?,
+                reextract_count: row.get(5)?,
+                char_count: row.get(6)?,
+                ocr_used: row.get::<_, i64>(7)? != 0,
+                preview: row.get(8)?,
+            })
+        })
+        .context("query get_low_quality_files")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect get_low_quality_files")
+}
+
+pub fn get_content_quality(conn: &Connection, md5: &str) -> Result<Option<(Option<f64>, i64)>> {
+    match conn.query_row(
+        "SELECT quality_score, reextract_count FROM content_index WHERE md5 = ?1",
+        rusqlite::params![md5],
+        |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, i64>(1)?)),
+    ) {
+        Ok(v) => Ok(Some(v)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+pub fn update_reextract_state(conn: &Connection, md5: &str, count: i64, flags_json: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE content_index SET reextract_count = ?1, quality_flags = ?2 WHERE md5 = ?3",
+        rusqlite::params![count, flags_json, md5],
+    )
+    .context("update_reextract_state failed")?;
+    Ok(())
+}
+
+pub fn count_reextractable(conn: &Connection, max_score: f64, cap: i64) -> Result<i64> {
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM content_index \
+         WHERE quality_score IS NOT NULL AND quality_score < ?1 \
+         AND reextract_count < ?2",
+        rusqlite::params![max_score, cap],
+        |row| row.get::<_, i64>(0),
+    )
+    .context("count_reextractable failed")?;
+    Ok(count)
+}
+
 pub fn get_content(conn: &Connection, md5: &str) -> Result<Option<String>> {
     let mut stmt = conn.prepare("SELECT text_content FROM content_index WHERE md5=?1")?;
     let mut rows = stmt.query_map(rusqlite::params![md5], |row| row.get::<_, String>(0))?;
@@ -1313,5 +1456,107 @@ mod tests {
 
         let moved = get_file_by_path(&conn, "b.txt").unwrap().expect("a now owns b.txt");
         assert_eq!(moved.id, id_a);
+    }
+
+    fn quality_result(score: f32, flags: Vec<crate::extractor::quality::QualityFlag>) -> crate::extractor::quality::QualityResult {
+        crate::extractor::quality::QualityResult {
+            score,
+            printable_ratio: 0.9,
+            fffd_ratio: 0.0,
+            confidence: None,
+            density_norm: 0.5,
+            lexicon_hit_rate: 0.8,
+            flags,
+        }
+    }
+
+    #[test]
+    fn test_store_content_with_quality_roundtrip() {
+        let conn = db();
+        let qr = quality_result(0.82, vec![]);
+        store_content_with_quality(&conn, "q1", "good text", false, None, Some(&qr)).unwrap();
+
+        let (score, reext_count) = get_content_quality(&conn, "q1").unwrap().unwrap();
+        assert!((score.unwrap() - 0.82).abs() < 0.01, "score should be ~0.82, got {score:?}");
+        assert_eq!(reext_count, 0);
+    }
+
+    #[test]
+    fn test_store_content_with_quality_none() {
+        let conn = db();
+        store_content_with_quality(&conn, "q2", "plain text", true, Some(50), None).unwrap();
+
+        let (score, reext_count) = get_content_quality(&conn, "q2").unwrap().unwrap();
+        assert!(score.is_none(), "no quality → NULL score");
+        assert_eq!(reext_count, 0);
+        assert_eq!(get_content(&conn, "q2").unwrap().unwrap(), "plain text");
+    }
+
+    #[test]
+    fn test_get_quality_summary_buckets() {
+        let conn = db();
+        let g = quality_result(0.9, vec![]);
+        store_content_with_quality(&conn, "g1", "aaa", false, None, Some(&g)).unwrap();
+        store_content_with_quality(&conn, "g2", "bbb", false, None, Some(&g)).unwrap();
+        let y = quality_result(0.6, vec![]);
+        store_content_with_quality(&conn, "y1", "ccc", false, None, Some(&y)).unwrap();
+        let r = quality_result(0.3, vec![]);
+        store_content_with_quality(&conn, "r1", "ddd", false, None, Some(&r)).unwrap();
+        store_content_with_quality(&conn, "u1", "eee", false, None, None).unwrap();
+
+        let s = get_quality_summary(&conn).unwrap();
+        assert_eq!(s.green, 2);
+        assert_eq!(s.yellow, 1);
+        assert_eq!(s.red, 1);
+        assert_eq!(s.unevaluated, 1);
+        assert_eq!(s.total, 5);
+    }
+
+    #[test]
+    fn test_get_low_quality_files_ordering() {
+        let conn = db();
+        insert_raw_dir(&conn, "qd1", "/docs");
+        insert_raw_file(&conn, "a.txt", "qd1");
+        insert_raw_file(&conn, "b.txt", "qd1");
+
+        let qr_bad = quality_result(0.2, vec![]);
+        let qr_ok = quality_result(0.9, vec![]);
+        store_content_with_quality(&conn, "md5_a", "bad content here for preview test. extra text to exceed 200 chars pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad pad", false, None, Some(&qr_bad)).unwrap();
+        store_content_with_quality(&conn, "md5_b", "good content", false, None, Some(&qr_ok)).unwrap();
+
+        let rows = get_low_quality_files(&conn, 0.5, 10).unwrap();
+        assert_eq!(rows.len(), 1, "only md5_a is below 0.5");
+        assert_eq!(rows[0].md5, "md5_a");
+        assert!((rows[0].quality_score.unwrap() - 0.2).abs() < 0.01);
+        assert!(rows[0].preview.len() <= 200, "preview capped at 200 chars");
+        assert_eq!(rows[0].reextract_count, 0);
+    }
+
+    #[test]
+    fn test_update_reextract_state() {
+        let conn = db();
+        store_content_with_quality(&conn, "rx1", "text", false, None, None).unwrap();
+
+        update_reextract_state(&conn, "rx1", 2, "[\"low_printable\"]").unwrap();
+        let (score, count) = get_content_quality(&conn, "rx1").unwrap().unwrap();
+        assert_eq!(count, 2);
+        assert!(score.is_none());
+
+        update_reextract_state(&conn, "rx1", 3, "[\"high_fffd\"]").unwrap();
+        let (_, count) = get_content_quality(&conn, "rx1").unwrap().unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn test_count_reextractable() {
+        let conn = db();
+        let qr_low = quality_result(0.3, vec![]);
+        let qr_high = quality_result(0.9, vec![]);
+        store_content_with_quality(&conn, "cr1", "a", false, None, Some(&qr_low)).unwrap();
+        store_content_with_quality(&conn, "cr2", "b", false, None, Some(&qr_low)).unwrap();
+        store_content_with_quality(&conn, "cr3", "c", false, None, Some(&qr_high)).unwrap();
+
+        let count = count_reextractable(&conn, 0.5, 10).unwrap();
+        assert_eq!(count, 2);
     }
 }
