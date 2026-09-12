@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-09-12（`quality` CLI 子命令：无头质量体检）
+
+- **新增 `link-searcher quality` CLI 子命令**（`cli.rs`）：支持 `backfill`、`audit`、`reextract` 三个子命令，可在无 GUI 环境下运行 OCR 质量健康检查流程。
+- **提取共享 helper**：从 Tauri 命令 `backfill_quality` 中提取 `run_quality_backfill(conn, limit)` 核心逻辑（`commands/index.rs`），Tauri 命令与 CLI 共用同一路径，消除重复；同样提取 `reextract_one(db_pool, indexer, file_id, old_score, old_count, engine_override)` 供 `re_extract_file`、`re_extract_low_quality` 与 CLI `quality reextract` 三方共用。
+- **新增测试 1 例**：`run_quality_backfill_scores_missing_rows_via_shared_helper` 直接验证共享 helper；既有测试 331 例 + 新增 1 = **332** 全绿。
+- **子命令用法**：
+  - `link-searcher quality backfill [--limit N]` — 回填缺少质量评分的行
+  - `link-searcher quality audit [--limit N] [--max-score S]` — 审计低质量文件 + 直方图
+  - `link-searcher quality reextract --file-id ID` — 单文件重提取
+  - `link-searcher quality reextract --limit N [--max-score S] --yes` — 批量重提取（需确认）
+
+---
+
+## 2026-09-12（真实数据排查：乱码入库根因修复）
+
+对真实库（`/Volumes/Data/index`，1.2GB，11,928 文件，9,402 条内容）跑体检，发现 **174 个"超长提取"（137 个 PDF）**，最坏一个解析出 **20,311,514 字符 = 文件字节数**。两条根因均已修复：
+
+- **索引器原始 UTF-8 回退把损坏二进制当文本入库**（`indexer.rs`）：损坏的 `.pdf`（实为 `data`，NUL 开头，poppler/lopdf 均无法解析）在提取全部失败后，回退逻辑把整个 **20MB 文件**解码为 UTF-8、**未经 `sanitize_text`、无任何合理性校验**地存入 `content_index`（`char_count` == 文件大小），严重污染 Tantivy。修复：回退文本先 `sanitize_text`，再用新增纯函数 `is_plausible_text_fallback()` 校验（含 `\0` / 空 / 或 `LowPrintable` 即判不可信）；不可信则按失败处理（`indexed=2`）**不入库**；并把该分支 `ocr_used` 由错误的 `true` 改为 `false`。5 例单测。
+- **PDF 文字层"不可信"门禁**（`pdf.rs`）：新增 `is_implausible_text_layer()`——非空白字符/页 > 20,000（物理不可能），或 `compute_quality` 命中 `LowPrintable`（<0.7）即判文字层不可信 → 走 OCR；**不因 `LowLexicon` 单独触发**（避免法律生僻字误伤）。接入 `doc_clean` 门禁。5 例单测。
+- **真实数据验证**：重建后对最坏文件重新提取 —— 20MB 乱码**不再入库**（内容行被拒/清除）。
+- **测试**：`cargo test --lib` **342** 全绿（+10：pdf 门禁 5 + indexer 5）。
+
+---
+
 ## 2026-09-12（深度学习 OCR 预处理：deskew 纠偏）
 
 - **新增 `detect_deskew_angle()`**（`extractor/preprocess.rs`）：粗粒度投影轮廓法检测页面倾斜角——将灰度图缩小至 ≤400px 后 Otsu 二值化（仅用于检测，输出保持灰度），在 ±10° 范围内以 0.5° 步长旋转，取水平投影（逐行墨迹计数）方差最大角；额外校验最佳角度下空行比例 ≥ 2%，排除非文本结构（如单色边缘图）的假阳性。

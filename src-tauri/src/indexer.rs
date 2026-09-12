@@ -249,14 +249,22 @@ impl IndexerService {
                 Err(e) => {
                     log::warn!("[INDEX] 提取失败: {e}, 尝试纯文本回退");
                     let fallback = if file_size <= MAX_FILE_SIZE {
-                        std::str::from_utf8(&raw).ok().map(|s| s.to_owned())
+                        std::str::from_utf8(&raw).ok().map(crate::extractor::sanitize_text)
                     } else {
                         None
                     };
                     match fallback {
-                        Some(t) => {
-                            ocr_used = true;
+                        Some(t) if is_plausible_text_fallback(&t, &file_ext) => {
                             (t, crate::extractor::quality::ExtractMeta::default())
+                        }
+                        Some(_) => {
+                            log::warn!(
+                                "[INDEX] 纯文本回退不可信 (文件: {file_name}), 标记为失败"
+                            );
+                            return Err((
+                                job.file_id.clone(),
+                                format!("{}: 所有提取方式均失败: {e}", job.file_path.display()),
+                            ));
                         }
                         None => {
                             return Err((
@@ -742,6 +750,21 @@ impl IndexerService {
     }
 }
 
+fn is_plausible_text_fallback(text: &str, file_ext: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    if text.contains('\0') {
+        return false;
+    }
+    let quality = crate::extractor::quality::compute_quality(
+        text,
+        &crate::extractor::quality::ExtractMeta::default(),
+        file_ext,
+    );
+    !quality.flags.contains(&crate::extractor::quality::QualityFlag::LowPrintable)
+}
+
 fn classify_error_str(msg: &str, _ext: &str) -> &'static str {
     if msg.contains("Permission denied") || msg.contains("Access denied") {
         "access_denied"
@@ -957,6 +980,38 @@ mod tests {
         assert_eq!(top.len(), 0, "deleted doc should not be found");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_plausible_fallback_normal_text() {
+        let text = "Hello World 这是一个测试文本 合同编号 1234567890 包含各种常用字符内容";
+        assert!(is_plausible_text_fallback(text, "txt"));
+    }
+
+    #[test]
+    fn test_plausible_fallback_null_bytes_rejected() {
+        let text = "hello world\0\0\0\0\0more text here";
+        assert!(!is_plausible_text_fallback(text, "txt"));
+    }
+
+    #[test]
+    fn test_plausible_fallback_binary_junk_rejected() {
+        // Binary content: mostly non-printable bytes, printable_ratio << 0.7
+        let text: String = (0..200)
+            .map(|i| char::from_u32(i % 32).unwrap_or('\x01'))
+            .collect();
+        assert!(!is_plausible_text_fallback(&text, "pdf"));
+    }
+
+    #[test]
+    fn test_plausible_fallback_empty_rejected() {
+        assert!(!is_plausible_text_fallback("", "txt"));
+    }
+
+    #[test]
+    fn test_plausible_fallback_legit_plaintext() {
+        let text = "这是一份正式的合同文本，甲方为某某公司，乙方为某某个人。签订日期：2025年1月1日。双方经协商一致，达成以下协议条款。";
+        assert!(is_plausible_text_fallback(text, "txt"));
     }
 
     #[test]

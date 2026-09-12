@@ -269,6 +269,7 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
         let engine = super::ocr::preferred_engine(engine);
         let is_sparse = is_sparse_text_layer(&merged, pages.len());
+        let is_implausible = is_implausible_text_layer(&merged, pages.len());
 
         // Capture pdf_inspector page-level info for per-page OCR decisions.
         // pages_needing_ocr is 0-indexed.
@@ -303,7 +304,7 @@ impl PdfExtractor {
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
-        let doc_clean = merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse;
+        let doc_clean = merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse && !is_implausible;
 
         // lopdf can produce whitespace-only text on Quartz/CFF PDFs —
         // pdftotext handles these correctly
@@ -369,8 +370,8 @@ impl PdfExtractor {
             }
         }
 
-        log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} → falling to image-layer OCR ({lang})",
-            path.file_name(), is_wm, is_garbled, is_rep, is_sparse);
+        log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} implausible={} → falling to image-layer OCR ({lang})",
+            path.file_name(), is_wm, is_garbled, is_rep, is_sparse, is_implausible);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
             return Ok(ocr_text);
         }
@@ -538,6 +539,34 @@ pub fn is_sparse_text_layer(text: &str, page_count: usize) -> bool {
     }
     let non_ws = text.chars().filter(|c| !c.is_whitespace()).count();
     non_ws < 50 * page_count
+}
+
+/// True when the extracted text layer is implausible — garbage/binary junk or
+/// physically impossible character density — and must NOT be trusted as clean.
+///
+/// Two independent signals, either triggers:
+///   1. Absurd density: >20 000 non-whitespace chars per page (impossible for
+///      real text; scanned PDFs yield 1–3k chars/page via OCR).
+///   2. Low printable ratio: reuses `compute_quality` and checks
+///      `QualityFlag::LowPrintable` only. We deliberately ignore `LowLexicon`
+///      because legal docs legitimately contain rare characters, names, and
+///      jargon — triggering OCR on those would over-trigger on healthy files.
+pub fn is_implausible_text_layer(text: &str, page_count: usize) -> bool {
+    if text.is_empty() || page_count == 0 {
+        return false;
+    }
+    let non_ws = text.chars().filter(|c| !c.is_whitespace()).count();
+    if non_ws / page_count > 20_000 {
+        return true;
+    }
+    let meta = crate::extractor::quality::ExtractMeta {
+        page_count: Some(page_count as u32),
+        ..Default::default()
+    };
+    let quality = crate::extractor::quality::compute_quality(text, &meta, "pdf");
+    quality
+        .flags
+        .contains(&crate::extractor::quality::QualityFlag::LowPrintable)
 }
 
 fn page_needs_ocr(page_text: &str, page_has_images: bool) -> bool {
@@ -1353,5 +1382,49 @@ mod tests {
         ocr_pages.insert(0, "Replacement OCR".to_string());
         let result = merge_page_texts(&text_layer, &ocr_pages);
         assert_eq!(result, "Replacement OCR\nOriginal page two");
+    }
+
+    // ── is_implausible_text_layer tests ──────────────────────────────
+
+    #[test]
+    fn test_implausible_normal_legal_text_over_pages_returns_false() {
+        // Simulates a 10-page contract: ~2000 chars/page → 20k total.
+        // That's dense but plausible for a real legal document.
+        let page = "合同编号 2024-LX-001 第一条 甲方与乙方经友好协商，就以下事宜达成一致条款如下。\
+            本合同自签署之日起生效。本文包含中英文混合内容 Article 1 Section 2 \
+            双方同意在本合同签署后三十日内完成交付。This is a test sentence for density. \
+            The quick brown fox jumps over the lazy dog. 合同条款内容。";
+        let text = page.repeat(10); // ~10 pages worth
+        assert!(!is_implausible_text_layer(&text, 10));
+    }
+
+    #[test]
+    fn test_implausible_binary_junk_low_printable_returns_true() {
+        // Junk with lots of non-printable/symbol characters → low printable ratio.
+        // Mix of control chars, random bytes as chars, brackets, pipes, etc.
+        let mut junk = String::new();
+        for i in 0u8..255 {
+            junk.push(i as char);
+        }
+        // printable ratio will be well below 0.7
+        assert!(is_implausible_text_layer(&junk, 5));
+    }
+
+    #[test]
+    fn test_implausible_modest_text_one_page_returns_false() {
+        let text = "This is a short document with just a few sentences on a single page.";
+        assert!(!is_implausible_text_layer(&text, 1));
+    }
+
+    #[test]
+    fn test_implausible_absurd_density_one_page_returns_true() {
+        // 25,000 chars on 1 page → absurd density (>20k/page)
+        let text = "A".repeat(25_000);
+        assert!(is_implausible_text_layer(&text, 1));
+    }
+
+    #[test]
+    fn test_implausible_empty_text_returns_false() {
+        assert!(!is_implausible_text_layer("", 5));
     }
 }
