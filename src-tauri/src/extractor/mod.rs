@@ -6,6 +6,7 @@ pub mod ocr;
 pub mod office;
 pub mod paddleocr;
 pub mod pdf;
+mod preprocess;
 pub mod quality;
 pub mod windows_ocr;
 mod text;

@@ -95,6 +95,14 @@
 
 ---
 
+## 2026-09-12（OCR 质量修复 Phase 2 · Wave 9：深度学习 OCR 预处理管线）
+
+- **新增 `extractor/preprocess.rs`（DBNet 专用、梯度保留）**：`preprocess_for_ocr(path) -> Result<Option<PathBuf>>`——① 最长边 < 1000px 时用 Lanczos3 放大到 1000；② 转灰度；③ **仅当对比度低**（p95−p5 < 100）才做 `equalize_histogram` 直方图均衡；无需处理时返回 `None`（直接用原图）。**全程不二值化、不做形态学、不做颜色遮罩**（法律文档红章保护；修掉了旧 Tesseract 预处理"二值化毁掉 DBNet 梯度"的问题）。
+- **接入范围仅限 PaddleOCR**（`extractor/ocr.rs::ocr_image_with_stats` 的 PaddleOCR 分支）：AppleVision / WindowsOcr / Tesseract 保持原样以免回归；临时文件在识别后（成功或失败）清理。因 `ocr_image_with_regions` 委托该函数，**图片与 PDF 页渲染两条路径同时受益**。
+- **测试**：`cargo test --lib` **319** 全绿（+5：非二值化不变式 / 干净图跳过 / 小图放大 / 低对比增强 / PNG 有效，均自清理临时文件）；`cargo check --all-targets` 零错误；PaddleOCR POC 经新预处理仍正常识别（conf 0.88）；CER 评测 4/4、平均 0.0000；无临时文件残留。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。

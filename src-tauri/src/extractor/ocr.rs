@@ -246,8 +246,17 @@ pub fn ocr_image_with_stats(
     let _gate = ocr_gate().acquire();
     match engine {
         OcrEngineType::PaddleOCR => {
-            paddleocr::recognize_from_path_enriched(path)
-                .map_err(|e| anyhow::anyhow!("{e}"))
+            // Gradient-preserving preprocessing for DBNet: upscale small images,
+            // enhance low contrast. No binarization — DBNet needs gradients.
+            let preprocessed = super::preprocess::preprocess_for_ocr(path)?;
+            let ocr_path = preprocessed.as_deref().unwrap_or(path);
+            let result = paddleocr::recognize_from_path_enriched(ocr_path)
+                .map_err(|e| anyhow::anyhow!("{e}"));
+            // ponytail: caller-owned temp cleanup; upgrade to RAII guard when needed
+            if let Some(ref p) = preprocessed {
+                let _ = std::fs::remove_file(p);
+            }
+            result
         }
         OcrEngineType::AppleVision => {
             let (text, n) = super::apple_vision::recognize_from_path_with_regions(path, lang)
