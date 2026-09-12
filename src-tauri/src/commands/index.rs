@@ -1400,63 +1400,31 @@ pub(crate) fn next_reextract_state(
     (new_count, false)
 }
 
-#[derive(Serialize)]
-pub struct ReextractOutcome {
-    pub reextracted: bool,
-    pub old_score: Option<f64>,
-    pub new_score: Option<f64>,
-    pub reason: Option<String>,
-}
-
-#[derive(Serialize)]
-pub struct QualityReextractReport {
-    pub processed: usize,
-    pub ok: usize,
-    pub failed: usize,
-    pub exhausted: usize,
-}
-
-#[tauri::command]
-pub async fn get_quality_summary(
-    state: State<'_, AppState>,
-) -> Result<tracker::QualitySummary, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    tracker::get_quality_summary(&conn).map_err(|e| format!("{e}"))
-}
-
-#[tauri::command]
-pub async fn quality_audit(
-    state: State<'_, AppState>,
-    min_score: Option<f64>,
-    limit: Option<usize>,
-) -> Result<Vec<tracker::LowQualityRow>, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let score = min_score.unwrap_or(0.5);
-    let lim = limit.unwrap_or(100).min(1000);
-    tracker::get_low_quality_files(&conn, score, lim).map_err(|e| format!("{e}"))
-}
-
-#[tauri::command]
-pub async fn re_extract_file(
-    state: State<'_, AppState>,
-    file_id: String,
-    engine: Option<String>,
-) -> Result<ReextractOutcome, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let rec = tracker::get_file_by_id(&conn, &file_id)
-        .map_err(|e| format!("{e}"))?
-        .ok_or_else(|| "file not found".to_string())?;
-    let dir = db::dir_config::get_dir(&conn, &rec.dir_id)
-        .map_err(|e| format!("{e}"))?
-        .ok_or_else(|| "dir config not found".to_string())?;
-    let md5 = rec.md5.clone().ok_or_else(|| "file has no md5".to_string())?;
-
-    let (old_score, old_count) = match tracker::get_content_quality(&conn, &md5)
-        .map_err(|e| format!("{e}"))?
-    {
-        Some(v) => v,
-        None => (None, 0),
-    };
+/// Shared single-file re-extraction core used by the CLI `quality reextract`
+/// and the Tauri commands [`re_extract_file`] / [`re_extract_low_quality`].
+/// Clears the cached content so `index_file` re-extracts, deletes the stale
+/// Tantivy doc, re-indexes, and applies the `reextract_count` guard via
+/// [`next_reextract_state`]. `old_score`/`old_count` are supplied by the caller
+/// (DB lookup for single-file mode, the low-quality row for batch mode).
+pub(crate) fn reextract_one(
+    db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    indexer: &crate::indexer::IndexerService,
+    file_id: &str,
+    old_score: Option<f64>,
+    old_count: i64,
+    engine_override: Option<ocr::OcrEngineType>,
+) -> anyhow::Result<ReextractOutcome> {
+    let conn = db_pool
+        .get()
+        .map_err(|e| anyhow::anyhow!("db error: {e}"))?;
+    let rec = tracker::get_file_by_id(&conn, file_id)?
+        .ok_or_else(|| anyhow::anyhow!("file not found"))?;
+    let dir = db::dir_config::get_dir(&conn, &rec.dir_id)?
+        .ok_or_else(|| anyhow::anyhow!("dir config not found"))?;
+    let md5 = rec
+        .md5
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("file has no md5"))?;
 
     if old_count >= 3 {
         return Ok(ReextractOutcome {
@@ -1467,24 +1435,19 @@ pub async fn re_extract_file(
         });
     }
 
-    let engine_override = engine.map(|s| ocr::map_engine(&s));
-
     // ponytail: delete_content clears md5 cache so index_file re-extracts
     let _ = tracker::delete_content(&conn, &md5);
     let full_path = std::path::Path::new(&dir.path).join(&rec.path);
     drop(conn);
 
     // Must delete stale Tantivy doc — re-adding without it leaves duplicates.
-    let _ = state.indexer.delete_document_only(&file_id);
-    state
-        .indexer
-        .index_file(&file_id, &full_path, &rec.dir_id, engine_override)
-        .map_err(|e| format!("{e}"))?;
+    let _ = indexer.delete_document_only(file_id);
+    indexer.index_file(file_id, &full_path, &rec.dir_id, engine_override)?;
 
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let (new_score, _new_count) = match tracker::get_content_quality(&conn, &md5)
-        .map_err(|e| format!("{e}"))?
-    {
+    let conn = db_pool
+        .get()
+        .map_err(|e| anyhow::anyhow!("db error: {e}"))?;
+    let (new_score, _new_count) = match tracker::get_content_quality(&conn, &md5)? {
         Some(v) => v,
         None => (None, 0),
     };
@@ -1533,6 +1496,75 @@ pub async fn re_extract_file(
     })
 }
 
+#[derive(Serialize)]
+pub struct ReextractOutcome {
+    pub reextracted: bool,
+    pub old_score: Option<f64>,
+    pub new_score: Option<f64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct QualityReextractReport {
+    pub processed: usize,
+    pub ok: usize,
+    pub failed: usize,
+    pub exhausted: usize,
+}
+
+#[tauri::command]
+pub async fn get_quality_summary(
+    state: State<'_, AppState>,
+) -> Result<tracker::QualitySummary, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    tracker::get_quality_summary(&conn).map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+pub async fn quality_audit(
+    state: State<'_, AppState>,
+    min_score: Option<f64>,
+    limit: Option<usize>,
+) -> Result<Vec<tracker::LowQualityRow>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let score = min_score.unwrap_or(0.5);
+    let lim = limit.unwrap_or(100).min(1000);
+    tracker::get_low_quality_files(&conn, score, lim).map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+pub async fn re_extract_file(
+    state: State<'_, AppState>,
+    file_id: String,
+    engine: Option<String>,
+) -> Result<ReextractOutcome, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let (old_score, old_count) = {
+        let rec = tracker::get_file_by_id(&conn, &file_id)
+            .map_err(|e| format!("{e}"))?
+            .ok_or_else(|| "file not found".to_string())?;
+        let md5 = rec
+            .md5
+            .clone()
+            .ok_or_else(|| "file has no md5".to_string())?;
+        match tracker::get_content_quality(&conn, &md5).map_err(|e| format!("{e}"))? {
+            Some(v) => v,
+            None => (None, 0),
+        }
+    };
+    drop(conn);
+    let engine_override = engine.map(|s| ocr::map_engine(&s));
+    reextract_one(
+        &state.db,
+        &state.indexer,
+        &file_id,
+        old_score,
+        old_count,
+        engine_override,
+    )
+    .map_err(|e| format!("{e}"))
+}
+
 #[tauri::command]
 pub async fn re_extract_low_quality(
     state: State<'_, AppState>,
@@ -1563,97 +1595,22 @@ pub async fn re_extract_low_quality(
             }
 
             processed += 1;
-            let conn = match db_pool.get() {
-                Ok(c) => c,
-                Err(_) => {
-                    failed += 1;
-                    continue;
-                }
-            };
-            let rec = match tracker::get_file_by_id(&conn, file_id)
-                .map_err(|e| format!("{e}"))
-                .and_then(|r| r.ok_or_else(|| "file not found".to_string()))
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
-                    failed += 1;
-                    continue;
-                }
-            };
-            let dir = match db::dir_config::get_dir(&conn, &rec.dir_id)
-                .map_err(|e| format!("{e}"))
-                .and_then(|d| d.ok_or_else(|| "dir config not found".to_string()))
-            {
-                Ok(d) => d,
-                Err(e) => {
-                    log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
-                    failed += 1;
-                    continue;
-                }
-            };
-            let md5: String = match rec.md5 {
-                Some(ref m) => m.clone(),
-                None => {
-                    failed += 1;
-                    continue;
-                }
-            };
-
-            // ponytail: delete_content clears md5 cache so index_file re-extracts
-            let _ = tracker::delete_content(&conn, &md5);
-            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
-            drop(conn);
-
-            // Must delete stale Tantivy doc — re-adding without it leaves duplicates.
-            let _ = indexer.delete_document_only(file_id);
-            match indexer.index_file(file_id, &full_path, &rec.dir_id, None) {
-                Ok(()) => {
-                    let conn = match db_pool.get() {
-                        Ok(c) => c,
-                        Err(_) => {
-                            ok += 1;
-                            continue;
-                        }
-                    };
-                    let old_score = row.quality_score;
-                    let new_quality = tracker::get_content_quality(&conn, &md5)
-                        .ok()
-                        .flatten();
-                    let new_score = new_quality.and_then(|(s, _)| s);
-
-                    let (next_count, is_exhausted) =
-                        next_reextract_state(row.reextract_count, old_score, new_score);
-
-                    if is_exhausted {
-                        let flags_str: String = conn
-                            .query_row(
-                                "SELECT quality_flags FROM content_index WHERE md5 = ?1",
-                                rusqlite::params![md5],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or_else(|_| "[]".into());
-                        let mut flags: Vec<String> =
-                            serde_json::from_str(&flags_str).unwrap_or_default();
-                        if !flags.contains(&"exhausted".to_string()) {
-                            flags.push("exhausted".into());
-                        }
-                        let flags_json = serde_json::to_string(&flags)
-                            .unwrap_or_else(|_| "[\"exhausted\"]".into());
-                        let _ = tracker::update_reextract_state(&conn, &md5, 3, &flags_json);
+            match reextract_one(
+                &db_pool,
+                &indexer,
+                file_id,
+                row.quality_score,
+                row.reextract_count,
+                None,
+            ) {
+                Ok(outcome) if outcome.reextracted => {
+                    if outcome.reason.as_deref() == Some("exhausted") {
                         exhausted += 1;
                     } else {
-                        let flags_str: String = conn
-                            .query_row(
-                                "SELECT quality_flags FROM content_index WHERE md5 = ?1",
-                                rusqlite::params![md5],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or_else(|_| "[]".into());
-                        let _ = tracker::update_reextract_state(&conn, &md5, next_count, &flags_str);
                         ok += 1;
                     }
                 }
+                Ok(_) => exhausted += 1,
                 Err(e) => {
                     log::warn!("[RE-EXTRACT-LOW] {file_id}: {e}");
                     failed += 1;
@@ -1676,6 +1633,79 @@ pub struct QualityBackfillReport {
     pub scored: usize,
 }
 
+/// Shared quality-backfill core: compute and persist quality scores for up to
+/// `limit` content rows that are missing one. Returns `(processed, scored)`.
+/// Used by the Tauri command [`backfill_quality`] and the CLI
+/// `link-searcher quality backfill`. Resolves PDF page counts via
+/// [`extractor::pdf::get_pdf_page_count`] and image dims via
+/// `image::image_dimensions` using the dir_config roots — identical to the
+/// inline logic previously embedded in the Tauri command.
+pub(crate) fn run_quality_backfill(
+    conn: &rusqlite::Connection,
+    limit: usize,
+) -> anyhow::Result<(usize, usize)> {
+    let dir_roots: std::collections::HashMap<String, String> =
+        crate::db::dir_config::list_dirs(conn)?
+            .into_iter()
+            .map(|d| (d.id, d.path))
+            .collect();
+
+    let rows = tracker::get_content_missing_quality(conn, limit)?;
+    let mut processed = 0usize;
+    let mut scored = 0usize;
+
+    for row in &rows {
+        processed += 1;
+        let ext = row
+            .rel_path
+            .as_deref()
+            .and_then(|p| std::path::Path::new(p).extension())
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let mut meta = crate::extractor::quality::ExtractMeta {
+            ocr_used: row.ocr_used,
+            mean_confidence: None,
+            page_count: None,
+            image_dims: None,
+        };
+
+        if ext == "pdf" {
+            if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
+                if let Some(root) = dir_roots.get(dir_id) {
+                    let abs = std::path::Path::new(root).join(rel);
+                    meta.page_count =
+                        crate::extractor::pdf::get_pdf_page_count(&abs).ok();
+                }
+            }
+        } else if matches!(
+            ext.as_str(),
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
+        ) {
+            if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
+                if let Some(root) = dir_roots.get(dir_id) {
+                    let abs = std::path::Path::new(root).join(rel);
+                    meta.image_dims = ::image::image_dimensions(&abs).ok();
+                }
+            }
+        }
+
+        let quality =
+            crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
+        let flags_json = crate::extractor::quality::flags_to_json(&quality.flags);
+        if let Err(e) =
+            tracker::update_content_quality(conn, &row.md5, quality.score as f64, &flags_json)
+        {
+            log::warn!("[QUALITY-BACKFILL] update failed {}: {e}", row.md5);
+            continue;
+        }
+        scored += 1;
+    }
+
+    Ok((processed, scored))
+}
+
 #[tauri::command]
 pub async fn backfill_quality(
     state: State<'_, AppState>,
@@ -1686,69 +1716,8 @@ pub async fn backfill_quality(
     tokio::task::spawn_blocking(move || {
         let _guard = crate::state::TaskGuard::new("quality-backfill");
         let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
-
-        let dir_roots: std::collections::HashMap<String, String> =
-            crate::db::dir_config::list_dirs(&conn)
-                .map_err(|e| format!("{e}"))?
-                .into_iter()
-                .map(|d| (d.id, d.path))
-                .collect();
-
-        let rows = tracker::get_content_missing_quality(&conn, limit)
-            .map_err(|e| format!("{e}"))?;
-        let mut processed = 0usize;
-        let mut scored = 0usize;
-
-        for row in &rows {
-            processed += 1;
-            let ext = row
-                .rel_path
-                .as_deref()
-                .and_then(|p| std::path::Path::new(p).extension())
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-
-            let mut meta = crate::extractor::quality::ExtractMeta {
-                ocr_used: row.ocr_used,
-                mean_confidence: None,
-                page_count: None,
-                image_dims: None,
-            };
-
-            if ext == "pdf" {
-                if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
-                    if let Some(root) = dir_roots.get(dir_id) {
-                        let abs = std::path::Path::new(root).join(rel);
-                        meta.page_count =
-                            crate::extractor::pdf::get_pdf_page_count(&abs).ok();
-                    }
-                }
-            } else if matches!(
-                ext.as_str(),
-                "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
-            ) {
-                if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
-                    if let Some(root) = dir_roots.get(dir_id) {
-                        let abs = std::path::Path::new(root).join(rel);
-                        meta.image_dims = ::image::image_dimensions(&abs).ok();
-                    }
-                }
-            }
-
-            let quality =
-                crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
-            let flags_json =
-                crate::extractor::quality::flags_to_json(&quality.flags);
-            if let Err(e) =
-                tracker::update_content_quality(&conn, &row.md5, quality.score as f64, &flags_json)
-            {
-                log::warn!("[QUALITY-BACKFILL] update failed {}: {e}", row.md5);
-                continue;
-            }
-            scored += 1;
-        }
-
+        let (processed, scored) =
+            run_quality_backfill(&conn, limit).map_err(|e| format!("{e}"))?;
         log::info!(
             "[QUALITY-BACKFILL] done: {processed} processed, {scored} scored"
         );
@@ -2117,6 +2086,28 @@ mod tests {
         assert!(score_a.unwrap() > 0.5, "score_a={score_a:?}");
         let (score_b, _) = crate::db::tracker::get_content_quality(&conn, "md5_b").unwrap().unwrap();
         assert!(score_b.unwrap() > 0.5, "score_b={score_b:?}");
+    }
+
+    #[test]
+    fn run_quality_backfill_scores_missing_rows_via_shared_helper() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::run_migrations(&conn).unwrap();
+        crate::db::dir_config::add_dir(&conn, "/nonexistent", None, None, None, None, true).unwrap();
+        let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
+
+        let fid = crate::db::tracker::upsert_file(&conn, "a.txt", &d.id, 100, 10, Some("md5_a")).unwrap();
+        crate::db::tracker::update_indexed(&conn, &fid, Some("md5_a")).unwrap();
+        crate::db::tracker::store_content(&conn, "md5_a", "Hello World 你好世界 test text 12345", false, None).unwrap();
+
+        let (processed, scored) = run_quality_backfill(&conn, 100).unwrap();
+        assert_eq!(processed, 1);
+        assert_eq!(scored, 1);
+
+        let still_missing = crate::db::tracker::get_content_missing_quality(&conn, 100).unwrap();
+        assert_eq!(still_missing.len(), 0);
+
+        let (score, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
+        assert!(score.unwrap() > 0.5);
     }
 }
 #[cfg(test)]

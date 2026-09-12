@@ -138,6 +138,7 @@
 | **命令行搜索** | `link-searcher search "keyword"`（别名 `index`） |
 | **命令行扫描/监控** | `link-searcher scan [dir]` 扫描并退出；`link-searcher watch dir` 实时监控文件变更 |
 | **索引健康检查** | `link-searcher health` |
+| **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
 

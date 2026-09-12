@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use crate::boot;
 use crate::config;
@@ -51,6 +51,49 @@ pub enum Cli {
         #[arg(long)]
         dry_run: bool,
     },
+    /// OCR-quality health check (headless)
+    Quality {
+        #[command(subcommand)]
+        cmd: QualityCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum QualityCmd {
+    /// Backfill quality scores for content rows that are missing them
+    Backfill {
+        /// Max rows to score (default 20000)
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
+    /// List low-quality files and the quality-score histogram
+    Audit {
+        /// Max rows to list (default 50)
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Maximum quality score to include (default 0.5)
+        #[arg(long, default_value = "0.5")]
+        max_score: f64,
+    },
+    /// Re-extract low-quality files (batch) or one file by id
+    Reextract {
+        /// Re-extract a single file by id
+        #[arg(long)]
+        file_id: Option<String>,
+        /// Max files to re-extract in batch mode (default 100)
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Maximum quality score to include in batch mode (default 0.5)
+        #[arg(long, default_value = "0.5")]
+        max_score: f64,
+        /// Confirm batch re-extraction (required without --file-id)
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+fn fmt_score(score: Option<f64>) -> String {
+    score.map(|s| format!("{s:.3}")).unwrap_or_else(|| "-".into())
 }
 
 pub fn run_cli() -> Result<()> {
@@ -347,6 +390,146 @@ pub fn run_cli() -> Result<()> {
             );
             println!("{cited}");
         }
+        Cli::Quality { cmd } => match cmd {
+            QualityCmd::Backfill { limit } => {
+                let data_dir = config::load_config().data_dir;
+                let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+                let limit = limit.unwrap_or(20000).min(20000);
+                let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+                let (processed, scored) =
+                    crate::commands::index::run_quality_backfill(&conn, limit)
+                        .context("quality backfill failed")?;
+                drop(conn);
+                println!("processed {processed} / scored {scored}");
+            }
+            QualityCmd::Audit { limit, max_score } => {
+                let data_dir = config::load_config().data_dir;
+                let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+                let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+                let summary = db::tracker::get_quality_summary(&conn)
+                    .context("failed to get quality summary")?;
+                let rows = db::tracker::get_low_quality_files(&conn, max_score, limit.unwrap_or(50))
+                    .context("failed to list low-quality files")?;
+                drop(conn);
+
+                println!("quality summary:");
+                println!("  green        {}", summary.green);
+                println!("  yellow       {}", summary.yellow);
+                println!("  red          {}", summary.red);
+                println!("  unevaluated  {}", summary.unevaluated);
+                println!();
+                println!("low-quality files (score < {max_score}):");
+                if rows.is_empty() {
+                    println!("  (none)");
+                }
+                for row in &rows {
+                    println!(
+                        "  {:>6.3}  chars={:<8}  flags={:<28}  {}",
+                        row.quality_score.unwrap_or(0.0),
+                        row.char_count,
+                        row.quality_flags,
+                        row.file_path.as_deref().unwrap_or(&row.md5),
+                    );
+                }
+            }
+            QualityCmd::Reextract { file_id, limit, max_score, yes } => {
+                let data_dir = config::load_config().data_dir;
+                let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
+
+                if let Some(id) = file_id {
+                    let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+                    let rec = db::tracker::get_file_by_id(&conn, &id)
+                        .context("failed to look up file")?
+                        .ok_or_else(|| anyhow::anyhow!("file not found"))?;
+                    let md5 = rec
+                        .md5
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("file has no md5"))?;
+                    let (old_score, old_count) =
+                        match db::tracker::get_content_quality(&conn, &md5)
+                            .context("failed to read quality state")?
+                        {
+                            Some(v) => v,
+                            None => (None, 0),
+                        };
+                    drop(conn);
+
+                    let outcome = crate::commands::index::reextract_one(
+                        &bootstrap.pool,
+                        &bootstrap.indexer,
+                        &id,
+                        old_score,
+                        old_count,
+                        None,
+                    )
+                    .context("re-extract failed")?;
+                    println!(
+                        "re-extracted={} old_score={} new_score={} reason={}",
+                        outcome.reextracted,
+                        fmt_score(outcome.old_score),
+                        fmt_score(outcome.new_score),
+                        outcome.reason.as_deref().unwrap_or("-"),
+                    );
+                } else {
+                    let limit = limit.unwrap_or(100);
+                    let conn = bootstrap.pool.get().context("failed to get DB connection")?;
+                    let rows = db::tracker::get_low_quality_files(&conn, max_score, limit)
+                        .context("failed to list low-quality files")?;
+                    drop(conn);
+
+                    let would = rows
+                        .iter()
+                        .filter(|r| r.file_id.is_some() && r.reextract_count < 3)
+                        .count();
+                    if !yes {
+                        println!(
+                            "{would} file(s) would be re-extracted ({} low-quality below {max_score}); pass --yes to proceed",
+                            rows.len(),
+                        );
+                        return Err(anyhow::anyhow!(
+                            "aborted: --yes required for batch re-extraction"
+                        ));
+                    }
+
+                    let mut processed = 0usize;
+                    let mut ok = 0usize;
+                    let mut failed = 0usize;
+                    let mut exhausted = 0usize;
+                    for row in &rows {
+                        let Some(ref id) = row.file_id else {
+                            continue;
+                        };
+                        if row.reextract_count >= 3 {
+                            exhausted += 1;
+                            continue;
+                        }
+                        processed += 1;
+                        match crate::commands::index::reextract_one(
+                            &bootstrap.pool,
+                            &bootstrap.indexer,
+                            id,
+                            row.quality_score,
+                            row.reextract_count,
+                            None,
+                        ) {
+                            Ok(outcome) if outcome.reextracted => {
+                                if outcome.reason.as_deref() == Some("exhausted") {
+                                    exhausted += 1;
+                                } else {
+                                    ok += 1;
+                                }
+                            }
+                            Ok(_) => exhausted += 1,
+                            Err(e) => {
+                                eprintln!("[reextract] {id}: {e}");
+                                failed += 1;
+                            }
+                        }
+                    }
+                    println!("processed {processed} / ok {ok} / failed {failed} / exhausted {exhausted}");
+                }
+            }
+        },
         Cli::Health => {
             let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);
