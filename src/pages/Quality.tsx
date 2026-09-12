@@ -24,6 +24,65 @@ function qualityDotClass(score: number | null): string {
   return 'bg-red-500'
 }
 
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif', '.heic', '.heif'])
+
+function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 B'
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+interface ProblemCategory {
+  labelKey: string
+  reasonKey: string
+  solutionKey: string
+  badgeColor: string
+}
+
+function deriveProblemCategory(
+  fileSize: number,
+  charCount: number,
+  fileExt: string,
+  indexed: number,
+  _errorMsg: string | null,
+): ProblemCategory | null {
+  if (fileSize === 0) {
+    return {
+      labelKey: 'quality_cat_empty_file',
+      reasonKey: 'quality_cat_empty_file_reason',
+      solutionKey: 'quality_cat_empty_file_solution',
+      badgeColor: 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700',
+    }
+  }
+  if (indexed === 2) {
+    return {
+      labelKey: 'quality_cat_index_failed',
+      reasonKey: 'quality_cat_index_failed_reason',
+      solutionKey: 'quality_cat_index_failed_solution',
+      badgeColor: 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800/40',
+    }
+  }
+  if (charCount === 0 && fileSize > 0) {
+    const ext = fileExt.startsWith('.') ? fileExt.toLowerCase() : `.${fileExt}`.toLowerCase()
+    if (IMAGE_EXTS.has(ext)) {
+      return {
+        labelKey: 'quality_cat_image_no_text',
+        reasonKey: 'quality_cat_image_no_text_reason',
+        solutionKey: 'quality_cat_image_no_text_solution',
+        badgeColor: 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/40',
+      }
+    }
+    return {
+      labelKey: 'quality_cat_no_extracted_text',
+      reasonKey: 'quality_cat_no_extracted_text_reason',
+      solutionKey: 'quality_cat_no_extracted_text_solution',
+      badgeColor: 'bg-orange-50 dark:bg-orange-900/20 text-orange-700 dark:text-orange-300 border-orange-200 dark:border-orange-800/40',
+    }
+  }
+  return null
+}
+
 export default function Quality() {
   const { t } = useI18n()
   const [items, setItems] = useState<FileItem[]>([])
@@ -216,10 +275,12 @@ export default function Quality() {
             <table className="w-full text-xs select-none table-fixed">
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 backdrop-blur z-10">
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
-                  <th className="px-2 py-1 font-medium" style={{ width: 240 }}>{t('filename')}</th>
-                  <th className="px-2 py-1 font-medium" style={{ width: 120 }}>{t('path')}</th>
-                  <th className="px-2 py-1 font-medium" style={{ width: 80 }}>{t('quality')}</th>
-                  <th className="px-2 py-1 font-medium" style={{ width: 80 }}>{t('quality_flags_label')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 220 }}>{t('filename')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 100 }}>{t('path')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 60 }}>{t('quality_source_size')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 60 }}>{t('quality_char_count_label')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 70 }}>{t('quality')}</th>
+                  <th className="px-2 py-1 font-medium" style={{ width: 70 }}>{t('quality_flags_label')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -242,6 +303,12 @@ export default function Quality() {
                       </td>
                       <td className="px-2 py-1">
                         <span className="text-gray-500 dark:text-gray-400 truncate block" title={item.rel_path}>{item.rel_path}</span>
+                      </td>
+                      <td className="px-2 py-1">
+                        <span className="text-gray-500 dark:text-gray-400 tabular-nums">{formatFileSize(item.file_size)}</span>
+                      </td>
+                      <td className="px-2 py-1">
+                        <span className="text-gray-500 dark:text-gray-400 tabular-nums">{item.char_count.toLocaleString()}</span>
                       </td>
                       <td className="px-2 py-1">
                         <span className={`font-medium ${
@@ -328,12 +395,23 @@ export default function Quality() {
           </div>
         )}
         {preview && !previewLoading && !previewError && (
-          <div className="p-4 space-y-4">
+            <div className="p-4 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
                 {items.find(i => i.file_id === selectedId)?.file_name ?? ''}
               </h3>
             </div>
+            {(() => {
+              const item = items.find(i => i.file_id === selectedId)
+              if (!item) return null
+              return (
+                <div className="flex items-center gap-3 text-[10px] text-gray-400 dark:text-gray-500">
+                  <span>{t('quality_source_size')}: {formatFileSize(item.file_size)}</span>
+                  <span>·</span>
+                  <span>{t('quality_char_count_label')}: {item.char_count.toLocaleString()}</span>
+                </div>
+              )
+            })()}
 
             <div className="space-y-2 border-b border-gray-100 dark:border-gray-800 pb-4">
               <span className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('quality_original_preview')}</span>
@@ -381,29 +459,47 @@ export default function Quality() {
 
             {(() => {
               const flags = parseQualityFlags(preview.quality_flags)
-              if (flags.length === 0) return null
+              const item = items.find(i => i.file_id === selectedId)
+              const category = item
+                ? deriveProblemCategory(item.file_size, item.char_count, item.file_ext, item.indexed, item.error_msg)
+                : null
+
+              if (!category && flags.length === 0) return null
+
               return (
                 <div className="space-y-3">
-                  <div>
-                    <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('quality_why_low')}</h4>
-                    <ul className="space-y-1.5">
-                      {flags.map(f => (
-                        <li key={f} className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-800/30 rounded px-2.5 py-1.5">
-                          <span className="font-medium">{t(flagReasonKey(f))}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('quality_recommended_fix')}</h4>
-                    <ul className="space-y-1.5">
-                      {flags.map(f => (
-                        <li key={f} className="text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 rounded px-2.5 py-1.5">
-                          <span className="font-medium">{t(flagSolutionKey(f))}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+                  {category && (
+                    <div className={`border rounded-md px-3 py-2 ${category.badgeColor}`}>
+                      <div className="text-xs font-semibold">{t(category.labelKey)}</div>
+                      <div className="text-xs mt-1 opacity-80">{t(category.reasonKey)}</div>
+                      <div className="text-xs mt-1 opacity-80">{t(category.solutionKey)}</div>
+                    </div>
+                  )}
+
+                  {flags.length > 0 && (
+                    <>
+                      <div>
+                        <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('quality_why_low')}</h4>
+                        <ul className="space-y-1.5">
+                          {flags.map(f => (
+                            <li key={f} className="text-xs text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-800/30 rounded px-2.5 py-1.5">
+                              <span className="font-medium">{t(flagReasonKey(f))}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2">{t('quality_recommended_fix')}</h4>
+                        <ul className="space-y-1.5">
+                          {flags.map(f => (
+                            <li key={f} className="text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/10 border border-blue-100 dark:border-blue-800/30 rounded px-2.5 py-1.5">
+                              <span className="font-medium">{t(flagSolutionKey(f))}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </>
+                  )}
                 </div>
               )
             })()}

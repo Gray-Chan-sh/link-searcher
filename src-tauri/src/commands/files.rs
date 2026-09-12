@@ -23,6 +23,7 @@ pub struct FileItem {
     pub status: String,
     pub quality_score: Option<f64>,
     pub quality_flags: String,
+    pub char_count: i64,
 }
 
 #[derive(Serialize)]
@@ -591,7 +592,7 @@ pub(crate) fn query_file_list(
             "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
         }
         Some("flagged") => {
-            wheres.push("ci.quality_flags IS NOT NULL AND ci.quality_flags != '[]'".into());
+            wheres.push("ci.quality_flags IS NOT NULL AND ci.quality_flags != '[]' AND file_tracking.size > 0".into());
             "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
         }
         _ => "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5",
@@ -623,7 +624,7 @@ pub(crate) fn query_file_list(
     let data_sql = format!(
         "SELECT file_tracking.id, file_tracking.path, file_tracking.size, file_tracking.mtime, \
          file_tracking.indexed, file_tracking.error_msg, file_tracking.status, \
-         ci.quality_score, ci.quality_flags \
+         ci.quality_score, ci.quality_flags, ci.char_count \
          FROM file_tracking {quality_join} WHERE {where_clause} \
          ORDER BY {order_clause} \
          LIMIT ?{} OFFSET ?{}",
@@ -661,6 +662,7 @@ pub(crate) fn query_file_list(
                 status: row.get("status")?,
                 quality_score: row.get("quality_score")?,
                 quality_flags: row.get::<_, Option<String>>("quality_flags")?.unwrap_or_else(|| "[]".into()),
+                char_count: row.get::<_, Option<i64>>("char_count")?.unwrap_or(0),
             })
         })
         .map_err(|e| format!("query error: {e}"))?;

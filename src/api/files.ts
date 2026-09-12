@@ -302,6 +302,7 @@ export interface FileItem {
   status: string
   quality_score: number | null
   quality_flags: string
+  char_count: number
 }
 
 export interface FileListResponse {
