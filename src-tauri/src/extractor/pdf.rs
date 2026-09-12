@@ -268,6 +268,7 @@ impl PdfExtractor {
         let merged = page_texts.join("\n");
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
         let engine = super::ocr::preferred_engine(engine);
+        let is_sparse = is_sparse_text_layer(&merged, pages.len());
 
         // Use pdf-inspector for accurate PDF classification
         if merged.len() > 100
@@ -275,7 +276,8 @@ impl PdfExtractor {
                 match pdf_inspector::classify_pdf_mem(&bytes) {
                     Ok(class) => {
                         let need_ocr = !class.pages_needing_ocr.is_empty()
-                            && class.pages_needing_ocr.len() * 2 > class.page_count as usize;
+                            && (class.pages_needing_ocr.len() * 2 > class.page_count as usize
+                                || is_sparse);
                         if matches!(class.pdf_type, pdf_inspector::PdfType::Scanned | pdf_inspector::PdfType::ImageBased) || need_ocr {
                             log::info!(
                                 "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
@@ -293,7 +295,7 @@ impl PdfExtractor {
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
-        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep {
+        if merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse {
             log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
             return Ok(merged);
         }
@@ -304,8 +306,8 @@ impl PdfExtractor {
                 log::info!("[PDF] {:?}: pdftotext recovered {} chars from garbled text", path.file_name(), text.len());
                 return Ok(text);
             }
-        log::info!("[PDF] {:?}: wm={} garbled={} rep={} → falling to image-layer OCR ({lang})",
-            path.file_name(), is_wm, is_garbled, is_rep);
+        log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} → falling to image-layer OCR ({lang})",
+            path.file_name(), is_wm, is_garbled, is_rep, is_sparse);
         if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
             return Ok(ocr_text);
         }
@@ -462,6 +464,17 @@ fn is_repetitive(text: &str) -> bool {
     }
     let distinct: HashSet<&str> = lines.iter().copied().collect();
     (lines.len() - distinct.len()) as f64 / lines.len() as f64 > 0.6
+}
+
+/// True when the text layer is too sparse to be real document body text.
+/// A real body page has far more than 50 non-whitespace chars; 50/page is
+/// the conservative threshold.
+pub fn is_sparse_text_layer(text: &str, page_count: usize) -> bool {
+    if page_count == 0 {
+        return false;
+    }
+    let non_ws = text.chars().filter(|c| !c.is_whitespace()).count();
+    non_ws < 50 * page_count
 }
 
 /// Render PDF pages to images using pdftoppm and run OCR.
@@ -1071,5 +1084,40 @@ mod tests {
     #[test]
     fn test_normalize_pdf_dpi_negative_falls_back_300() {
         assert_eq!(normalize_pdf_dpi(Some("-5")), 300);
+    }
+
+    #[test]
+    fn test_is_sparse_empty_text_is_sparse() {
+        assert!(is_sparse_text_layer("", 5));
+    }
+
+    #[test]
+    fn test_is_sparse_page_count_zero_returns_false() {
+        assert!(!is_sparse_text_layer("some text", 0));
+    }
+
+    #[test]
+    fn test_is_sparse_one_page_20_chars_is_sparse() {
+        // 20 < 50 * 1 → true
+        assert!(is_sparse_text_layer("abcdefghij1234567890", 1));
+    }
+
+    #[test]
+    fn test_is_sparse_one_page_500_chars_not_sparse() {
+        let text = "a".repeat(500);
+        assert!(!is_sparse_text_layer(&text, 1));
+    }
+
+    #[test]
+    fn test_is_sparse_ten_pages_400_chars_is_sparse() {
+        // 400 < 50 * 10 = 500 → true
+        assert!(is_sparse_text_layer(&"a".repeat(400), 10));
+    }
+
+    #[test]
+    fn test_is_sparse_watermark_only_many_pages() {
+        // 5 pages × 15 chars = 75 < 50 * 5 = 250 → true
+        let wm = "confidential\n".repeat(5);
+        assert!(is_sparse_text_layer(&wm, 5));
     }
 }

@@ -85,6 +85,16 @@
 
 ---
 
+## 2026-09-12（OCR 质量修复 Phase 2 · Wave 8：稀疏/水印文字层强制 OCR）
+
+- **新增 `is_sparse_text_layer(text, page_count)`**（`pdf.rs` 纯函数）：非空白字符 < 50/页 判定为稀疏文字层（真实正文每页远超此值；空文本视为稀疏，页数为 0 视为非稀疏）。
+- **接入 `extract_with_lang` 决策树**：清洁文字层判定新增 `!is_sparse` 条件；`pdf_inspector` 的 `need_ocr` 增加 `|| is_sparse` 覆盖——**即使水印逐页略变导致 `is_watermark_text`/`is_repetitive` 漏判，只要文字层稀疏也会强制走 OCR 回退**，直接修复"只识别到水印"。
+- **安全网保留**：`try_ocr_fallback` 无内嵌图/无法渲染时返回 `None`，仍回退到原文字层，避免短数字文档丢内容。
+- **未做图像水印去除**（法律文档红色公章语义重要，仅做文本层检测）。
+- **测试**：`cargo test --lib` 314 全绿（+6）；`cargo check --all-targets` 零错误。**未验证**：本机 poppler 损坏，渲染→OCR 端到端无法本地验证。
+
+---
+
 ## 2026-09-11（AI 聊天：范围只点名文件时证据泄漏修复）
 
 - **现象**：检索范围仅含 1 个文件（`二审/xxx判决书.pdf`），strict 模式下 evidence 却出现 3 份文件（混入两份不属于范围的 `一审/.../15-民事判决书.pdf` 等文件名含"判决书"的同库文件）。
