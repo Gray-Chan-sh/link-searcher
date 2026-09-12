@@ -248,7 +248,13 @@ pub fn ocr_image_with_stats(
         OcrEngineType::PaddleOCR => {
             // Gradient-preserving preprocessing for DBNet: upscale small images,
             // enhance low contrast. No binarization — DBNet needs gradients.
-            let preprocessed = super::preprocess::preprocess_for_ocr(path)?;
+            let preprocessed = match super::preprocess::preprocess_for_ocr(path) {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("[OCR] preprocess failed, using raw image: {e}");
+                    None
+                }
+            };
             let ocr_path = preprocessed.as_deref().unwrap_or(path);
             let result = paddleocr::recognize_from_path_enriched(ocr_path)
                 .map_err(|e| anyhow::anyhow!("{e}"));
