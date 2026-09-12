@@ -1400,13 +1400,12 @@ mod tests {
 
     #[test]
     fn test_implausible_binary_junk_low_printable_returns_true() {
-        // Junk with lots of non-printable/symbol characters → low printable ratio.
-        // Mix of control chars, random bytes as chars, brackets, pipes, etc.
+        // Private Use Area + replacement chars are non-printable → low printable ratio.
         let mut junk = String::new();
-        for i in 0u8..255 {
-            junk.push(i as char);
+        for _ in 0..200 {
+            junk.push('\u{E000}');
+            junk.push('\u{FFFD}');
         }
-        // printable ratio will be well below 0.7
         assert!(is_implausible_text_layer(&junk, 5));
     }
 

@@ -17,6 +17,17 @@
 
 ---
 
+## 2026-09-12（质量指标误报修复：可打印字符集过窄）
+
+真实数据复核发现 65 个**合法中文文档**被误判 `low_printable`——根因：`quality.rs::is_printable_allowed` 是**白名单制**，只认 CJK 汉字 + ASCII 字母数字 + 空白 + 一串多为 ASCII 的标点，**漏掉全角/中文标点（`，：；！？` 等）、全角形（U+FF00–FFEF）、以及所有非 CJK/Latin 文字系统**，导致真正的中文法律文书 `printable_ratio` 跌破 0.7。
+
+- **修复**：改为**黑名单式**——仅 `U+FFFD`、控制字符、私用区（PUA）判为不可打印，其余（含 CJK 标点/全角/Cyrillic/Greek 等）一律可打印；移除已无用的 `is_punctuation`。此修复同时惠及依赖 `LowPrintable` 的两个新门禁（`pdf.rs::is_implausible_text_layer`、`indexer.rs::is_plausible_text_fallback`），避免对合法文本误触发 OCR 或误拒。
+- **同步修正测试**：`pdf.rs` 中"乱码"用例原用字节 0–254（其中含合法 Latin-1），改用私用区/替换字符构造真实乱码。
+- **真实数据重算**：reset → backfill 9,323 行；`low_printable` 误报大幅下降，剩余主要为**空文件**（jpg/md/txt/docx/png 的 0 字符）与少数仍含杂乱文字层的 PDF。索引最大单行字符数由 20,311,514 → 2,004,235。
+- **测试**：`cargo test --lib` **346** 全绿（+4）。
+
+---
+
 ## 2026-09-12（真实数据排查：乱码入库根因修复）
 
 对真实库（`/Volumes/Data/index`，1.2GB，11,928 文件，9,402 条内容）跑体检，发现 **174 个"超长提取"（137 个 PDF）**，最坏一个解析出 **20,311,514 字符 = 文件字节数**。两条根因均已修复：

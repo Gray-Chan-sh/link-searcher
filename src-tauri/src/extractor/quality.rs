@@ -56,20 +56,21 @@ fn is_cjk(c: char) -> bool {
     matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
 }
 
-#[inline]
-fn is_punctuation(c: char) -> bool {
-    matches!(
-        c,
-        '.' | ',' | '!' | '?' | ';' | ':' | '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}'
-            | '<' | '>' | '-' | '\u{2014}' | '\u{2026}' | '\u{3001}' | '\u{3002}'
-            | '\u{300A}' | '\u{300B}' | '\u{300C}' | '\u{300D}' | '\u{300E}' | '\u{300F}'
-            | '\u{FF08}' | '\u{FF09}' | '\u{3010}' | '\u{3011}'
-    )
-}
-
+// sanitize_text already removes control chars before scoring, so printable metric's
+// job is to catch genuinely non-text (replacement + private-use + control) content,
+// not to whitelist one script's punctuation.
 #[inline]
 fn is_printable_allowed(c: char) -> bool {
-    is_cjk(c) || c.is_ascii_alphanumeric() || c.is_whitespace() || is_punctuation(c)
+    if c == '\u{FFFD}' || c.is_control() {
+        return false;
+    }
+    if matches!(
+        c,
+        '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    ) {
+        return false;
+    }
+    true
 }
 
 /// Compute lexicon hit rate: CJK chars from CJK set + whole Latin words in EN set.
@@ -372,5 +373,69 @@ mod tests {
         let json = flags_to_json(&flags);
         assert!(json.contains("low_printable"));
         assert!(json.contains("high_fffd"));
+    }
+
+    #[test]
+    fn test_chinese_full_width_punctuation_printable() {
+        let text = "浙江传化江南大地发展有限公司 变更记录共24条数据：【新增】项目！；（测试）《规范》、，？";
+        let meta = ExtractMeta::default();
+        let res = compute_quality(text, &meta, "docx");
+        assert!(
+            res.printable_ratio >= 0.95,
+            "chinese text with full-width punctuation should have high printable_ratio, got {}",
+            res.printable_ratio
+        );
+        assert!(
+            !res.flags.contains(&QualityFlag::LowPrintable),
+            "should not set LowPrintable flag for legitimate Chinese text with full-width punctuation"
+        );
+    }
+
+    #[test]
+    fn test_private_use_area_non_printable() {
+        let pua_text = "\u{E000}\u{E001}\u{F8FF}\u{F0000}\u{100000}";
+        let meta = ExtractMeta::default();
+        let res = compute_quality(pua_text, &meta, "txt");
+        assert_eq!(res.printable_ratio, 0.0);
+        assert!(res.flags.contains(&QualityFlag::LowPrintable));
+    }
+
+    #[test]
+    fn test_is_printable_allowed_blocks_replacement_control_pua() {
+        assert!(!is_printable_allowed('\u{FFFD}'), "replacement char");
+        assert!(!is_printable_allowed('\u{0000}'), "null control");
+        assert!(!is_printable_allowed('\u{0007}'), "BEL control");
+        assert!(!is_printable_allowed('\u{001B}'), "ESC control");
+        assert!(!is_printable_allowed('\u{E000}'), "PUA BMP start");
+        assert!(!is_printable_allowed('\u{F8FF}'), "PUA BMP end");
+        assert!(!is_printable_allowed('\u{F0000}'), "PUA Plane 15 start");
+        assert!(!is_printable_allowed('\u{FFFFD}'), "PUA Plane 15 end");
+        assert!(!is_printable_allowed('\u{100000}'), "PUA Plane 16 start");
+        assert!(!is_printable_allowed('\u{10FFFD}'), "PUA Plane 16 end");
+    }
+
+    #[test]
+    fn test_is_printable_allowed_accepts_all_scripts() {
+        assert!(is_printable_allowed('中'));
+        assert!(is_printable_allowed('，'));
+        assert!(is_printable_allowed('：'));
+        assert!(is_printable_allowed('；'));
+        assert!(is_printable_allowed('！'));
+        assert!(is_printable_allowed('？'));
+        assert!(is_printable_allowed('（'));
+        assert!(is_printable_allowed('）'));
+        assert!(is_printable_allowed('【'));
+        assert!(is_printable_allowed('】'));
+        assert!(is_printable_allowed('《'));
+        assert!(is_printable_allowed('》'));
+        assert!(is_printable_allowed('、'));
+        assert!(is_printable_allowed('a'));
+        assert!(is_printable_allowed('Z'));
+        assert!(is_printable_allowed('0'));
+        assert!(is_printable_allowed(' '));
+        assert!(!is_printable_allowed('\n'), "newline is a control char");
+        assert!(is_printable_allowed('Я'));
+        assert!(is_printable_allowed('α'));
+        assert!(is_printable_allowed('→'));
     }
 }
