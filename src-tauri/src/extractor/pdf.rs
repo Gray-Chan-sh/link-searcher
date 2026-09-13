@@ -9,6 +9,13 @@ use anyhow::{Context, Result};
 use super::Extractor;
 use crate::scanner::helpers::TempDir;
 
+pub const LARGE_SCAN_PAGE_THRESHOLD: usize = 20;
+pub const LARGE_SCAN_OCR_BUDGET: Duration = Duration::from_secs(600);
+
+pub fn should_ocr_pages_individually(page_count: usize, whole_doc_failed: bool) -> bool {
+    whole_doc_failed || page_count > LARGE_SCAN_PAGE_THRESHOLD
+}
+
 /// Locate a poppler binary (`pdftoppm` or `pdfimages`).
 /// Searches PATH first, then the bundled/dev `poppler-bin/` dir, then next
 /// to the executable, then platform install prefixes — the Tauri app may
@@ -157,6 +164,76 @@ fn try_pdftotext_extract(path: &Path) -> Option<String> {
 
 pub struct PdfExtractor;
 
+fn run_pdf_ocr_pipeline(
+    path: &Path,
+    page_count: usize,
+    page_texts: &[String],
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Option<String> {
+    let page_count = if page_count == 0 {
+        get_pdf_page_count(path).unwrap_or(0) as usize
+    } else {
+        page_count
+    };
+
+    if !should_ocr_pages_individually(page_count, false) {
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine) {
+            return Some(ocr_text);
+        }
+    } else {
+        log::info!(
+            "[PDF] {:?}: large scanned PDF ({} pages > {}), attempting fast-path whole-doc OCR first",
+            path.file_name(), page_count, LARGE_SCAN_PAGE_THRESHOLD
+        );
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine) {
+            return Some(ocr_text);
+        }
+    }
+
+    if should_ocr_pages_individually(page_count, true) {
+        log::info!(
+            "[PDF] {:?}: running per-page OCR loop for {} pages with budget {:?}",
+            path.file_name(), page_count, LARGE_SCAN_OCR_BUDGET
+        );
+        let dpi = global_pdf_dpi();
+        let mut ocr_pages = HashMap::new();
+        let start_time = Instant::now();
+        let mut pages_attempted = 0usize;
+        let mut budget_hit = false;
+
+        for page_num in 1..=page_count {
+            if start_time.elapsed() >= LARGE_SCAN_OCR_BUDGET {
+                budget_hit = true;
+                log::warn!(
+                    "[PDF] {:?}: per-page OCR reached time budget {:?}, stopping early at page {}/{}",
+                    path.file_name(), LARGE_SCAN_OCR_BUDGET, page_num, page_count
+                );
+                break;
+            }
+            pages_attempted += 1;
+            let page_idx = page_num - 1;
+            if let Some(p_text) = ocr_single_pdf_page(path, page_num as u32, dpi, lang, engine) {
+                ocr_pages.insert(page_idx, p_text);
+            }
+        }
+
+        log::info!(
+            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, budget_hit={}",
+            path.file_name(), pages_attempted, page_count, ocr_pages.len(), budget_hit
+        );
+
+        if !ocr_pages.is_empty() {
+            let merged = merge_page_texts(page_texts, &ocr_pages);
+            if !merged.trim().is_empty() {
+                return Some(merged);
+            }
+        }
+    }
+
+    None
+}
+
 /// Try OCR via pdfimages → pdftoppm, returning the first non-empty result.
 fn try_ocr_fallback(path: &Path, lang: &str, engine: &super::ocr::OcrEngineType) -> Option<String> {
     if pdfimages_path().is_some() {
@@ -241,7 +318,7 @@ impl PdfExtractor {
                     path.file_name()
                 );
                 let engine = super::ocr::preferred_engine(engine);
-                return if let Some(text) = try_ocr_fallback(path, lang, &engine) {
+                return if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
                     Ok(text)
                 } else {
                     Err(anyhow::anyhow!(
@@ -286,7 +363,7 @@ impl PdfExtractor {
                                 "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
                                 path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
                             );
-                            if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
+                            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
                                 return Ok(ocr_text);
                             }
                         }
@@ -380,9 +457,11 @@ impl PdfExtractor {
 
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} implausible={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep, is_sparse, is_implausible);
-        if let Some(ocr_text) = try_ocr_fallback(path, lang, &engine) {
+
+        if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
             return Ok(ocr_text);
         }
+
         Ok(merged)
     }
 
@@ -1362,6 +1441,20 @@ mod tests {
     fn test_page_needs_ocr_repetitive_without_images_returns_false() {
         let rep = "CONFIDENTIAL - INTERNAL USE ONLY\n".repeat(5);
         assert!(!page_needs_ocr(&rep, false), "repetitive text without images should not need OCR");
+    }
+
+    #[test]
+    fn test_should_ocr_pages_individually() {
+        // Small doc, whole doc succeeded -> false
+        assert!(!should_ocr_pages_individually(10, false));
+        // Small doc, boundary 20, whole doc succeeded -> false
+        assert!(!should_ocr_pages_individually(20, false));
+        // Small doc, whole doc failed -> true
+        assert!(should_ocr_pages_individually(10, true));
+        // Large doc (> 20), whole doc succeeded -> true
+        assert!(should_ocr_pages_individually(21, false));
+        // Large doc (> 20), whole doc failed -> true
+        assert!(should_ocr_pages_individually(21, true));
     }
 
     #[test]
