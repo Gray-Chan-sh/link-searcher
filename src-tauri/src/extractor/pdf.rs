@@ -306,13 +306,21 @@ impl PdfExtractor {
         let is_rep = is_repetitive(&merged);
         let doc_clean = merged.len() > 100 && !is_garbled && !is_wm && !is_rep && !is_sparse && !is_implausible;
 
-        // lopdf can produce whitespace-only text on Quartz/CFF PDFs —
-        // pdftotext handles these correctly
-        if is_garbled
-            && let Some(text) = try_pdftotext_extract(path) {
-                log::info!("[PDF] {:?}: pdftotext recovered {} chars from garbled text", path.file_name(), text.len());
-                return Ok(text);
+        // lopdf can produce watermark-only, garbled, or sparse text on PDFs
+        // where pdftotext has the correct text layer — try pdftotext recovery.
+        if !doc_clean {
+            if let Some(text) = try_pdftotext_extract(path) {
+                if prefer_recovered_text(&merged, &text, pages.len()) {
+                    log::info!(
+                        "[PDF] {:?}: pdftotext recovered {} chars (vs lopdf {})",
+                        path.file_name(),
+                        text.len(),
+                        merged.len()
+                    );
+                    return Ok(text);
+                }
             }
+        }
 
         // Per-page refinement runs ONLY when the document-level text layer looks
         // healthy but individual pages may still be scanned/empty. When the
@@ -564,9 +572,16 @@ pub fn is_implausible_text_layer(text: &str, page_count: usize) -> bool {
         ..Default::default()
     };
     let quality = crate::extractor::quality::compute_quality(text, &meta, "pdf");
-    quality
-        .flags
-        .contains(&crate::extractor::quality::QualityFlag::LowPrintable)
+        quality
+            .flags
+            .contains(&crate::extractor::quality::QualityFlag::LowPrintable)
+}
+
+pub fn prefer_recovered_text(lopdf_text: &str, recovered: &str, page_count: usize) -> bool {
+    !is_garbled_text(recovered)
+        && !is_implausible_text_layer(recovered, page_count)
+        && !is_sparse_text_layer(recovered, page_count)
+        && recovered.chars().count() > lopdf_text.chars().count()
 }
 
 fn page_needs_ocr(page_text: &str, page_has_images: bool) -> bool {
@@ -1425,5 +1440,43 @@ mod tests {
     #[test]
     fn test_implausible_empty_text_returns_false() {
         assert!(!is_implausible_text_layer("", 5));
+    }
+
+    // ── prefer_recovered_text tests ──────────────────────────────────
+
+    #[test]
+    fn test_prefer_recovered_text_bug_scenario_watermark_vs_clean() {
+        // Simulates the confirmed bug: lopdf returns only watermark text,
+        // pdftotext returns full document text.
+        let watermark = "国家企业信用信息公示系统\n".repeat(20);
+        let recovered = "企业信用信息公示报告 上海岩锦物业管理有限公司 法定代表人 注册资本 统一社会信用代码 ".repeat(80);
+        assert!(prefer_recovered_text(&watermark, &recovered, 46));
+    }
+
+    #[test]
+    fn test_prefer_recovered_text_recovered_shorter_rejected() {
+        let lopdf = "Substantial document content here. ".repeat(100);
+        let recovered = "short";
+        assert!(!prefer_recovered_text(&lopdf, &recovered, 10));
+    }
+
+    #[test]
+    fn test_prefer_recovered_text_recovered_garbled_rejected() {
+        let lopdf = "Readable content here for comparison. ".repeat(10);
+        let garbled = "\u{FFFD}\u{FFFD}\u{FFFD}".repeat(200);
+        assert!(!prefer_recovered_text(&lopdf, &garbled, 5));
+    }
+
+    #[test]
+    fn test_prefer_recovered_text_recovered_sparse_rejected() {
+        let lopdf = "hi";
+        let recovered = "short"; // 5 non-ws < 50*1 → sparse
+        assert!(!prefer_recovered_text(&lopdf, &recovered, 1));
+    }
+
+    #[test]
+    fn test_prefer_recovered_text_equal_length_rejected() {
+        let text = "Same content for both. ".repeat(50);
+        assert!(!prefer_recovered_text(&text, &text, 5));
     }
 }
