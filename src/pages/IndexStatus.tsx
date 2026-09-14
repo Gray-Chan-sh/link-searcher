@@ -298,7 +298,7 @@ export default function IndexStatus() {
         : 0)
 
   return (
-    <div className="h-full p-6 overflow-y-auto">
+    <div className="h-full p-4 md:p-6 overflow-y-auto">
       <div className="flex items-center justify-between mb-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('index_status')}</h2>
@@ -415,7 +415,7 @@ export default function IndexStatus() {
       )}
 
       {loading && (
-        <div className="grid grid-cols-4 gap-4 mb-6">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <StatsCardSkeleton />
           <StatsCardSkeleton />
           <StatsCardSkeleton />
@@ -437,7 +437,7 @@ export default function IndexStatus() {
 
       {status && (
         <>
-          <div className="grid grid-cols-5 gap-4 mb-6">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
             <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('total_files')} value={status.total_files.toLocaleString()} color="gray" /></div>
             <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" /></div>
             <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} /></div>
@@ -541,7 +541,7 @@ export default function IndexStatus() {
                               <span className="font-medium text-gray-900 dark:text-gray-100 truncate max-w-[60%]" title={entry.file_path ?? undefined}>
                                 {entry.file_path ?? t('quality_unknown_path')}
                               </span>
-                              <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
                                 <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeColor}`}>
                                   {score !== null ? score.toFixed(2) : '—'}
                                 </span>
@@ -616,7 +616,7 @@ export default function IndexStatus() {
             </div>
           )}
 
-          <div className="grid grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">Scan Info</h3>
               <dl className="space-y-2 text-sm">
@@ -658,7 +658,7 @@ export default function IndexStatus() {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-6 mt-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
             <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
               <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">{t('recent_changes')}</h3>
               {!lastDelta ? (

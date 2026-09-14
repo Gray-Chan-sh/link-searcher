@@ -20,6 +20,8 @@ import Browse from './pages/Browse'
 import AiChat from './pages/AiChat'
 import Quality from './pages/Quality'
 import StatusBar from './components/StatusBar'
+import MobileNav from './components/MobileNav'
+import MobileHeader from './components/MobileHeader'
 import OnboardingWizard from './components/OnboardingWizard'
 import ToastContainer from './components/ToastContainer'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -224,7 +226,7 @@ export default function App() {
             <span>{t('dep_missing_banner', { n: depsMissingCount })}</span>
           </button>
         )}
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-auto pb-16 md:pb-0">
           <Routes>
             <Route index element={<SearchPage />} />
             <Route path="browse" element={<Browse />} />

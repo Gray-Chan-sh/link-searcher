@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-09-14：移动端 Web UI 响应式适配
+
+- **目标**：支持手机浏览器通过局域网 Web API 访问电脑端数据，提供移动端友好界面。
+- **已具备基础**：后端 Axum HTTPS 服务器（`webapi/`）已实现，前端 `api/client.ts` 已支持 Tauri IPC / HTTP 双模自动切换，Bearer Token 认证 + SSE 事件桥接均已就绪。本次仅做前端 UI 适配。
+- **新增文件**：
+  - `src/components/MobileNav.tsx`：底部 Tab 导航栏（搜索/浏览/索引/设置），`<768px` 显示，支持 `safe-area-inset-bottom`；
+  - `src/components/MobileHeader.tsx`：移动端顶部标题栏 + 汉堡菜单（主题切换、Token 管理、设置入口）。
+- **修改文件**：
+  - `src/App.tsx`：桌面侧栏 `hidden md:flex`，移动端显示 MobileHeader + MobileNav；`<main>` 添加 `pb-16 md:pb-0` 为底部导航留白；
+  - `src/components/PreviewPanel.tsx`：新增 `useIsMobile` hook；移动端通过 `createPortal` 渲染为全屏 Modal（桌面端保持原有侧栏行为）；
+  - `src/components/FilterPanel.tsx`：新增 `onClose` prop + `useIsMobile` hook；移动端通过 `createPortal` 渲染为底部抽屉 Sheet（桌面端保持原有侧栏行为）；
+  - `src/pages/SearchPage.tsx`：新增 `useIsMobile` hook；FilterPanel 根据屏幕宽度切换内联/抽屉模式；搜索栏添加 `flex-wrap` 和 `min-w-[200px]`；
+  - `src/pages/Browse.tsx`：新增 `useIsMobile` hook；移动端隐藏右侧预览面板和折叠按钮；AI 问答栏添加 `flex-wrap`；文件名搜索输入 `min-w-0` 允许收缩；
+  - `src/pages/IndexStatus.tsx`：统计卡片 `grid-cols-5→grid-cols-2 md:grid-cols-5`，信息面板 `grid-cols-2→grid-cols-1 md:grid-cols-2`，按钮行添加 `flex-wrap`，移动端减小内边距；
+  - `src/pages/Settings.tsx`：标签栏添加 `overflow-x-auto` 支持水平滚动，标签文字添加 `whitespace-nowrap`，移动端减小内边距；
+  - `src/pages/LogViewer.tsx`：过滤器按钮行添加 `flex-wrap`，移动端减小内边距；
+  - `src/components/StatusBar.tsx`：状态栏添加 `overflow-x-auto` 和 `flex-wrap`，移动端隐藏文件总数显示。
+- **断点策略**：`< 768px` 为移动端，`≥ 768px` 为桌面端（Tailwind `md:` 断点）。
+- **验证**：TypeScript 编译零错误，Vite 构建成功，semgrep ERROR 级零发现。
+
 ## 2026-09-12（Phase 2 / B：大型扫描 PDF 逐页 OCR——救活 0 字巨型卷宗）
 
 - **问题**：47 个大型扫描 PDF 提取 **0 字**（如 443 页/31MB 的 `案件/CH 常宏案/证据摘要-20241007/00 证据摘要-20241007.pdf`）。根因：全扫描件走**整册** OCR，`pdftoppm` 渲染全部页后超出 **120s 上限** → 返回空 → 退回空/水印。

@@ -15,6 +15,18 @@ import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
 import { exportFile } from '../utils/platform'
 
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    setIsMobile(mq.matches)
+    return () => mq.removeEventListener('change', handler)
+  }, [breakpoint])
+  return isMobile
+}
+
 interface RefineStep {
   hits: SearchHit[]
   selectedIds: Set<string>
@@ -27,6 +39,7 @@ export default function SearchPage() {
   const navigate = useNavigate()
   const search = useSearch()
   const { dirs } = useDirs()
+  const isMobile = useIsMobile()
   const [selectedHit, setSelectedHit] = useState<SearchHit | null>(null)
   const [focusIndex, setFocusIndex] = useState(-1)
   const [showFilters, setShowFilters] = useState(true)
@@ -204,17 +217,24 @@ export default function SearchPage() {
 
   return (
     <div className="flex h-full">
-      {showFilters && (
+      {!isMobile && showFilters && (
         <FilterPanel dirs={dirs} dirPaths={search.dirPaths} extFilter={search.extFilter}
           onDirPathsChange={search.setDirPaths} onExtToggle={handleExtToggle}
           onClearFilters={() => { search.setDirIds([]); search.setDirPaths([]); search.setExtFilter([]) }}
           width={filterWidth} onWidthChange={setFilterWidth} />
       )}
 
+      {isMobile && showFilters && (
+        <FilterPanel dirs={dirs} dirPaths={search.dirPaths} extFilter={search.extFilter}
+          onDirPathsChange={search.setDirPaths} onExtToggle={handleExtToggle}
+          onClearFilters={() => { search.setDirIds([]); search.setDirPaths([]); search.setExtFilter([]) }}
+          width={filterWidth} onWidthChange={setFilterWidth} onClose={() => setShowFilters(false)} />
+      )}
+
       <div className="flex-1 flex flex-col min-w-0">
         <div className="px-4 pt-4 pb-2 space-y-3">
-          <div className="flex items-center gap-2">
-            <div className="flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex-1 min-w-[200px]">
               <SearchBar query={search.query} loading={search.status === 'loading'}
                 suggestions={search.suggestions}
                 onQueryChange={search.setQuery} onSubmit={search.submitSearch}
@@ -234,7 +254,7 @@ export default function SearchPage() {
           </div>
 
           {search.status === 'success' && (
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="text-xs text-gray-500 dark:text-gray-400">
                 {isRefining ? (
                   <span>

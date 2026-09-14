@@ -1,9 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { DirConfig, DirTreeNode } from '../api/dirs'
 import { getDirTree } from '../api/dirs'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { useI18n } from '../i18n'
 import DirTree from './DirTree'
+
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    setIsMobile(mq.matches)
+    return () => mq.removeEventListener('change', handler)
+  }, [breakpoint])
+  return isMobile
+}
 
 interface FilterPanelProps {
   dirs: DirConfig[]
@@ -14,6 +27,7 @@ interface FilterPanelProps {
   onClearFilters: () => void
   width: number
   onWidthChange: (w: number) => void
+  onClose?: () => void
 }
 
 const COMMON_EXTS = ['pdf', 'docx', 'txt', 'md', 'html', 'csv', 'json', 'xml', 'jpg', 'png']
@@ -40,8 +54,10 @@ export default function FilterPanel({
   onClearFilters,
   width,
   onWidthChange,
+  onClose,
 }: FilterPanelProps) {
   const { t } = useI18n()
+  const isMobile = useIsMobile()
   const [trees, setTrees] = useState<DirTreeNode[]>([])
   const [typeStats, setTypeStats] = useState<FileTypeStat[]>([])
   const draggingRef = useRef(false)
@@ -105,13 +121,14 @@ export default function FilterPanel({
     onDirPathsChange(Array.from(next))
   }
 
-  return (
-    <div role="region" aria-label={t('filters')} style={{ width }} className="shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto relative">
-      {/* Drag handle */}
-      <div
-        onMouseDown={handleDragStart}
-        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400/40 transition-colors z-10"
-      />
+  const filterContent = (
+    <>
+      {!isMobile && (
+        <div
+          onMouseDown={handleDragStart}
+          className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-400/40 transition-colors z-10"
+        />
+      )}
       <div className="flex items-center justify-between mb-3">
         <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">{t('filters')}</h3>
         {hasFilters && (
@@ -159,6 +176,37 @@ export default function FilterPanel({
           ))}
         </div>
       </div>
+    </>
+  )
+
+  if (isMobile) {
+    return createPortal(
+      <div className="fixed inset-0 z-50 md:hidden" onClick={onClose}>
+        <div className="absolute inset-0 bg-black/40" />
+        <div
+          className="absolute bottom-0 left-0 right-0 max-h-[80vh] bg-gray-50 dark:bg-gray-900 rounded-t-2xl shadow-xl overflow-y-auto p-4"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('filters')}</h3>
+            {onClose && (
+              <button onClick={onClose} className="p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors">
+                <svg className="size-4 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+          {filterContent}
+        </div>
+      </div>,
+      document.body,
+    )
+  }
+
+  return (
+    <div role="region" aria-label={t('filters')} style={{ width }} className="shrink-0 border-r border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/50 p-4 overflow-y-auto relative">
+      {filterContent}
     </div>
   )
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
+import { createPortal } from 'react-dom'
 import { resolveAssetUrlSync as resolveAssetUrl } from '../utils/platform'
 import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities } from '../api/files'
 import { reExtractFile } from '../api/index'
@@ -6,6 +7,18 @@ import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
 import { toast } from '../utils/toast'
+
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    setIsMobile(mq.matches)
+    return () => mq.removeEventListener('change', handler)
+  }, [breakpoint])
+  return isMobile
+}
 
 interface PreviewPanelProps {
   fileId: string | null
@@ -59,6 +72,7 @@ function parseQualityFlags(raw: string): string[] {
 
 export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPanelProps) {
   const { t } = useI18n()
+  const isMobile = useIsMobile()
   const [meta, setMeta] = useState<FileDetail | null>(null)
   const [preview, setPreview] = useState<FilePreview | null>(null)
   const [loading, setLoading] = useState(false)
@@ -192,11 +206,49 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
   if (!fileId) return null
 
-  return (
-    <div
-      className="shrink-0 border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col relative"
-      style={{ width: effectiveWidth }}
-    >
+  const previewContent = (
+    <>
+      {/* Resize handle - desktop only */}
+      {!isMobile && (
+        <div
+          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500 transition-colors z-10"
+          onMouseDown={handleResizeStart}
+        />
+      )}
+
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
+        <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate flex-1">
+          {meta?.file_name ?? t('preview')}
+        </h3>
+        <div className="flex items-center gap-1">
+          {!isMobile && (
+            <button
+              onClick={() => setFullscreen(v => !v)}
+              className="p-0.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+              title={fullscreen ? t('shrink_panel') : t('expand_panel')}
+            >
+              <svg
+                className="size-3.5 text-gray-400"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                {fullscreen
+                  ? <><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" /></>
+                  : <><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" /></>
+                }
+              </svg>
+            </button>
+          )}
+          <button onClick={onClose} className="p-0.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors">
+            <XIcon className="size-3.5 text-gray-400" />
+          </button>
+        </div>
+      </div>
       {/* Resize handle */}
       <div
         className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500 transition-colors z-10"
@@ -448,6 +500,24 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
           </button>
         </div>
       )}
+    </>
+  )
+
+  if (isMobile) {
+    return createPortal(
+      <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900 md:hidden">
+        {previewContent}
+      </div>,
+      document.body,
+    )
+  }
+
+  return (
+    <div
+      className="shrink-0 border-l border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 flex flex-col relative"
+      style={{ width: effectiveWidth }}
+    >
+      {previewContent}
     </div>
   )
 }

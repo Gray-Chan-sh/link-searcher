@@ -14,6 +14,18 @@ import SearchBar from '../components/SearchBar'
 import ResultList from '../components/ResultList'
 import type { SearchHit } from '../api/search'
 
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mq.addEventListener('change', handler)
+    setIsMobile(mq.matches)
+    return () => mq.removeEventListener('change', handler)
+  }, [breakpoint])
+  return isMobile
+}
+
 function CopyAllButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -84,6 +96,7 @@ export default function Browse() {
   // 全文搜索模式（与 SearchPage 共享 useSearch hook）
   const fts = useFtsSearch()
   const [selectedSearchHit, setSelectedSearchHit] = useState<SearchHit | null>(null)
+  const isMobile = useIsMobile()
   type ColKey = 'filename' | 'path' | 'type' | 'quality' | 'status'
   const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, quality: 80, status: 112 })
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
@@ -386,7 +399,7 @@ return (
             ))}
           </select>
 
-          <div className="relative flex-1 min-w-[160px] max-w-xs">
+          <div className="relative flex-1 min-w-0 max-w-xs">
             <input
               type="text"
               value={search}
@@ -598,7 +611,7 @@ return (
 
         {/* AI Q&A bar */}
         <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <input
               type="text"
               value={askQuestion}
@@ -676,7 +689,7 @@ return (
       </div>
 
       {/* Right: Preview */}
-      {!previewCollapsed && (
+      {!isMobile && !previewCollapsed && (
       <div className="w-80 shrink-0 overflow-y-auto bg-white dark:bg-gray-900">
         {previewLoading && (
           <div className="flex items-center justify-center py-16">
@@ -760,6 +773,7 @@ return (
       </div>
       )}
       {/* Preview toggle handle */}
+      {!isMobile && (
       <button
         onClick={() => setPreviewCollapsed(v => !v)}
         title={previewCollapsed ? t('show_preview') : t('hide_preview')}
@@ -767,6 +781,7 @@ return (
       >
         {previewCollapsed ? '◀' : '▶'}
       </button>
+      )}
 
       {contextMenu && (
         <div

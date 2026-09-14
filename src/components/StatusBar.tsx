@@ -59,7 +59,7 @@ export default function StatusBar() {
   }, [status?.is_scanning])
 
   return (
-    <footer className="flex items-center justify-between px-4 py-1.5 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500 dark:text-gray-400 shrink-0">
+    <footer className="flex items-center justify-between px-4 py-1.5 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 text-xs text-gray-500 dark:text-gray-400 shrink-0 overflow-x-auto">
       {error && !loading ? (
         <span className="text-red-600 dark:text-red-400">{error}</span>
       ) : !status && loading ? (
@@ -71,8 +71,8 @@ export default function StatusBar() {
         <span>{t('ready')}</span>
       ) : status ? (
         <>
-          <div className="flex items-center gap-4">
-            <span>{status.total_files} {t('files')}</span>
+          <div className="flex items-center gap-3 md:gap-4 flex-wrap">
+            <span className="hidden md:inline">{status.total_files} {t('files')}</span>
             <span className="text-green-600 dark:text-green-400">{status.indexed} {t('indexed')}</span>
             {status.pending > 0 && <span className="text-yellow-600 dark:text-yellow-400">{status.pending} {t('pending')}</span>}
             {status.errors > 0 && <span className="text-red-600 dark:text-red-400">{status.errors} {t('errors')}</span>}
@@ -83,7 +83,7 @@ export default function StatusBar() {
     : null
 }
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap shrink-0">
             {status.is_scanning && (
               scanProgress ? (
                 <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">

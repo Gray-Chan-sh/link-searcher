@@ -106,7 +106,7 @@ export default function LogViewer() {
   const filteredLogs = filterLogs(logs, filter, grep)
 
   return (
-    <div className="h-full flex flex-col p-6">
+    <div className="h-full flex flex-col p-4 md:p-6">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{t('logs')}</h2>
@@ -131,7 +131,7 @@ export default function LogViewer() {
         </div>
       </div>
 
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-3 flex-wrap">
         {FILTERS.map(f => (
           <button
             key={f.value}
