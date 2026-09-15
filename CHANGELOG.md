@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-15：移动端导航正式接入（补全 MobileHeader / MobileNav 渲染）
+
+- **背景**：移动端响应式提交（`d936317`/`89fcd6e`）创建了 `MobileHeader`/`MobileNav` 组件并在 App.tsx 引入，但**从未渲染**——`<1024px` 侧栏隐藏后无替代导航，`main` 上预留的 `pb-16` 是空的。上一提交（`f483ca1`）仅删除死导入恢复 CI，本提交补齐功能。
+- **修复**（`src/App.tsx`）：
+  - 内容列顶部渲染 `<MobileHeader theme={theme} cycleTheme={cycleTheme} />`（组件自带 `lg:hidden`）——应用名 + 汉堡菜单（主题切换 / Token / 设置）。
+  - 根部渲染 `<MobileNav />`（组件自带 `fixed bottom-0` + `lg:hidden`）——底部 4 主标签：搜索 / 浏览 / 索引 / 设置。
+  - 底部预留空间从 `main` 移至**内容列**：`pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0`，使 `StatusBar` 位于固定导航**上方**不被遮挡，并兼容刘海屏安全区。
+- **验证**：`npm run build`（`tsc -b && vite build`）通过。
+- **待人工确认**：移动端实机/窄视口视觉验收（底部导航与 StatusBar 间距、刘海屏安全区）。
+
+---
+
 ## 2026-09-15：修复 CI 前端构建失败（App.tsx 未使用导入 TS6133）
 
 - **现象**：CI `Build frontend`（`tsc -b && vite build`）三平台全红，1 分钟即失败——`src/App.tsx(23,1)/(24,1) TS6133: 'MobileNav'/'MobileHeader' is declared but its value is never read`。本地 `npx tsc --noEmit` 不报，是因为 CI 走 `tsc -b` 读取 `tsconfig.app.json` 的 `noUnusedLocals`。

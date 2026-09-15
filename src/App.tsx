@@ -20,6 +20,8 @@ import Browse from './pages/Browse'
 import AiChat from './pages/AiChat'
 import Quality from './pages/Quality'
 import StatusBar from './components/StatusBar'
+import MobileNav from './components/MobileNav'
+import MobileHeader from './components/MobileHeader'
 import OnboardingWizard from './components/OnboardingWizard'
 import ToastContainer from './components/ToastContainer'
 import { ErrorBoundary } from './components/ErrorBoundary'
@@ -214,7 +216,8 @@ export default function App() {
         </div>
       </aside>
 
-      <div className="flex flex-col flex-1 min-w-0">
+      <div className="flex flex-col flex-1 min-w-0 pb-[calc(4rem+env(safe-area-inset-bottom))] lg:pb-0">
+        <MobileHeader theme={theme} cycleTheme={cycleTheme} />
         {!setupPending && depsMissingCount > 0 && (
           <button
             onClick={goToDepCenter}
@@ -224,7 +227,7 @@ export default function App() {
             <span>{t('dep_missing_banner', { n: depsMissingCount })}</span>
           </button>
         )}
-        <main className="flex-1 overflow-auto pb-16 lg:pb-0">
+        <main className="flex-1 overflow-auto">
           <Routes>
             <Route index element={<SearchPage />} />
             <Route path="browse" element={<Browse />} />
@@ -239,6 +242,8 @@ export default function App() {
         </main>
         <StatusBar />
       </div>
+
+      <MobileNav />
 
       {setupPending && <SetupWizard onDone={handleSetupDone} />}
 
