@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-15：修复 CI 前端构建失败（App.tsx 未使用导入 TS6133）
+
+- **现象**：CI `Build frontend`（`tsc -b && vite build`）三平台全红，1 分钟即失败——`src/App.tsx(23,1)/(24,1) TS6133: 'MobileNav'/'MobileHeader' is declared but its value is never read`。本地 `npx tsc --noEmit` 不报，是因为 CI 走 `tsc -b` 读取 `tsconfig.app.json` 的 `noUnusedLocals`。
+- **根因**：移动端响应式提交（`d936317`/`89fcd6e`）为 App.tsx 添加了 `MobileNav`/`MobileHeader` 的 import，但**从未在 JSX 中渲染**——侧栏改为 `hidden lg:flex`、`main` 预留 `pb-16 lg:pb-0`，却没有挂上底部导航，导入成为死代码。
+- **修复**（`src/App.tsx`）：删除两行未使用 import，恢复构建。
+- **遗留**（未在本次处理）：`MobileNav.tsx`/`MobileHeader.tsx` 组件仍未被任何页面渲染，移动端（<1024px）侧栏隐藏后**暂无替代导航**；后续接入时需一并处理与 `StatusBar` 在移动端的重叠。
+- **验证**：`npm run build` 通过（tsc 零错误 + vite 构建成功）。
+
+---
+
 ## 2026-09-15：设置页新增「性能」标签页 + 一键优化（按本机硬件自动调参）
 
 - **背景**：索引速度与硬件强相关——`batch_io_concurrency` 固定 8、`commit_interval` 固定 100、Tantivy writer buffer 固定 150MB，在 NVMe + 多核机器上远未吃满，在 HDD/低配机器上又可能过载；用户无从调整。
