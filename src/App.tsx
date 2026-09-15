@@ -171,7 +171,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <div className="flex h-screen overflow-hidden bg-white dark:bg-gray-950 text-gray-900 dark:text-gray-100">
-      <aside className="flex flex-col w-56 border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 shrink-0">
+      <aside className="hidden lg:flex flex-col w-56 border-r border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 shrink-0">
         <div className="px-5 py-4 border-b border-gray-200 dark:border-gray-800">
           <h1 className="text-lg font-semibold tracking-tight">{t('app_name')}</h1>
         </div>
@@ -226,7 +226,7 @@ export default function App() {
             <span>{t('dep_missing_banner', { n: depsMissingCount })}</span>
           </button>
         )}
-        <main className="flex-1 overflow-auto pb-16 md:pb-0">
+        <main className="flex-1 overflow-auto pb-16 lg:pb-0">
           <Routes>
             <Route index element={<SearchPage />} />
             <Route path="browse" element={<Browse />} />

@@ -8,7 +8,7 @@ import { XIcon, LoadingSpinner } from '../icons'
 import { formatSize, formatTime } from '../utils/format'
 import { toast } from '../utils/toast'
 
-function useIsMobile(breakpoint = 768) {
+function useIsMobile(breakpoint = 1024) {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
@@ -505,7 +505,7 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
   if (isMobile) {
     return createPortal(
-      <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900 md:hidden">
+      <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900 lg:hidden">
         {previewContent}
       </div>,
       document.body,

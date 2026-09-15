@@ -15,7 +15,7 @@ import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
 import { exportFile } from '../utils/platform'
 
-function useIsMobile(breakpoint = 768) {
+function useIsMobile(breakpoint = 1024) {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)

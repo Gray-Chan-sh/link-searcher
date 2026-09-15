@@ -4,15 +4,16 @@
 
 ---
 
-## 2026-09-14：移动端 Web UI 响应式适配
+## 2026-09-14：移动端 Web UI 响应式适配（v2 — 断点升至 1024px）
 
-- **目标**：支持手机浏览器通过局域网 Web API 访问电脑端数据，提供移动端友好界面。
-- **已具备基础**：后端 Axum HTTPS 服务器（`webapi/`）已实现，前端 `api/client.ts` 已支持 Tauri IPC / HTTP 双模自动切换，Bearer Token 认证 + SSE 事件桥接均已就绪。本次仅做前端 UI 适配。
-- **新增文件**：
-  - `src/components/MobileNav.tsx`：底部 Tab 导航栏（搜索/浏览/索引/设置），`<768px` 显示，支持 `safe-area-inset-bottom`；
-  - `src/components/MobileHeader.tsx`：移动端顶部标题栏 + 汉堡菜单（主题切换、Token 管理、设置入口）。
-- **修改文件**：
-  - `src/App.tsx`：桌面侧栏 `hidden md:flex`，移动端显示 MobileHeader + MobileNav；`<main>` 添加 `pb-16 md:pb-0` 为底部导航留白；
+- **问题**：首版断点 768px 在 iPad 竖屏 / 大屏手机（768–1023px）仍显示双栏，右侧预览面板几乎无内容。
+- **修复**：
+  - 全局断点从 `768px`（md）统一升至 `1024px`（lg），覆盖所有竖屏场景：
+    - `useIsMobile()` 默认参数 → `1024`（PreviewPanel / FilterPanel / SearchPage / Browse）
+    - `App.tsx`：侧栏 `hidden md:flex` → `hidden lg:flex`，MobileNav/MobileHeader `md:hidden` → `lg:hidden`
+    - Tailwind portal 容器 `md:hidden` → `lg:hidden`
+  - `src/pages/Browse.tsx`：移动端（`<1024px`）文件预览由右侧固定面板改为 **全屏 Modal**（`createPortal`），点选文件后全屏展示预览内容，关闭按钮返回列表；桌面端保持原有多栏布局不变。
+- **验证**：TypeScript 编译零错误，Vite 构建成功，semgrep ERROR 级零发现。
   - `src/components/PreviewPanel.tsx`：新增 `useIsMobile` hook；移动端通过 `createPortal` 渲染为全屏 Modal（桌面端保持原有侧栏行为）；
   - `src/components/FilterPanel.tsx`：新增 `onClose` prop + `useIsMobile` hook；移动端通过 `createPortal` 渲染为底部抽屉 Sheet（桌面端保持原有侧栏行为）；
   - `src/pages/SearchPage.tsx`：新增 `useIsMobile` hook；FilterPanel 根据屏幕宽度切换内联/抽屉模式；搜索栏添加 `flex-wrap` 和 `min-w-[200px]`；

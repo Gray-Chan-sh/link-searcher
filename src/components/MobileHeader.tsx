@@ -34,7 +34,7 @@ export default function MobileHeader({ theme, cycleTheme }: MobileHeaderProps) {
 
   return (
     <>
-      <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 md:hidden shrink-0">
+      <header className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 lg:hidden shrink-0">
         <h1
           className="text-base font-semibold tracking-tight cursor-pointer"
           onClick={() => { navigate('/'); setShowMenu(false) }}
@@ -56,7 +56,7 @@ export default function MobileHeader({ theme, cycleTheme }: MobileHeaderProps) {
 
       {/* Dropdown menu */}
       {showMenu && (
-        <div className="fixed inset-0 z-50 md:hidden" onClick={() => setShowMenu(false)}>
+        <div className="fixed inset-0 z-50 lg:hidden" onClick={() => setShowMenu(false)}>
           <div className="absolute right-2 top-14 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-xl overflow-hidden">
             <button
               onClick={() => { cycleTheme(); setShowMenu(false) }}

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '../api/client'
 import { confirm, saveFile } from '../utils/platform'
@@ -14,7 +15,7 @@ import SearchBar from '../components/SearchBar'
 import ResultList from '../components/ResultList'
 import type { SearchHit } from '../api/search'
 
-function useIsMobile(breakpoint = 768) {
+function useIsMobile(breakpoint = 1024) {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
@@ -690,97 +691,165 @@ return (
 
       {/* Right: Preview */}
       {!isMobile && !previewCollapsed && (
-      <div className="w-80 shrink-0 overflow-y-auto bg-white dark:bg-gray-900">
-        {previewLoading && (
-          <div className="flex items-center justify-center py-16">
-            <LoadingSpinner className="size-5" />
-          </div>
-        )}
-        {previewError && (
-          <div className="p-4 text-sm text-red-600 dark:text-red-400">
-            {previewError}
-          </div>
-        )}
-        {preview && !previewLoading && (
-           <div className="p-4 min-h-full">
-            {selectedFile && (
-              <div className="mb-3 flex items-center justify-between gap-2">
-                <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={selectedFile}>{selectedFile}</span>
-                {preview.content && (
-                  <CopyAllButton text={preview.content} label={t('copy_all_text')} />
-                )}
-                {preview.file_type === 'image' && (
-                  <span className="flex items-center gap-1 shrink-0">
-                    {[0.5, 1, 1.5, 2].map(z => (
-                      <button
-                        key={z}
-                        onClick={() => setPreviewZoom(z)}
-                        className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
-                          previewZoom === z
-                            ? 'bg-blue-500 text-white border-blue-500'
-                            : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
-                        }`}
-                      >
-                        {z * 100}%
-                      </button>
-                    ))}
-                  </span>
-                )}
-              </div>
-            )}
-            {preview.file_type === 'image' && preview.image_path && (
-              <div className="mb-3 flex justify-center overflow-hidden">
-                <img
-                  src={preview.image_base64 ? (() => {
-            const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
-            const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
-            return "data:image/" + mime + ";base64," + preview.image_base64
-          })() : ""}
-                  alt=""
-                  style={{ transform: `scale(${previewZoom})`, transformOrigin: 'top left' }}
-                  className={`max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 transition-transform ${previewZoom > 1 ? 'max-h-none' : 'max-h-64'}`}
-                />
-              </div>
-            )}
-            {preview.content && (
-              <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed overflow-y-auto max-h-[calc(100vh-16rem)]">
-                {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
-              </pre>
-            )}
-            {preview.content && preview.content.length > 50000 && (
-              <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                {t('truncated_notice')}
-              </p>
-            )}
-            {!preview.content && preview.file_type !== 'image' && (
-              <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
-            )}
-            {preview.char_count > 0 && (
-              <p className="mt-3 text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
-                {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
-              </p>
-            )}
-          </div>
-        )}
-        {!preview && !previewLoading && !previewError && selectedFile && (
-          <p className="p-4 text-sm text-gray-400 dark:text-gray-500">{t('loading_preview')}</p>
-        )}
-        {!selectedFile && !previewLoading && (
-          <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
-            {t('select_file_preview')}
-          </div>
-        )}
-      </div>
+        <div className="w-80 shrink-0 overflow-y-auto bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-800">
+          {previewLoading && (
+            <div className="flex items-center justify-center py-16">
+              <LoadingSpinner className="size-5" />
+            </div>
+          )}
+          {previewError && (
+            <div className="p-4 text-sm text-red-600 dark:text-red-400">
+              {previewError}
+            </div>
+          )}
+          {preview && !previewLoading && (
+             <div className="p-4 min-h-full">
+              {selectedFile && (
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={selectedFile}>{selectedFile}</span>
+                  {preview.content && (
+                    <CopyAllButton text={preview.content} label={t('copy_all_text')} />
+                  )}
+                  {preview.file_type === 'image' && (
+                    <span className="flex items-center gap-1 shrink-0">
+                      {[0.5, 1, 1.5, 2].map(z => (
+                        <button
+                          key={z}
+                          onClick={() => setPreviewZoom(z)}
+                          className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
+                            previewZoom === z
+                              ? 'bg-blue-500 text-white border-blue-500'
+                              : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
+                          }`}
+                        >
+                          {z * 100}%
+                        </button>
+                      ))}
+                    </span>
+                  )}
+                </div>
+              )}
+              {preview.file_type === 'image' && preview.image_path && (
+                <div className="mb-3 flex justify-center overflow-hidden">
+                  <img
+                    src={preview.image_base64 ? (() => {
+              const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
+              const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
+              return "data:image/" + mime + ";base64," + preview.image_base64
+            })() : ""}
+                    alt=""
+                    style={{ transform: `scale(${previewZoom})`, transformOrigin: 'top left' }}
+                    className={`max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 transition-transform ${previewZoom > 1 ? 'max-h-none' : 'max-h-64'}`}
+                  />
+                </div>
+              )}
+              {preview.content && (
+                <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed overflow-y-auto max-h-[calc(100vh-16rem)]">
+                  {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
+                </pre>
+              )}
+              {preview.content && preview.content.length > 50000 && (
+                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                  {t('truncated_notice')}
+                </p>
+              )}
+              {!preview.content && preview.file_type !== 'image' && (
+                <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
+              )}
+              {preview.char_count > 0 && (
+                <p className="mt-3 text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
+                  {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
+                </p>
+              )}
+            </div>
+          )}
+          {!preview && !previewLoading && !previewError && selectedFile && (
+            <p className="p-4 text-sm text-gray-400 dark:text-gray-500">{t('loading_preview')}</p>
+          )}
+          {!selectedFile && !previewLoading && (
+            <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
+              {t('select_file_preview')}
+            </div>
+          )}
+        </div>
       )}
-      {/* Preview toggle handle */}
+
+      {/* Preview toggle handle - desktop only */}
       {!isMobile && (
-      <button
-        onClick={() => setPreviewCollapsed(v => !v)}
-        title={previewCollapsed ? t('show_preview') : t('hide_preview')}
-        className="w-5 shrink-0 self-stretch flex items-center justify-center text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 dark:hover:text-gray-300 transition-colors border-l border-gray-200 dark:border-gray-800"
-      >
-        {previewCollapsed ? '◀' : '▶'}
-      </button>
+        <button
+          onClick={() => setPreviewCollapsed(v => !v)}
+          title={previewCollapsed ? t('show_preview') : t('hide_preview')}
+          className="w-5 shrink-0 self-stretch flex items-center justify-center text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 dark:hover:text-gray-300 transition-colors border-l border-gray-200 dark:border-gray-800"
+        >
+          {previewCollapsed ? '◀' : '▶'}
+        </button>
+      )}
+
+      {/* Mobile preview modal */}
+      {isMobile && selectedFile && createPortal(
+        <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900 lg:hidden overflow-y-auto">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 sticky top-0 bg-white dark:bg-gray-900 z-10">
+            <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate flex-1 mr-2" title={selectedFile}>
+              {selectedFile}
+            </span>
+            <button
+              onClick={() => setSelectedFile(null)}
+              className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-500"
+            >
+              <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6 6 18" /><path d="m6 6 12 12" />
+              </svg>
+            </button>
+          </div>
+          <div className="p-4 flex-1">
+            {previewLoading && (
+              <div className="flex items-center justify-center py-16">
+                <LoadingSpinner className="size-5" />
+              </div>
+            )}
+            {previewError && (
+              <div className="p-4 text-sm text-red-600 dark:text-red-400">
+                {previewError}
+              </div>
+            )}
+            {preview && !previewLoading && (
+              <div className="space-y-3">
+                {preview.content && (
+                  <div className="flex justify-end">
+                    <CopyAllButton text={preview.content} label={t('copy_all_text')} />
+                  </div>
+                )}
+                {preview.file_type === 'image' && preview.image_path && (
+                  <div className="flex justify-center overflow-hidden">
+                    <img
+                      src={preview.image_base64 ? (() => {
+                        const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
+                        const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
+                        return "data:image/" + mime + ";base64," + preview.image_base64
+                      })() : ""}
+                      alt=""
+                      className="max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 max-h-96"
+                    />
+                  </div>
+                )}
+                {preview.content && (
+                  <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed bg-gray-50 dark:bg-gray-800/50 p-3 rounded-lg border border-gray-200 dark:border-gray-700">
+                    {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
+                  </pre>
+                )}
+                {!preview.content && preview.file_type !== 'image' && (
+                  <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
+                )}
+                {preview.char_count > 0 && (
+                  <p className="text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
+                    {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </div>,
+        document.body,
       )}
 
       {contextMenu && (

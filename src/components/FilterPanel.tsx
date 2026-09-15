@@ -6,7 +6,7 @@ import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { useI18n } from '../i18n'
 import DirTree from './DirTree'
 
-function useIsMobile(breakpoint = 768) {
+function useIsMobile(breakpoint = 1024) {
   const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
   useEffect(() => {
     const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
@@ -181,7 +181,7 @@ export default function FilterPanel({
 
   if (isMobile) {
     return createPortal(
-      <div className="fixed inset-0 z-50 md:hidden" onClick={onClose}>
+      <div className="fixed inset-0 z-50 lg:hidden" onClick={onClose}>
         <div className="absolute inset-0 bg-black/40" />
         <div
           className="absolute bottom-0 left-0 right-0 max-h-[80vh] bg-gray-50 dark:bg-gray-900 rounded-t-2xl shadow-xl overflow-y-auto p-4"
