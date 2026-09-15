@@ -306,6 +306,14 @@ bash scripts/eval/run_ocr_eval.sh
 
 评估 OCR 提取质量：脚本自动合成为合成测试样本（内置 manifest），通过 CER（字符错误率）衡量各引擎输出质量。真实样本可放入 gitignored 的 `scripts/eval/ocr_fixtures/real/` 目录参与评估。运行需要对应 OCR 引擎可用（如 PaddleOCR 模型已下载）。
 
+### RAG 检索评测
+
+```bash
+bash scripts/eval/run_rag_eval.sh <golden_dir>
+```
+
+评估 RAG 检索质量（Context Recall@10 / Success@10）：对 golden 标注的每个问题跑 `chat --dry-run` 并比对支撑文件命中。需要预先准备含 `docs/` 与 `golden.jsonl` 的 golden 目录（真实语料，勿提交 git），且已配置 `active_embedding_model_id`；评测结果记录到 [docs/rag-eval-baseline.md](docs/rag-eval-baseline.md)。
+
 ---
 
 ## 许可证

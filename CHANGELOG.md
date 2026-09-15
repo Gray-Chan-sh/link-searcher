@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-16：RAG 评测基线固化为可执行门禁 + 否决 GraphRAG / LLM Wiki（ADR-0001 首篇）
+
+- **背景（门禁可运行但不可执行，且不可发现）**：`scripts/eval/README.md:40` 早已要求「跑评测，把结果记录到 `docs/rag-eval-baseline.md`」，但该文件**从未创建**；同时 README 测试章节只列了 OCR 评测，**没有 RAG 评测入口**。结果 `d99ce91` 引入的检索质量门禁（`run_rag_eval.sh`）虽然能跑，但基线数字无处登记、改动前后无从对比，且使用者根本找不到它。
+- **新增 `docs/rag-eval-baseline.md`**：登记评测方法（Context Recall@10 / Success@10）、前置条件（`LS_BIN`、golden 目录结构、`active_embedding_model_id` 必须已配置否则向量通道**静默跳过**、`LINK_SEARCHER_DATA_DIR` 隔离）、2026-09-16 主库规模快照（附可复测 SQL）、门禁规则（检索/注入/chunk 切分/注入预算/embedding 任一改动必须跑，**数字回落即回归**）、局限与变更记录表。诚实记录当前状态：**本仓库无任何已提交 golden 集**（隐私设计），唯一数字是 `d99ce91` 的 **3 问句冒烟 100%**，样本远不足；以「门禁就绪度」表标明当前为「**必须测量**型」，待 golden 集达 30–60 问句后升级为「**对比基线**型」。
+- **新增 `docs/adr/0001-reject-graphrag-and-llm-wiki.md`（建立 ADR 约定）**：正式否决 Microsoft GraphRAG 与 Karpathy「LLM Wiki」模式作为本项目的检索/知识架构，三条理由均带 `file:line` / commit 证据——① **规模错配**：实测两个库（11,825 / 22,441 活跃文件，均含 12.5 万级 chunk）相对 LLM Wiki 模式 ~100–200 文件的有效上限为 **59–224 倍**，GraphRAG 论文自身定位为「全局综述与向量 RAG 互补，**而非小语料必选**」；② **成本不可行**：GraphRAG 索引在实测语料上需 ≥125,000 次 chunk 级 LLM 调用，且**无原生增量更新**，与 `notify` 持续监控变动的语料模式直接冲突；③ **已有能力覆盖 + 实测无缺口**：`ai_topic_clusters`（含「摘要未命中回退 `content_index` 前 200 字」）+ scoped RAG 对话 + 两级漏斗 + 评测门禁。
+- **ADR 含前提澄清与 4 条可度量重审触发条件**：前提澄清明确否决理由**不是**「缺 LLM 基础设施」（`ai/mod.rs` 网关、`config.rs` 多提供商 + 0600 密钥、`local_embed.rs` 本地 BGE 均已具备），而是成本/规模/冗余三维度；触发条件为「① golden 集扩到 30–60 问句后 Recall@10 跌破 90%；② 出现具体且可复现的跨文档多跳/全库综合失败用例；③ 语料规模任一方向实质变化（降至 ~200 文件以下 → LLM Wiki 进入有效区间；doc 向量达数十万 → 重开 ANN/内存驻留）；④ 出现产品级知识图谱可视化需求（先评估可视化现有 `ai_topic_clusters` 输出）」。另含 3 个替代方案（scoped wiki / 轻量 entity→file 倒排索引 / 本地模型跑 GraphRAG）评估与「未核实内容声明」。
+- **`README.md` 测试章节补 `### RAG 检索评测`**：紧接 `### OCR 质量评估`，说明 golden 集前置条件与「勿提交 git」，并链接 `docs/rag-eval-baseline.md`，使门禁可被发现。
+- **设计要点**：ADR 以项目自身调研报告（`docs/research-rag-best-practices-personal.md`，commit `c29d8c4`）为权威先验材料，读作对既有仓库内分析的**正式确认**，而非引入新观点；为避免与既有调研结论冲突，明确排除未被核实的外部材料（arXiv 论文 ID、第三方 star 数、`microsoft/llmwiki`）。
+- **涉及文件**：`docs/rag-eval-baseline.md`（新增）、`docs/adr/0001-reject-graphrag-and-llm-wiki.md`（新增）、`README.md`（测试章节一个小节）。
+- **验证**：文档内所有行号/commit 引用逐一实测核对（`ai_topic_clusters` → `commands/ai.rs:105`、`doc_summaries` 建表 → `db/mod.rs:317`、命令注册 → `lib.rs:101`、300ms 防抖 → `docs/ARCHITECTURE.md:160`、100 倍滞后 → 调研报告 `:455`、bge-small 吞吐 48–100 块/s → `CHANGELOG.md:816`、`ai_topic_clusters` 回退 → `ai.rs:116`，共 12 处引用均一致）。**核验中修正 3 处**：① 剔除 1 处无依据断言（关于 arXiv 编号区间「与发表模式不符」的推理——arXiv 采用 YYMM 编号，`2605` 合法）；② 修正模块编号引用（`docs/ARCHITECTURE.md` 实为「模块四 = AI 出口 / 模块五 = 语义向量检索 / 模块六 = AI 聊天与 RAG 管线」，原写「模块五至七」误把章节号当模块号）；③ 修正规模倍数算术（原「100 至 150 倍」系 22,441 库相对 150–200 上限的倍数，与同句 11,825 库不一致；已按两库分别列出 59–118× / 112–224×）。本次为**纯文档变更，无代码路径改动**。
+
+---
+
 ## 2026-09-15：移动端导航正式接入（补全 MobileHeader / MobileNav 渲染）
 
 - **背景**：移动端响应式提交（`d936317`/`89fcd6e`）创建了 `MobileHeader`/`MobileNav` 组件并在 App.tsx 引入，但**从未渲染**——`<1024px` 侧栏隐藏后无替代导航，`main` 上预留的 `pb-16` 是空的。上一提交（`f483ca1`）仅删除死导入恢复 CI，本提交补齐功能。
