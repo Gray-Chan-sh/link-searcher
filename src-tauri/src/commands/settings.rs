@@ -20,6 +20,9 @@ const ALLOWED_KEYS: &[&str] = &[
     "web_api_token",
     "web_api_bind",
     "web_api_dev_mode",
+    "perf_batch_io_concurrency",
+    "perf_commit_interval",
+    "perf_writer_buffer_mb",
 ];
 
 #[tauri::command]

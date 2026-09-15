@@ -113,3 +113,31 @@ export async function cancelDepInstall(): Promise<void> {
 export async function depInstallStatus(): Promise<{ installing: boolean; dep: string | null }> {
     return client.invoke('dep_install_status')
 }
+
+// ── Performance ──
+
+export interface HardwareInfo {
+    cpu_cores: number
+    disk_speed_mbps: number
+    disk_type: string
+    platform: string
+}
+
+export interface PerformanceProfile {
+    batch_io_concurrency: number
+    commit_interval: number
+    writer_buffer_mb: number
+    tier: string
+}
+
+export async function detectHardware(): Promise<HardwareInfo> {
+    return client.invoke<HardwareInfo>('detect_hardware')
+}
+
+export async function autoOptimize(): Promise<PerformanceProfile> {
+    return client.invoke<PerformanceProfile>('auto_optimize')
+}
+
+export async function getPerformanceProfile(): Promise<PerformanceProfile> {
+    return client.invoke<PerformanceProfile>('get_performance_profile')
+}

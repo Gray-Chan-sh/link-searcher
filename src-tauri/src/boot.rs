@@ -15,6 +15,7 @@ use crate::db;
 use crate::indexer::IndexerService;
 use crate::scanner::Scanner;
 use crate::search::IndexManager;
+use crate::commands::performance::{get_batch_io_concurrency_from_db, get_commit_interval_from_db};
 
 /// Core services shared by the GUI and the CLI.
 pub struct Bootstrap {
@@ -56,6 +57,15 @@ pub fn bootstrap_core(data_dir: &Path) -> Result<Bootstrap> {
         index_manager.clone(),
         cancel_scan.clone(),
     ));
+
+    {
+        let init_conn = pool.get().context("failed to get DB connection for perf settings")?;
+        let concurrency = get_batch_io_concurrency_from_db(&init_conn);
+        let commit_interval = get_commit_interval_from_db(&init_conn);
+        indexer.set_batch_io_concurrency(concurrency);
+        indexer.set_commit_interval(commit_interval);
+        log::info!("[BOOT] Performance settings: concurrency={concurrency}, commit_interval={commit_interval}");
+    }
     let scanner = Arc::new(Scanner::with_cancel(
         pool.clone(),
         indexer.clone(),

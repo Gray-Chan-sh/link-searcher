@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-15：设置页新增「性能」标签页 + 一键优化（按本机硬件自动调参）
+
+- **背景**：索引速度与硬件强相关——`batch_io_concurrency` 固定 8、`commit_interval` 固定 100、Tantivy writer buffer 固定 150MB，在 NVMe + 多核机器上远未吃满，在 HDD/低配机器上又可能过载；用户无从调整。
+- **新增**（`commands/performance.rs`，新文件）：
+  - `detect_hardware`：`std::thread::available_parallelism()` 取 CPU 核心数；临时文件 2MB 写/读基准测磁盘速度并分类为 `nvme`/`ssd`/`hdd`；返回平台标识。
+  - `auto_optimize`：按硬件分档计算最优参数，写入 `app_settings` 并**立即应用到运行中的 `IndexerService`**（`set_batch_io_concurrency` / `set_commit_interval`）。
+  - `get_performance_profile`：读取当前生效参数并反推档位。
+  - 分档策略：≥16 核 + 快速盘 → 并发 24 / 提交 2000 / 缓冲 300MB（高性能）；≥8 核 + 快速盘 → 12 / 1000 / 200MB（均衡）；其余 → 4 / 500 / 150MB（保守）。
+  - 7 例单测（磁盘分类、分档计算、基准可运行）。
+- **持久化**：`commands/settings.rs` 的 `ALLOWED_KEYS` 新增 `perf_batch_io_concurrency`、`perf_commit_interval`、`perf_writer_buffer_mb`；`boot.rs` 启动时从 DB 读取并套用到 `IndexerService`，重启后保持。
+- **前端**：`components/settings/PerformanceTab.tsx`（新文件）——硬件信息卡片（CPU 核心/磁盘类型/磁盘速度/平台）+ 当前配置（档位徽章 + 三项参数）+「一键优化」按钮；`Settings.tsx` 在「备份」与「系统」之间插入「性能」标签页。
+- **i18n**：en / zh / ja / ko 四语各新增 17 条性能相关文案。
+- **验证**：`cargo test --lib` **359** 全绿（+7），`npx tsc --noEmit` 零错误，semgrep ERROR 级零发现。
+
+---
+
 ## 2026-09-14：移动端 Web UI 响应式适配（v2 — 断点升至 1024px）
 
 - **问题**：首版断点 768px 在 iPad 竖屏 / 大屏手机（768–1023px）仍显示双栏，右侧预览面板几乎无内容。

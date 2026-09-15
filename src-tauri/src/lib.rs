@@ -25,6 +25,7 @@ use crate::commands::files::{download_files, get_duplicates, get_file, get_file_
 use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
+use crate::commands::performance::{detect_hardware, auto_optimize, get_performance_profile};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::funasr::install_funasr;
@@ -181,6 +182,9 @@ get_dir_children,
             list_session_logs,
             clear_logs,
             get_version,
+            detect_hardware,
+            auto_optimize,
+            get_performance_profile,
             install_funasr,
             install_bge,
             check_bge_installed,

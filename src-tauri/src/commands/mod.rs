@@ -8,6 +8,7 @@ pub mod funasr;
 pub mod helpers;
 pub mod index;
 pub mod logs;
+pub mod performance;
 pub mod search;
 pub mod settings;
 pub mod tesseract;
