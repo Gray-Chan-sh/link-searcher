@@ -100,6 +100,7 @@
   - `src/components/StatusBar.tsx`：状态栏添加 `overflow-x-auto` 和 `flex-wrap`，移动端隐藏文件总数显示。
 - **断点策略**：`< 1024px` 为移动端，`≥ 1024px` 为桌面端（Tailwind `lg:` 断点）。
 - **CI/CD**：`release.yml` 的 `releaseDraft` 从 `true` 改为 `false`，打 tag 时直接由 GitHub Actions 自动创建并发布正式 Release，不再产生草稿。
+- **CI/CD 修复**：macOS 构建在无 Apple 签名 Secrets 时失败（`tauri-action` 对空字符串 env 变量仍尝试 `security import` 导致 `failed to import keychain certificate`）。修复：拆分为两个条件构建步骤——Secrets 存在时走签名构建，不存在时走无签名构建。
 - **验证**：TypeScript 编译零错误，Vite 构建成功，semgrep ERROR 级零发现。
 
 ## 2026-09-12（Phase 2 / B：大型扫描 PDF 逐页 OCR——救活 0 字巨型卷宗）
