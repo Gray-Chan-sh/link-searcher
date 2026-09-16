@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-16：PDF 提取管线升级 — pdf-inspector 全管线优先（P0）
+
+- **背景**：`extractor/pdf.rs` 原先用 lopdf `extract_text` 逐页提取纯文本，pdf-inspector 仅做分类路由（`classify_pdf_mem`）。痛点：lopdf 在 CID/Identity-H 字体、复杂排版、多栏 PDF 上提取量低或返回乱码/水印，CHANGELOG 中大量 PDF 修复（水印误提、整册 OCR 超时、乱码入库）均为此根因。
+- **改动**（`extractor/pdf.rs`）：
+  - 新增 `try_inspector_pipeline` 函数：用 `pdf_inspector::process_pdf_mem` 做全管线提取（分类 + 文本提取 + Markdown 转换），包裹 `catch_unwind` 防 lopdf 内部 panic 崩溃。TextBased PDF 直接返回 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由到 OCR 管线（跳过文本提取），Mixed 逐页路由。
+  - 新增 `try_mixed_extract` 函数：用 `extract_pages_markdown_mem` 逐页提取，文本页取 Markdown、图片页走 `ocr_single_pdf_page`（现有 OCR 管线，用户配置引擎），合并输出。
+  - `extract_with_lang` 入口改为先尝试 inspector 管线，失败/空/乱码时走**完整**现有 lopdf 管线（含 pdftotext/anydoc 兜底 + 水印/乱码/稀疏检测 + 逐页 OCR splice），**不改任何现有兜底逻辑**。
+  - `preferred_engine` 统一在方法顶部解析一次，移除两处冗余调用。
+- **OCR 引擎不变**：Scanned/Mixed 页的 OCR 继续走 `ocr::preferred_engine` → 用户配置引擎（Apple Vision / Windows OCR / PaddleOCR / Tesseract），**不强制任何引擎**。
+- **验证**：`cargo test --lib pdf` 41/41 通过零回归；`semgrep scan --severity ERROR` 零发现；A/B 对比测试（`tests/test_pdf_inspector_ab.rs`）20 个真实法律 PDF 上 pdf-inspector 提取量 57,837 vs lopdf 11,461 字符（+5x），TextBased PDF 质量提升明显（例：`4.2-汉世纪投资管理有限公司报告.pdf` A=837 → B=1004 chars，0% 乱码）。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`（新增 ~120 行函数 + 入口改动 5 行）；`src-tauri/tests/test_pdf_inspector_ab.rs`（A/B 对比测试，新增）。
+
+---
+
+## 2026-09-16：PDF 提取管线升级 + 编码检测升级 + Office 安全边界 + 嵌入图片 OCR
+
+- **PDF 提取管线升级（P0）**：`extractor/pdf.rs` 入口改为先尝试 pdf-inspector 全管线（`process_pdf_mem`：分类+提取+Markdown），TextBased PDF 直接返回结构化 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由 OCR，Mixed 逐页路由。`catch_unwind` 防 lopdf 内部 panic。失败/空/乱码走完整现有 lopdf 管线兜底。A/B 测试（20 个真实法律 PDF）提取量 57,837 vs 11,461 chars。OCR 引擎不变（用户配置的 Apple Vision/Windows OCR/PaddleOCR/Tesseract）。
+- **编码检测升级（P1）**：`extractor/text.rs` 用 `chardetng`（Firefox 同款）替换 GBK-only 编码回退链。之前只尝试 UTF-8 → GBK → lossy，漏了 Big5（繁体）、Shift_JIS（日文）、EUC-KR（韩文）、EUC-JP 等编码。现在覆盖所有主流编码，匹配多语言界面（中文/English/日本語/한국어）。BOM 检测和快速 UTF-8 路径不变。
+- **Office 安全边界（P2-c）**：`extractor/office/mod.rs` 入口加 256MiB 文件大小上限，防止超大 Office 文件 OOM。核查 anydoc 源码发现其已内建完整安全限制（`package/limits.rs`：128MiB/entry、512MiB/total、256 XML 深度、2M 节点、128MiB 嵌入资源上限），无需额外防护。
+- **Office 嵌入图片 OCR（P2-b）**：`extractor/office/mod.rs` 新增 `extract_with_ocr` 方法，对 .docx/.pptx/.odt/.odp/.epub 等格式用 `anydoc::to_document` 获取 `Document.assets`，筛选 `image/*` 类型资产写入临时文件并走现有 OCR 管线（用户配置引擎），OCR 文本拼接到 Markdown 输出。`extractor/mod.rs` 调度改为对 Office 格式传入 `lang` 和 `engine`。.ods/.rtf/.csv 不走 OCR 路径（无嵌入图片）。
+- **涉及文件**：`src-tauri/Cargo.toml`（+chardetng）、`src-tauri/src/extractor/pdf.rs`（+120 行）、`src-tauri/src/extractor/text.rs`（编码检测重写）、`src-tauri/src/extractor/office/mod.rs`（+大小守卫+嵌入图片 OCR）、`src-tauri/src/extractor/mod.rs`（Office 调度传 OCR 参数）、`src-tauri/tests/test_pdf_inspector_ab.rs`（A/B 测试）。
+- **验证**：`cargo test --lib` 359/359 通过零回归；`semgrep scan --severity ERROR` 零发现。
+
+---
+
 ## 2026-09-16：RAG 评测基线固化为可执行门禁 + 否决 GraphRAG / LLM Wiki（ADR-0001 首篇）
 
 - **背景（门禁可运行但不可执行，且不可发现）**：`scripts/eval/README.md:40` 早已要求「跑评测，把结果记录到 `docs/rag-eval-baseline.md`」，但该文件**从未创建**；同时 README 测试章节只列了 OCR 评测，**没有 RAG 评测入口**。结果 `d99ce91` 引入的检索质量门禁（`run_rag_eval.sh`）虽然能跑，但基线数字无处登记、改动前后无从对比，且使用者根本找不到它。
@@ -73,7 +98,8 @@
   - `src/pages/Settings.tsx`：标签栏添加 `overflow-x-auto` 支持水平滚动，标签文字添加 `whitespace-nowrap`，移动端减小内边距；
   - `src/pages/LogViewer.tsx`：过滤器按钮行添加 `flex-wrap`，移动端减小内边距；
   - `src/components/StatusBar.tsx`：状态栏添加 `overflow-x-auto` 和 `flex-wrap`，移动端隐藏文件总数显示。
-- **断点策略**：`< 768px` 为移动端，`≥ 768px` 为桌面端（Tailwind `md:` 断点）。
+- **断点策略**：`< 1024px` 为移动端，`≥ 1024px` 为桌面端（Tailwind `lg:` 断点）。
+- **CI/CD**：`release.yml` 的 `releaseDraft` 从 `true` 改为 `false`，打 tag 时直接由 GitHub Actions 自动创建并发布正式 Release，不再产生草稿。
 - **验证**：TypeScript 编译零错误，Vite 构建成功，semgrep ERROR 级零发现。
 
 ## 2026-09-12（Phase 2 / B：大型扫描 PDF 逐页 OCR——救活 0 字巨型卷宗）

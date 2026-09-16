@@ -129,6 +129,6 @@ jobs:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'Link-Searcher v__VERSION__'
           releaseBody: 'See [CHANGELOG.md](${{ github.server_url }}/${{ github.repository }}/blob/master/CHANGELOG.md) for details.'
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
