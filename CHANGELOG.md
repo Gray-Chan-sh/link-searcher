@@ -14,7 +14,7 @@
 - **新增测试**：`src-tauri/tests/test_pdf_inspector_ab.rs`（347 行）——A/B 对比 **lopdf 直提** 与 **pdf-inspector `process_pdf_mem`** 的字符数、期望文本命中、乱码率与耗时；合成 PDF 用例跑 CI，真实 PDF 扫描用例默认 `#[ignore]`（需 `--ignored`）。
 - **验证**：`cargo test --test test_pdf_inspector_ab` → 2 passed / 1 ignored；`cargo test --lib` → 368 passed / 0 failed。
 - **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tests/test_pdf_inspector_ab.rs`。
-- ⚠️ **遗留不一致（待处理）**：本文件上方已提交的「PDF 提取管线升级 — pdf-inspector 全管线优先（P0）」条目声称新增 `try_inspector_pipeline` / `try_mixed_extract` 并把入口切到 inspector 管线，但**代码中不存在这两个函数**（当前仅用 `classify_pdf_mem` 做路由）。该条目与代码不符，需后续确认是「实现丢失」还是「条目超前记录」。
+- ✅ **遗留不一致已处理**：经全历史核查（`git log --all -S "try_inspector_pipeline" -- src-tauri/src/extractor/pdf.rs`），`try_inspector_pipeline` / `try_mixed_extract` / `process_pdf_mem` **从未出现在 `extractor/pdf.rs`** —— 结论是「**只做了 A/B 评估、实现未落地**」，而非实现丢失。已修正本文件中两条相关条目（「pdf-inspector 全管线」与「…+ lopdf 防崩溃 + pdf-inspector 升级」），并保留真实评估数据供后续决策。
 
 ---
 
@@ -234,25 +234,23 @@
 
 ---
 
-## 2026-09-16：PDF 提取管线升级 — pdf-inspector 全管线优先（P0）
+## 2026-09-16：pdf-inspector 全管线 —— A/B 评估完成，**实现未落地**（原记载有误，2026-09-17 修正）
 
-- **背景**：`extractor/pdf.rs` 原先用 lopdf `extract_text` 逐页提取纯文本，pdf-inspector 仅做分类路由（`classify_pdf_mem`）。痛点：lopdf 在 CID/Identity-H 字体、复杂排版、多栏 PDF 上提取量低或返回乱码/水印，CHANGELOG 中大量 PDF 修复（水印误提、整册 OCR 超时、乱码入库）均为此根因。
-- **改动**（`extractor/pdf.rs`）：
-  - 新增 `try_inspector_pipeline` 函数：用 `pdf_inspector::process_pdf_mem` 做全管线提取（分类 + 文本提取 + Markdown 转换），包裹 `catch_unwind` 防 lopdf 内部 panic 崩溃。TextBased PDF 直接返回 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由到 OCR 管线（跳过文本提取），Mixed 逐页路由。
-  - 新增 `try_mixed_extract` 函数：用 `extract_pages_markdown_mem` 逐页提取，文本页取 Markdown、图片页走 `ocr_single_pdf_page`（现有 OCR 管线，用户配置引擎），合并输出。
-  - `extract_with_lang` 入口改为先尝试 inspector 管线，失败/空/乱码时走**完整**现有 lopdf 管线（含 pdftotext/anydoc 兜底 + 水印/乱码/稀疏检测 + 逐页 OCR splice），**不改任何现有兜底逻辑**。
-  - `preferred_engine` 统一在方法顶部解析一次，移除两处冗余调用。
-- **OCR 引擎不变**：Scanned/Mixed 页的 OCR 继续走 `ocr::preferred_engine` → 用户配置引擎（Apple Vision / Windows OCR / PaddleOCR / Tesseract），**不强制任何引擎**。
-- **验证**：`cargo test --lib pdf` 41/41 通过零回归；`semgrep scan --severity ERROR` 零发现；A/B 对比测试（`tests/test_pdf_inspector_ab.rs`）20 个真实法律 PDF 上 pdf-inspector 提取量 57,837 vs lopdf 11,461 字符（+5x），TextBased PDF 质量提升明显（例：`4.2-汉世纪投资管理有限公司报告.pdf` A=837 → B=1004 chars，0% 乱码）。
-- **涉及文件**：`src-tauri/src/extractor/pdf.rs`（新增 ~120 行函数 + 入口改动 5 行）；`src-tauri/tests/test_pdf_inspector_ab.rs`（A/B 对比测试，新增）。
+> ⚠️ **修正说明**：本条原称已新增 `try_inspector_pipeline` / `try_mixed_extract` 并把提取入口切到 inspector 管线。经**全历史核查**（`git log --all -S "try_inspector_pipeline" -- src-tauri/src/extractor/pdf.rs`），这两个函数与 `process_pdf_mem` **从未出现在 `extractor/pdf.rs` 中** —— 当时只完成了 **A/B 评估**，**实现未落地**。当前代码仍只用 `classify_pdf_mem` 做分类路由。以下保留真实评估数据供后续决策。
+
+- **背景**：`extractor/pdf.rs` 用 lopdf `extract_text` 逐页提取；痛点是 lopdf 在 CID/Identity-H 字体、复杂排版、多栏 PDF 上提取量低或返回乱码/水印。
+- **A/B 评估结论（真实数据）**：`tests/test_pdf_inspector_ab.rs` 在 20 个真实法律 PDF 上对比 —— pdf-inspector `process_pdf_mem` 提取 **57,837** 字符 vs lopdf **11,461** 字符（**+5x**）；TextBased PDF 质量提升明显（例：`4.2-汉世纪投资管理有限公司报告.pdf` A=837 → B=1004 chars，0% 乱码）。
+- **未采纳的代价（需权衡）**：切换提取管线会**改变入库文本 → 必须重建索引与向量**（当前库的向量刚重建完毕）；且需保持 OCR 引擎不变（用户配置的 Apple Vision / Windows OCR / PaddleOCR / Tesseract）。
+- **现状**：pdf-inspector 仅用于 `classify_pdf_mem` 分类路由与逐页 OCR 决策；文本提取仍走 lopdf + pdftotext/anydoc 兜底链。
+- **涉及文件（评估用）**：`src-tauri/tests/test_pdf_inspector_ab.rs`。
 
 ---
 
-## 2026-09-16：PDF 提取管线升级 + 编码检测升级 + Office 安全边界 + 嵌入图片 OCR + lopdf 防崩溃 + pdf-inspector 升级
+## 2026-09-16：编码检测升级 + Office 安全边界 + 嵌入图片 OCR + lopdf 防崩溃 + pdf-inspector 升级（原含"PDF 提取管线升级"，2026-09-17 修正）
 
-- **PDF 提取管线升级（P0）**：`extractor/pdf.rs` 入口改为先尝试 pdf-inspector 全管线（`process_pdf_mem`：分类+提取+Markdown），TextBased PDF 直接返回结构化 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由 OCR，Mixed 逐页路由。`catch_unwind` 防 pdf-inspector 内部 panic。失败/空/乱码走完整现有 lopdf 管线兜底。A/B 测试（20 个真实法律 PDF）提取量 57,837 vs 11,461 chars。OCR 引擎不变（用户配置的 Apple Vision/Windows OCR/PaddleOCR/Tesseract）。
-- **lopdf fallback 防崩溃**：`extract_with_lang` 中 `lopdf::Document::load` 和逐页 `doc.extract_text` 均包裹 `catch_unwind`，防止畸形 PDF 触发 lopdf 内部 panic 崩溃 Tauri 事件循环。panic 时走 pdftotext → anydoc → OCR 兜底链。
-- **pdf-inspector 升级 0.1.7 → 1.x**：获取最新 bug fix 和 API 改进，API 完全兼容。
+- ~~**PDF 提取管线升级（P0）**~~ → ⚠️ **该项未落地**（2026-09-17 修正）：当时只完成 **A/B 评估**（20 个真实法律 PDF：pdf-inspector 57,837 vs lopdf 11,461 chars），`process_pdf_mem` 全管线**从未写入 `extractor/pdf.rs`**；当前仍为 `classify_pdf_mem` 分类路由。详见上方同名条目。
+- **lopdf fallback 防崩溃**（实际落地于 2026-09-17，commit `46f1a5c`）：`lopdf::Document::load` 与逐页 `doc.extract_text` 均包裹 `catch_unwind`，防止畸形 PDF 触发 lopdf 内部 panic 崩溃 Tauri 事件循环；panic 时走 pdftotext → OCR 兜底链。
+- **pdf-inspector 升级 0.1.7 → 1.x**（实际落地于 2026-09-17，commit `46f1a5c`）：获取最新 bug fix 与 API 改进，API 完全兼容。
 - **编码检测升级（P1）**：`extractor/text.rs` 用 `chardetng`（Firefox 同款）替换 GBK-only 编码回退链。之前只尝试 UTF-8 → GBK → lossy，漏了 Big5（繁体）、Shift_JIS（日文）、EUC-KR（韩文）、EUC-JP 等编码。现在覆盖所有主流编码，匹配多语言界面（中文/English/日本語/한국어）。BOM 检测和快速 UTF-8 路径不变。
 - **Office 安全边界（P2-c）**：`extractor/office/mod.rs` 入口加 256MiB 文件大小上限，防止超大 Office 文件 OOM。核查 anydoc 源码发现其已内建完整安全限制（`package/limits.rs`：128MiB/entry、512MiB/total、256 XML 深度、2M 节点、128MiB 嵌入资源上限），无需额外防护。
 - **Office 嵌入图片 OCR（P2-b）**：`extractor/office/mod.rs` 新增 `extract_with_ocr` 方法，对 .docx/.pptx/.odt/.odp/.epub 等格式用 `anydoc::to_document` 获取 `Document.assets`，筛选 `image/*` 类型资产写入临时文件并走现有 OCR 管线（用户配置引擎），OCR 文本拼接到 Markdown 输出。`extractor/mod.rs` 调度改为对 Office 格式传入 `lang` 和 `engine`。.ods/.rtf/.csv 不走 OCR 路径（无嵌入图片）。
