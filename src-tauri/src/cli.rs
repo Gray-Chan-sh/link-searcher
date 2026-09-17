@@ -291,7 +291,7 @@ pub fn run_cli() -> Result<()> {
                     "[三路检索] 命中 {} 份文件，注入 {} 条证据（full_recall={}）",
                     prepared.total_match_count, prepared.evidence.len(), full_recall
                 );
-                for (i, ev) in prepared.evidence.iter().enumerate().take(20) {
+                for (i, ev) in prepared.evidence.iter().enumerate().take(30) {
                     println!(
                         "  [{:>3}] bm25={} sem={} path={}",
                         i + 1,
@@ -300,8 +300,8 @@ pub fn run_cli() -> Result<()> {
                         ev.path
                     );
                 }
-                if prepared.evidence.len() > 20 {
-                    println!("  ... 共 {} 条证据，仅显示前 20 条", prepared.evidence.len());
+                if prepared.evidence.len() > 30 {
+                    println!("  ... 共 {} 条证据，仅显示前 30 条", prepared.evidence.len());
                 }
                 println!(
                     "[覆盖] 注入 {} 份全文 + {} 份摘要兜底 = {} 总覆盖（不遗漏）",

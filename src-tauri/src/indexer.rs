@@ -549,6 +549,30 @@ impl IndexerService {
     /// * `file_id`   – primary key in `file_tracking`
     /// * `file_path` – absolute path to the file on disk
     /// * `dir_id`    – owning directory config id
+    /// 内容变更时清理该文件的旧语义向量。
+    ///
+    /// 向量回填是"只补缺失"语义（`missing_embedding_rows` 只选没有行的文件），
+    /// 而 doc 向量按 `file_id` 键、其不随内容变化 —— 不清旧向量就会永远按
+    /// 旧内容参与语义排序（搜新话题搜不到、搜旧话题却命中）。
+    /// 清掉后由扫描结束时的 `run_backfill_embeddings` 重建。
+    fn clear_stale_embeddings(conn: &Connection, file_id: &str, new_hash: &str) {
+        let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(conn, file_id) else {
+            return;
+        };
+        let Some(old_md5) = rec.md5.as_deref() else {
+            return;
+        };
+        if old_md5 == new_hash {
+            return;
+        }
+        if let Err(e) = crate::db::tracker::delete_embedding(conn, file_id) {
+            log::warn!("[INDEX] 内容变更清理旧 doc 向量失败 {file_id}: {e}");
+        }
+        if let Err(e) = crate::db::tracker::delete_chunk_embeddings(conn, old_md5) {
+            log::warn!("[INDEX] 内容变更清理旧 chunk 向量失败 {old_md5}: {e}");
+        }
+    }
+
     pub fn index_file(
         &self,
         file_id: &str,
@@ -592,6 +616,8 @@ impl IndexerService {
         let result = (|| -> Result<()> {
             let data = Self::extract_and_index_single(&job, &conn, engine_override)
                 .map_err(|(_, e)| anyhow::anyhow!(e))?;
+
+            Self::clear_stale_embeddings(&conn, file_id, &data.hash);
 
             let mut guard = self.lock_writer()?;
             let w = guard
@@ -842,6 +868,32 @@ mod tests {
         let p = dir.join(name);
         std::fs::write(&p, content).unwrap();
         p
+    }
+
+    #[test]
+    fn test_content_change_clears_stale_embeddings() {
+        let (svc, fid) = setup();
+        let c = svc.db.get().unwrap();
+
+        crate::db::tracker::update_indexed(&c, &fid, Some("oldhash")).unwrap();
+        crate::db::tracker::upsert_embedding(&c, &fid, &[1.0, 2.0, 3.0]).unwrap();
+        crate::db::tracker::upsert_chunk_embedding(&c, "oldhash", 0, &[1.0, 2.0]).unwrap();
+
+        IndexerService::clear_stale_embeddings(&c, &fid, "oldhash");
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE file_id=?1", [&fid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "内容未变时不应清理向量");
+
+        IndexerService::clear_stale_embeddings(&c, &fid, "newhash");
+        let n: i64 = c
+            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE file_id=?1", [&fid], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0, "内容变更后应清理 doc 向量（否则永远按旧内容参与排序）");
+        let m: i64 = c
+            .query_row("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='oldhash'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(m, 0, "内容变更后应清理旧 md5 的 chunk 向量");
     }
 
     #[test]

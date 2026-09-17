@@ -360,15 +360,19 @@ pub fn vector_scan_with_query_emb(
 ) -> Result<Vec<(String, f32)>, String> {
     let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
     let all_count = all.len();
+    let mut max_sim: f32 = 0.0;
     let mut results: Vec<(String, f32)> = all
         .into_iter()
         .filter_map(|(fid, vec)| {
             let sim = cosine(query_emb, &vec);
+            if sim > max_sim {
+                max_sim = sim;
+            }
             if sim >= threshold { Some((fid, sim)) } else { None }
         })
         .collect();
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    log::info!("[AI]   vector: {} emb, {} above {:.2}", all_count, results.len(), threshold);
+    log::info!("[AI]   vector: {} emb, {} above {:.2} (max_sim={:.4})", all_count, results.len(), threshold, max_sim);
     Ok(results)
 }
 

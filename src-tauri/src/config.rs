@@ -207,6 +207,13 @@ pub fn load_config() -> AppConfig {
             } else if config.data_dir.as_os_str().is_empty() {
                 config.data_dir = default_data_dir();
             }
+            // 评测用开关：允许环境变量覆盖语义权重，便于对 semantic_weight
+            // 跑 A/B（scripts/eval/run_rag_eval.sh），无需改动用户 config.json。
+            if let Ok(w) = std::env::var("LINK_SEARCHER_SEMANTIC_WEIGHT")
+                && let Ok(v) = w.trim().parse::<f64>()
+            {
+                config.semantic_weight = v.clamp(0.0, 1.0);
+            }
             // Migrate the legacy single-gateway config: if the user only ever
             // set ai_api_base/key, apply it to BOTH new gateways so the old
             // behaviour (one gateway for everything) keeps working.

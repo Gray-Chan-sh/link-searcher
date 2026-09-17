@@ -4,6 +4,222 @@
 
 ---
 
+## 2026-09-17：剩余三个方向的验证 —— HyDE 负面 / 多向量不可行 / top-30 口径
+
+- **① 查询扩展（HyDE）：❌ 明确负面**。用本地 LLM（`Qwen3.8-27B-oQ4e-mtp`）为每道语义题生成"假设答案"再嵌入，与"直接嵌入问句"对比（纯 Python 实验，未改代码）：
+
+  | 指标 | 问句直嵌 | HyDE |
+  |---|---|---|
+  | top-10 命中 | **9/20** | **5/20** ⬇ |
+  | top-30 命中 | **10/20** | **8/20** ⬇ |
+  | 改善 / 变差 | — | 2 / **16** |
+
+  **原因**：本地 LLM 不知道案情，生成的"假设答案"是通用法律套话（如违约金、竞业限制的通说），嵌入后**更接近其它通用文书**而非目标文档（典型：某题 `4 → 311`）。**在此场景 HyDE 是死路**——需要领域知识的模型才有意义。
+- **② bge-m3 多向量（ColBERT）/ 稀疏（lexical）输出：❌ 当前服务栈不可行**。实测网关 `/v1/embeddings` 只返回 `embedding`（1024 维 dense），**无 sparse/colbert 字段**；且 `Xenova/bge-m3` 仓库只有 dense 的多种量化变体，**没有 sparse/colbert 头**。要用需换服务栈（如 FlagEmbedding），成本高。
+- **③ 评测口径 top-30：✅ 已量化**。应用实际注入 **30 条**，而 harness 只统计 **top-10** —— 这系统性低估了多跳/语义题。实测 21 道未命中中 **10 道其实落在 top-30 内**（应用能看到，只是没进 top-10）：
+
+  | 口径 | Success |
+  |---|---|
+  | `Success@10`（harness） | 54/75 = **72.00%** |
+  | `Success@30`（应用实际注入） | 64/75 = **85.33%** |
+  | 差额 | **+10 题 / +13.33pp** |
+
+  多出的 10 题：`semantic` 4 / `multi_hop` 3 / `twin` 2 / `exact_id` 1。
+- **配套改动**：`cli.rs` 的 `chat --dry-run` 证据打印上限由 20 → **30**（仅影响人读输出；harness 仍取前 10 行，**指标口径不变**）。
+- **涉及文件**：`src-tauri/src/cli.rs`（打印上限）、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-17：多方向参数扫描 —— 结论：检索参数已到极限，全部落在噪声区
+
+- **方法**：为免重建做多轮扫描，新增 3 个评测用 env 开关（`LINK_SEARCHER_VECTOR_THRESHOLD` / `LINK_SEARCHER_CHUNK_VECTOR_THRESHOLD` / `LINK_SEARCHER_CHUNK_TOP_K`），并把 `rrf_add` 扩展出**通道权重**参数（新增 `LINK_SEARCHER_RRF_CHUNK_WEIGHT`，默认 1.0 = 行为不变）。全部串行评测，75 题。
+- **扫描结果**（Success@10 / Recall@10）：
+
+  | 配置 | Success@10 | Recall@10 | multi_hop | twin | semantic | long_doc | 配对净胜 (p) |
+  |---|---|---|---|---|---|---|---|
+  | **基线** thr0.55 w1.0 | 72.00% | 66.67% | 50.00 | 70.00 | **55.00** | **100.00** | — |
+  | VECTOR_THRESHOLD 0.65 | 66.67% | 60.71% | 75.00 | 80.00 | 40.00 | 100.00 | 明显更差 |
+  | VECTOR_THRESHOLD 0.45 | 72.00% | 65.48% | 50.00 | 70.00 | 55.00 | 100.00 | ≈持平 |
+  | CHUNK_THR 0.70 / 0.80 | **73.33%** | **70.24%** | 87.50 | 80.00 | 45.00 | 80.00 | +1 (**p=0.500**) |
+  | CHUNK_RRF_WEIGHT 0.3 | **73.33%** | 67.86% | 75.00 | 80.00 | 45.00 | **100.00** | +1 (**p=0.500**) |
+  | CHUNK_RRF_WEIGHT 0.0 | **73.33%** | **70.24%** | 87.50 | 80.00 | 45.00 | 80.00 | +1 (**p=0.500**) |
+
+- **核心发现：`chunk` 通道是一个"固定跷跷板"** —— 它帮 `semantic`(+2题)/`long_doc`(+1题)，伤 `multi_hop`(−3题)/`twin`(−1题)。`CHUNK_THR=0.70` 与 `CHUNK_RRF_WEIGHT=0` **数字完全相同**（等价于关闭该通道的排序影响力）。任何调参都只是在该跷跷板两端移动，**净变化恒为 +1 题、p=0.500（纯噪声）**。
+- **处置：维持基线不变**（`VECTOR_THRESHOLD=0.55`、`CHUNK_VECTOR_THRESHOLD=0.55`、chunk 权重 1.0）。理由：改动在统计上不可区分（p=0.50），且按项目门禁规则「分类别回落即回归」，采纳会导致 `semantic` −10pp。
+- **剩余空间在哪（诊断结论）**：21 道未命中中 **14 道 best-rank >20**（召回失败），且实测 bge-m3 的**纯向量通道**对 20 道语义题只能覆盖 **9/20**（10 道排名 >50）→ **剩余失败是模型层面的**，参数调优无法解决。
+- **下一步方向（未做）**：① 查询扩展（HyDE：LLM 先造假设答案再嵌入）——**注意评测脚本不调 LLM，需扩展 dry-run 才能度量**；② bge-m3 的**多向量（ColBERT）/稀疏（lexical）**输出（需改代码 + 重灌）；③ 评测口径：应用实际注入 top-30，而 harness 只统计 top-10（多跳题天然吃亏）。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`（env 开关 + `rrf_add` 权重参数）、`scripts/eval/README.md`。
+
+---
+
+## 2026-09-17：修复内容变更后语义向量不刷新（陈旧向量参与排序）
+
+- **现象（代码审查发现）**：文件**内容被修改并重新索引**后，其语义向量**不会刷新**——语义检索仍按**旧内容**匹配（搜新话题搜不到、搜旧话题却命中），且随时间持续漂移。
+- **根因**：向量回填是**"只补缺失"**语义（`missing_embedding_rows` 只选没有行的文件），而 `doc_embeddings` 按 **`file_id`** 键 —— `file_id` 由路径生成、**不随内容变化**，故旧向量行一直存在 → 回填永远跳过 → 陈旧向量永久残留。对照：**删除**路径**有**清理（`delete_file` → `delete_embedding`，注释写着"避免残留幽灵参与排序"），**修改**路径漏了。
+- **修复**（`indexer.rs`）：新增 `IndexerService::clear_stale_embeddings(conn, file_id, new_hash)`，在 `index_file` 提取完成、写索引之前调用——若文件记录中的旧 md5 与新内容 hash **不同**，则清理该文件的 doc 向量与**旧 md5** 的 chunk 向量；随后由扫描结束时的 `run_backfill_embeddings` 重建。
+- **验证**：新增单测 `test_content_change_clears_stale_embeddings`（内容未变**不**清理 / 内容变更后清理 doc 向量 + 旧 md5 的 chunk 向量）；`cargo test --lib` **368 passed / 0 failed**；semgrep ERROR **零发现**。
+- **副作用**：修改过的文件在**下一次扫描回填前**短暂无语义向量（分钟级窗口），属预期。
+- **关联发现**：同一"只补缺失"机制也解释了**换嵌入模型不会自动重灌**——换模型必须显式清空向量（见上方 2026-09-17 运维记录）。
+- **涉及文件**：`src-tauri/src/indexer.rs`
+
+---
+
+## 2026-09-17：嵌入模型切回 bge-m3（网关）+ 全量重灌向量（运维操作）
+
+- **背景**：根因定位确认 `semantic` 类别塌陷源于生效模型为 `local:bge-small-zh-v1.5`（512 维小模型），而配置中 `bge-m3-mlx-fp16` 网关一度离线。网关恢复后，三模型微基准（同一 308 文档 / 20 道语义题）实测：bge-small **9/20**、bge-large 13/20、**bge-m3 16/20**。
+- **执行**：
+  1. **备份**：`data.db` → `data.db.bak-bge-small-20260917`（1.15GB，已校验 512 维 × 11,679）。
+  2. **切换**：`active_embedding_model_id` 由 `local:bge-small-zh-v1.5` 改为 `33fc2b21-…:bge-m3-mlx-fp16`（provider `olmx`）。
+  3. **清空旧向量**：`DELETE FROM doc_embeddings; DELETE FROM chunk_embeddings;`（因应用的回填是"只补缺失"，不清空会跳过已有行）。
+  4. **重灌**：`/Volumes/Data/index/reembed_vectors.py`（复刻应用语义：doc 文本截断 2000 字、chunk 用原文、batch 64、f32-LE BLOB、可续跑），后台 PID 记录于运行日志，日志 `reembed.log`。
+- **规模与耗时（实测修正）**：doc 11,693（**2.0/s，1.6h 完成**）+ chunk 125,254（**4.5/s，约 6.6h**）≈ **合计约 8 小时**（早期估 19h 偏保守）。已测**网关串行处理，加并发无收益**（2/4/8 并发吞吐均无提升）。
+- **期间影响**：新旧向量维度不一致，`cosine()` 返回 0 → **语义通道暂时失效**，重灌完成后恢复；期间**不应使用应用**。
+- **回滚**：恢复 `data.db.bak-bge-small-20260917` + 把 `active_embedding_model_id` 改回 `local:bge-small-zh-v1.5`。
+- **✅ 验证结果（2026-09-17 16:14 重灌完成，16:21 评测完成；75 题、串行）**：
+
+  | category | bge-small (512) | **bge-m3 (1024)** | Δ |
+  |---|---|---|---|
+  | `fact` | 70.83% | **91.67%** | **+20.84pp** |
+  | `semantic` | 35.00% | **55.00%** | **+20.00pp** |
+  | `long_doc` / `twin` / `exact_id` | 100% / 70.00% / 62.50% | 同左 | ±0 |
+  | `multi_hop` | 75.00% | **50.00%** | **−25.00pp** ⚠️ |
+  | **总计** | **62.67%** | **72.00%** | **+9.33pp** |
+
+  - 全量向量：doc **11,693** + chunk **125,254**，**全部 1024 维，0 失败**；总耗时约 **8 小时**。
+  - 配对：【512 漏 28/75】→【1024 漏 21/75】，**✅修好 12 / ❌弄坏 5 = 净胜 7**（符号检验 **p≈0.072**）。
+  - **结论**：「语义塌陷 = 回退到 512 维小模型」的判断**成立**（`semantic` 35%→55%，方向与微基准预测一致）；且 `fact` 也有 +20.84pp 的意外收益。
+  - **唯一回落**：`multi_hop` −25pp（8 题丢 2 题），弄坏的 5 题中 3 题属此类 —— 待查，**已排除阈值失配**（实测 bge-m3 在 0.55 下候选数 10–1325，与 bge-small 的 42–776 同量级）。
+- **自动化闭环**：守候脚本 `/Volumes/Data/index/watch_and_eval.sh`（`nohup`，不依赖会话）——等重灌结束 → 校验向量完整性（doc 1024/≥11000、chunk 1024/≥120000）→ **串行**跑评测 → 结果落盘 `/Volumes/Data/index/eval-after-bge-m3.txt`。已按预期完成。
+- **下一步**：查 `multi_hop` 回落（3 题）；考虑 `VECTOR_THRESHOLD` 是否按新分布微调（0.55→0.60 可把候选从最多 1325 收到最多 271）；记录新基线。
+
+---
+
+## 2026-09-16：语义检索根因定位（含一个阴性实验）— 全库 chunk 召回通道无效
+
+- **背景**：`semantic` 类别（20 题）仅 35%，为最差类别。本轮做了两轮根因诊断 + 一次修复尝试。
+- **诊断结论**：
+  1. **"查询串被降级"假设已证伪**：管线实际嵌入的是关键词袋（`kw1 kw2`）与 OR 串（含字面 "OR"），而非自然问句；但实测三者与自然问句的余弦仅差 **±0.02~0.05** → **不是原因**。
+  2. **嵌入模型区分度不足（主因之一）**：20 道语义题中，支撑文档自身余弦仅 **0.33~0.62**（**16/20 低于阈值 0.55**），且**"支撑文档即全库最高分"仅 1/20** —— `bge-small-zh-v1.5` **分不出正确答案，别的文档分更高**。
+  3. **chunk 信号强于文件级、但用不上**：长文档的文件级向量被整篇稀释（cos 0.35~0.46，排名远在 10 名外），而其 **chunk 级最高可达 0.55~0.69**（多篇超阈）。旧的两级漏斗仅对粗筛命中的 md5 做块级精检，使该信号无法参与召回。
+- **实施的改动与结论（阴性）**：把全库 chunk 扫描改为独立召回通道（`chunk_vector_scan_with_query_emb` 常开）。
+  - **实测无效**：候选仅 **3244 → 3249（+5）**，**top-20 完全不变**（6 个查询含 3 道真语义题，逐一比对输出完全一致）；代价为 **+6.2s/查询**（3.14s → 9.31s，来自 12.5 万 chunk 向量的 DB 读取）。
+  - **原因**：BM25（关键词 OR）已命中数千份，**目标文档本就在候选池内**——问题是**排名上不去**，不是召回不到。chunk 通道的 RRF 权重（≤0.016）撼不动 BM25 的统治地位。
+  - **处置**：**已完整回退**（命中数复原为 1011），并在代码处保留阴性结论注释，避免后人重复尝试。
+- **修正后的根因认识**：`semantic` 失败的主因是 **① 嵌入模型区分度不足**（模型层）与 **② BM25 数千命中淹没候选池导致的排序问题**（架构层），**并非** chunk 通道的漏斗设计。
+- **🔍 根因最终定位（配置层，非代码）**：当前生效的嵌入模型是 `local:bge-small-zh-v1.5`（**512 维**），而配置里遗留 `embedding_model = bge-m3-mlx-fp16` 指向本地网关 `localhost:8000` —— **该网关当前无响应**。DB 证据：当前库全部向量为 **512 维**，而 9/3 备份 `data.db.bak-pre-bgem3` 为 **1024 维**（说明历史上确实用过 bge-m3/大模型）。本地 `bge-large-zh-v1.5`（1024 维）**已下载但未启用**。→ **语义检索塌陷大概率是「强模型网关不可用后回退到小模型」的代价**，属配置漂移而非有意降级。
+- **修复方向（运维层，不需改代码）**：① 恢复 `bge-m3` MLX 网关并把 `active_embedding_model_id` 切回它；或 ② 改用本地 `bge-large-zh-v1.5`（离线可用，但 tract CPU 推理较慢，debug 下单次约 85s，release 未实测）。两者都需**重灌向量**（`active_embedding_model_id` 与向量维度必须一致，否则 `cosine()` 直接返回 0）。
+- **下一步候选**（均未做）：换更大嵌入模型（`bge-large-zh-v1.5` / `bge-m3`）、HyDE 类查询扩展、候选池截断/分层排序。
+- **✅ 换模型收益的实测验证（微基准）**：在**同一 308 份文档**（300 份诱饵 + 10 份支撑，`ORDER BY id LIMIT` 确定性抽样）与**同一 20 道语义题**上对比两个模型（`PROBE_MODEL` 环境变量切换，结果取 top-10）：
+  - `bge-small-zh-v1.5`：top-10 命中 **9/20**，top-1 **5/20**
+  - `bge-large-zh-v1.5`：top-10 命中 **13/20（+20pp）**，top-1 **7/20**
+  - 典型排名跃升：`22→1`、`32→2`、`44→4`、`41→13`、`57→11`、`262→10`、`191→51`、`273→21`（仅 2 题略降：`2→5`、`4→5`）
+  - 结论：**换 1024 维模型能实质性提升语义检索**，与 `semantic` 塌陷的根因判断一致。
+- **🎯 网关恢复后的三模型实测（同一 308 文档微基准、同一 20 道语义题）**：
+
+  | 模型 | top-10 命中 | top-1 | 最差排名 |
+  |---|---|---|---|
+  | `bge-small-zh-v1.5`（现状，512维） | 9/20 (45%) | 5/20 | 273 |
+  | `bge-large-zh-v1.5`（本地，1024维） | 13/20 (65%) | 7/20 | 178 |
+  | **`bge-m3-mlx-fp16`（网关，1024维）** | **16/20 (80%)** | **11/20** | **65** |
+
+  → **bge-m3 最佳**（相对现状 **+7 题 / +35pp**），且**无灾难性失败**（最差 65 vs 现状 273）。确证「语义塌陷 = 回退到小模型」的判断。
+- **网关重灌吞吐实测**：batch=128 时 **2.06 doc/s**（batch=16 为 1.52）→ 全量重灌（doc 11,679 + chunk 125,234）约 **18–19 小时**，显著优于本机 bge-large 的 ~91 小时，但仍是**过夜级**任务。
+- **推荐路径**：① `active_embedding_model_id` 从 `local:bge-small-zh-v1.5` 切到网关的 `bge-m3`；② 运行向量重灌；③ **串行**跑 75 题评测确认 `semantic` 提升。
+- **⚠️ 切换模型的硬约束**：必须**同时重灌 doc 与 chunk 两类向量**——维度不匹配时 `cosine()` 直接返回 **0**（`ai/mod.rs:738`），只换一类会让该类通道彻底失效。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`（净改动：仅一条阴性结论注释）、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-16：golden 集重构（分类标签 + 拆多跳 + 近名区分题）+ harness 分类统计
+
+- **动机**：60 题 golden 集统计功效不足（配对 p≈0.055，边界显著），且**回归无法定位**——只有总数，看不出"哪一类变好、哪一类变坏"。
+- **harness 改动**（`scripts/eval/run_rag_eval.sh`）：读取每题可选的 `category` 字段，**按类别分桶输出 Recall/Success**；缺省记为 `uncategorized`；未命中列表带类别前缀。用法与词表已写入 `scripts/eval/README.md`。
+- **golden 集重构**（仓外 `/Volumes/Data/index/eval-golden/`，60 → **75 题**）：
+  - **拆多跳**：把"一题问两事实、但答案在同一文件"的题拆成单跳；跨文件的**真实**综合题保留并标 `multi_hop`。
+  - **打分类标签**：每题恰好一个主类别（`fact` / `semantic` / `exact_id` / `twin` / `multi_hop` / `long_doc`）。
+  - **新增 10 道近名区分题**（`twin`）：语料中存在同名/近名兄弟文件（如 `调解书.pdf` vs `民事调解书.pdf`），必须靠**内容**而非文件名区分——本项目已实际踩到过的失败模式。
+  - 分布：`fact` 24 / `semantic` 20 / `twin` 10 / `multi_hop` 8 / `exact_id` 8 / `long_doc` 5；59 个 support basename 全部经 SQL 校验唯一。
+- **直接产出**：分类基线立刻暴露出**最严重缺陷是 `semantic` 类别仅 35%**（串行实测；其余类别 62–100%）——语义化表述的查询显著更难检索，且与融合方式无关。**这一发现无法从单一总数中看出**；同时分类标签也让"RRF 显著更优"的旧结论被修正为"方向为正但不显著"（见下条）。
+- **涉及文件**：`scripts/eval/run_rag_eval.sh`、`scripts/eval/README.md`、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-16：检索融合改用 RRF（倒数排名融合）— 方向为正，但复测未达显著
+
+- **动机**：实测发现向量通道被"结构性压制"——三通道合并后按 `score = w×语义 + (1−w)×BM25` 排序，而纯向量/chunk/路径候选的 `bm25_score` 为 `None`，其分数上限只有 `w×1.0 = 0.3`（w=0.3），难以胜过 BM25 命中。表现：向量阈值由 0.65 降到 0.55 后，注入的 top-30 **完全不变**。权重 A/B 亦证实 0.3/0.5/0.7 无可靠差异 —— 问题不在权重，在**融合方式**。
+- **改动**（`commands/ai.rs`）：新增 `RRF_K = 60.0` 与 `rrf_add()`；三通道合并的每个循环按**各通道内排名**累加 `Σ 1/(k+rank+1)`（**独立于 `all_seen` 去重**——同一文档出现在多个通道时各计一次，这是 RRF 的关键语义）；排序改为按 RRF 降序，并把真实 RRF 值写入 `rrf_score`（该字段此前存的是加权混合分，而 UI 标签本就是"RRF"，属纠正）。
+- **默认值变更**：默认启用 RRF；设 `LINK_SEARCHER_FUSION=mix` 可退回旧的分数加权混合。
+- **语义收窄**：`semantic_weight` 不再参与跨通道合并排序，仅保留其在 `semantic_fuse` 内对 BM25 候选集的重排作用。
+- **A/B（60 题 golden 集；同一组题 + 确定性检索 → 可做配对分析）**：
+
+  | 融合 | Recall@10 | Success@10 | 未命中 |
+  |---|---|---|---|
+  | `mix`（旧默认） | 42.25% (30/71) | 50.00% (30/60) | 30 |
+  | **`rrf`（新默认）** | **54.93% (39/71)** | **60.00% (36/60)** | **24** |
+
+  配对：RRF 修好 **8** 题 / 弄坏 **2** 题 → **净胜 6 题**（符号检验 p≈0.055）；Recall@10 **+12.68pp（≈2.1 SE）**。
+- **golden 集同步优化**：10 道"一题问两事实"的多跳语义题 → 拆成 **20 道单跳题**（拆前它们在所有权重下均失败 8–10/10，属题目设计缺陷）；原 40 题保持不变（sha256 校验）。总计 **60 题**，50 个 support basename 全部唯一。
+- **⚠️ 复测修正（同日，75 题版 golden 集，串行执行）**：golden 集重构后（拆分多跳 + 打分类标签 + 加近名区分题，60 → 75 题）复测：`mix` Recall 51.19% (43/84) / Success 57.33% (43/75) → `rrf` **Recall 59.52% (50/84) / Success 62.67% (47/75)**；配对 **9 修好 / 5 弄坏 = 净胜 4 题，符号检验 p = 0.212（不显著）**。分类看收益集中在 `multi_hop` **+37.5pp**（与理论一致）、`long_doc` +20.0pp、`semantic` +10.0pp；而 `twin` −10.0pp、`fact` −4.2pp。
+- 🚨 **测量纪律（重要）**：此前若干组 A/B 曾**并行**执行，CPU 争抢使本地 BGE 嵌入超过 `cached_embed` 的 **5 秒超时**，导致 `semantic_fuse` 静默退化为纯 BM25，指标系统性偏低（同一 75 题集：并行 `56.00%` vs 串行 `62.67%`；语义题子集并行 `3/20` vs 串行 `7/20`）。**评测与 A/B 必须串行**；已写入 `scripts/eval/README.md` 警告。
+- **结论修正**：RRF 方向为正、机制合理（修复"通道分数量纲不可比"这一真实缺陷），但**在 75 题下未达统计显著**；此前"60 题 +12.68pp / p≈0.055"的结论**不稳健**（受集合构成影响）。**保留 RRF 为默认**——项目门禁规则是"数字不回落"，两个总指标均上升，且 `LINK_SEARCHER_FUSION=mix` 可一键回退；同时需继续扩充 golden 集以定论，并重点关注 `twin`（近名区分）与 `fact` 两类。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-16：语义权重 A/B — 评测用开关 + 结论（维持 0.3）
+
+- **动机**：此前实测发现向量通道"结构性失效"（14/14 次扫描 0 命中；阈值 0.65→0.55 后 top-30 仍无变化）。怀疑根因是 `weighted_mix`（`score = w×语义 + (1−w)×BM25`，w = `semantic_weight` 默认 0.3）把纯向量候选压死，故做权重 A/B。
+- **新增评测开关**（`config.rs`）：环境变量 `LINK_SEARCHER_SEMANTIC_WEIGHT`（0.0–1.0，自动 clamp）可覆盖 `semantic_weight`，**不改动用户 `config.json`**；用法已记录于 `scripts/eval/README.md`。
+- **golden 集扩充**：40 → **50 题**，新增 10 道**场景化语义题**（问句用词刻意不与答案文件名重叠，如"掌握公司核心机密的员工跳槽后多久不能去同行？"→《公司管理人员信息与数据保密协议-含竞业限制.docx》）。10 个 support basename 经 SQL 校验唯一；全部 50 题 basename 唯一。
+- **A/B 结果**（50 题，同一 golden 集，harness 已修复）：
+
+  | w | Recall@10 | Success@10 |
+  |---|---|---|
+  | 0.0（纯 BM25） | 32.79% (20/61) | 40.00% (20/50) |
+  | **0.3（现状默认）** | **44.26% (27/61)** | **54.00% (27/50)** |
+  | 0.5 | 39.34% (24/61) | 46.00% (23/50) |
+  | 0.7 | 49.18% (30/61) | 50.00% (25/50) |
+
+- **结论**：① **纯 BM25（w=0.0）明显最差** → 语义重排 BM25 候选确实有效（Recall +6.55~16.39pp）；② **w=0.3 / 0.5 / 0.7 差异在 ~1 个标准误内且非单调**（Success 差异仅 2–4 题），属噪声 → **维持默认 0.3 不变**（其在 Success@10 上最高）；③ **负面发现**：新增 10 道语义题在**所有权重下**均失败 8–10/10 —— 向量通道救不了"精确事实 + 语义化表述"类查询，**权重不是其杠杆**。
+- ⚠️ **数据可信度说明**：本组 A/B 当时**并行**运行（每组两个进程），受 CPU 争抢影响嵌入超时、退化纯 BM25，绝对值偏低；结论方向（0.0 最差、0.3/0.5/0.7 不可区分）不受影响，但**若要引用具体数字需按串行重测**。
+- **未做**：未改 `semantic_weight` 默认值；未改用 RRF 融合（结构性改进，另行立项）。
+- **涉及文件**：`src-tauri/src/config.rs`、`scripts/eval/README.md`、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-16：修复 RAG 评测 harness 路径解析 bug + 建立首个正式基线
+
+- **背景**：为给检索改动上回归门禁，从真实语料构建 40 题 golden 集并跑评测，结果异常偏低（Recall 3.92%），不合常理。
+- **根因（评测工具 bug，非检索问题）**：`scripts/eval/run_rag_eval.sh` 用 `path=(\S+)` 从 dry-run 输出提取路径，而 `\S+` **遇空格即止**。本语料路径几乎全部含空格（`案件/HQ 恒群案/…`、`律师业务文书模板/民事文书样式/…`），路径被截断为 `案件/HQ`，basename 变成 `HQ`，**永远匹配不上任何支撑文件**。
+- **影响面**：该脚本入库以来，**所有涉及含空格路径的评测数字均无效**——包括 `d99ce91` 那次"3 问句 100%"冒烟（其样本恰好路径无空格）。
+- **修复**：改为行尾匹配 `path=(.+)$`（加 `re.M`），并补 `import re`。
+- **验证 A（harness 修复效果）**：同一 golden 集（40 题），harness 修复前 `3.92% / 5.00%` → 修复后 `50.98% / 65.00%`。抽查确认目标文件确实位居前列（如"恒群案限制高消费申请书…"目标文件 rank 1 / bm25=72.05），此前的低分纯属工具假象。
+- **验证 B（本次代码修复 A/B，harness 已修复）**：BEFORE（旧关键词逻辑）= `Recall@10 45.10% (23/51)` / `Success@10 55.00% (22/40)`；AFTER（本次修复）= `50.98% (26/51)` / `65.00% (26/40)`。即 **Recall@10 +5.88pp、Success@10 +10.00pp、未命中 18→14 题**。
+- **golden 集**：40 题（30 单支撑 / 9 双支撑 / 1 三支撑），覆盖 13 个案件目录 + `学习/` + `诉讼模板/` + `抖音/`，六种文件类型；全部 support basename 经 SQL 校验**唯一**。存于 `/Volumes/Data/index/eval-golden/`（含当事人信息，**仓外不入库**）。
+- **基线登记**：已写入 `docs/rag-eval-baseline.md`，标记为当前基线。
+- **未命中分析（14/40）**：多为"一题问两个事实"的多跳题（如"李志愿何时受伤？工伤几级？"），或答案所在文件名与问句无关（案号在 `法院信息.md`）——属 golden 设计层面，非检索缺陷。
+- **涉及文件**：`scripts/eval/run_rag_eval.sh`、`docs/rag-eval-baseline.md`。
+
+---
+
+## 2026-09-16：修复 RAG 检索关键词截断 — 核心依据被丢弃（P0）
+
+- **背景**：用户问"律师受当事人委托，对不动产资料进行查询，需要什么手续和材料？"，正确的依据文件 `不动产登记资料查询暂行办法(2024修正).docx` 从未进入注入的前 30 条材料，LLM 因此回答"材料中没有"。全链路排查（`app.log` + 生产库 + jieba-rs 源码实测）确认根因在关键词提取。
+- **根因**：`extract_retrieval_keywords`（`commands/ai.rs`）用 `TokenizeMode::Search` 分词，而 Search 模式**先输出子词、再输出整词**（实测："不动产" → `不动`/`动产`/`不动产`）。函数按 token 顺序取前 3 个即 `break`，于是 `["律师","委托","不动"]`——整词 `不动产` 被它自己的子词挤掉，BM25 查询退化为 `律师 OR 委托 OR 不动`。实测该文件排名 **559**（分数 5.05），掉出 top-30。
+- **改动**（`commands/ai.rs`）：
+  - `extract_retrieval_keywords`：**移除 `MAX_KEYWORDS=3` 硬截断**（位置不再决定取舍）；新增**子词去重**——收集后丢弃被更长候选包含的子词片段（`不动`/`动产` ⊆ `不动产`，`当事` ⊆ `当事人`）。保留 `TokenizeMode::Search`（切回 `Default` 会把人名 `常宏`/`万城`/`联嵘` 拆成单字并被 <2 字过滤丢弃，已实测）。
+  - `is_retrieval_stopword`：补充连接/引导泛词 `根据`/`依据`/`按照`/`依照`/`说明`/`表明`/`请问`/`指明`/`指出`（问句开头高频虚词，白占关键词名额）。
+  - 新增 `rewrite_history` 并抽出 `llm_rewrite_query` 的历史构造：检索改写的历史**只保留用户消息**，排除助手回答——助手自身的否定结论（如"没有关于…的记录"）回灌会被 LLM 采纳进检索词，形成自我否定的检索查询。
+- **向量通道标定**（`ai/mod.rs` + `commands/ai.rs`）：
+  - `vector_scan_with_query_emb` 日志增加 `max_sim`，用于观测真实相似度分布。
+  - 实测标定（bge-small-zh-v1.5，11,679 条向量，4 个真实查询）：最高余弦 0.61~0.77，中位数 0.26~0.45。原阈值 `0.65` **高于部分查询的 max**（"联嵘"查询 max=0.6111），使向量通道对该类查询**结构性失效**（与日志中 14/14 次 `0 above 0.65` 吻合）。已将 `VECTOR_THRESHOLD` 由 `0.65` 下调至 `0.55`（仍远高于中位数、保持区分度，各查询可召回 40+ 候选）。
+  - **诚实说明**：该改动修复了通道的"结构性失效"，但对本次 3 个验证 case 的 top-30 **可见结果无变化**——因为纯向量候选 `bm25_score=None`，在 `weighted_mix`（BM25 权重 0.7）下排在 BM25 命中之后，难以进入前 30。即：**通道恢复可用，但其实际影响力受打分权重限制**；若要让语义检索真正生效，需另行调整权重（待评测基线就绪后 A/B）。
+- **验证**：`cargo test --lib` 364 passed / 0 failed（新增 6 项检索关键词回归测试）；端到端 `chat --dry-run` —— 原失败 case 中该文件从"缺席"升至 **rank 9**，专项查询升至 **rank 1**（bm25=104.02）；"联嵘"多实体长问句未退化（目标文件 rank 2/5）。
+- **未做**：向量打分权重调整、`①③` 合并、LLM 结构化检索意图——依赖 RAG 评测基线，另行规划。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src-tauri/src/ai/mod.rs`。
+
+---
+
 ## 2026-09-16：PDF 提取管线升级 — pdf-inspector 全管线优先（P0）
 
 - **背景**：`extractor/pdf.rs` 原先用 lopdf `extract_text` 逐页提取纯文本，pdf-inspector 仅做分类路由（`classify_pdf_mem`）。痛点：lopdf 在 CID/Identity-H 字体、复杂排版、多栏 PDF 上提取量低或返回乱码/水印，CHANGELOG 中大量 PDF 修复（水印误提、整册 OCR 超时、乱码入库）均为此根因。
@@ -18,14 +234,16 @@
 
 ---
 
-## 2026-09-16：PDF 提取管线升级 + 编码检测升级 + Office 安全边界 + 嵌入图片 OCR
+## 2026-09-16：PDF 提取管线升级 + 编码检测升级 + Office 安全边界 + 嵌入图片 OCR + lopdf 防崩溃 + pdf-inspector 升级
 
-- **PDF 提取管线升级（P0）**：`extractor/pdf.rs` 入口改为先尝试 pdf-inspector 全管线（`process_pdf_mem`：分类+提取+Markdown），TextBased PDF 直接返回结构化 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由 OCR，Mixed 逐页路由。`catch_unwind` 防 lopdf 内部 panic。失败/空/乱码走完整现有 lopdf 管线兜底。A/B 测试（20 个真实法律 PDF）提取量 57,837 vs 11,461 chars。OCR 引擎不变（用户配置的 Apple Vision/Windows OCR/PaddleOCR/Tesseract）。
+- **PDF 提取管线升级（P0）**：`extractor/pdf.rs` 入口改为先尝试 pdf-inspector 全管线（`process_pdf_mem`：分类+提取+Markdown），TextBased PDF 直接返回结构化 Markdown（含标题/表格/多栏阅读顺序），Scanned/ImageBased 直接路由 OCR，Mixed 逐页路由。`catch_unwind` 防 pdf-inspector 内部 panic。失败/空/乱码走完整现有 lopdf 管线兜底。A/B 测试（20 个真实法律 PDF）提取量 57,837 vs 11,461 chars。OCR 引擎不变（用户配置的 Apple Vision/Windows OCR/PaddleOCR/Tesseract）。
+- **lopdf fallback 防崩溃**：`extract_with_lang` 中 `lopdf::Document::load` 和逐页 `doc.extract_text` 均包裹 `catch_unwind`，防止畸形 PDF 触发 lopdf 内部 panic 崩溃 Tauri 事件循环。panic 时走 pdftotext → anydoc → OCR 兜底链。
+- **pdf-inspector 升级 0.1.7 → 1.x**：获取最新 bug fix 和 API 改进，API 完全兼容。
 - **编码检测升级（P1）**：`extractor/text.rs` 用 `chardetng`（Firefox 同款）替换 GBK-only 编码回退链。之前只尝试 UTF-8 → GBK → lossy，漏了 Big5（繁体）、Shift_JIS（日文）、EUC-KR（韩文）、EUC-JP 等编码。现在覆盖所有主流编码，匹配多语言界面（中文/English/日本語/한국어）。BOM 检测和快速 UTF-8 路径不变。
 - **Office 安全边界（P2-c）**：`extractor/office/mod.rs` 入口加 256MiB 文件大小上限，防止超大 Office 文件 OOM。核查 anydoc 源码发现其已内建完整安全限制（`package/limits.rs`：128MiB/entry、512MiB/total、256 XML 深度、2M 节点、128MiB 嵌入资源上限），无需额外防护。
 - **Office 嵌入图片 OCR（P2-b）**：`extractor/office/mod.rs` 新增 `extract_with_ocr` 方法，对 .docx/.pptx/.odt/.odp/.epub 等格式用 `anydoc::to_document` 获取 `Document.assets`，筛选 `image/*` 类型资产写入临时文件并走现有 OCR 管线（用户配置引擎），OCR 文本拼接到 Markdown 输出。`extractor/mod.rs` 调度改为对 Office 格式传入 `lang` 和 `engine`。.ods/.rtf/.csv 不走 OCR 路径（无嵌入图片）。
-- **涉及文件**：`src-tauri/Cargo.toml`（+chardetng）、`src-tauri/src/extractor/pdf.rs`（+120 行）、`src-tauri/src/extractor/text.rs`（编码检测重写）、`src-tauri/src/extractor/office/mod.rs`（+大小守卫+嵌入图片 OCR）、`src-tauri/src/extractor/mod.rs`（Office 调度传 OCR 参数）、`src-tauri/tests/test_pdf_inspector_ab.rs`（A/B 测试）。
-- **验证**：`cargo test --lib` 359/359 通过零回归；`semgrep scan --severity ERROR` 零发现。
+- **涉及文件**：`src-tauri/Cargo.toml`（+chardetng, pdf-inspector 0.1.7→1.x）、`src-tauri/src/extractor/pdf.rs`（+120 行 inspector 管线 + lopdf catch_unwind）、`src-tauri/src/extractor/text.rs`（编码检测重写）、`src-tauri/src/extractor/office/mod.rs`（+大小守卫+嵌入图片 OCR）、`src-tauri/src/extractor/mod.rs`（Office 调度传 OCR 参数）、`src-tauri/tests/test_pdf_inspector_ab.rs`（A/B 测试）。
+- **验证**：`cargo test --lib` 364/364 通过零回归；`semgrep scan --severity ERROR` 零发现。
 
 ---
 

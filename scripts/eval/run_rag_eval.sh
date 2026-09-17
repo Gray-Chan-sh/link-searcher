@@ -45,7 +45,8 @@ fi
 
 # python 主逻辑：读 golden + 逐问跑 dry-run + 统计
 GOLDEN_DIR="${GOLDEN_DIR}" BIN="${BIN}" python3 <<'PY'
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
+from collections import defaultdict
 from pathlib import Path
 
 golden_dir = Path(os.environ["GOLDEN_DIR"])
@@ -54,26 +55,33 @@ rows = [json.loads(l) for l in (golden_dir / "golden.jsonl").read_text().splitli
 
 total = hit_any = hit_files_total = support_total = 0
 misses = []
+cat_stats = defaultdict(lambda: {"total": 0, "hit_any": 0, "hit_files": 0, "support_total": 0})
 for row in rows:
     q = row["question"]
     supports = row.get("support_files", [])
+    cat = row.get("category") or "uncategorized"
     total += 1
     support_total += len(supports)
+    st = cat_stats[cat]
+    st["total"] += 1
+    st["support_total"] += len(supports)
     # dry-run 输出
     r = subprocess.run([bin_path, "chat", "--dry-run", q], capture_output=True, text=True, timeout=300)
     out = r.stdout + r.stderr
     # 解析 path= 行，取前 10 个 basename
     top10 = []
-    for m in __import__("re").finditer(r"path=(\S+)", out):
+    for m in re.finditer(r"path=(.+)$", out, re.M):
         top10.append(Path(m.group(1)).name)
         if len(top10) >= 10:
             break
     q_hit = sum(1 for f in supports if f in top10)
     hit_files_total += q_hit
+    st["hit_files"] += q_hit
     if q_hit > 0:
         hit_any += 1
+        st["hit_any"] += 1
     else:
-        misses.append(q)
+        misses.append((cat, q))
 
 print()
 print("============================================")
@@ -83,9 +91,17 @@ recall = hit_files_total / support_total if support_total else 0.0
 success = hit_any / total if total else 0.0
 print(f"  Context Recall@10: {recall:.2%} ({hit_files_total}/{support_total})")
 print(f"  Success@10 (≥1 支撑文件进 top-10): {success:.2%} ({hit_any}/{total})")
+if cat_stats:
+    print()
+    print("  按类别（category）:")
+    for cat in sorted(cat_stats):
+        s = cat_stats[cat]
+        rc = s["hit_files"] / s["support_total"] if s["support_total"] else 0.0
+        sc = s["hit_any"] / s["total"] if s["total"] else 0.0
+        print(f"    {cat:<14} {s['total']:>3} 题   Recall {rc:6.2%} ({s['hit_files']}/{s['support_total']})   Success {sc:6.2%} ({s['hit_any']}/{s['total']})")
 if misses:
     print()
     print("未命中问句（需人工检查检索质量）:")
-    for m in misses:
-        print(f"  - {m}")
+    for cat, m in misses:
+        print(f"  - [{cat}] {m}")
 PY

@@ -670,6 +670,18 @@ fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// 构建检索改写用对话历史字符串。只包含用户消息——助手回答
+/// （尤其是否定结论）回灌会导致自相矛盾的检索查询。
+fn rewrite_history(messages: &[ChatMessage]) -> String {
+    let users: Vec<&ChatMessage> = messages.iter().filter(|m| m.role == "user").collect();
+    let mut history_str = String::from("对话历史：\n");
+    let start = users.len().saturating_sub(6);
+    for m in &users[start..] {
+        history_str.push_str(&format!("用户：{}\n", truncate_text(&m.content, 120)));
+    }
+    history_str
+}
+
 /// Try an LLM query rewrite within a strict time budget. Returns `None`
 /// (and the caller falls back to the rule-based rewrite) on any failure:
 /// gateway disabled, timeout, empty/garbage output.
@@ -680,14 +692,7 @@ pub async fn llm_rewrite_query(
     if !crate::ai::llm_enabled() {
         return None;
     }
-    let mut history_str = String::from("对话历史：\n");
-    for m in messages.iter().rev().take(6).rev() {
-        history_str.push_str(&format!(
-            "{}：{}\n",
-            if m.role == "user" { "用户" } else { "助手" },
-            truncate_text(&m.content, 120),
-        ));
-    }
+    let history_str = rewrite_history(messages);
     let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
@@ -717,6 +722,8 @@ fn is_retrieval_stopword(w: &str) -> bool {
             // 动作/主题泛词
             | "涉及" | "相关" | "有关" | "关于" | "涉及到的" | "需要" | "知道" | "看看"
             | "告诉" | "查询" | "搜索" | "查找" | "列出" | "列表" | "列举" | "汇总" | "整理"
+            // 连接/引导泛词（问句开头的高频虚词，无检索区分度）
+            | "根据" | "依据" | "按照" | "依照" | "说明" | "表明" | "请问" | "指明" | "指出"
             // 领域泛词（检索全库时无区分度）
             | "案件" | "案子" | "民事" | "民事案件" | "刑事案件" | "刑事" | "行政" | "行政诉讼"
             | "诉讼" | "起诉" | "判决" | "裁定" | "案由"
@@ -731,11 +738,13 @@ fn is_retrieval_stopword(w: &str) -> bool {
 /// （"常宏"会被 tag 拆成 常+宏 两个单字），而 Search 模式能保留
 /// "常宏"/"万城" 这类专有名词为整体词。
 ///
+/// Search 模式会先输出子词片段（如"不动产"→"不动"/"动产"/"不动产"），
+/// 这里在收集后丢弃被更长候选包含的子词片段，只保留完整词。
+///
 /// 例："涉及常宏的民事案件一共有多少，请列表" → ["常宏"]
 ///      "万城的股东资格确认纠纷" → ["万城", "股东资格"]
 ///      "上周会议纪要" → []（无实体，调用方回退完整问句）
 fn extract_retrieval_keywords(query: &str) -> Vec<String> {
-    const MAX_KEYWORDS: usize = 3;
     let q = query.trim();
     if q.chars().count() < 2 {
         return Vec::new();
@@ -755,11 +764,17 @@ fn extract_retrieval_keywords(query: &str) -> Vec<String> {
             continue;
         }
         out.push(w.to_string());
-        if out.len() >= MAX_KEYWORDS {
-            break;
-        }
     }
+    // 丢弃被更长候选包含的子词片段（"不动"/"动产" ⊆ "不动产"）
     out
+        .iter()
+        .filter(|a| {
+            !out.iter().any(|b| {
+                b.as_str() != a.as_str() && b.chars().count() > a.chars().count() && b.contains(a.as_str())
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
@@ -857,6 +872,19 @@ pub fn weighted_mix(
         .collect();
     fused.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
     fused
+}
+
+pub(crate) const RRF_K: f64 = 60.0;
+
+/// Reciprocal Rank Fusion 累加：score(d) += 1/(k + rank0 + 1)。
+/// 按"排名"而非"分数"融合，避免某通道因分数量纲不同被结构性压制。
+pub(crate) fn rrf_add(
+    acc: &mut std::collections::HashMap<String, f64>,
+    file_id: &str,
+    rank0: usize,
+    weight: f64,
+) {
+    *acc.entry(file_id.to_string()).or_insert(0.0) += weight / (RRF_K + rank0 as f64 + 1.0);
 }
 
 /// Semantic rerank of BM25 hits: embed the query, score the stored
@@ -1069,7 +1097,11 @@ pub(crate) struct PreparedConversation {
 const CONTEXT_BUDGET: usize = 150_000;
 const SYSTEM_OVERHEAD: usize = 2_000;
 const ANSWER_RESERVE: usize = 8_000;
-const VECTOR_THRESHOLD: f32 = 0.65;
+/// 全库文件级向量相似度阈值。实测标定（bge-small-zh-v1.5，11,679 条向量）：
+/// 真实查询的最高余弦落在 0.61~0.77，中位数 0.26~0.45。原值 0.65 高于部分
+/// 查询的 max（"联嵘"查询 max=0.6111），导致向量通道对该类查询完全失效；
+/// 0.55 仍远高于中位数、保持区分度，且各查询可召回 40+ 候选。
+const VECTOR_THRESHOLD: f32 = 0.55;
 /// Chunk vectors are shorter/more focused than whole-file vectors, so the
 /// similarity distribution sits lower; initial estimate, tunable via
 /// `app_settings['chunk_vector_threshold']` in future.
@@ -1315,6 +1347,21 @@ pub(crate) async fn prepare_conversation_prompt(
     for (fid, _) in &mention_resolved {
         all_seen.insert(fid.clone());
     }
+    // 评测用开关：允许环境变量覆盖检索参数，便于免重建做参数扫描（A/B）。
+    let env_f32 = |key: &str, default: f32| -> f32 {
+        std::env::var(key).ok().and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(default)
+    };
+    let env_usize = |key: &str, default: usize| -> usize {
+        std::env::var(key).ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(default)
+    };
+    let vector_threshold = env_f32("LINK_SEARCHER_VECTOR_THRESHOLD", VECTOR_THRESHOLD);
+    let chunk_threshold = env_f32("LINK_SEARCHER_CHUNK_VECTOR_THRESHOLD", CHUNK_VECTOR_THRESHOLD);
+    let chunk_top_k = env_usize("LINK_SEARCHER_CHUNK_TOP_K", CHUNK_VECTOR_TOP_K);
+    let chunk_rrf_weight = env_f32("LINK_SEARCHER_RRF_CHUNK_WEIGHT", 1.0) as f64;
+    let use_rrf = std::env::var("LINK_SEARCHER_FUSION")
+        .map(|v| !v.eq_ignore_ascii_case("mix"))
+        .unwrap_or(true);
+    let mut rrf_acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     // 从问句提炼核心实体词（如"常宏"），三通道共用：
     // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
     // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
@@ -1337,7 +1384,8 @@ pub(crate) async fn prepare_conversation_prompt(
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
-        for hit in bm25_hits {
+        for (rank, hit) in bm25_hits.into_iter().enumerate() {
+            rrf_add(&mut rrf_acc, &hit.file_id, rank, 1.0);
             if all_seen.insert(hit.file_id.clone()) { all_hits.push(hit); }
         }
         emit_progress("bm25", &format!("BM25 完成，命中 {} 份", bm25_count), bm25_count, bm25_count);
@@ -1352,10 +1400,10 @@ pub(crate) async fn prepare_conversation_prompt(
             // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
             let query_emb = crate::ai::cached_embed(&vec_query);
             if let Some(qe) = &query_emb {
-                if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, VECTOR_THRESHOLD) {
+                if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, vector_threshold) {
                     log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
-                    let mut i = 0usize;
-                    for (fid, sim) in vec_hits {
+                    for (rank, (fid, sim)) in vec_hits.into_iter().enumerate() {
+                        rrf_add(&mut rrf_acc, &fid, rank, 1.0);
                         if all_seen.insert(fid.clone()) {
                             all_hits.push(ScoredHit {
                                 file_id: fid, path: String::new(), bm25_score: None,
@@ -1363,13 +1411,15 @@ pub(crate) async fn prepare_conversation_prompt(
                                 from_chunk: false, hit_chunks: Vec::new(),
                             });
                         }
-                        i += 1;
-                        if !full_recall && i > 500 { break; }
+                        if !full_recall && rank >= 500 { break; }
                     }
                 }
                 // chunk 级向量通道：只对"文档级粗筛已命中的 md5 集"做块级精检
                 // （两级漏斗，避免全库 12.5 万+ chunk 暴力余弦）。粗筛集 =
                 // BM25 命中 + 文件级向量命中（上面已并入 all_hits）。
+                // 注：曾试过把全库 chunk 扫描作为独立召回通道，实测**无效果**
+                // （候选仅 +5/~3244，top-20 完全不变）——因为 BM25 已命中数千份、
+                // 文档本就在候选池内，弱 chunk 信号无法改变排名，且 +6.2s/查询。
                 if let Ok(chunk_hits) = {
                     // 收集粗筛命中文件 → md5 候选集
                     let hit_ids: Vec<String> = all_hits.iter().map(|h| h.file_id.clone()).collect();
@@ -1388,19 +1438,23 @@ pub(crate) async fn prepare_conversation_prompt(
                     if md5s.is_empty() {
                         // 粗筛 0 命中时回退全库 chunk 扫描（保底：不因漏斗丢失
                         // "仅块级可命中"的极端场景；正常粗筛命中数千份时走漏斗）。
-                        crate::ai::chunk_vector_scan_with_query_emb(&c, qe, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K)
+                        crate::ai::chunk_vector_scan_with_query_emb(&c, qe, chunk_threshold, chunk_top_k)
                     } else {
-                        crate::ai::chunk_vector_scan_for_md5s(&c, qe, &md5s, CHUNK_VECTOR_THRESHOLD, CHUNK_VECTOR_TOP_K)
+                        crate::ai::chunk_vector_scan_for_md5s(&c, qe, &md5s, chunk_threshold, chunk_top_k)
                     }
                 } {
                     log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
                     let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
-                    for (md5, idx, sim) in chunk_hits {
+                    let mut md5_first_rank: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for (rank, (md5, idx, sim)) in chunk_hits.into_iter().enumerate() {
+                        md5_first_rank.entry(md5.clone()).or_insert(rank);
                         by_md5.entry(md5).or_default().push((idx, sim));
                     }
                     for (md5, chunks) in by_md5 {
                         let Ok(file_ids) = crate::db::tracker::get_files_by_md5(&c, &md5) else { continue };
+                        let first_rank = md5_first_rank.get(&md5).copied().unwrap_or(0);
                         for fid in file_ids {
+                            rrf_add(&mut rrf_acc, &fid, first_rank, chunk_rrf_weight);
                             if !all_seen.insert(fid.clone()) { continue; }
                             all_hits.push(ScoredHit {
                                 file_id: fid, path: String::new(), bm25_score: None,
@@ -1427,7 +1481,8 @@ pub(crate) async fn prepare_conversation_prompt(
         };
         if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &path_kws) {
             log::info!("[AI]   path_match_files returned {} hits (kws={:?})", path_hits.len(), path_kws);
-            for (fid, _path) in path_hits {
+            for (rank, (fid, _path)) in path_hits.into_iter().enumerate() {
+                rrf_add(&mut rrf_acc, &fid, rank, 1.0);
                 if all_seen.insert(fid.clone()) {
                     all_hits.push(ScoredHit {
                         file_id: fid, path: String::new(), bm25_score: None,
@@ -1471,21 +1526,32 @@ pub(crate) async fn prepare_conversation_prompt(
         // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
         // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。
         if all_hits.len() > 1 {
-            let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
-            let max_bm25 = all_hits.iter()
-                .filter_map(|h| h.bm25_score)
-                .fold(0.0_f64, f64::max);
-            let max_sem = all_hits.iter()
-                .filter_map(|h| h.semantic_score)
-                .fold(0.0_f64, f64::max);
-            all_hits.sort_by(|a, b| {
-                let score = |h: &ScoredHit| -> f64 {
-                    let b = h.bm25_score.map(|s| if max_bm25 > 0.0 { s / max_bm25 } else { 0.0 }).unwrap_or(0.0);
-                    let s = h.semantic_score.map(|x| if max_sem > 0.0 { x / max_sem } else { 0.0 }).unwrap_or(0.0);
-                    if b > 0.0 || s > 0.0 { weight * s + (1.0 - weight) * b } else { 0.0 }
-                };
-                score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            if use_rrf {
+                for h in &mut all_hits {
+                    h.rrf_score = rrf_acc.get(&h.file_id).copied();
+                }
+                all_hits.sort_by(|a, b| {
+                    let ra = a.rrf_score.unwrap_or(0.0);
+                    let rb = b.rrf_score.unwrap_or(0.0);
+                    rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            } else {
+                let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
+                let max_bm25 = all_hits.iter()
+                    .filter_map(|h| h.bm25_score)
+                    .fold(0.0_f64, f64::max);
+                let max_sem = all_hits.iter()
+                    .filter_map(|h| h.semantic_score)
+                    .fold(0.0_f64, f64::max);
+                all_hits.sort_by(|a, b| {
+                    let score = |h: &ScoredHit| -> f64 {
+                        let b = h.bm25_score.map(|s| if max_bm25 > 0.0 { s / max_bm25 } else { 0.0 }).unwrap_or(0.0);
+                        let s = h.semantic_score.map(|x| if max_sem > 0.0 { x / max_sem } else { 0.0 }).unwrap_or(0.0);
+                        if b > 0.0 || s > 0.0 { weight * s + (1.0 - weight) * b } else { 0.0 }
+                    };
+                    score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
         }
         emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());
         log::info!("[AI]   scan: q=\"{}\" bm25={} extra={} total={}", truncate_text(&search_q, 30), bm25_count, all_hits.len().saturating_sub(bm25_count), all_hits.len());
@@ -3914,9 +3980,58 @@ mod retrieval_keyword_tests {
     }
 
     #[test]
-    fn caps_at_three_keywords() {
+    fn full_word_survives_positional_cutoff() {
+        // 回归：MAX_KEYWORDS=3 时"不动产"（排在子词"不动"/"动产"之后）被截断丢弃
+        let kws = extract_retrieval_keywords("律师委托查询不动产手续材料");
+        assert!(kws.contains(&"不动产".to_string()), "got: {kws:?}");
+        assert!(!kws.contains(&"不动".to_string()), "sub-word leaked: {kws:?}");
+        assert!(!kws.contains(&"动产".to_string()), "sub-word leaked: {kws:?}");
+    }
+
+    #[test]
+    fn sub_word_fragments_deduped_to_full_word() {
+        let kws = extract_retrieval_keywords("不动产权证书遗失声明");
+        assert!(kws.contains(&"不动产".to_string()), "got: {kws:?}");
+        assert!(!kws.contains(&"不动".to_string()), "sub-word leaked: {kws:?}");
+        assert!(!kws.contains(&"动产".to_string()), "sub-word leaked: {kws:?}");
+    }
+
+    #[test]
+    fn proper_nouns_kept_whole_by_search_mode() {
+        // 守护：切词模式切回 Default 会把人名拆成单字并被 <2 chars 过滤丢弃
+        let kws = extract_retrieval_keywords("涉及常宏的民事案件一共有多少，请列表");
+        assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
+        let kws = extract_retrieval_keywords("万城的股东资格确认纠纷");
+        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
+        let kws = extract_retrieval_keywords("联嵘公司的工商变更沿革");
+        assert!(kws.contains(&"联嵘".to_string()), "got: {kws:?}");
+    }
+
+    #[test]
+    fn new_function_word_stopwords_filtered() {
+        let kws = extract_retrieval_keywords("请根据工商登记材料说明情况");
+        assert!(!kws.contains(&"根据".to_string()), "got: {kws:?}");
+    }
+
+    #[test]
+    fn no_positional_keyword_cap() {
         let kws = extract_retrieval_keywords("常宏 郑坚敏 万城 违约金 比例 审计");
-        assert!(kws.len() <= 3, "got: {kws:?}");
+        for want in ["常宏", "郑坚敏", "万城", "违约金", "审计"] {
+            assert!(kws.contains(&want.to_string()), "missing {want}, got: {kws:?}");
+        }
+        assert!(!kws.contains(&"违约".to_string()), "sub-word leaked: {kws:?}");
+        assert!(!kws.contains(&"约金".to_string()), "sub-word leaked: {kws:?}");
+    }
+
+    #[test]
+    fn rewrite_history_ignores_assistant_turns() {
+        let msgs = vec![
+            ChatMessage { role: "user".into(), content: "关于外联发的股权转让".into() },
+            ChatMessage { role: "assistant".into(), content: "根据材料，没有相关记录".into() },
+        ];
+        let h = rewrite_history(&msgs);
+        assert!(h.contains("股权转让"), "user content missing: {h}");
+        assert!(!h.contains("没有相关记录"), "assistant content leaked: {h}");
     }
 
     #[test]
@@ -4193,5 +4308,45 @@ mod chunk_budget_tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod rrf_add_tests {
+    use super::*;
+
+    #[test]
+    fn rrf_add_accumulates_across_channels() {
+        let mut two: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        rrf_add(&mut two, "a", 0, 1.0);
+        rrf_add(&mut two, "a", 0, 1.0);
+        let mut one: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        rrf_add(&mut one, "b", 0, 1.0);
+        let score_a = *two.get("a").unwrap();
+        let score_b = *one.get("b").unwrap();
+        assert!(
+            (score_a - 2.0 * score_b).abs() < 1e-12,
+            "two-channel rank-0 doc must be ~2x one-channel: a={score_a} b={score_b}"
+        );
+    }
+
+    #[test]
+    fn rrf_add_monotonically_decreasing_in_rank() {
+        let mut acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        rrf_add(&mut acc, "r0", 0, 1.0);
+        rrf_add(&mut acc, "r1", 1, 1.0);
+        rrf_add(&mut acc, "r2", 2, 1.0);
+        let s0 = *acc.get("r0").unwrap();
+        let s1 = *acc.get("r1").unwrap();
+        let s2 = *acc.get("r2").unwrap();
+        assert!(s0 > s1, "rank 0 > rank 1: {s0} vs {s1}");
+        assert!(s1 > s2, "rank 1 > rank 2: {s1} vs {s2}");
+    }
+
+    #[test]
+    fn rrf_acc_missing_key_is_none_no_panic() {
+        let acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        assert!(acc.get("nope").is_none());
+        assert_eq!(acc.get("nope").copied().unwrap_or(0.0), 0.0);
     }
 }

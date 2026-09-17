@@ -23,11 +23,25 @@ golden 目录结构：
 ```
 golden_dir/
   docs/            # 评测语料（被索引的文档）
-  golden.jsonl     # 标注：每行 {"question": "...", "support_files": ["a.txt", ...]}
+  golden.jsonl     # 标注：每行 {"question": "...", "support_files": ["a.txt", ...], "category": "fact"}
 ```
 
 `support_files` 用 **basename** 匹配（不依赖绝对路径），支撑文件应能唯一对应
 `docs/` 下的某个文件。
+
+### `category` 分类（可选但强烈建议）
+
+给每题打**恰好一个**主类别，评测会按类别分桶输出 Recall/Success —— 这样任何改动
+都能回答"**哪一类变好、哪一类变坏**"，而不是只有一个总数。缺省记为 `uncategorized`。
+
+| category | 含义 |
+|---|---|
+| `fact` | 单文档事实，措辞含关键词（BM25 友好） |
+| `semantic` | 单文档事实，但措辞语义化（问句用词与文件名不重叠，压向量通道） |
+| `exact_id` | 精确编号/名称匹配（案号、信用代码、精确金额） |
+| `twin` | 近名/同名文件区分（须靠内容区分兄弟文件） |
+| `multi_hop` | 跨文件综合（2–3 份支撑） |
+| `long_doc` | 长文档深部事实（>1 万字，压 chunk 通道） |
 
 ### 真实库子集（推荐）
 
@@ -48,6 +62,34 @@ golden_dir/
   BGE（`local:bge-large-zh-v1.5`）或远端网关时，向量通道静默跳过，结果只反映
   BM25 + 路径通道。评测前确认设置页/`config` 的 `active_embedding_model_id`。
 - 评测用独立 data dir（`LINK_SEARCHER_DATA_DIR`），不污染真实索引库。
+- 🚨 **不要并行跑多个评测**。本评测逐题启动 CLI 进程，每题都要做一次本地 BGE 嵌入；
+  并行运行会争抢 CPU，使嵌入超过代码里的 **5 秒超时**（`semantic_fuse` 的
+  `cached_embed`），从而**静默退化为纯 BM25**，指标显著偏低。实测同一 75 题集：
+  并行 `Success@10 56.00%` vs 串行 `62.67%`；语义题子集 并行 `3/20` vs 串行 `7/20`。
+  **做 A/B 对比时务必串行执行**（一次只跑一组）。
+- **语义权重 A/B**：环境变量 `LINK_SEARCHER_SEMANTIC_WEIGHT`（0.0–1.0）可覆盖
+  `semantic_weight`（默认 0.3）而**不改动用户 `config.json`**，用于对比不同权重下的
+  检索质量。例：
+  ```bash
+  LINK_SEARCHER_SEMANTIC_WEIGHT=0.7 bash scripts/eval/run_rag_eval.sh <golden_dir> <data_dir>
+  ```
+  ⚠️ 做权重对比时，golden 集需包含**真·语义题**（问句用词与答案文件名不重叠）——
+  若全是"文件名即答案"的关键词题，结论必然偏向 BM25。
+
+### 其他评测用覆盖开关（免重建做参数扫描）
+
+| 环境变量 | 默认 | 作用 |
+|---|---|---|
+| `LINK_SEARCHER_SEMANTIC_WEIGHT` | 0.3 | 语义权重（RRF 下只影响 BM25 候选内部重排） |
+| `LINK_SEARCHER_FUSION` | （空=RRF） | 设为 `mix` 退回旧的分数加权融合 |
+| `LINK_SEARCHER_VECTOR_THRESHOLD` | 0.55 | 文件级向量相似度阈值 |
+| `LINK_SEARCHER_CHUNK_VECTOR_THRESHOLD` | 0.55 | chunk 级向量阈值 |
+| `LINK_SEARCHER_CHUNK_TOP_K` | 500 | chunk 通道取数上限 |
+| `LINK_SEARCHER_RRF_CHUNK_WEIGHT` | 1.0 | chunk 通道的 RRF 权重 |
+
+⚠️ **已扫描结论（2026-09-17，75 题串行）**：这些参数**均已到极限** —— 调整只会在
+`semantic`/`long_doc` 与 `multi_hop`/`twin` 之间移动（净变化恒 +1 题、p=0.50）。**基线
+（0.55 / 0.55 / 500 / 1.0）即为当前最优**，无需再调。
 
 ## 指标含义
 
