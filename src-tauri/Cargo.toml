@@ -66,7 +66,7 @@ symphonia = { version = "0.6.0", features = ["all"] }
 hound = "3.5.1"
 kaldi-native-fbank = "0.1.0"
 ndarray = "0.17.2"
-pdf-inspector = "0.1.7"
+pdf-inspector = "1"
 sherpa-onnx = "1.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
 # POC: pure-Rust legacy .doc (Word 97-2003) extraction; docx feature unneeded

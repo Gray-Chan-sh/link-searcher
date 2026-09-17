@@ -288,9 +288,12 @@ impl PdfExtractor {
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<String> {
         log::info!("[PDF] extracting {:?}", path.file_name());
-        let doc = match lopdf::Document::load(path) {
-            Ok(d) => d,
-            Err(e) => {
+        let engine = super::ocr::preferred_engine(engine);
+        let doc = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            lopdf::Document::load(path)
+        })) {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
                 log::warn!(
                     "[PDF] {:?}: lopdf failed to parse ({e}), trying pdftotext/anydoc fallback",
                     path.file_name()
@@ -317,7 +320,6 @@ impl PdfExtractor {
                     "[PDF] {:?}: pdftotext unavailable/watermarked, falling to image OCR",
                     path.file_name()
                 );
-                let engine = super::ocr::preferred_engine(engine);
                 return if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
                     Ok(text)
                 } else {
@@ -325,6 +327,22 @@ impl PdfExtractor {
                         "failed to load PDF and no OCR fallback available: {e}"
                     ))
                 };
+            }
+            Err(_) => {
+                log::warn!(
+                    "[PDF] {:?}: lopdf panicked during load, trying pdftotext/anydoc fallback",
+                    path.file_name()
+                );
+                if let Some(text) = try_pdftotext_extract(path) {
+                    return Ok(text);
+                }
+                if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
+                    return Ok(text);
+                }
+                return Err(anyhow::anyhow!(
+                    "lopdf panicked and no fallback available for {:?}",
+                    path.file_name()
+                ));
             }
         };
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
@@ -334,17 +352,23 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: {} pages, extracting text", path.file_name(), pages.len());
         let mut page_texts: Vec<String> = Vec::new();
         for page_num in &pages {
-            match doc.extract_text(&[*page_num]) {
-                Ok(text) => page_texts.push(text.trim_end_matches('\n').to_owned()),
-                Err(e) => {
+            let page_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                doc.extract_text(&[*page_num])
+            }));
+            match page_result {
+                Ok(Ok(text)) => page_texts.push(text.trim_end_matches('\n').to_owned()),
+                Ok(Err(e)) => {
                     log::warn!("[PDF] page {} extraction failed: {e}", page_num);
+                    page_texts.push(String::new());
+                }
+                Err(_) => {
+                    log::warn!("[PDF] page {} extraction panicked", page_num);
                     page_texts.push(String::new());
                 }
             }
         }
         let merged = page_texts.join("\n");
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
-        let engine = super::ocr::preferred_engine(engine);
         let is_sparse = is_sparse_text_layer(&merged, pages.len());
         let is_implausible = is_implausible_text_layer(&merged, pages.len());
 

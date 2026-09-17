@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-17：PDF 提取 —— lopdf 加 panic 保护 + pdf-inspector 升级 1.x
+
+- **背景**：`extractor/pdf.rs` 的 lopdf 路径（`Document::load` / `extract_text`）对畸形 PDF 会**直接 panic**，导致整个提取流程崩溃、无任何回退。
+- **改动**：
+  - `lopdf::Document::load` 与逐页 `extract_text` 均包入 `std::panic::catch_unwind(AssertUnwindSafe(...))`；panic 时不再崩溃，改为回退 **pdftotext → 图片 OCR**，两者都不可用才返回错误（错误信息明确标注 "lopdf panicked"）。
+  - `preferred_engine` 解析**上提至函数顶部**（供新增的 panic 分支复用），移除下游两处重复调用。
+  - 依赖：`pdf-inspector` **0.1.7 → 1**。
+- **新增测试**：`src-tauri/tests/test_pdf_inspector_ab.rs`（347 行）——A/B 对比 **lopdf 直提** 与 **pdf-inspector `process_pdf_mem`** 的字符数、期望文本命中、乱码率与耗时；合成 PDF 用例跑 CI，真实 PDF 扫描用例默认 `#[ignore]`（需 `--ignored`）。
+- **验证**：`cargo test --test test_pdf_inspector_ab` → 2 passed / 1 ignored；`cargo test --lib` → 368 passed / 0 failed。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tests/test_pdf_inspector_ab.rs`。
+- ⚠️ **遗留不一致（待处理）**：本文件上方已提交的「PDF 提取管线升级 — pdf-inspector 全管线优先（P0）」条目声称新增 `try_inspector_pipeline` / `try_mixed_extract` 并把入口切到 inspector 管线，但**代码中不存在这两个函数**（当前仅用 `classify_pdf_mem` 做路由）。该条目与代码不符，需后续确认是「实现丢失」还是「条目超前记录」。
+
+---
+
 ## 2026-09-17：剩余三个方向的验证 —— HyDE 负面 / 多向量不可行 / top-30 口径
 
 - **① 查询扩展（HyDE）：❌ 明确负面**。用本地 LLM（`Qwen3.8-27B-oQ4e-mtp`）为每道语义题生成"假设答案"再嵌入，与"直接嵌入问句"对比（纯 Python 实验，未改代码）：
