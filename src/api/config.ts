@@ -1,7 +1,7 @@
 import * as client from './client'
 
 /** Wire values are PascalCase (serde unit-enum variant names), NOT lowercase. */
-export type ModelType = 'Embedding' | 'Llm' | 'Unknown'
+export type ModelType = 'Embedding' | 'Llm' | 'Reranker' | 'Unknown'
 
 export interface ModelInfo {
     id: string
@@ -42,6 +42,7 @@ export interface ConfigInfo {
     providers: ProviderInfo[]
     active_embedding_model_id: string
     active_llm_model_id: string
+    active_reranker_model_id: string
     semantic_weight: number
 }
 
@@ -96,7 +97,7 @@ export async function refreshProviderModels(id: string): Promise<ModelInfo[]> {
     return client.invoke<ModelInfo[]>('refresh_provider_models', { id })
 }
 
-export async function setActiveModel(kind: 'embedding' | 'llm', modelId: string): Promise<void> {
+export async function setActiveModel(kind: 'embedding' | 'llm' | 'reranker', modelId: string): Promise<void> {
     await client.invoke('set_active_model', { kind, modelId })
 }
 

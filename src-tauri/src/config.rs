@@ -18,6 +18,7 @@ pub const INDEX_DIR_NAME: &str = ".ls-index";
 pub enum ModelType {
     Embedding,
     Llm,
+    Reranker,
     #[default]
     Unknown,
 }
@@ -27,6 +28,7 @@ impl ModelType {
         match self {
             Self::Embedding => "embedding",
             Self::Llm => "llm",
+            Self::Reranker => "reranker",
             Self::Unknown => "unknown",
         }
     }
@@ -118,6 +120,10 @@ pub struct AppConfig {
     /// `provider_id:model_id` of the embedding model in use.
     #[serde(default)]
     pub active_embedding_model_id: String,
+    /// `provider_id:model_id` of the reranker model in use. Empty (default)
+    /// disables the rerank stage — behaviour is unchanged.
+    #[serde(default)]
+    pub active_reranker_model_id: String,
     /// `provider_id:model_id` of the LLM model in use.
     #[serde(default)]
     pub active_llm_model_id: String,
@@ -146,6 +152,7 @@ impl Default for AppConfig {
             llm_model: "qwen2.5-7b-instruct".to_string(),
             providers: Vec::new(),
             active_embedding_model_id: String::new(),
+            active_reranker_model_id: String::new(),
             active_llm_model_id: String::new(),
             semantic_weight: 0.3,
         }

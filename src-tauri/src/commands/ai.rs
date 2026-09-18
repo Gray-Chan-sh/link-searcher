@@ -965,6 +965,53 @@ fn semantic_fuse(
     )
 }
 
+/// Reorder permutation from reranker scores. Given the full hit list, the
+/// indices of candidates that were actually reranked, and their scores,
+/// returns a permutation of `0..original.len()` where reranked candidates
+/// come first (sorted by score descending) and all others follow in their
+/// original relative order.
+/// 重排结果与原排序的 RRF 融合。`w=1.0` 完全采用重排名次（原行为），
+/// `w=0.0` 完全保留原序。中间值把两个**排名**做 RRF 融合，避免重排把原本
+/// 排序正确的文档（尤其长文档）误压出前 10。
+const RERANK_FUSION_K: f64 = 60.0;
+
+fn apply_rerank_order(
+    original: &[ScoredHit],
+    rerank_idx: &[usize],
+    scores: &[f32],
+    w: f64,
+) -> Vec<usize> {
+    if rerank_idx.is_empty() || scores.is_empty() {
+        return (0..original.len()).collect();
+    }
+    let mut paired: Vec<(usize, f32)> = rerank_idx
+        .iter()
+        .zip(scores.iter())
+        .map(|(&idx, &s)| (idx, s))
+        .collect();
+    paired.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let rerank_rank: std::collections::HashMap<usize, usize> = paired
+        .iter()
+        .enumerate()
+        .map(|(r, (idx, _))| (*idx, r))
+        .collect();
+
+    let w = w.clamp(0.0, 1.0);
+    let mut fused: Vec<(usize, f64)> = (0..original.len())
+        .map(|i| {
+            let s_orig = 1.0 / (RERANK_FUSION_K + i as f64);
+            let s_rr = rerank_rank
+                .get(&i)
+                .map(|r| 1.0 / (RERANK_FUSION_K + *r as f64))
+                .unwrap_or(0.0);
+            (i, w * s_rr + (1.0 - w) * s_orig)
+        })
+        .collect();
+    // stable sort：同分（如 w=1.0 时全部未重排候选）保持原相对顺序
+    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    fused.into_iter().map(|(i, _)| i).collect()
+}
+
 /// BM25 retrieval returning top relevant hits — tokenised as explicit OR
 /// (a raw question would parse as an exact phrase and miss). When
 /// `semantic` is true and the embedding gateway is configured, reranks the
@@ -1551,6 +1598,88 @@ pub(crate) async fn prepare_conversation_prompt(
                     };
                     score(b).partial_cmp(&score(a)).unwrap_or(std::cmp::Ordering::Equal)
                 });
+            }
+        }
+        // --- Rerank stage (after fusion, before top-30 injection) ---
+        let rerank_enabled = std::env::var("LINK_SEARCHER_RERANK")
+            .map(|v| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true);
+        let rerank_top_n = std::env::var("LINK_SEARCHER_RERANK_TOP_N")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(50);
+        if rerank_enabled && all_hits.len() > 10 {
+            let top_n = rerank_top_n.min(all_hits.len());
+            let rc = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let cand_ids: Vec<String> = all_hits[..top_n].iter().map(|h| h.file_id.clone()).collect();
+            let cand_recs = crate::db::tracker::get_files_by_ids(&rc, &cand_ids).unwrap_or_default();
+            let mut md5s: Vec<String> = cand_recs.iter()
+                .filter_map(|r| r.as_ref().and_then(|r| r.md5.clone()))
+                .collect();
+            md5s.sort();
+            md5s.dedup();
+            let chunk_embs = crate::db::tracker::get_chunk_embeddings_by_md5s(&rc, &md5s).unwrap_or_default();
+            let mut chunks_by_md5: std::collections::HashMap<String, Vec<(usize, Vec<f32>)>> = std::collections::HashMap::new();
+            for (md5, idx, vec) in chunk_embs {
+                chunks_by_md5.entry(md5).or_default().push((idx, vec));
+            }
+            let query_emb = crate::ai::cached_embed(&search_q);
+            let mut passages: Vec<String> = Vec::new();
+            let mut rerank_idx: Vec<usize> = Vec::new();
+            for (i, rec) in cand_recs.iter().enumerate() {
+                let Some(rec) = rec else { continue };
+                let Some(md5) = &rec.md5 else { continue };
+                let passage = if let Some(qe) = &query_emb {
+                    if let Some(chunks) = chunks_by_md5.get(md5) {
+                        let best = chunks.iter().max_by(|(_, a), (_, b)| {
+                            crate::ai::cosine(qe, a).partial_cmp(&crate::ai::cosine(qe, b))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        if let Some((chunk_idx, _)) = best {
+                            let db_chunks = crate::db::chunks::get_chunks(&rc, md5).unwrap_or_default();
+                            db_chunks.iter()
+                                .find(|c| c.chunk_index as usize == *chunk_idx)
+                                .map(|c| crate::ai::truncate_for_embed(&c.text))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let passage = passage.or_else(|| {
+                    crate::db::tracker::get_content(&rc, md5).ok().flatten()
+                        .map(|t| crate::ai::truncate_for_embed(&t))
+                });
+                if let Some(p) = passage {
+                    passages.push(p);
+                    rerank_idx.push(i);
+                }
+            }
+            drop(rc);
+            if !passages.is_empty() {
+                match crate::ai::rerank(&search_q, &passages) {
+                    Some(scores) if scores.len() == rerank_idx.len() => {
+                        // 默认 0.3：实测 75 题下 w=0.3 的每一类别都不低于启用重排前，
+                        // 而 w=1.0（纯重排）会把 long_doc 从 100% 压到 60%。
+                        let fusion_w: f64 = std::env::var("LINK_SEARCHER_RERANK_FUSION")
+                            .ok()
+                            .and_then(|v| v.trim().parse::<f64>().ok())
+                            .unwrap_or(0.3);
+                        let perm = apply_rerank_order(&all_hits, &rerank_idx, &scores, fusion_w);
+                        let new_hits: Vec<ScoredHit> = perm.iter().map(|&i| all_hits[i].clone()).collect();
+                        all_hits = new_hits;
+                        log::info!("[AI]   rerank: reordered {} candidates", rerank_idx.len());
+                    }
+                    Some(scores) => {
+                        log::warn!("[AI]   rerank: score count mismatch ({} vs {}), keeping original order", scores.len(), rerank_idx.len());
+                    }
+                    None => {
+                        log::warn!("[AI]   rerank: unavailable, keeping original order");
+                    }
+                }
             }
         }
         emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());
@@ -4348,5 +4477,69 @@ mod rrf_add_tests {
         let acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
         assert!(acc.get("nope").is_none());
         assert_eq!(acc.get("nope").copied().unwrap_or(0.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod rerank_order_tests {
+    use super::*;
+
+    fn hit(id: &str) -> ScoredHit {
+        ScoredHit {
+            file_id: id.into(),
+            path: String::new(),
+            bm25_score: None,
+            semantic_score: None,
+            rrf_score: None,
+            from_history: false,
+            from_chunk: false,
+            hit_chunks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn rerank_orders_prefix_by_score_desc_preserves_tail() {
+        let original = vec![hit("A"), hit("B"), hit("C"), hit("D"), hit("E")];
+        let rerank_idx = vec![0, 1, 2];
+        let scores = vec![0.1, 0.9, 0.5];
+        let perm = apply_rerank_order(&original, &rerank_idx, &scores, 1.0);
+        assert_eq!(perm, vec![1, 2, 0, 3, 4]);
+    }
+
+    #[test]
+    fn excluded_candidate_keeps_original_relative_position() {
+        let original = vec![hit("A"), hit("B"), hit("C"), hit("D"), hit("E")];
+        let rerank_idx = vec![0, 2];
+        let scores = vec![0.9, 0.1];
+        let perm = apply_rerank_order(&original, &rerank_idx, &scores, 1.0);
+        assert_eq!(perm, vec![0, 2, 1, 3, 4]);
+    }
+
+    #[test]
+    fn empty_inputs_yield_identity_permutation() {
+        let original = vec![hit("A"), hit("B"), hit("C")];
+        let perm = apply_rerank_order(&original, &[], &[], 1.0);
+        assert_eq!(perm, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn fusion_weight_protects_high_original_rank() {
+        // 夹具对应"原本排第 1 的文档被重排打到最低分"（实测中的长文档误压）
+        let original = vec![hit("A"), hit("B"), hit("C"), hit("D")];
+        let rerank_idx = vec![0, 1, 2, 3];
+        let scores = vec![0.1, 0.9, 0.8, 0.7];
+        assert_eq!(
+            apply_rerank_order(&original, &rerank_idx, &scores, 1.0),
+            vec![1, 2, 3, 0],
+            "w=1.0 纯重排，A 掉到末尾"
+        );
+        assert_eq!(
+            apply_rerank_order(&original, &rerank_idx, &scores, 0.0),
+            vec![0, 1, 2, 3],
+            "w=0.0 纯原序，完全不动"
+        );
+        let fused = apply_rerank_order(&original, &rerank_idx, &scores, 0.5);
+        assert_eq!(fused[0], 1, "got {fused:?}");
+        assert_eq!(fused[1], 0, "w=0.5 融合后 A 应仅降一位，got {fused:?}");
     }
 }

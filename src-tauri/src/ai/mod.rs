@@ -114,6 +114,7 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
     let active_id = match kind {
         ModelType::Embedding => &cfg.active_embedding_model_id,
         ModelType::Llm => &cfg.active_llm_model_id,
+        ModelType::Reranker => &cfg.active_reranker_model_id,
         ModelType::Unknown => return None,
     };
     if active_id.is_empty() {
@@ -156,10 +157,18 @@ pub fn classify_model_by_name(id: &str) -> ModelType {
         "embed", "text-embedding", "bge", "minilm", "e5-", "gte-", "nomic-embed",
         "jina-embeddings", "mxbai-embed", "all-minilm",
     ];
+    const RERANK_HINTS: &[&str] = &["reranker", "rerank", "cross-encoder"];
     const LLM_HINTS: &[&str] = &[
         "instruct", "chat", "llm", "gpt", "qwen", "deepseek", "gemma", "llama", "mistral",
         "mixtral", "yi-", "glm", "phi", "command-r", "claude", "gemini",
     ];
+    // Rerank 必须先判：`bge-reranker-v2-m3` 含 "bge"，若先跑 EMBED_HINTS 会被
+    // 误判为嵌入模型，用户在设置页就会把它选进"嵌入模型"下拉框并调用失败。
+    for h in RERANK_HINTS {
+        if lower.contains(h) {
+            return ModelType::Reranker;
+        }
+    }
     for h in EMBED_HINTS {
         if lower.contains(h) {
             return ModelType::Embedding;
@@ -324,6 +333,63 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         .enumerate()
         .map(|(i, _)| by_index.remove(&i))
         .collect()
+}
+
+/// Rerank `passages` against `query` via the gateway's `/rerank` endpoint.
+/// Returns one score per passage **in input order**. `None` on any failure
+/// (no reranker configured, gateway down, malformed response) — caller keeps
+/// the original ordering.
+pub fn rerank(query: &str, passages: &[String]) -> Option<Vec<f32>> {
+    let cfg = crate::config::load_config();
+    if passages.is_empty() {
+        return None;
+    }
+    let ep = resolve_active_endpoint(&cfg, ModelType::Reranker)?;
+    let url = format!("{}/rerank", ep.base_url.trim_end_matches('/'));
+
+    #[derive(Serialize)]
+    struct Req<'a> {
+        model: &'a str,
+        query: &'a str,
+        documents: &'a [String],
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        results: Vec<RerankEntry>,
+    }
+    #[derive(Deserialize)]
+    struct RerankEntry {
+        index: usize,
+        relevance_score: f32,
+    }
+
+    let body = Req { model: &ep.model_id, query, documents: passages };
+    let req_body = serde_json::to_string(&body).unwrap_or_default();
+    let send_result = build_agent()
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set_auth(&ep.api_key)
+        .send_string(&req_body);
+
+    let parsed: Result<Resp, String> = send_result
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+        .and_then(|body| serde_json::from_str::<Resp>(&body).map_err(|e| e.to_string()));
+
+    let resp = match parsed {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("[AI] rerank request failed: {e}");
+            return None;
+        }
+    };
+    let mut scores = vec![f32::MIN; passages.len()];
+    for entry in resp.results {
+        if entry.index < passages.len() {
+            scores[entry.index] = entry.relevance_score;
+        }
+    }
+    Some(scores)
 }
 
 pub fn embed(text: &str) -> Option<Vec<f32>> {

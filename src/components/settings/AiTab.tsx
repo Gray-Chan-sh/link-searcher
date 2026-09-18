@@ -26,7 +26,7 @@ interface AiTabProps {
   aiTest: { kind: string; ok: boolean; detail: string; max_output_tokens?: number }[] | null
   aiTestLoading: boolean
   onSaveSemanticWeight: () => void
-  onActiveModel: (kind: 'embedding' | 'llm', modelId: string) => void
+  onActiveModel: (kind: 'embedding' | 'llm' | 'reranker', modelId: string) => void
   onTestProvider: (p: ProviderInfo) => void
   onRefreshProvider: (p: ProviderInfo) => void
   onDeleteProvider: (p: ProviderInfo) => void
@@ -39,7 +39,7 @@ interface AiTabProps {
   onInstallBge: () => void
   providerInUse: (p: ProviderInfo) => boolean
   modelInUse: (p: ProviderInfo, modelId: string) => boolean
-  modelOptions: (kind: 'embedding' | 'llm') => { value: string; label: string }[]
+  modelOptions: (kind: 'embedding' | 'llm' | 'reranker') => { value: string; label: string }[]
   setEditingId: (id: string | null) => void
   setEditDraft: (d: { name: string; baseUrl: string; apiKey: string; keyTouched: boolean; reveal: boolean } | null | ((prev: { name: string; baseUrl: string; apiKey: string; keyTouched: boolean; reveal: boolean } | null) => { name: string; baseUrl: string; apiKey: string; keyTouched: boolean; reveal: boolean } | null)) => void
   setAdding: (v: boolean) => void
@@ -128,6 +128,18 @@ export function AiTab({
             availableLabel={t('ai_available')}
             notConfiguredLabel={t('ai_not_configured')}
           />
+          <UsageSelect
+            label={t('reranker_model')}
+            value={appConfig?.active_reranker_model_id ?? ''}
+            onChange={v => onActiveModel('reranker', v)}
+            options={modelOptions('reranker')}
+            cap={caps?.embedding} /* reranker served by same gateway as embedding */
+            notSelectedLabel={t('ai_not_selected')}
+            checkingLabel={t('ai_checking')}
+            availableLabel={t('ai_available')}
+            notConfiguredLabel={t('ai_not_configured')}
+          />
+          <p className="text-[10px] text-gray-400">{t('reranker_hint')}</p>
         </div>
 
         <div className="pt-2 space-y-1 flex items-center gap-2 flex-wrap">

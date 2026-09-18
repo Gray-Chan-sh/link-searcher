@@ -45,12 +45,19 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
 
   const providerInUse = (p: ProviderInfo) =>
     (appConfig?.active_embedding_model_id ?? '').startsWith(`${p.id}:`) ||
-    (appConfig?.active_llm_model_id ?? '').startsWith(`${p.id}:`)
+    (appConfig?.active_llm_model_id ?? '').startsWith(`${p.id}:`) ||
+    (appConfig?.active_reranker_model_id ?? '').startsWith(`${p.id}:`)
 
-  const modelOptions = (kind: 'embedding' | 'llm', bgeStatus: { installed: boolean; model_dir: string; model_name: string }[] | null): { value: string; label: string }[] => {
+  const modelOptions = (kind: 'embedding' | 'llm' | 'reranker', bgeStatus: { installed: boolean; model_dir: string; model_name: string }[] | null): { value: string; label: string }[] => {
+    const typeMap: Record<'embedding' | 'llm' | 'reranker', ModelType> = {
+      embedding: 'Embedding',
+      llm: 'Llm',
+      reranker: 'Reranker',
+    }
+    const targetType = typeMap[kind]
     const remote = (appConfig?.providers ?? []).flatMap(p =>
       p.models
-        .filter(m => m.enabled !== false && m.model_type === (kind === 'embedding' ? 'Embedding' : 'Llm'))
+        .filter(m => m.enabled !== false && m.model_type === targetType)
         .map(m => ({ value: `${p.id}:${m.id}`, label: `${p.name} / ${m.id}` })),
     )
     if (kind === 'embedding' && bgeStatus) {
@@ -64,7 +71,8 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
 
   const modelInUse = (p: ProviderInfo, modelId: string) =>
     appConfig?.active_embedding_model_id === `${p.id}:${modelId}` ||
-    appConfig?.active_llm_model_id === `${p.id}:${modelId}`
+    appConfig?.active_llm_model_id === `${p.id}:${modelId}` ||
+    appConfig?.active_reranker_model_id === `${p.id}:${modelId}`
 
   const handleToggleEnabled = async (p: ProviderInfo, modelId: string, enabled: boolean) => {
     await persistProviders(
@@ -76,9 +84,14 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     )
   }
 
-  const handleActiveModel = async (kind: 'embedding' | 'llm', modelId: string) => {
+  const handleActiveModel = async (kind: 'embedding' | 'llm' | 'reranker', modelId: string) => {
     if (!appConfig) return
-    const key = kind === 'embedding' ? 'active_embedding_model_id' : 'active_llm_model_id'
+    const keyMap: Record<'embedding' | 'llm' | 'reranker', 'active_embedding_model_id' | 'active_llm_model_id' | 'active_reranker_model_id'> = {
+      embedding: 'active_embedding_model_id',
+      llm: 'active_llm_model_id',
+      reranker: 'active_reranker_model_id',
+    }
+    const key = keyMap[kind]
     const prev = appConfig[key]
     setAppConfig({ ...appConfig, [key]: modelId })
     setCaps(c => (c ? { ...c, [kind]: undefined } : c))

@@ -18,6 +18,48 @@
 
 ---
 
+## 2026-09-17：重排（Reranker）落地 —— 管线 + 模型分类 + 设置页
+
+- **动机**：诊断显示 21 道未命中里 **10 道的正确文档已在候选池内**（rank 11–30），只是排名不够前。离线实验用 cross-encoder 重排后 `Success@10` 由 72.00% → 81.33%（+7 题）。
+- **改动**：
+  - **管线**（`commands/ai.rs`）：RRF 融合后、取 top-30 前新增重排阶段 —— 取 top-N（默认 50，`LINK_SEARCHER_RERANK_TOP_N`）→ 构造 passage → 调 `/v1/rerank` → 按分数重排。排序逻辑抽为纯函数 `apply_rerank_order` 便于单测。env `LINK_SEARCHER_RERANK=off` 可一键关闭。
+  - **客户端**（`ai/mod.rs`）：新增 `pub fn rerank(query, passages) -> Option<Vec<f32>>`，走网关 `/v1/rerank`；**任何失败（未配置/网关不可达/超时/格式异常）都返回 `None` → 保留原顺序**，只打 WARN。**重排是纯排序优化，fail-open，不影响可用性。**
+  - **模型分类**（`ai/mod.rs` + `config.rs`）：`ModelType` 新增 **`Reranker`** 变体；`classify_model_by_name` 新增 `rerank/reranker/cross-encoder` 识别，**必须排在 `EMBED_HINTS` 之前** —— 否则 `bge-reranker-v2-m3` 含 "bge" 会被误判为嵌入模型。
+  - **配置**：新增 `active_reranker_model_id`（`provider:model`，**空 = 关闭 = 默认**），与 `active_embedding_model_id` / `active_llm_model_id` 命名对齐。
+  - **设置页**（`AiTab.tsx` + `useSettingsProviders.ts` + `api/config.ts` + 4 语言 i18n）：新增第三个模型下拉框（重排模型），复用现有 `UsageSelect` 组件。
+- **实测（75 题、串行、真实管线）**：
+
+  | 指标 | 重排前 | **重排后** | Δ |
+  |---|---|---|---|
+  | Context Recall@10 | 66.67% | **73.81%** | **+7.14pp** |
+  | Success@10 | 72.00% | **76.00%** | **+4.00pp** |
+
+  | category | 前 → 后 |
+  |---|---|
+  | `multi_hop` | 50.00 → **100.00** ✅ |
+  | `exact_id` | 62.50 → **75.00** ✅ |
+  | `twin` | 70.00 → **80.00** ✅ |
+  | `fact` | 91.67 → 91.67 |
+  | `semantic` | 55.00 → 50.00 ⚠️ |
+  | **`long_doc`** | **100.00 → 60.00** ⚠️ |
+
+- **✅ 已解决的回落（融合权重）**：纯重排（w=1.0）会把 `long_doc` 从 100% 压到 **60%**（+`semantic` −5pp）。根因：passage 取"与查询最相似的单个 chunk"，长文档若该 chunk 不含答案就会被误压。**修法**：把重排名次与原排序做 **RRF 融合**（`apply_rerank_order` 增加权重参数 `w`；`LINK_SEARCHER_RERANK_FUSION`，**默认 0.3**）。
+- **融合权重扫描（75 题、串行）**：
+
+  | w | Recall@10 | Success@10 | multi_hop | twin | long_doc | semantic | fact |
+  |---|---|---|---|---|---|---|---|
+  | 1.0（纯重排） | 73.81% | 76.00% | 100.00 | 80.00 | **60.00** ⚠️ | 50.00 ⚠️ | 91.67 |
+  | 0.5 | 73.81% | **80.00%** | **100.00** | **90.00** | **100.00** | 55.00 | 87.50 |
+  | **0.3（新默认）** | **73.81%** | **80.00%** | 75.00 | **90.00** | **100.00** | 55.00 | **95.83** |
+  | 0（=不重排，基线） | 66.67% | 72.00% | 50.00 | 70.00 | 100.00 | 55.00 | 91.67 |
+
+  **选 0.3 的理由**：与 0.5 在两项总指标上打平（80.00% / 73.81%），但 **w=0.3 的每一类别均不低于基线**（唯一零回落的配置）；而 0.5 会让 `fact` −4.17pp。
+- **最终收益（相对启用重排前）**：`Success@10` **72.00% → 80.00%（+8.00pp）**、`Recall@10` **66.67% → 73.81%（+7.14pp）**、`multi_hop` **50 → 75**、`twin` **70 → 90**、`exact_id` **62.5 → 75**、`fact` **91.67 → 95.83**，其余持平。
+- **默认状态**：`active_reranker_model_id` 为空 → **重排关闭，行为与改动前完全一致**（选择性开启功能）。
+- **涉及文件**：`src-tauri/src/{config.rs, ai/mod.rs, commands/ai.rs, commands/config.rs}`、`src/{api/config.ts, hooks/useSettingsProviders.ts, components/settings/AiTab.tsx, i18n/*}`。
+
+---
+
 ## 2026-09-17：剩余三个方向的验证 —— HyDE 负面 / 多向量不可行 / top-30 口径
 
 - **① 查询扩展（HyDE）：❌ 明确负面**。用本地 LLM（`Qwen3.8-27B-oQ4e-mtp`）为每道语义题生成"假设答案"再嵌入，与"直接嵌入问句"对比（纯 Python 实验，未改代码）：

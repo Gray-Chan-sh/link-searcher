@@ -29,6 +29,8 @@ pub struct ConfigInfo {
     pub active_llm_model_id: String,
     #[serde(default)]
     pub semantic_weight: f64,
+    #[serde(default)]
+    pub active_reranker_model_id: String,
 }
 
 #[tauri::command]
@@ -49,6 +51,7 @@ pub fn get_config() -> Result<ConfigInfo, String> {
         active_embedding_model_id: config.active_embedding_model_id,
         active_llm_model_id: config.active_llm_model_id,
         semantic_weight: config.semantic_weight,
+        active_reranker_model_id: config.active_reranker_model_id,
     })
 }
 
@@ -86,6 +89,7 @@ pub fn update_config(
         active_embedding_model_id: new_config.active_embedding_model_id,
         active_llm_model_id: new_config.active_llm_model_id,
         semantic_weight: new_config.semantic_weight,
+        active_reranker_model_id: new_config.active_reranker_model_id,
     };
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.
