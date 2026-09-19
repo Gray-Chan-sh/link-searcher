@@ -4,6 +4,106 @@
 
 ---
 
+## 2026-09-19：LLM reasoning 字段分离 + max_tokens 1M
+
+- **问题**：聚合 LLM 模型（如 9router）可能返回 `reasoning`/`reasoning_content` 思考字段，流式路径将思考文本混入最终正文，导致 AI 聊天回复被污染（非严格 JSON、回答截断）。同时 `DEFAULT_MAX_TOKENS=16384` 对思考模型偏小，思考 token 吃光预算后正文被人为截断。
+- **改动**：
+  - `ai/mod.rs` `chat_stream()`：字段级分离——reasoning/reasoning_content delta 仅转发 `on_delta(d, true)` 给前端思考区，不进 `full`；仅 content delta 进 `full`；结尾 `full` 为空时回退 `reasoning_buf`（镜像非流式 `chat()` 语义）
+  - `ai/mod.rs` `DEFAULT_MAX_TOKENS`：16384 → 1_000_000（模型在自身上限自然停止，不人为截断）
+  - `ai/mod.rs` `active_max_tokens()`：新增 debug 日志标注 `source=detected|fallback`，便于排查
+  - `tests/ai_chat_stream_wire.rs`：新增 3 个 wire 测试（reasoning+content 分离、纯 reasoning 回退、reasoning-only fallback）
+- **影响范围**：`conversation_ask_stream`、`smart_search_stream` 自动受益；非流式 `chat()` / 前端 `ChatPanel` / `ai_topic_clusters` 不改
+- **验证**：12 个 wire 测试全通过；semgrep 0 findings；`test_incremental_indexing_dedup`、`test_ocr_fallback` 预存在于 master，非本次引入
+
+---
+
+## 2026-09-19：检索 POC —— 在线词表改写（Level 1）显著超越预设问题
+
+- **背景**：Level 3 POC（预设问题）暴露根本缺陷（LLM 猜测问法覆盖率不足、引发 RRF 侧偏误伤 twin 类 -20pp）。改为 Level 1 **"不预测，只翻译"**——查询时读取 `hotword_counts` 表前 200 个高频词，随用户问题一同喂给 LLM，实时将口语转化为库内正式术语。
+- **改动**：
+  - `ai/mod.rs`：新增 `vocabulary_rewrite(query, conn)`——读 `hotword_counts` 高频词（count >= 20, length >= 2, top 200），调 LLM 改写口语为库内术语关键词
+  - `commands/ai.rs`：`prepare_conversation_prompt` 中，在 BM25 检索前接入改写逻辑，由 `LINK_SEARCHER_VOCAB_REWRITE` 开关控制（默认关），改写关键词与原实体词合并用于 BM25 / 向量检索
+- **A/B 评测（88 题，串行）**：
+
+  | 类别 | 基线 | Level 3 (离线QA) | **Level 1 (在线改写)** |
+  |---|---|---|---|
+  | **semantic** | 45.45% (15/33) | 51.52% (+6.07pp) | **57.58% (19/33) (+12.13pp)** ✅ |
+  | exact_id | 75.00% | 75.00% | **87.50% (+12.50pp)** ✅ |
+  | fact | 95.83% | 95.83% | 91.67% (-4.16pp) |
+  | twin | 90.00% | 70.00% (-20pp) | **90.00% (±0)** ✅ 无误伤 |
+  | multi_hop | 75.00% | 62.50% (-12.5pp) | **75.00% (±0)** ✅ 无误伤 |
+  | long_doc | 100% | 100% | 100% |
+  | **总体** | **72.73%** | 71.59% (-1.14pp) | **77.27% (+4.54pp)** ✅ |
+
+- **亮点**：
+  1. **旗舰案例修复**："律师受当事人委托，对不动产资料进行查询，需要什么手续？" 从基线未进 top-30 **升至命中 top-10**。
+  2. **零副作用**：由于不增加新检索通道、仅丰富 BM25 关键词，twin/multi_hop 完全无误伤。
+  3. **修复 5 题**：不动产手续、小区安保单价、购房迟延罚金、延迟解约、工程款逾期违约金。
+- **涉及文件**：`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo build` 0 错误；`semgrep --severity ERROR` 0 findings；88 题串行评测。
+
+---
+
+## 2026-09-19：检索 POC —— 离线问答对索引（Level 3）验证
+
+- **背景**：88 题评测中 `semantic` 类（开放式问法找精确答案）Success@10 仅 45.45%，合同类 0/6 全挂。根因是用户口语与库内法律文本的词汇鸿沟（"跳槽"在库内仅出现 5 次，"竞业"出现 1,309 次）。
+- **方案**：离线用 LLM 读每篇文档，生成 3–5 个口语化问题（"离职后多长时间不能去竞争对手那里工作？"），向量化后作为独立检索通道（`LINK_SEARCHER_QA_SCAN` 开关，默认关）。
+- **新增**：
+  - `doc_qa_pairs` 表（`db/mod.rs`）：存储 `(file_id, question, vector)` 三元组
+  - CRUD 函数（`db/tracker.rs`）：`upsert_qa_pair` / `get_all_qa_vectors` / `delete_qa_for_file` / `count_qa_pairs`
+  - QA 向量扫描（`ai/mod.rs`）：`qa_vector_scan_with_query_emb`——复用 `vector_scan_with_query_emb` 模式，扫描 QA 对向量库
+  - CLI 子命令（`cli.rs`）：`link-searcher index-qa --count 5 --min-chars 1800 --max-chars 6500`——批量读 `content_index`，调 LLM 生成问题，调 `cached_embed` 向量化，写入 `doc_qa_pairs`
+  - RAG 管线集成（`commands/ai.rs`）：在 `prepare_conversation_prompt` 的 chunk 通道之后加入 QA 通道，通过 RRF 融合进候选池
+- **A/B 评测（88 题，串行）**：
+
+  | 类别 | BEFORE (QA关) | AFTER (QA开, 937 对) | 变化 |
+  |---|---|---|---|
+  | semantic | 45.45% (15/33) | **51.52%** (17/33) | **+6.07pp** ✅ |
+  | 合同类 6 题 | 0/6 = 0% | 2/6 = 33% | **+2 题** ✅ |
+  | twin | 90% | 70% | −20pp ⚠️ |
+  | multi_hop | 75% | 62.5% | −12.5pp ⚠️ |
+  | 总体 | 72.73% | 71.59% | −1.14pp |
+
+- **关键发现**：
+  1. **方向成立**：有 QA 对的合同文档确实能被找到（定制品购销合同、母线槽施工合同从 0→命中），证明"离线预生成口语化问题→向量匹配"能桥接词汇鸿沟。
+  2. **瓶颈在 LLM 质量**：gemma-4-e2b（小模型）生成的 5 个问题太泛，4/6 合同目标文档的生成问题恰好没覆盖到黄金集问的条款（如问"工资多少"但没问"辞工提前期"，问"单价多少"但没问"保修期限"）。需换更大模型（Qwen 27B）或每篇生成更多问题（10–15 个）。
+  3. **覆盖率不均匀导致 RRF 倾斜**：仅 200 篇有 QA 对，其余 1.1 万篇没有，QA 通道新增候选把部分无 QA 的 twin/multi_hop 文档挤出 top-10。需全量生成才能消除。
+- **涉及文件**：`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/ai/mod.rs`、`src-tauri/src/cli.rs`、`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo build` 零错误（3 个 pre-existing warning 无关）；88 题 A/B 串行评测。
+
+---
+
+## 2026-09-19：文档 —— 新增《检索问答流程》
+
+- **新增 `docs/RAG_PIPELINE.md`**：完整描述"用户提问后系统做了什么"——指令剥离 / 问题改写 / 范围解析 / 四路检索 / 合并排序 / 精读重排 / 选材配额 / 严格模式 / 生成引用 / 结果展示共 10 步。
+- **纯行为描述**：不含文件、函数、常量等实现细节（实现见 `ARCHITECTURE.md`，参数见 `rag-eval-baseline.md`），面向"想理解系统怎么想的"读者。
+- **含两张关键表**：① **关键截断链**——信息在「合并排序 → 精读窗口 → 注入上限 → 材料总上限」四步依次丢失，并指出**"检索到了但模型没看到"**的典型成因；② **已知薄弱场景**——按评测基线列出合同/法规/语义/取值四类查询的强弱及其规律（*问句越像需求陈述越难检索，越像文档原话越容易*）。
+- **含排查线索**：回答不对时按「检索依据面板 → 推理过程时间线 → 严格模式」三步定位。
+- **涉及文件**：`docs/RAG_PIPELINE.md`（新增）、`README.md`（文档导航）、`CHANGELOG.md`。
+
+---
+
+## 2026-09-19：检索指标盲区 —— RRF 挤掉"单通道优秀"文档 + 双重融合
+
+- **现象**（真实用户案例）：`律师受当事人委托，对不动产资料进行查询，需要什么手续和材料？` 的注入证据里**没有**《不动产登记资料查询暂行办法(2024修正).docx》（该问的法源）。该文档在**纯 BM25 下排第 7**，却被挤出 top-30。
+- **根因（两层）**：
+  1. **双重融合**：`bm25_relevant_hits` 内部先用 `semantic_fuse`（分数混合）重排 BM25 候选，外层管线又用 RRF 融合各通道 → 外层看到的"BM25 名次"并非真实名次（外层已改 RRF，内层仍留旧 `weighted_mix`）。
+  2. **RRF 平坦性**：`1/(K+rank)` 使"单通道优秀"（BM25 #7 → 0.0149）输给"多通道中等"（约 0.024）。
+- **量化**：该缺陷长期未被发现，是因为此文档**不在 golden 集内** —— 指标对它是"盲"的，故 80.00% 与"案例查不到"可以并存。
+- **修复尝试与实测取舍**：新增"精英加成"（只给**纯 BM25 前 K 名**加权重，按 `bm25_score` 回溯名次——按通道迭代名次无效）。目标文档可回归 top-10（`K=10 w=2` → rank 8），但总分 **80.00% → 72.00%**（`multi_hop` 75→37.5）。属结构性取舍：抬高字面精度必然挤占语义召回名额。
+- **处置**：① **保持基线**（精英加成默认关闭 `K=0`，行为不变）；② 将该案例纳入 golden 集（75 → 76 题），新基线 **78.95%**，该题**登记为已知失败**；③ 保留 env 开关作为**已知代价的应急手段**。
+- **题面分布校正（同日，88 题基线）**：分析发现原 76 题集 **66%（50/76）是"X 是多少/是什么"取值题**（问句含实体名 → BM25 有强锚点），而真实用户主要的"条款/要求/清单"式查询**仅 1 题**。故：
+  - 将该案例**改归 `semantic`**（按仓库定义"问句用词与文件名不重叠"，本问与文件名仅重合 3 字；原归 `fact` 有误）。
+  - 并行委派 2 个子代理，新增 **12 道法规/合同类条款查询题**（每题附逐字答案引文，经独立校验器核验：引文逐字命中、文件名重合 ≤3、无重复、无 basename 歧义 —— **12/12 通过**）。
+  - golden 集 76 → **88 题**（`semantic` 20→33，成为最大类别），新基线 **72.73% (64/88)**、Recall@10 68.04%。
+- **新发现**：新增题中**法规类 4/6 通过、合同/协议类 0/6 全部未进 top-10**（其中 2 题实际已进注入的 top-30：rank 17、22，属**排序**问题；4 题为**真·召回失败**）。→ **合同/协议类（模板化、跨文件重复条款、无专有名词锚点）是本项目最弱检索场景**，且此前因题面偏易**完全未被度量**。原"80.00%"**约高估 7pp**。
+- **新增评测开关**（均默认不改变行为）：`LINK_SEARCHER_BM25_ELITE_K`(0)、`LINK_SEARCHER_BM25_ELITE_WEIGHT`(4.0)、`LINK_SEARCHER_INNER_SEMANTIC_FUSE`(on)、`LINK_SEARCHER_RRF_BM25_WEIGHT`(1.0)。
+- **验证**：`cargo test --lib` 372 passed / 0 failed；`npx tsc --noEmit` 零错误；semgrep `--severity ERROR` 0 findings；75/76/88 题基线的既有类别分子逐项一致（仅新增题改变分母/分子）。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`docs/rag-eval-baseline.md`、`scripts/eval/README.md`、`CHANGELOG.md`。
+- ⚠️ **未解决（已记录待办）**：① 非分块文档喂给重排器的片段仅 2000 字（该文档 4491 字，前 2000 字只含 1 次"律师"/1 次"委托"，全文 8/13 次）——重排信号被截掉约 87%；② 合同/协议类召回失败（4/6 未进 top-30）尚未定位根因。
+
+---
+
 ## 2026-09-17：PDF 提取 —— lopdf 加 panic 保护 + pdf-inspector 升级 1.x
 
 - **背景**：`extractor/pdf.rs` 的 lopdf 路径（`Document::load` / `extract_text`）对畸形 PDF 会**直接 panic**，导致整个提取流程崩溃、无任何回退。

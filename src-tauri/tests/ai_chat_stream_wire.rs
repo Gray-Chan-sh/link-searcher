@@ -129,6 +129,14 @@ fn sse_delta(text: &str) -> String {
     serde_json::json!({"choices":[{"delta":{"content":text}}]}).to_string()
 }
 
+fn sse_delta_reasoning(text: &str) -> String {
+    serde_json::json!({"choices":[{"delta":{"reasoning":text}}]}).to_string()
+}
+
+fn sse_delta_reasoning_content(text: &str) -> String {
+    serde_json::json!({"choices":[{"delta":{"reasoning_content":text}}]}).to_string()
+}
+
 // ---------------------------------------------------------------------------
 // 正常流：多个 delta + [DONE]
 // ---------------------------------------------------------------------------
@@ -324,6 +332,88 @@ fn chat_stream_empty_done_returns_empty_string() {
     assert_eq!(out.text.as_deref(), Some(""), "空流应返回空字符串（非 None）");
     assert!(deltas.is_empty(), "空流不应触发任何 delta");
     assert!(!out.cancelled);
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning delta should NOT be mixed into final text (field-level separation)
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_reasoning_not_in_full() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|_| sse_response(&[
+        format!("data: {}", sse_delta_reasoning("思考：我需要分析这个问题").as_str()).as_str(),
+        format!("data: {}", sse_delta("回答").as_str()).as_str(),
+        "data: [DONE]",
+    ]));
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let mut deltas = Vec::new();
+    let mut reasoning_deltas = Vec::new();
+    let out = chat_stream("sys", "user", &mut |d: &str, r| {
+        if r { reasoning_deltas.push(d.to_string()); } else { deltas.push(d.to_string()); }
+    });
+    assert_eq!(out.text.as_deref(), Some("回答"));
+    assert_eq!(deltas, vec!["回答".to_string()]);
+    assert_eq!(reasoning_deltas, vec!["思考：我需要分析这个问题".to_string()]);
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// Pure reasoning_content (no content) → fallback to reasoning as final answer
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_pure_reasoning_fallback() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|_| sse_response(&[
+        format!("data: {}", sse_delta_reasoning_content("以下是思考过程...然后答案是42").as_str()).as_str(),
+        "data: [DONE]",
+    ]));
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let mut deltas = Vec::new();
+    let mut reasoning_deltas = Vec::new();
+    let out = chat_stream("sys", "user", &mut |d: &str, r| {
+        if r { reasoning_deltas.push(d.to_string()); } else { deltas.push(d.to_string()); }
+    });
+    assert_eq!(out.text.as_deref(), Some("以下是思考过程...然后答案是42"));
+    assert!(deltas.is_empty(), "no content deltas arrived");
+    assert_eq!(reasoning_deltas, vec!["以下是思考过程...然后答案是42".to_string()]);
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning delta followed by [DONE] (no content ever) → fallback to reasoning
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_empty_with_reasoning_done() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|_| sse_response(&[
+        format!("data: {}", sse_delta_reasoning("思考...").as_str()).as_str(),
+        "data: [DONE]",
+    ]));
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let mut deltas = Vec::new();
+    let mut reasoning_deltas = Vec::new();
+    let out = chat_stream("sys", "user", &mut |d: &str, r| {
+        if r { reasoning_deltas.push(d.to_string()); } else { deltas.push(d.to_string()); }
+    });
+    assert_eq!(out.text.as_deref(), Some("思考..."));
+    assert!(deltas.is_empty(), "no content deltas arrived");
+    assert_eq!(reasoning_deltas, vec!["思考...".to_string()]);
 
     let _ = gw.handle.join();
     let _ = std::fs::remove_dir_all(&tmp);

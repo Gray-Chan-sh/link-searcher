@@ -132,7 +132,7 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
     Some(ActiveEndpoint::new(provider, model_id))
 }
 
-const DEFAULT_MAX_TOKENS: u32 = 16384;
+const DEFAULT_MAX_TOKENS: u32 = 1_000_000;
 
 /// Look up the active LLM model's `max_output_tokens` from the provider config
 /// (populated by `list_provider_models` from the gateway's `/v1/models` response).
@@ -140,14 +140,21 @@ const DEFAULT_MAX_TOKENS: u32 = 16384;
 fn active_max_tokens() -> u32 {
     let cfg = crate::config::load_config();
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
+        log::debug!("[AI] max_tokens={DEFAULT_MAX_TOKENS} (source=no-endpoint)");
         return DEFAULT_MAX_TOKENS;
     };
     let (pid, mid) = cfg.active_llm_model_id.split_once(':').unwrap_or(("", &cfg.active_llm_model_id));
-    cfg.providers.iter()
+    let detected = cfg.providers.iter()
         .find(|p| p.id == pid)
         .and_then(|p| p.models.iter().find(|m| m.id == mid))
-        .and_then(|m| m.max_output_tokens)
-        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .and_then(|m| m.max_output_tokens);
+    let val = detected.unwrap_or(DEFAULT_MAX_TOKENS);
+    if detected.is_some() {
+        log::debug!("[AI] max_tokens={val} (source=detected)");
+    } else {
+        log::debug!("[AI] max_tokens={val} (source=fallback)");
+    }
+    val
 }
 
 /// Classify a model id by name heuristics. Pure function, user-overridable.
@@ -442,6 +449,32 @@ pub fn vector_scan_with_query_emb(
     Ok(results)
 }
 
+/// Brute-force cosine scan over ALL stored QA-pair embeddings.
+/// Returns (file_id, similarity) sorted descending, capped at `top_k`.
+/// QA pairs are pre-generated natural-language questions whose embedding
+/// bridges the vocabulary gap between user's everyday language and the
+/// document's formal terminology.
+pub fn qa_vector_scan_with_query_emb(
+    conn: &rusqlite::Connection,
+    query_emb: &[f32],
+    threshold: f32,
+    top_k: usize,
+) -> Result<Vec<(String, f32)>, String> {
+    let all = crate::db::tracker::get_all_qa_vectors(conn).map_err(|e| e.to_string())?;
+    let all_count = all.len();
+    let mut results: Vec<(String, f32)> = all
+        .into_iter()
+        .filter_map(|(fid, vec)| {
+            let sim = cosine(query_emb, &vec);
+            if sim >= threshold { Some((fid, sim)) } else { None }
+        })
+        .collect();
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(top_k);
+    log::info!("[AI]   qa_vector: {} qa pairs, {} above {:.2}", all_count, results.len(), threshold);
+    Ok(results)
+}
+
 /// Brute-force cosine scan over ALL stored chunk embeddings.
 /// Returns (md5, chunk_index, similarity) sorted descending, capped at
 /// `top_k` so long documents with many chunks can't flood the caller.
@@ -577,6 +610,54 @@ pub fn chat(system: &str, user: &str) -> Option<String> {
     }
 }
 
+/// Query-time vocabulary rewrite: reads the library's high-frequency terms
+/// from `hotword_counts`, feeds them alongside the user's question to the LLM,
+/// and returns BM25-friendly keywords that bridge the vocabulary gap
+/// (e.g., "跳槽" → "竞业限制") without predicting user questions offline.
+pub fn vocabulary_rewrite(query: &str, conn: &rusqlite::Connection) -> Option<Vec<String>> {
+    let keywords: Vec<String> = conn
+        .prepare(
+            "SELECT word FROM hotword_counts
+             WHERE length(word) >= 2 AND count >= 20
+             ORDER BY count DESC LIMIT 200",
+        )
+        .ok()?
+        .query_map([], |r| r.get::<_, String>(0))
+        .ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if keywords.is_empty() {
+        return None;
+    }
+
+    let system = "用户用口语提问，但文档库使用正式法律/商业术语。请根据用户问题和库内术语参考，输出适合全文检索的关键词。要求：1）使用库内术语替代口语词；2）保留用户问题中的专有名词和数字；3）只输出关键词，空格分隔，不要编号和解释。";
+    let user = format!(
+        "用户问题：{}\n\n库内术语参考：{}",
+        query,
+        keywords.join(" ")
+    );
+
+    let response = chat(system, &user)?;
+    let rewritten: Vec<String> = response
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if rewritten.is_empty() {
+        None
+    } else {
+        log::info!(
+            "[AI] vocabulary_rewrite: {} chars → {} keywords: {:?}",
+            query.chars().count(),
+            rewritten.len(),
+            rewritten
+        );
+        Some(rewritten)
+    }
+}
+
 /// Outcome of a streaming chat call.
 pub struct ChatStreamOutcome {
     pub text: Option<String>,
@@ -666,6 +747,7 @@ pub fn chat_stream(
     }
 
     let mut full = String::new();
+    let mut reasoning_buf = String::new();
     let mut cancelled = false;
     let mut first_line = true;
     let mut line = String::new();
@@ -724,11 +806,11 @@ pub fn chat_stream(
                     }
                 } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning.as_ref())
                     && !d.is_empty() {
-                        full.push_str(d);
+                        reasoning_buf.push_str(d);
                         on_delta(d, true);
                     } else if let Some(d) = sr.choices.first().and_then(|c| c.delta.reasoning_content.as_ref())
                         && !d.is_empty() {
-                            full.push_str(d);
+                            reasoning_buf.push_str(d);
                             on_delta(d, true);
                         }
             }
@@ -737,6 +819,13 @@ pub fn chat_stream(
             cancelled = true;
             break;
         }
+    }
+
+    // Fallback: when content is empty but reasoning arrived (some gateways
+    // put the answer in reasoning_content with empty content), use the
+    // reasoning text as the final answer — mirroring chat()'s behavior.
+    if full.trim().is_empty() && !reasoning_buf.trim().is_empty() {
+        full = reasoning_buf;
     }
 
     let took_ms = started.elapsed().as_millis() as u64;
