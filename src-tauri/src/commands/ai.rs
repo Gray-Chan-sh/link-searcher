@@ -253,6 +253,10 @@ pub struct EvidenceItem {
     pub rewritten_query: Option<String>,
     #[serde(default)]
     pub from_history: bool,
+    /// Session-stable material number (`[N]`). 0 = unset (legacy / smart path);
+    /// callers fall back to positional index in that case.
+    #[serde(default)]
+    pub material_no: usize,
 }
 
 /// Retrieval hit carrying its scores; semantic fields are `None` unless
@@ -303,6 +307,8 @@ struct AiDone {
     trace_id: String,
     #[serde(default)]
     search_query: String,
+    #[serde(default)]
+    search_terms: Vec<String>,
     #[serde(default)]
     hits: usize,
     #[serde(default)]
@@ -380,6 +386,7 @@ fn prepare_smart_prompt(
                 rewritten: false,
                 rewritten_query: None,
                 from_history: false,
+                material_no: 0,
             });
         }
         drop(conn);
@@ -491,6 +498,7 @@ pub async fn smart_search_stream(
         evidence,
         trace_id: String::new(),
         search_query: query,
+        search_terms: vec![],
         hits,
         total_match_count: 0,
         llm_model: String::new(),
@@ -1129,6 +1137,9 @@ pub(crate) struct PreparedConversation {
     pub(crate) evidence: Vec<EvidenceItem>,
     /// Final retrieval query (after rewrite) — recorded per turn for traceability.
     pub(crate) search_query: String,
+    /// jieba-tokenized query terms — the frontend highlights these in the
+    /// cited passage shown by the hover preview.
+    pub(crate) search_terms: Vec<String>,
     /// Number of BM25 hits before merge with @mention files.
     pub(crate) hits: usize,
     pub(crate) total_match_count: usize,
@@ -1136,6 +1147,10 @@ pub(crate) struct PreparedConversation {
     /// When false under non-strict mode, callers should refuse to answer
     /// rather than let the LLM answer with no evidence.
     pub(crate) has_evidence: bool,
+    /// Material numbers actually visible in `context` after the total length
+    /// cap. Citations must validate against this set, **not** `evidence.len()`:
+    /// materials past the cap were retrieved but never entered the prompt.
+    pub(crate) visible_nums: std::collections::BTreeSet<usize>,
     /// Accumulated AI events for this turn's pipeline execution.
     /// Caller should batch-insert into ai_events table.
     pub(crate) events: Vec<(String, serde_json::Value)>,
@@ -1223,6 +1238,7 @@ pub(crate) async fn prepare_conversation_prompt(
         strict_docs,
     );
     let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut material_order = prior_material_order(state, session_id);
     emit_progress("query_rewrite", "查询改写中...", 0, 0);
     let rule = rewrite_query(&last_q, messages);
     let original_rule_query = rule.query.clone();
@@ -1247,6 +1263,7 @@ pub(crate) async fn prepare_conversation_prompt(
         ensure_parent_entities(&search_q, parent_q)
     };
     let rewritten = search_q != last_q.trim();
+    let search_terms = query_terms(&search_q);
     log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten);
     events.push(("query_rewrite".into(), serde_json::json!({
         "original": last_q,
@@ -1861,10 +1878,7 @@ pub(crate) async fn prepare_conversation_prompt(
     let per_mention_file = mention_total_budget / mention_files_with_content.len().max(1);
     let mut mention_budget_used = 0usize;
     for (fid, resolved_path, md5, text) in mention_files_with_content.iter() {
-        // 全局材料编号 = 注入顺序（docs.len() 在 push 前 = 当前序号 - 1）。
-        // docs 与 evidence 同步 push，编号与 evidence 下标 +1 严格一致，
-        // auto_cite / sanitize_citations / @mention→[N] 都按此体系工作。
-        let n = docs.len() + 1;
+        let n = assign_material_no(&mut material_order, fid);
         mention_has_content = true;
         let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_mention_file, &[]);
         if !injected.trim().is_empty() {
@@ -1874,13 +1888,14 @@ pub(crate) async fn prepare_conversation_prompt(
             evidence.push(EvidenceItem {
                 file_id: fid.clone(),
                 path: resolved_path.clone(),
-                snippet: truncate_text(text, 200),
+                snippet: cited_excerpt(text, &search_terms, 300),
                 bm25_score: None,
                 semantic_score: None,
                 rrf_score: None,
                 rewritten,
                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                 from_history: false,
+                material_no: n,
             });
         }
     }
@@ -1904,7 +1919,7 @@ pub(crate) async fn prepare_conversation_prompt(
     let per_history_file = history_total_budget / history_files_with_content.len().max(1);
     let mut history_budget_used = 0usize;
     for (fid, resolved_path, md5, text) in history_files_with_content.iter() {
-        let n = docs.len() + 1;
+        let n = assign_material_no(&mut material_order, fid);
         let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_history_file, &[]);
         if !injected.trim().is_empty() {
             docs.push(format!("[{n}]（{resolved_path}）\n{injected}"));
@@ -1913,13 +1928,14 @@ pub(crate) async fn prepare_conversation_prompt(
             evidence.push(EvidenceItem {
                 file_id: fid.clone(),
                 path: resolved_path.clone(),
-                snippet: truncate_text(text, 200),
+                snippet: cited_excerpt(text, &search_terms, 300),
                 bm25_score: None,
                 semantic_score: None,
                 rrf_score: None,
                 rewritten,
                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                 from_history: true,
+                material_no: n,
             });
         }
     }
@@ -1960,18 +1976,19 @@ pub(crate) async fn prepare_conversation_prompt(
                         };
                         let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
                         if !injected.trim().is_empty() {
-                            let n = docs.len() + 1;
+                            let n = assign_material_no(&mut material_order, &hit.file_id);
                             docs.push(format!("[{n}]（{}）\n{}", rec.path, injected));
                             evidence.push(EvidenceItem {
                                 file_id: hit.file_id.clone(),
                                 path: rec.path.clone(),
-                                snippet: truncate_text(text, 200),
+                                snippet: cited_excerpt(text, &search_terms, 300),
                                 bm25_score: hit.bm25_score,
                                 semantic_score: hit.semantic_score,
                                 rrf_score: hit.rrf_score,
                                 rewritten,
                                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                                 from_history: false,
+                                material_no: n,
                             });
                             content_budget = content_budget.saturating_sub(injected.chars().count());
                         }
@@ -2025,20 +2042,21 @@ pub(crate) async fn prepare_conversation_prompt(
             let per_file = (budget / scope_files.len()).max(500);
             let mut injected_n = 0usize;
             for (fid, path, md5, text) in &scope_files {
-                let n = docs.len() + 1;
+                let n = assign_material_no(&mut material_order, fid);
                 let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &[]);
                 if injected.trim().is_empty() { continue }
                 docs.push(format!("[{n}]（{path}）\n{injected}"));
                 evidence.push(EvidenceItem {
                     file_id: fid.clone(),
                     path: path.clone(),
-                    snippet: truncate_text(text, 200),
+                    snippet: cited_excerpt(text, &search_terms, 300),
                     bm25_score: None,
                     semantic_score: None,
                     rrf_score: None,
                     rewritten,
                     rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                     from_history: false,
+                    material_no: n,
                 });
                 injected_n += 1;
             }
@@ -2105,15 +2123,16 @@ pub(crate) async fn prepare_conversation_prompt(
     // 旧编号会错位。明确告知本轮范围 + 历史编号已失效，杜绝跨轮引用。
     // 上限按"截断后实际可见"的材料编号计算——context 可能被 50k 截断，
     // 尾部材料并未进入 prompt，声明范围过大同样会造成悬空引用。
-    let visible_max = visible_material_count(&context);
-    let material_note = if visible_max == 0 {
+    let visible_nums = visible_material_numbers(&context);
+    let material_note = if visible_nums.is_empty() {
         String::new()
     } else {
-        format!("本轮共提供 {} 份材料，编号为 [1]-[{}]。", visible_max, visible_max)
+        let list = visible_nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
+        format!("本轮提供材料编号：{}。", list)
     };
     let system = format!(
-        "你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n{material_note}引用材料时在对应内容后标注 [N]（N 为材料编号）。只允许引用本轮 [1]-[{}] 范围内的编号；对话历史中出现的 [N] 编号属于当时轮次、已失效，不得引用。\n\n材料：\n{}{}",
-        visible_max, context, recall_section
+        "你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n{material_note}引用材料时在对应内容后标注 [N]（N 为材料编号）。只允许引用本轮列出的编号，未列出的编号一律不得引用。\n\n材料：\n{}{}",
+        context, recall_section
     );
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
@@ -2138,7 +2157,7 @@ pub(crate) async fn prepare_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": 50000,
     })));
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty() })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
 }
 
 /// Post-process LLM response: supplement [N] citations for sentences that
@@ -2164,7 +2183,10 @@ pub fn auto_cite(answer: &str, evidence: &[EvidenceItem]) -> String {
         format!("\x00CODE{idx}\x00")
     });
 
-    let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, _)| (i + 1, &evidence[i].snippet as &str)).collect();
+    let labels: Vec<(usize, &str)> = evidence.iter().enumerate().map(|(i, e)| {
+        let no = if e.material_no == 0 { i + 1 } else { e.material_no };
+        (no, e.snippet.as_str())
+    }).collect();
 
     let sent_re = regex::Regex::new(r"[^。！？!?\n]*[。！？!?]").unwrap();
     // 已有引用的句子直接跳过，不再追加 [N]（避免 [3][1] 重叠）
@@ -2238,7 +2260,26 @@ pub fn sanitize_citations(answer: &str, evidence_len: usize) -> String {
         .into_owned()
 }
 
-/// Jaccard-like keyword overlap score between two strings.
+/// Set-based variant of [`sanitize_citations`]: strips any `[N]` whose number is
+/// not among the materials actually provided this turn (session-stable numbers).
+pub fn sanitize_citations_set(answer: &str, valid: &std::collections::BTreeSet<usize>) -> String {
+    if valid.is_empty() || answer.trim().is_empty() {
+        return answer.to_string();
+    }
+    let cite_re = regex::Regex::new(r"\[(\d+)\]").unwrap();
+    cite_re
+        .replace_all(answer, |caps: &regex::Captures| {
+            let n: usize = caps[1].parse().unwrap_or(0);
+            if valid.contains(&n) {
+                caps[0].to_string()
+            } else {
+                caps[1].to_string()
+            }
+        })
+        .into_owned()
+}
+
+/// Jaccard overlap (`|A∩B| / |A∪B|`) between two strings' content words.
 fn keyword_overlap(a: &str, b: &str) -> f64 {
     let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
     let a_words: std::collections::HashSet<String> = jieba
@@ -2255,7 +2296,8 @@ fn keyword_overlap(a: &str, b: &str) -> f64 {
         .collect();
     if a_words.is_empty() || b_words.is_empty() { return 0.0; }
     let intersection = a_words.intersection(&b_words).count();
-    intersection as f64 / a_words.len().max(1) as f64
+    let union = a_words.len() + b_words.len() - intersection;
+    intersection as f64 / union.max(1) as f64
 }
 
 /// Multi-turn conversation: continue a chat using previously-selected
@@ -2286,7 +2328,7 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, evidence, has_evidence, .. } =
+    let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
     // 非严格模式：无材料注入时拒绝硬答（避免 LLM 无据发挥）。
     if !has_evidence {
@@ -2306,7 +2348,8 @@ pub async fn conversation_ask(
     if crate::ai::ai_cancelled() {
         return Err("请求已取消".into());
     }
-    let cited = auto_cite(&sanitize_citations(&answer, evidence.len()), &evidence);
+    let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
+    let cited = auto_cite(&sanitize_citations_set(&answer, &visible_nums), &visible_evidence);
     log::info!("[AI]   done: {} chars", answer.chars().count());
 
     Ok(cited)
@@ -2347,8 +2390,9 @@ pub async fn conversation_ask_stream(
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, hits, total_match_count, has_evidence, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, hits, total_match_count, has_evidence, visible_nums, mut events } =
         prepared?;
+    let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
     let cfg = crate::config::load_config();
     let turn_number = messages.iter().filter(|m| m.role == "user").count().saturating_sub(1);
@@ -2383,6 +2427,7 @@ pub async fn conversation_ask_stream(
             evidence,
             trace_id,
             search_query,
+            search_terms: search_terms.clone(),
             hits,
             total_match_count,
             llm_model: cfg.active_llm_model_id,
@@ -2438,7 +2483,7 @@ pub async fn conversation_ask_stream(
      }
      let raw_text = result.text.unwrap_or_default();
      log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
-     let cited_text = auto_cite(&sanitize_citations(&raw_text, evidence.len()), &evidence);
+     let cited_text = auto_cite(&sanitize_citations_set(&raw_text, &visible_nums), &visible_evidence);
      let _ = app.emit("ai-done", AiDone {
          session_id,
         full_text: cited_text,
@@ -2449,6 +2494,7 @@ pub async fn conversation_ask_stream(
         evidence,
         trace_id,
         search_query,
+        search_terms,
         hits,
         total_match_count,
         llm_model: cfg.active_llm_model_id,
@@ -2470,6 +2516,46 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     } else {
         chars[..max_chars].iter().collect()
     }
+}
+
+/// jieba-tokenize a retrieval query into matchable terms (len >= 2). Rewrites
+/// emit compound phrases (e.g. "不动产资料查询") that never appear verbatim.
+fn query_terms(query: &str) -> Vec<String> {
+    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
+    jieba.cut(query, true).iter().map(|w| w.word.to_string()).filter(|w| w.chars().count() >= 2).collect()
+}
+
+/// Pick the citation preview from the passage that best matches the query
+/// terms, so the hover card / Markdown export show the referenced text rather
+/// than the file head. Falls back to the head when no term matches.
+fn cited_excerpt(text: &str, terms: &[String], max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if terms.is_empty() || chars.len() <= max_chars {
+        return truncate_text(text, max_chars);
+    }
+    let step = (max_chars / 2).max(1);
+    let mut best_start = 0usize;
+    let mut best_score = 0usize;
+    let mut start = 0usize;
+    while start < chars.len() {
+        let end = (start + max_chars).min(chars.len());
+        let window: String = chars[start..end].iter().collect();
+        let score: usize = terms.iter().map(|t| window.matches(t.as_str()).count()).sum();
+        if score > best_score {
+            best_score = score;
+            best_start = start;
+        }
+        if end == chars.len() { break; }
+        start += step;
+    }
+    if best_score == 0 { return truncate_text(text, max_chars); }
+    let win_end = (best_start + max_chars).min(chars.len());
+    let win: String = chars[best_start..win_end].iter().collect();
+    let byte_pos = terms.iter().filter_map(|t| win.find(t.as_str())).min().unwrap_or(0);
+    let char_off = win[..byte_pos].chars().count();
+    let s = (best_start + char_off).saturating_sub(20);
+    let e = (s + max_chars).min(chars.len());
+    chars[s..e].iter().collect()
 }
 
 /// Inject chunk text honoring a char budget. When the hit came from the
@@ -2824,7 +2910,8 @@ fn fmt_evidence_item(e: &EvidenceItem, index: usize) -> String {
         .chain(e.rrf_score.map(|s| format!("RRF {s:.2}")))
         .collect();
     let score_str = if scores.is_empty() { String::new() } else { format!("（{}）", scores.join(" · ")) };
-    let mut out = format!("{index}. 📄 `{}` {score_str}", e.path);
+    let no = if e.material_no == 0 { index } else { e.material_no };
+    let mut out = format!("{no}. 📄 `{}` {score_str}", e.path);
     if e.rewritten
         && let Some(q) = &e.rewritten_query {
             out.push_str(&format!("\n    ↳ 查询改写: `{q}`"));
@@ -3146,7 +3233,7 @@ fn fmt_event_time(ts: i64) -> String {
 
 /// 从（可能被 50k 截断的）context 反推实际可见的最大材料编号。
 /// 材料块格式为 `[N]（路径）…`；无匹配返回 0。
-fn visible_material_count(context: &str) -> usize {
+fn visible_material_numbers(context: &str) -> std::collections::BTreeSet<usize> {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = RE.get_or_init(|| {
         // nosemgrep: rust-expect-panic — compile-time verified regex literal
@@ -3154,8 +3241,33 @@ fn visible_material_count(context: &str) -> usize {
     });
     re.captures_iter(context)
         .filter_map(|c| c.get(1).and_then(|m| m.as_str().parse::<usize>().ok()))
-        .max()
-        .unwrap_or(0)
+        .collect()
+}
+
+/// Session-stable material numbers: distinct file_ids in first-appearance order
+/// across the session's persisted per-turn evidence; index + 1 = stable `[N]`.
+fn prior_material_order(state: &AppState, session_id: &str) -> Vec<String> {
+    if session_id.is_empty() { return Vec::new(); }
+    let h = read_history(&state.data_dir);
+    let Some(session) = h.sessions.into_iter().find(|s| s.id == session_id) else { return Vec::new() };
+    let mut order: Vec<String> = Vec::new();
+    for turn in &session.per_turn_evidence {
+        for item in &turn.items {
+            if !item.file_id.is_empty() && !order.iter().any(|x| x == &item.file_id) {
+                order.push(item.file_id.clone());
+            }
+        }
+    }
+    order
+}
+
+/// Assign the stable number for a material id, appending new ids.
+fn assign_material_no(order: &mut Vec<String>, id: &str) -> usize {
+    if let Some(pos) = order.iter().position(|x| x == id) {
+        return pos + 1;
+    }
+    order.push(id.to_string());
+    order.len()
 }
 
 #[tauri::command]
@@ -3300,6 +3412,7 @@ mod history_tests {
                     rewritten: true,
                     rewritten_query: Some("项目 背景".into()),
                     from_history: false,
+                    material_no: 0,
                 }],
                 trace_id: "s1#t1".into(),
                 took_ms: 5200,
@@ -3403,6 +3516,7 @@ mod history_tests {
                     rewritten: true,
                     rewritten_query: Some("万联发股权转让".into()),
                     from_history: false,
+                    material_no: 0,
                 }],
                 ..Default::default()
             }],
@@ -3554,17 +3668,45 @@ mod history_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 材料可见编号：从完整/截断 context 反推最大编号。
+    /// 材料可见编号：从完整/截断 context 反推实际可见的编号集合。
     #[test]
-    fn visible_material_count_detects_max_from_context() {
-        // 完整 3 份材料。
-        let ctx = "[1]（a/1.pdf）\n内容一\n\n---\n\n[2]（a/2.pdf）\n内容二\n\n---\n\n[3]（a/3.pdf）\n内容三";
-        assert_eq!(visible_material_count(ctx), 3);
+    fn visible_material_numbers_from_context() {
+        let ctx = "[1]（a/1.pdf）\n内容一\n\n---\n\n[3]（a/3.pdf）\n内容三\n\n---\n\n[7]（a/7.pdf）\n内容七";
+        assert_eq!(visible_material_numbers(ctx).iter().copied().collect::<Vec<_>>(), vec![1, 3, 7]);
         // 截断（第 3 份只剩开头，正则要求 [N]（ 完整出现才算可见）。
-        let truncated = "[1]（a/1.pdf）\n内容一\n\n---\n\n[2]（a/2.pdf）\n内容二\n\n---\n\n[3";
-        assert_eq!(visible_material_count(truncated), 2);
-        // 无材料。
-        assert_eq!(visible_material_count(""), 0);
+        let truncated = "[1]（a/1.pdf）\n内容一\n\n---\n\n[3]（a/3.pdf）\n内容三\n\n---\n\n[7";
+        assert_eq!(visible_material_numbers(truncated).iter().copied().collect::<Vec<_>>(), vec![1, 3]);
+        assert!(visible_material_numbers("").is_empty());
+    }
+
+    #[test]
+    fn assign_material_no_is_stable_and_appends() {
+        let mut order: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(assign_material_no(&mut order, "a"), 1);
+        assert_eq!(assign_material_no(&mut order, "b"), 2);
+        assert_eq!(assign_material_no(&mut order, "c"), 3);
+        assert_eq!(assign_material_no(&mut order, "a"), 1);
+        assert_eq!(order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn sanitize_citations_set_strips_numbers_not_in_set() {
+        let valid: std::collections::BTreeSet<usize> = [3usize, 7].into_iter().collect();
+        assert_eq!(sanitize_citations_set("依据[3]与[5]，另见[7][9]。", &valid), "依据[3]与5，另见[7]9。");
+        assert!(sanitize_citations_set("见[1]。", &std::collections::BTreeSet::new()).contains("[1]"));
+    }
+
+    #[test]
+    fn cited_excerpt_prefers_query_matching_passage() {
+        let filler = "无关内容".repeat(40);
+        let text = format!("{filler}目标条款：违约金为每日千分之五。{filler}");
+        let s = cited_excerpt(&text, &query_terms("违约金 千分之五"), 60);
+        assert!(s.contains("违约金"), "got: {s}");
+        let head: String = text.chars().take(60).collect();
+        assert_ne!(s, head, "should not fall back to head");
+        let compound = cited_excerpt(&text, &query_terms("违约金额度条款"), 60);
+        assert!(compound.contains("违约金"), "compound query: {compound}");
+        assert_eq!(cited_excerpt("abcdef", &[], 3), "abc");
     }
 
     /// strict + 目录引用 + 检索零命中：回退注入范围内已索引文件，而非拒答。
@@ -3767,6 +3909,7 @@ mod history_tests {
             rewritten: true,
             rewritten_query: Some("季度报告 它的风险".into()),
             from_history: false,
+            material_no: 0,
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: EvidenceItem = serde_json::from_str(&json).unwrap();
@@ -3828,6 +3971,7 @@ mod history_tests {
                     rewritten: true,
                     rewritten_query: Some("q".into()),
                     from_history: false,
+                    material_no: 0,
                 }],
                 ..Default::default()
             }],
@@ -3998,6 +4142,7 @@ mod auto_cite_tests {
             file_id: "f1".into(), path: path.into(), snippet: snippet.into(),
             bm25_score: None, semantic_score: None, rrf_score: None,
             rewritten: false, rewritten_query: None, from_history: false,
+            material_no: 0,
         }
     }
 
@@ -4035,6 +4180,23 @@ mod auto_cite_tests {
         let count = result.matches("[1]").count();
         assert_eq!(count, 1, "consecutive same source should merge into one [1]: {}", result);
     }
+
+    #[test]
+    fn citation_beyond_visible_bound_is_dropped() {
+        let evidence = vec![ev("a.pdf", "违约金千分之五"), ev("b.pdf", "租赁期限三年")];
+        let result = auto_cite(&sanitize_citations("租赁期限为三年[2]。", 1), &evidence[..1]);
+        assert!(!result.contains("[2]"), "citation beyond visible bound leaked: {}", result);
+    }
+
+    #[test]
+    fn generic_sentence_not_cited_by_incidental_overlap() {
+        let evidence = vec![ev(
+            "a.pdf",
+            "委托因歙县渔梁路129号房屋的不动产登记簿记载事项有错误，需前往歙县不动产登记中心办理更正登记手续",
+        )];
+        let result = auto_cite("注：以上回答仅基于提供的材料，具体操作请以当地不动产登记中心最新要求为准。", &evidence);
+        assert!(!result.contains("[1]"), "generic disclaimer should not be cited: {}", result);
+    }
 }
 
 #[cfg(test)]
@@ -4046,6 +4208,7 @@ mod auto_cite_md_tests {
             file_id: "f1".into(), path: "合同.pdf".into(), snippet: snippet.into(),
             bm25_score: None, semantic_score: None, rrf_score: None,
             rewritten: false, rewritten_query: None, from_history: false,
+            material_no: 0,
         }
     }
 

@@ -1,16 +1,31 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+import { useState, useRef, useEffect, useCallback, useMemo, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { cancelAiRequest, conversationAskStream, listenAiStream, listenAiProgress, openFile, type ChatMessage, type ChatSession, type AiProgressPayload } from '../api/files'
+import { fileTypeIcon } from '../utils/fileIcon'
+import { cancelAiRequest, conversationAskStream, listenAiProgress, openFile, type AiDonePayload, type ChatMessage, type ChatSession, type AiProgressPayload } from '../api/files'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
+import { basename, dirname, disambiguate } from '../utils/materialLabel'
+import { getStreamReasoning, getStreamText, hasAiDone, isStreamInFlight, markStreamEnded, markStreamStarted, subscribeAiStream, takeAiDone } from '../ai/streamStore'
 import MentionPicker from './MentionPicker'
 import AiEventTimeline from './AiEventTimeline'
+
+function highlightSnippet(text: string, terms: string[]): ReactNode {
+  const set = new Set(terms.filter(t => t.length >= 2))
+  if (set.size === 0) return text
+  const pattern = [...set].map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  const re = new RegExp(`(${pattern})`, 'g')
+  return text.split(re).map((part, idx) =>
+    set.has(part)
+      ? <mark key={idx} className="bg-yellow-200/80 dark:bg-yellow-600/40 text-inherit rounded-sm">{part}</mark>
+      : <span key={idx}>{part}</span>
+  )
+}
 
 interface ChatPanelProps {
   llmEnabled: boolean
@@ -55,7 +70,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const inputRef = useRef<HTMLInputElement>(null)
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string; reasoning: string } | null>(null)
   // 引用悬浮卡（跟随鼠标，fixed 定位，pointer-events-none 不拦截 hover 移出）
-  const [hoverCite, setHoverCite] = useState<{ x: number; y: number; path: string; snippet: string } | null>(null)
+  const [hoverCite, setHoverCite] = useState<{ x: number; y: number; path: string; snippet: string; terms: string[] } | null>(null)
   // 就地展开的引用卡：{ m: 消息下标, n: 材料编号(1-based) }
   const [activeCite, setActiveCite] = useState<{ m: number; n: number; path: string; snippet: string } | null>(null)
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
@@ -63,6 +78,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // 流式自动跟随：用户主动上滚查看历史时暂停跟随，回到底部后恢复
   const stickToBottomRef = useRef(true)
   const handleScroll = useCallback(() => {
+    setHoverCite(null)
     const el = scrollRef.current
     if (!el) return
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
@@ -79,7 +95,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // 事件回调需要"最新"会话值（组件卸载/会话切换后仍可能收到迟到事件）。
   const sessionRef = useRef(session)
   const messagesRef = useRef<ChatMessage[]>([])
-  const loadingRef = useRef(false)
 
   const messages = session?.messages ?? []
   messagesRef.current = messages
@@ -88,7 +103,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // loading 由会话持久字段驱动 —— 切页/切会话再切回可恢复"思考中"。
   const pendingStartedAt = session?.pending_started_at ?? null
   const loading = pendingStartedAt != null
-  loadingRef.current = loading
   useEffect(() => { sessionRef.current = session }, [session])
 
   // 会话切换/新建后，上一会话的 @mention chips、/命令 condition chips 与输入文本
@@ -140,6 +154,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const handleCancel = useCallback(async () => {
     if (!loading) return
     cancelAiRequest().catch(() => {})
+    if (session?.id) markStreamEnded(session.id)
     latestReqIdRef.current += 1
     sendingRef.current = false
     const partialText = streaming && streaming.sessionId === session?.id && streaming.text.trim()
@@ -154,73 +169,62 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setProgress(null)
   }, [loading, patchSession, messages, streaming, session?.id])
 
-  // 流式事件监听：增量文本实时显示；done 事件写回完整回答 + 响应耗时。
+  // 流式事件由应用级 streamStore 常驻监听（切页不丢事件）；本组件只订阅并渲染。
   useEffect(() => {
     if (!session?.id) return
-    let unlisten: (() => void) | undefined
-    let disposed = false
-    const sessId = session.id
-    listenAiStream(
-      sessId,
-      (delta, isReasoning) => {
-        console.log('[AI-DEBUG] ai-chunk', { deltaLen: delta?.length, isReasoning })
+    const sid = session.id
+
+    const applyDone = (p: AiDonePayload) => {
+      setStreaming(null)
+      setProgress(null)
+      if (p.cancelled) return
+      const cur = sessionRef.current
+      if (!cur) return
+      const took = p.took_ms > 0 ? `\n\n⏱ ${fmtTook(p.took_ms)}` : ''
+      // 网关偶发返回空流（content_chars=0）：显式错误而非静默"没有回答"
+      const body = p.full_text.trim()
+        ? p.full_text
+        : `❌ ${t('err_empty_response')}`
+      const sourcesPatch = p.source_ids.length > 0
+        ? { source_ids: p.source_ids, source_files: p.source_files }
+        : {}
+      const userTurns = messagesRef.current.filter(m => m.role === 'user').length
+      const perTurnPatch = {
+        per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
+          turn_index: userTurns - 1,
+          file_ids: p.source_ids,
+          items: p.evidence ?? [],
+          trace_id: p.trace_id ?? '',
+          took_ms: p.took_ms,
+          llm_model: p.llm_model ?? '',
+          embedding_model: p.embedding_model ?? '',
+          search_query: p.search_query ?? '',
+          search_terms: p.search_terms ?? [],
+          hits: p.hits ?? 0,
+        }]
+      }
+      onSessionChange({
+        ...cur,
+        messages: [...messagesRef.current, { role: 'assistant', content: body + took }],
+        ...sourcesPatch,
+        ...perTurnPatch,
+        pending_query: null,
+        pending_started_at: null,
+      })
+    }
+
+    const sync = () => {
+      if (isStreamInFlight(sid)) {
         setProgress(null)
-        if (isReasoning) {
-          setStreaming(s => ({
-            sessionId: sessId,
-            text: s?.sessionId === sessId ? s.text : '',
-            reasoning: (s?.sessionId === sessId ? s.reasoning : '') + delta,
-          }))
-        } else {
-          setStreaming(s => ({
-            sessionId: sessId,
-            text: (s?.sessionId === sessId ? s.text : '') + delta,
-            reasoning: s?.sessionId === sessId ? s.reasoning : '',
-          }))
-        }
-      },
-      p => {
-        console.log('[AI-DEBUG] ai-done received', { sessionId: p.session_id, loadingRef: loadingRef.current, disposed, fullTextLen: p.full_text?.length, cancelled: p.cancelled })
-        if (disposed) return
-        setStreaming(null)
-        setProgress(null)
-        if (p.cancelled) return
-        const cur = sessionRef.current
-        if (!cur) return
-        const took = p.took_ms > 0 ? `\n\n⏱ ${fmtTook(p.took_ms)}` : ''
-        // 网关偶发返回空流（content_chars=0）：显式错误而非静默"没有回答"
-        const body = p.full_text.trim()
-          ? p.full_text
-          : `❌ ${t('err_empty_response')}`
-        const sourcesPatch = p.source_ids.length > 0
-          ? { source_ids: p.source_ids, source_files: p.source_files }
-          : {}
-        const userTurns = messagesRef.current.filter(m => m.role === 'user').length
-        const perTurnPatch = {
-          per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
-            turn_index: userTurns - 1,
-            file_ids: p.source_ids,
-            items: p.evidence ?? [],
-            trace_id: p.trace_id ?? '',
-            took_ms: p.took_ms,
-            llm_model: p.llm_model ?? '',
-            embedding_model: p.embedding_model ?? '',
-            search_query: p.search_query ?? '',
-            hits: p.hits ?? 0,
-          }]
-        }
-        onSessionChange({
-          ...cur,
-          messages: [...messagesRef.current, { role: 'assistant', content: body + took }],
-          ...sourcesPatch,
-          ...perTurnPatch,
-          pending_query: null,
-          pending_started_at: null,
-        })
-      },
-    ).then(fn => { if (disposed) { fn(); return } unlisten = fn })
-      .catch(e => console.error('[ChatPanel] listenAiStream failed:', e))
-    return () => { disposed = true; unlisten?.() }
+        setHoverCite(null)
+        setStreaming({ sessionId: sid, text: getStreamText(sid), reasoning: getStreamReasoning(sid) })
+      }
+      const done = takeAiDone(sid)
+      if (done) applyDone(done)
+    }
+
+    sync()
+    return subscribeAiStream(sid, sync)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id])
 
@@ -249,6 +253,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     const turn = userBefore - 1
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === turn)?.items ?? []
+  }
+  const searchTermsFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.search_terms ?? []
   }
   const turnNumberFor = (msgIndex: number) => {
     return messages.slice(0, msgIndex).filter(m => m.role === 'user').length - 1
@@ -399,12 +407,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       ],
     })
     setStreaming({ sessionId: session.id, text: '', reasoning: '' })
+    markStreamStarted(session.id)
 
     try {
       // ponytail: smart_search_stream bypasses scope/semantic/rewrite; always use conversation path
       await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? true, session.full_recall ?? false)
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
+      markStreamEnded(session.id)
       sendingRef.current = false
       if (latestReqIdRef.current !== reqId) return
       setStreaming(null)
@@ -419,9 +429,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips, pendingMention, onMentionConsumed, insertMention])
 
   // 依赖只能是 session.id：若含 pending_query，handleSend 一设置它就会立刻清掉
-  // 刚写的 pending_started_at，使 loadingRef 恒为 false，ai-done 被守卫丢弃。
+  // 刚写的 pending_started_at，使 loading 恒为 false。
+  // 仅当本会话确无在途流/未消费的 done 时才清理 pending（否则切页返回会误清）。
   useEffect(() => {
-    if (!session?.pending_query) return
+    if (!session || !session.pending_query) return
+    if (isStreamInFlight(session.id) || hasAiDone(session.id)) return
     patchSession({ pending_query: null, pending_started_at: null })
   }, [session?.id])
 
@@ -458,7 +470,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         </div>
       )}
 
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
+      <div ref={scrollRef} onScroll={handleScroll} onMouseLeave={() => setHoverCite(null)} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
         {messages.length === 0 && (
           <div className="text-center text-sm text-gray-400 py-12">
             {t('chat_placeholder')}
@@ -484,10 +496,12 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                             const ev = evidenceFor(i)
                             if (idx >= 0 && idx < ev.length && ev[idx]!.path) {
                               const item = ev[idx]!
+                              const label = disambiguate(ev.map(e => e.path)).get(item.path) ?? basename(item.path)
                               return (
                                 <span
-                                  className="text-blue-600 dark:text-blue-400 cursor-pointer underline decoration-dotted decoration-1 underline-offset-2 rounded px-0.5 hover:bg-blue-100 dark:hover:bg-blue-900/40 transition-colors"
-                                  onMouseEnter={(e) => setHoverCite({ x: e.clientX, y: e.clientY, path: item.path, snippet: item.snippet })}
+                                  className="inline-flex items-center gap-0.5 align-middle text-[0.8em] leading-none rounded px-1 py-0.5 bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 cursor-pointer whitespace-nowrap hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+                                  aria-label={item.path}
+                                  onMouseEnter={(e) => setHoverCite({ x: e.clientX, y: e.clientY, path: item.path, snippet: item.snippet, terms: searchTermsFor(i) })}
                                   onMouseLeave={() => setHoverCite(null)}
                                   onClick={() => {
                                     setHoverCite(null)
@@ -496,7 +510,10 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                                         ? null
                                         : { m: i, n: idx + 1, path: item.path, snippet: item.snippet })
                                   }}
-                                >{children}</span>
+                                >
+                                  {fileTypeIcon(item.path, { className: 'size-3 shrink-0', 'aria-hidden': true })}
+                                  <span className="max-w-[10em] truncate">{label}</span>
+                                </span>
                               )
                             }
                           }
@@ -506,12 +523,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                     >{m.content.replace(/\[(\d+)\](\[(\d+)\])*/g, (match) => {
                       const nums = match.match(/\d+/g) || []
                       const ev = evidenceFor(i)
+                      const byNo = new Map<number, number>()
+                      ev.forEach((e, j) => byNo.set(e.material_no && e.material_no > 0 ? e.material_no : j + 1, j))
                       const links = nums.map(n => {
-                        const idx = parseInt(n, 10) - 1
-                        if (idx >= 0 && idx < ev.length && ev[idx]!.path) {
-                          return `[${n}](#ref:${idx})`
+                        const no = parseInt(n, 10)
+                        const idx = byNo.get(no)
+                        if (idx !== undefined && ev[idx]!.path) {
+                          return `[${no}](#ref:${idx})`
                         }
-                        return `[${n}]`
+                        return `[${no}]`
                       })
                       // 多个引用连写（[4][6]）用空格分隔渲染，避免视觉上
                       // 拼成单个编号（"46"）无法区分是 [46] 还是 [4][6]。
@@ -520,8 +540,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                     {activeCite && activeCite.m === i && (
                       <div className="mt-2 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/15 px-2.5 py-2 text-xs">
                         <div className="flex items-start justify-between gap-2">
-                          <span className="font-medium text-gray-700 dark:text-gray-300 break-all">
-                            📄 [{activeCite.n}] {activeCite.path}
+                          <span className="font-medium text-gray-700 dark:text-gray-300 break-all flex items-start gap-1">
+                            {fileTypeIcon(activeCite.path, { className: 'size-3.5 shrink-0 mt-0.5', 'aria-hidden': true })}
+                            <span className="break-all">{activeCite.path}</span>
                           </span>
                           <button
                             type="button"
@@ -816,9 +837,12 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           className="fixed z-50 pointer-events-none max-w-[340px] rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow-lg px-2.5 py-2 text-[11px] text-gray-600 dark:text-gray-300"
           style={{ left: Math.min(hoverCite.x + 14, window.innerWidth - 360), top: hoverCite.y + 18 }}
         >
-          <div className="font-medium text-gray-700 dark:text-gray-300 break-all">📄 {hoverCite.path}</div>
+          <div className="break-all">
+            {dirname(hoverCite.path) && <span className="text-gray-400 dark:text-gray-500">{dirname(hoverCite.path)}/</span>}
+            <span className="font-semibold text-gray-800 dark:text-gray-100">{basename(hoverCite.path)}</span>
+          </div>
           {hoverCite.snippet && (
-            <div className="mt-1 whitespace-pre-wrap line-clamp-5">{hoverCite.snippet}</div>
+            <div className="mt-1 whitespace-pre-wrap line-clamp-5">{highlightSnippet(hoverCite.snippet, hoverCite.terms)}</div>
           )}
         </div>
       )}

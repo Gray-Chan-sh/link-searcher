@@ -4,6 +4,91 @@
 
 ---
 
+## 2026-09-20：引用预览「被引用片段」+ 导出编号对齐（导出复盘修复）
+
+- **背景**：用真实导出复盘验证 ①②③-B③-C。确认 **③-B（会话内稳定编号，跨轮同一文件编号一致）** 与 **③-A（不再复述"编号已失效"）** 生效；同时暴露两处问题并修复。
+- **问题 A（预览仍是文件头）**：`cited_excerpt` 初版按**空格整词**匹配查询，但改写产出的是**复合短语**（如"不动产资料查询"），文中不存在 → 命中 0 → 回退文件头（实测第 1 轮全部回退，第 2/3 轮因含短词而正常）。**改为 jieba 分词后再匹配**（"不动产资料查询" → 不动产/资料/查询）。
+- **问题 B（导出编号错位）**：③-B 后回答引用**会话稳定编号**（如 `[49][54]`），但 Markdown 导出的"检索依据"列表用**位置序号**（1–30）→ 对不上。`fmt_evidence_item` 改用 `material_no`（0 时回退位置）。应用内"检索依据"面板不显示编号，无此问题。
+- **问题 C（高亮同样受复合短语影响）**：前端高亮用 `search_query.split(/\s+/)`，同样得到复合短语、匹配不到正文。改为**后端 jieba 分词后随轮下发检索词**：`query_terms()` 统一分词；`PreparedConversation.search_terms` → `AiDone.search_terms` → 前端 `PerTurnEvidence.search_terms`，悬停高亮据此进行（`cited_excerpt` 也复用同一分词结果，避免每份材料重复分词）。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **381 passed / 0 failed**；`cargo check` 0 错误；`npx tsc -b` 0 错误；`npx vitest run` 31 passed；`npm run lint` 0 errors；`semgrep --severity ERROR` 0 findings。
+
+---
+
+## 2026-09-20：AI 流式回答跨页不丢（应用级 streamStore）
+
+- **问题**：AI 回答过程中切到其它页面再返回，回答会"停止"。
+- **根因**：`ai-chunk`/`ai-done` 监听器挂在 `ChatPanel` 内（`useEffect [session?.id]`），而 `App.tsx` 的 `<Route path="chat">` 在切页时**卸载 AiChat/ChatPanel** → `unlisten()` 移除监听。后端仍在跑，但事件无人接收；`ai-done` 是唯一把回答写回会话的地方，丢失后回答永不落库；返回时 pending 清理 effect 又清掉"思考中"状态，表现为"停止回答"。
+- **改动**：新增应用级单例 `src/ai/streamStore.ts`，**常驻监听** `ai-chunk`/`ai-done`，按 session 缓冲流式文本与 done 结果；`ChatPanel` 改为订阅 store（渲染读 store 累积文本；挂载时消费缓冲的 done 并写回会话）；pending 清理 effect 增加"本会话有在途流/未消费 done 则不清"守卫；移除已无用的 `loadingRef`。
+- **涉及文件**：`src/ai/streamStore.ts`（新增）、`src/components/ChatPanel.tsx`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0 错误；`npx vitest run` 31 passed；`npm run lint` 0 errors。
+
+---
+
+## 2026-09-20：引用气泡悬停修复（重复提示 / 提示不消失）
+
+- **重复提示**：引用气泡同时挂了原生 `title`（浏览器文件名提示）与自定义内容卡，悬停时两者叠加。移除 `title`（保留 `aria-label`），并在内容卡中**强调文件名**（目录弱化、basename 加粗）。
+- **提示不消失**：流式回答重渲染会替换引用节点，`onMouseLeave` 不再触发；滚动时卡片固定在鼠标坐标也不消失。改为在**滚动**、**鼠标离开消息区**、**流式分片到达**三处清除 hover 卡片。
+- **涉及文件**：`src/components/ChatPanel.tsx`、`src/utils/materialLabel.ts`（新增 `dirname`）、`src/utils/__tests__/materialLabel.test.ts`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0 错误；`npx vitest run` 31 passed；`npm run lint` 0 errors。
+
+---
+
+## 2026-09-20：会话内稳定材料编号（③-B）
+
+- **背景**：材料编号此前每轮从 `[1]` 重排（同一文件不同轮编号不同），prompt 还明确声明"历史编号已失效"，助手会把该内部提示复述进回答、用户无法跨轮对照。③-C 已把引用渲染为文件名气泡；本次让**编号本身在会话内稳定**。
+- **改动（后端 + 前端 resolver）**：
+  - `EvidenceItem` 新增 `material_no: usize`（`#[serde(default)]`；0 = 未设置，回退位置索引）。
+  - 新增 `prior_material_order`：从会话持久化的 `per_turn_evidence` 按 **file_id 首次出现顺序** 反推稳定编号；`assign_material_no` 复用/追加（`commands/ai.rs`）。
+  - `prepare_conversation_prompt` 四处材料注入点改用 `assign_material_no` 标注；`material_note` 由"编号 `[1]`-`[N]`"改为**列举本轮编号集合**；system prompt 由"只允许引用本轮 `[1]`-`[N]`、历史编号已失效"改为"只允许引用本轮列出的编号" → **顺带消除助手复述"编号已失效"**。
+  - `PreparedConversation.visible_max: usize` → `visible_nums: BTreeSet<usize>`；新增 `sanitize_citations_set`（按集合校验）；`auto_cite` 标签改用 `material_no`（0 时回退位置）。
+  - 前端 `EvidenceItem` 加 `material_no?`；`ChatPanel` 引用解析由 `idx = N-1` 改为**按 `material_no` 查表**（缺失时回退位置，兼容旧数据）。
+- **测试**：`visible_material_numbers_from_context`、`assign_material_no_is_stable_and_appends`、`sanitize_citations_set_strips_numbers_not_in_set`（替换原 `visible_material_count` 测试）。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`、`docs/RAG_PIPELINE.md`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **380 passed / 0 failed**；`cargo check` 0 错误（3 条既有告警）；`npx tsc -b` 0 错误；`npx vitest run` 27 passed；`semgrep --severity ERROR` **0 findings / 0 blocking**。
+
+---
+
+## 2026-09-20：引用渲染改为「文件名气泡」（③-C）
+
+- **背景**：AI 回答里的引用此前是裸编号 `[N]`，且编号每轮重排（同一文件在不同轮次编号不同），用户无法从数字判断是哪份文件。本次把**渲染层**改为「文件类型图标 + 截断 basename」气泡。会话内稳定编号（③-B）为后续独立子项。
+- **改动（纯前端，不动后端）**：
+  - 新增 `src/utils/materialLabel.ts`：`basename`（兼容 `/` 与 `\`）、`truncateForDisplay`（按**显示宽度**截断，CJK 计 2；中段省略、保留扩展名）、`disambiguate`（basename 同名冲突时前缀最短唯一父目录段）。
+  - 新增 `src/utils/fileIcon.tsx`：`fileTypeIcon(path)` 按扩展名映射图标（pdf/doc/表格/幻灯片/图片/音频/文本）。
+  - `src/icons.tsx`：新增 `FilePdfIcon` / `FileDocIcon` / `FileSheetIcon` / `FileSlideIcon` / `FileImageIcon` / `FileAudioIcon`。
+  - `src/components/ChatPanel.tsx`：引用标记渲染为**独立气泡**（一引用一气泡、**不合并**；连续引用 `[4][6]` → 两个气泡、可换行），气泡含类型图标 + 截断文件名，`title`/`aria-label` 为完整路径；悬浮/点击卡改为图标 + 完整路径。底层 markdown 仍为 `[N]`（存储/复制不膨胀）。
+- **测试**：新增 `src/utils/__tests__/materialLabel.test.ts`（11 例：跨平台 basename、CJK 宽度截断、3× `委托书.docx` 同名消歧）。
+- **涉及文件**：`src/utils/materialLabel.ts`、`src/utils/fileIcon.tsx`、`src/icons.tsx`、`src/components/ChatPanel.tsx`、`src/utils/__tests__/materialLabel.test.ts`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` **0 错误**；`npx vitest run` **27 passed / 0 failed**；`npm run lint` **0 errors**（无新增告警）。
+
+---
+
+## 2026-09-20：RAG 引用体系诊断 —— 编号跨轮失效 / 悬空引用 / 泛化误挂
+
+- **背景**：对一次真实多轮问答（律师受委托查询不动产资料，3 轮追问，严格模式）做全链路复盘 + 代码定位。发现 **6 类引用体系缺陷**，其中 **2 类为确定性代码缺陷**（非模型随机性），另 4 类为设计取舍。
+- **确定性缺陷（代码）**：
+  1. **悬空引用（上界用错变量）**：材料因上下文总长上限被截断后，prompt 只声明"编号 `[1]`-`[M]`"（M = `visible_material_count(&context)`，实际可见数），但 `sanitize_citations` / `auto_cite` 用的上界是**检索到的材料总数**（`evidence.len()`）。结果回答里出现模型**从未看到**的第 M+1..N 份材料的编号——实测第 2 轮声明 `[1]`-`[23]`、正文却出现 `[25]`。`visible_max` 已在 `prepare_conversation_prompt` 算出（`commands/ai.rs:2108`）却**未随 `PreparedConversation` 返回**，调用点（`ai.rs:2309` 非流式 / `ai.rs:2441` 流式）只能拿到 `evidence.len()`。
+  2. **泛化误挂**：`auto_cite`（`ai.rs:2154-2218`，阈值 `keyword_overlap > 0.15` @2194）只看"句子与材料片段的关键词重合度"。泛化句（如"具体操作请以当地不动产登记中心最新要求为准"）因含通用词"不动产登记中心"，与《更正登记委托书》片段（含"歙县不动产登记中心"）重合 → 被挂上无关编号 `[27]`。**关键词重合 ≠ 支撑关系**。
+- **设计取舍（方向待定）**：
+  3. **编号跨轮重排**：材料每轮从 `[1]` 重新编号、历史编号作废，助手会把系统指令"历史编号已失效"复述进回答（`ai.rs:2104-2116`）。
+  4. **全库无范围收敛**：未限定范围时全库检索，"利害关系人/判决/裁定"等跨案通用词把其他案件卷宗大量卷入（实测单轮 BM25 命中 4214 / 6245 / 2611）；缺"同一案件自动聚焦"。
+  5. **多轮指代丢失**：追问"利害关系人"（残缺问句）被硬拼关键词作答而非澄清；追问里的"他"未补全为具体人名（`rewrite_query` @514、`rewrite_history` @675、LLM 改写 5s 超时 @700）。
+  6. **chunk 质量 / 来源等级**：检索片段常为 OCR 页眉水印噪声（`ICS 01.120`、`Love Home` 等）；只索引到当事人书状、索引不到裁判文书时，以书状充"法院认定"的出处。
+- **本次已修（①②，确定性缺陷）**：
+  1. **引用上界改为"实际可见材料数"**：`PreparedConversation` 新增 `visible_max` 字段（取自既有 `visible_material_count(&context)`）并由 `prepare_conversation_prompt` 返回；`conversation_ask`（非流式）与 `conversation_ask_stream`（流式）两处调用点改用 `bound = visible_max.min(evidence.len())`，`sanitize_citations` 与 `auto_cite` 均按 `bound` 生效 → 模型不再引用被总长上限截断、自己从未看到的材料（悬空引用消失）。
+  2. **`keyword_overlap` 改为真 Jaccard（交集 / 并集）**：旧口径分母是"句子词数"，长句命中几个泛词（如"不动产登记中心"）即超阈值，把引用挂到"以当地要求为准"这类套话上；并集做分母后泛词重合并被稀释 → 泛化误挂消失。
+- **测试**：新增 `citation_beyond_visible_bound_is_dropped`（越界引用被丢弃）、`generic_sentence_not_cited_by_incidental_overlap`（泛化句不补引用）；`cargo test --lib` **378 passed / 0 failed**。
+- **待修（③-⑥，设计取舍，方向待定）**：
+  - [ ] ③ 编号跨轮稳定化方案（会话内稳定编号 or 不复述"编号已失效"）。
+  - [ ] ④ 会话级范围收敛（同案件自动聚焦）。
+  - [ ] ⑤ 多轮指代补全 + 残缺问句澄清。
+  - [ ] ⑥ chunk 质量与来源等级加权。
+- **文档**：`docs/RAG_PIPELINE.md` 增补"引用与编号体系"薄弱场景表 + "排查线索"引用检查项。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`docs/RAG_PIPELINE.md`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **378 passed / 0 failed**；`cargo check` 0 错误（3 条告警均为既有、与本改动无关）；`semgrep --severity ERROR` **0 findings / 0 blocking**。
+
+---
+
 ## 2026-09-19：LLM max_tokens 自适应降级 —— 修复"网关拒绝超限值导致调用全失败"
 
 - **根因（完整链）**：

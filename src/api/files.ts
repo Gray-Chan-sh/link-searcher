@@ -60,6 +60,7 @@ export interface EvidenceItem {
   rewritten?: boolean
   rewritten_query?: string | null
   from_history?: boolean
+  material_no?: number
 }
 
 export interface SmartSearchResponse {
@@ -88,6 +89,8 @@ export interface PerTurnEvidence {
   embedding_model?: string
   /** 改写后的最终检索查询 */
   search_query?: string
+  /** jieba 分词后的检索词（前端用于高亮被引用片段） */
+  search_terms?: string[]
   /** BM25 合并前命中数 */
   hits?: number
 }
@@ -159,6 +162,7 @@ export interface AiDonePayload {
   evidence?: EvidenceItem[]
   trace_id?: string
   search_query?: string
+  search_terms?: string[]
   hits?: number
   total_match_count?: number
   llm_model?: string
