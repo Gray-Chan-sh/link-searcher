@@ -1405,6 +1405,22 @@ pub(crate) async fn prepare_conversation_prompt(
     let chunk_threshold = env_f32("LINK_SEARCHER_CHUNK_VECTOR_THRESHOLD", CHUNK_VECTOR_THRESHOLD);
     let chunk_top_k = env_usize("LINK_SEARCHER_CHUNK_TOP_K", CHUNK_VECTOR_TOP_K);
     let chunk_rrf_weight = env_f32("LINK_SEARCHER_RRF_CHUNK_WEIGHT", 1.0) as f64;
+    let bm25_rrf_weight = env_f32("LINK_SEARCHER_RRF_BM25_WEIGHT", 1.0) as f64;
+    // BM25 头部"精英加成"：BM25 排名越靠前，字面相关性的精度越高；中后段
+    // 则是任关键词命中的长尾（噪声）。实测全局提高 BM25 权重会同时抬高
+    // rank 100~500 的长尾，灌满融合前 30（总分 80%→68%）；而只抬高前 K 名
+    // 能精准保住"高字面相关 + 语义中等"的文档（旗舰案例 BM25 #7 被
+    // 多通道中等文档挤出前 30 就是此因）。K=0 关闭（默认，行为不变）。
+    let bm25_elite_k = env_usize("LINK_SEARCHER_BM25_ELITE_K", 0);
+    let bm25_elite_weight = env_f32("LINK_SEARCHER_BM25_ELITE_WEIGHT", 4.0) as f64;
+    // BM25 通道内部的语义重排（semantic_fuse，用设置页 semantic_weight 做
+    // 分数混合）。外层管线已用 RRF 融合 BM25/向量/chunk/路径四个通道，内层
+    // 再一次分数混合属重复融合：它会把"字面强、语义中等"的文档在通道内
+    // 先压下去，外层再也救不回来。设为 off 时 BM25 通道保持纯 BM25 名次。
+    let inner_semantic_fuse = std::env::var("LINK_SEARCHER_INNER_SEMANTIC_FUSE")
+        .map(|v| !v.eq_ignore_ascii_case("off"))
+        .unwrap_or(true)
+        && crate::ai::embedding_enabled();
     let use_rrf = std::env::var("LINK_SEARCHER_FUSION")
         .map(|v| !v.eq_ignore_ascii_case("mix"))
         .unwrap_or(true);
@@ -1413,12 +1429,38 @@ pub(crate) async fn prepare_conversation_prompt(
     // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
     // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
     let retrieval_kws = extract_retrieval_keywords(&search_q);
-    let bm25_query = if retrieval_kws.is_empty() {
+    let vocab_rewrite_enabled = std::env::var("LINK_SEARCHER_VOCAB_REWRITE")
+        .map(|v| !v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false);
+    let final_kws = if vocab_rewrite_enabled {
+        match state.db.get() {
+            Ok(c) => match crate::ai::vocabulary_rewrite(&search_q, &c) {
+                Some(llm_kws) => {
+                    let mut merged = retrieval_kws.clone();
+                    for k in llm_kws {
+                        if !merged.contains(&k) {
+                            merged.push(k);
+                        }
+                    }
+                    log::info!("[AI]   vocab_rewrite merged kws: {:?}", merged);
+                    merged
+                }
+                None => retrieval_kws,
+            },
+            Err(e) => {
+                log::warn!("[AI] vocab_rewrite: db error: {e}");
+                retrieval_kws
+            }
+        }
+    } else {
+        retrieval_kws
+    };
+    let bm25_query = if final_kws.is_empty() {
         search_q.clone()
     } else {
-        retrieval_kws.join(" OR ")
+        final_kws.join(" OR ")
     };
-    log::info!("[AI]   retrieval_kws={:?} bm25_query=\"{}\"", retrieval_kws, truncate_text(&bm25_query, 60));
+    log::info!("[AI]   final_kws={:?} bm25_query=\"{}\"", final_kws, truncate_text(&bm25_query, 60));
     if !last_q.trim().is_empty() {
         check_cancel!();
         emit_progress("bm25", "BM25 检索中...", 0, 0);
@@ -1427,12 +1469,30 @@ pub(crate) async fn prepare_conversation_prompt(
             crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
         };
         let bm25_hits = bm25_relevant_hits(
-            state, &bm25_query, (total_files as usize).max(500), crate::ai::embedding_enabled(),
+            state, &bm25_query, (total_files as usize).max(500), inner_semantic_fuse,
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
+        // 精英加成按"纯 BM25 名次"（bm25_score 降序）判定，而非通道内迭代名次：
+        // 内层 semantic_fuse 会按分数混合重排该通道，若按重排名次加成，"字面强
+        // 但语义中等"的文档在通道内已被压到几十名开外，外层再无从救起。
+        let mut pure_order: Vec<usize> = (0..bm25_hits.len()).collect();
+        pure_order.sort_by(|&a, &b| {
+            bm25_hits[b].bm25_score.unwrap_or(0.0)
+                .partial_cmp(&bm25_hits[a].bm25_score.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut pure_rank: Vec<usize> = vec![0; bm25_hits.len()];
+        for (r, &i) in pure_order.iter().enumerate() {
+            pure_rank[i] = r;
+        }
         for (rank, hit) in bm25_hits.into_iter().enumerate() {
-            rrf_add(&mut rrf_acc, &hit.file_id, rank, 1.0);
+            let channel_w = if bm25_elite_k > 0 && pure_rank[rank] < bm25_elite_k {
+                bm25_elite_weight
+            } else {
+                bm25_rrf_weight
+            };
+            rrf_add(&mut rrf_acc, &hit.file_id, rank, channel_w);
             if all_seen.insert(hit.file_id.clone()) { all_hits.push(hit); }
         }
         emit_progress("bm25", &format!("BM25 完成，命中 {} 份", bm25_count), bm25_count, bm25_count);
@@ -1441,7 +1501,7 @@ pub(crate) async fn prepare_conversation_prompt(
             emit_progress("vector", "语义扫描中...", 0, 0);
             log::info!("[AI]   about to call vector_full_scan");
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let vec_query = if retrieval_kws.is_empty() { search_q.clone() } else { retrieval_kws.join(" ") };
+            let vec_query = if final_kws.is_empty() { search_q.clone() } else { final_kws.join(" ") };
             // 只嵌入一次，文件级与 chunk 级两个向量通道共享同一查询向量
             // （debug 下 bge-large 单次推理 85s，重复嵌入翻倍浪费）。
             // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
@@ -1513,10 +1573,33 @@ pub(crate) async fn prepare_conversation_prompt(
                     }
                 }
             }
+            // QA pair vector channel: pre-generated questions match user query
+            // by semantic similarity, bridging the vocabulary gap between user's
+            // everyday language and document's formal terminology.
+            let qa_scan_enabled = std::env::var("LINK_SEARCHER_QA_SCAN")
+                .map(|v| !v.eq_ignore_ascii_case("off"))
+                .unwrap_or(false);
+            if qa_scan_enabled {
+                if let Some(qe) = &query_emb {
+                    if let Ok(qa_hits) = crate::ai::qa_vector_scan_with_query_emb(&c, qe, vector_threshold, 50) {
+                        log::info!("[AI]   qa_vector_scan returned {} hits", qa_hits.len());
+                        for (rank, (fid, sim)) in qa_hits.into_iter().enumerate() {
+                            rrf_add(&mut rrf_acc, &fid, rank, 1.0);
+                            if all_seen.insert(fid.clone()) {
+                                all_hits.push(ScoredHit {
+                                    file_id: fid, path: String::new(), bm25_score: None,
+                                    semantic_score: Some(sim as f64), rrf_score: None,
+                                    from_history: false, from_chunk: false, hit_chunks: Vec::new(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
         }
         let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        let path_kws: Vec<String> = if retrieval_kws.is_empty() {
+        let path_kws: Vec<String> = if final_kws.is_empty() {
             // 无实体词时退化为完整问句 OR 分词片段，尽量不丢召回
             crate::search::schema::split_query_terms(&search_q)
                 .split_whitespace()
@@ -1524,7 +1607,7 @@ pub(crate) async fn prepare_conversation_prompt(
                 .filter(|s| !s.is_empty() && s != "OR")
                 .collect()
         } else {
-            retrieval_kws.clone()
+            final_kws.clone()
         };
         if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &path_kws) {
             log::info!("[AI]   path_match_files returned {} hits (kws={:?})", path_hits.len(), path_kws);
@@ -1980,11 +2063,11 @@ pub(crate) async fn prepare_conversation_prompt(
     const CHAT_RECALL_PER_MSG: usize = 2_000;
     let mut chat_recall: Vec<String> = Vec::new();
     let mut recall_budget = CHAT_RECALL_BUDGET;
-    if messages.len() > 1 && !retrieval_kws.is_empty() {
+    if messages.len() > 1 && !final_kws.is_empty() {
         for (i, m) in messages.iter().enumerate().take(messages.len().saturating_sub(1)) {
             if m.role != "assistant" || m.content.trim().is_empty() { continue; }
             let content_lower = m.content.to_lowercase();
-            let match_count = retrieval_kws.iter()
+            let match_count = final_kws.iter()
                 .filter(|kw| content_lower.contains(&kw.to_lowercase()))
                 .count();
             if match_count == 0 { continue; }

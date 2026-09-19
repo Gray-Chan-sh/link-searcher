@@ -349,6 +349,16 @@ const CREATE_TABLES_SQL: &str = "
         updated_at  INTEGER NOT NULL,
         PRIMARY KEY (md5, chunk_index)
     );
+
+    CREATE TABLE IF NOT EXISTS doc_qa_pairs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id     TEXT NOT NULL,
+        question    TEXT NOT NULL,
+        dim         INTEGER NOT NULL,
+        vector      BLOB NOT NULL,
+        updated_at  INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_qa_file_id ON doc_qa_pairs(file_id);
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any

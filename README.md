@@ -204,6 +204,8 @@ npm run tauri build
 > 📚 **文档导航**
 > - [用户手册](docs/USER_MANUAL.md) — 面向使用者的 12 章手册
 > - [设计手册](docs/ARCHITECTURE.md) — 面向开发者，分模块讲解设计思想、架构与复现要点
+> - [检索问答流程](docs/RAG_PIPELINE.md) — 提问后系统做了什么（纯行为描述，含已知薄弱场景与排查线索）
+> - [检索评测基线](docs/rag-eval-baseline.md) — 检索质量度量与变更门禁
 > - [搜索 UX 实现](docs/SEARCH_UX_IMPLEMENTATION.md)
 | 搜索引擎 | Tantivy 0.22 |
 | 数据库 | SQLite（rusqlite + r2d2 连接池） |

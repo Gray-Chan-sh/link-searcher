@@ -86,8 +86,19 @@ golden_dir/
 | `LINK_SEARCHER_CHUNK_VECTOR_THRESHOLD` | 0.55 | chunk 级向量阈值 |
 | `LINK_SEARCHER_CHUNK_TOP_K` | 500 | chunk 通道取数上限 |
 | `LINK_SEARCHER_RRF_CHUNK_WEIGHT` | 1.0 | chunk 通道的 RRF 权重 |
+| `LINK_SEARCHER_RERANK` | （空=开） | 设为 `off` 关闭重排阶段 |
+| `LINK_SEARCHER_RERANK_TOP_N` | 50 | 重排候选窗（⚠️ 开大显著变慢，1000 会超时） |
+| `LINK_SEARCHER_RERANK_FUSION` | 0.3 | 重排名次与原次序的 RRF 融合权重 |
+| `LINK_SEARCHER_BM25_ELITE_K` | 0（关） | 给**纯 BM25 前 K 名**加权重 |
+| `LINK_SEARCHER_BM25_ELITE_WEIGHT` | 4.0 | 上述加权倍数 |
+| `LINK_SEARCHER_INNER_SEMANTIC_FUSE` | （空=开） | 设为 `off` 使 BM25 通道保持纯 BM25 名次 |
+| `LINK_SEARCHER_RRF_BM25_WEIGHT` | 1.0 | BM25 通道整体权重（⚠️ 全局调高会灌满前 30） |
 
-⚠️ **已扫描结论（2026-09-17，75 题串行）**：这些参数**均已到极限** —— 调整只会在
+⚠️ **`BM25_ELITE_*` 是"已知代价的应急开关"**：`K=10 w=2` 可让典型 BM25 强/语义中等的
+文档进 top-10，但实测总分 **−8.00pp**（`multi_hop` 75→37.5）。见
+`docs/rag-eval-baseline.md` 的「指标盲区案例」节。**默认关闭，勿轻易采纳。**
+
+⚠️ **已扫描结论（2026-09-17，75 题串行）**：阈值/通道权重这类参数**均已到极限** —— 调整只会在
 `semantic`/`long_doc` 与 `multi_hop`/`twin` 之间移动（净变化恒 +1 题、p=0.50）。**基线
 （0.55 / 0.55 / 500 / 1.0）即为当前最优**，无需再调。
 
@@ -99,6 +110,29 @@ golden_dir/
 
 生成层（回答是否忠实、引用是否准确）不在本脚本范围；需要时用真实 `chat` 回答
 + 较强 API 模型做 judge 单独评。
+
+## ⚠️ 可答率口径（Answerable@10）——与上面的口径不同
+
+上面两个指标的判据是"**指定的那一份** support 文件是否进 top-10"，会**系统性低估**
+真实检索能力：库里常有多份文档都能回答同一个问题（例：多份劳动合同都含"提前三十日
+书面通知"），找到任意一份即为成功，但旧口径判为 miss。
+
+`scripts/eval/run_eval_answerable.py` 用 **LLM judge** 逐份判断 top-10 文档能否回答，
+任一份可答即算命中：
+
+```bash
+python3 scripts/eval/run_eval_answerable.py <golden.jsonl> <data_dir> \
+  --llm-url <URL> --llm-key <KEY> --llm-model <MODEL>
+```
+
+实测（88 题，judge=agnes-3.0-flash）：**可答率 87.50%** vs 旧口径 72.73%（+14.77pp），
+差异主要在 `semantic` 类（45.45% → 78.79%）。
+
+⚠️ **两点注意**：
+1. **judge 只喂文档前 3000 字** → 长文档（`long_doc`）答案在深处时**假阴性**（该类别
+   显示 40%，不代表检索失败）。长文档需改按 chunk/相关段落喂 judge。
+2. **评测前确认 embedding/reranker 服务在运行**（`curl 127.0.0.1:8000/v1/models`
+   返回 200）。服务未运行时向量通道静默关闭（输出 `sem=-`），结果不可比。
 
 ## 变更记录门禁
 

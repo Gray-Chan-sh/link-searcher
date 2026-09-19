@@ -550,42 +550,94 @@ pub fn chunk_vector_scan_for_md5s(
 /// text. `system` is the instruction, `user` the task/content. Returns `None`
 /// when unconfigured or the request fails (downgrade, never block).
 pub fn chat(system: &str, user: &str) -> Option<String> {
+    chat_with_timeout(system, user, 60 * 60)
+}
+
+/// Smallest `max_tokens` the adaptive-retry loop will step down to.
+const MIN_MAX_TOKENS: u32 = 1024;
+
+/// Pull the gateway's stated `max_tokens` ceiling out of a 400 body
+/// (e.g. "max_tokens 不能超过 65536"). Returns the largest plausible value
+/// below `current`, so a body echoing the rejected request size can't win.
+fn max_tokens_limit_from_error(body: &str, current: u32) -> Option<u32> {
+    let lower = body.to_ascii_lowercase();
+    let idx = lower.find("max_tokens")?;
+    body[idx..]
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|tok| tok.parse::<u32>().ok())
+        .filter(|&v| v >= MIN_MAX_TOKENS && v < current)
+        .max()
+}
+
+/// [`chat`] with an explicit read timeout, so short utility calls (e.g. query
+/// keyword rewriting) can fail fast instead of hanging on a stalled gateway.
+pub fn chat_with_timeout(system: &str, user: &str, read_timeout_secs: u64) -> Option<String> {
     let cfg = crate::config::load_config();
     let ep = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm)?;
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
-    let req = ChatReq {
-        model: ep.model_id.clone(),
-        messages: vec![
-            ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
-            ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
-        ],
-        temperature: 0.3,
-        max_tokens: active_max_tokens(),
-        stream: false,
-    };
-    let req_body = match serde_json::to_string(&req) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("[AI] chat request build failed: {e}");
-            return None;
-        }
-    };
+    let messages = vec![
+        ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
+        ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
+    ];
     log::info!(
         "[AI]   → LLM: model={} chars={}",
         ep.model_id,
         user.chars().count()
     );
-    let send_result = build_agent()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .set_auth(&ep.api_key)
-        .send_string(&req_body);
 
-    let parsed: Result<ChatResp, String> = send_result
-        .map_err(|e| e.to_string())
-        .and_then(|r| r.into_string().map_err(|e| e.to_string()))
-        .and_then(|body| parse_chat_response(&body));
+    // Some gateways reject an oversized max_tokens outright (agnes returns 400
+    // "max_tokens 不能超过 65536") instead of clamping; step down and retry.
+    let mut max_tokens = active_max_tokens();
+    let mut parsed: Result<ChatResp, String> = Err("request not attempted".into());
+    for attempt in 0..5 {
+        let req = ChatReq {
+            model: ep.model_id.clone(),
+            messages: messages.clone(),
+            temperature: 0.3,
+            max_tokens,
+            stream: false,
+        };
+        let req_body = match serde_json::to_string(&req) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("[AI] chat request build failed: {e}");
+                return None;
+            }
+        };
+        let send_result = build_agent_with_read_timeout(read_timeout_secs)
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .set_auth(&ep.api_key)
+            .send_string(&req_body);
+
+        match send_result {
+            Ok(resp) => {
+                parsed = resp
+                    .into_string()
+                    .map_err(|e| e.to_string())
+                    .and_then(|body| parse_chat_response(&body));
+                break;
+            }
+            Err(ureq::Error::Status(400, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                let next = max_tokens_limit_from_error(&body, max_tokens)
+                    .or_else(|| (max_tokens > MIN_MAX_TOKENS).then(|| (max_tokens / 2).max(MIN_MAX_TOKENS)))
+                    .filter(|&v| v < max_tokens);
+                if attempt < 4 && let Some(next) = next {
+                    log::warn!("[AI] gateway rejected max_tokens={max_tokens}; retrying with {next}");
+                    max_tokens = next;
+                    continue;
+                }
+                parsed = Err(body);
+                break;
+            }
+            Err(e) => {
+                parsed = Err(e.to_string());
+                break;
+            }
+        }
+    }
 
     match parsed {
         Ok(resp) => {
@@ -638,7 +690,7 @@ pub fn vocabulary_rewrite(query: &str, conn: &rusqlite::Connection) -> Option<Ve
         keywords.join(" ")
     );
 
-    let response = chat(system, &user)?;
+    let response = chat_with_timeout(system, &user, 20)?;
     let rewritten: Vec<String> = response
         .split_whitespace()
         .map(|s| s.to_string())
@@ -839,7 +891,7 @@ pub fn chat_stream(
     ChatStreamOutcome { text: Some(full), took_ms, cancelled }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ChatMsg {
     role: String,
     content: String,
@@ -912,9 +964,13 @@ fn build_agent() -> ureq::Agent {
     // to stream a long answer to completion. Connect fails fast (15s) so an
     // unreachable gateway errors immediately; the per-read cap (60min) is a
     // safety net, not a generation limit.
+    build_agent_with_read_timeout(60 * 60)
+}
+
+fn build_agent_with_read_timeout(read_timeout_secs: u64) -> ureq::Agent {
     let mut builder = ureq::builder()
         .timeout_connect(std::time::Duration::from_secs(15))
-        .timeout_read(std::time::Duration::from_secs(60 * 60));
+        .timeout_read(std::time::Duration::from_secs(read_timeout_secs));
     for var in ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"] {
         if let Ok(p) = std::env::var(var)
             && !p.is_empty() {
@@ -1344,6 +1400,28 @@ mod tests {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"你好"}}]}"#;
         let resp = parse_chat_response(body).unwrap();
         assert_eq!(resp.choices[0].message.content, "你好");
+    }
+
+    #[test]
+    fn max_tokens_limit_parses_agnes_error() {
+        let body = r#"{"error":{"message":"max_tokens 不能超过 65536 (request id: 20260919135013169628929UKzobVY6)"}}"#;
+        assert_eq!(max_tokens_limit_from_error(body, 1_000_000), Some(65536));
+    }
+
+    #[test]
+    fn max_tokens_limit_ignores_echoed_request_size() {
+        let body = "max_tokens=1000000 rejected; maximum allowed is 65536";
+        assert_eq!(max_tokens_limit_from_error(body, 1_000_000), Some(65536));
+    }
+
+    #[test]
+    fn max_tokens_limit_none_without_mention() {
+        assert_eq!(max_tokens_limit_from_error("context length exceeded", 1000), None);
+    }
+
+    #[test]
+    fn max_tokens_limit_never_exceeds_current() {
+        assert_eq!(max_tokens_limit_from_error("max_tokens cannot exceed 65536", 4096), None);
     }
 
     #[test]
