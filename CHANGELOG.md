@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-09-20：PDF 漏字修复（二）—— 扫描件识别 + 改走 OCR（修正上一版）
+
+- **上一版为何无效**：`一审判决书.pdf` 重索引后仍漏字。实测确认它是 **macOS Quartz 扫描件**（`pdfinfo` Producer=Quartz PDFContext；`pdfimages` 显示每页一张整页图 1240×1754@150dpi + CCITT 掩码），其上叠了一层**合成为文字层**——`人/行/自/一/用/月/日/身/生/山…` 等字被 macOS 用**回退字体拆成独立文本 run**（`委托代理` 与 `人` 分两次绘制）：
+  - lopdf：这些 run 的字体编码解析失败 → 直接**丢字**；
+  - pdftotext（上一版）：字符齐全但**阅读顺序被破坏**，碎字被甩到页尾 → 仍表现为漏字；
+  - `pdf-inspector`：检测器**只看 `Tj`/`TJ` 算子**（无图像维度）→ 判 `TextBased` conf=1.0 → App 不 OCR；
+  - **Apple Vision OCR**：逐页渲染识别 → 顺序与内容**全对**。
+- **改动**（`extractor/pdf.rs`，扫描件识别并优先 OCR）：
+  - `page_media_size()`（读 `/MediaBox`，支持 `Parent` 继承）+ `full_page_image_pages()`（解析 `pdfimages -list`，图像渲染尺寸/页面尺寸 ≥ 80% 判为整页图）；
+  - `is_image_based_scan()`：多数页（≥ 50%）含整页图 → 扫描件；
+  - `extract_with_lang` 在 lopdf 提取**之前**：判为扫描件即调用 `run_pdf_ocr_pipeline`（走 Vision）并返回，绕过不可信文字层；OCR 不可用/失败则原样回退（无回归）。
+  - 上一版「无 `/Encoding` → pdftotext」分支保留为**非扫描件**的兜底（扫描件已由 OCR 优先接管）。
+- **实测验证**（真实文件）：`is_image_based_scan=true`；`extract_with_lang(...,"chi_sim")` 输出 **10293 字**，开头正确：`安徽省歙县人民法院 / 行政判决书 / 原告汪均益，男，1944年7月13日出生…`；18 页耗时 8.24s。
+- **测试**：新增 `test_page_media_size_reads_direct_and_inherited`、`test_full_page_image_pages_detects_scan_coverage`。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **397 passed / 0 failed**；`cargo check` 0 错误；`cargo clippy` 无 `pdf.rs` 新增告警；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-20：PDF 漏字修复 —— 无 `/Encoding` 字体优先走 pdftotext
 
 - **问题**：中文 PDF（如 `一审判决书.pdf`）提取后**大量漏字**。日志出现 `[object] Could not parse the encoding, error: DictKey`，字体为 `AAAAAC+STSongti-SC-Regular`（macOS Quartz 导出的子集 TrueType，**无 `/Encoding` 键**）。lopdf 的 `extract_text` 在 `Font::get_font_encoding` 解析失败时回退到**不完整的 `/ToUnicode` CMap 解析**，静默丢弃字符；但残缺文本仍通过 `is_garbled` / `is_sparse` / `is_implausible` 三项质检 → `doc_clean=true`，既有 pdftotext 回退（`if !doc_clean`）从不触发。

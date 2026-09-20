@@ -132,6 +132,101 @@ fn run_with_timeout(mut cmd: std::process::Command, timeout: Duration) -> std::i
     Ok((Some(status), out))
 }
 
+fn object_number(o: &lopdf::Object) -> Option<f32> {
+    o.as_float().ok().or_else(|| o.as_i64().ok().map(|v| v as f32))
+}
+
+/// Page size in points from `/MediaBox`, following `Parent` for inherited values.
+fn page_media_size(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> Option<(f32, f32)> {
+    let mut id = page_id;
+    for _ in 0..64 {
+        let dict = doc.get_dictionary(id).ok()?;
+        if let Ok(mb_obj) = dict.get(b"MediaBox")
+            && let Ok((_, mb_obj)) = doc.dereference(mb_obj)
+            && let Ok(mb) = mb_obj.as_array()
+            && mb.len() == 4
+            && let (Some(w), Some(h)) = (
+                object_number(&mb[2]).zip(object_number(&mb[0])).map(|(a, b)| (a - b).abs()),
+                object_number(&mb[3]).zip(object_number(&mb[1])).map(|(a, b)| (a - b).abs()),
+            )
+            && w > 0.0
+            && h > 0.0
+        {
+            return Some((w, h));
+        }
+        match dict.get(b"Parent").and_then(lopdf::Object::as_reference) {
+            Ok(parent) => id = parent,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// Minimum `image-size / page-size` ratio, in both dimensions, for a full-page image.
+const FULL_PAGE_IMAGE_COVERAGE: f32 = 0.8;
+
+/// 1-based pages holding an image covering ≥ `FULL_PAGE_IMAGE_COVERAGE` of the
+/// page in both dimensions. `listing` is `pdfimages -list` output.
+fn full_page_image_pages(
+    listing: &str,
+    page_size: impl Fn(u32) -> Option<(f32, f32)>,
+) -> HashSet<u32> {
+    let mut pages = HashSet::new();
+    for line in listing.lines() {
+        // Columns: page num type width height color comp bpc enc interp object id x-ppi y-ppi size ratio
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 14 || !matches!(f[2], "image" | "stencil" | "smask") {
+            continue;
+        }
+        let (Ok(page), Ok(w), Ok(h), Ok(xppi), Ok(yppi)) = (
+            f[0].parse::<u32>(),
+            f[3].parse::<u32>(),
+            f[4].parse::<u32>(),
+            f[12].parse::<f32>(),
+            f[13].parse::<f32>(),
+        ) else {
+            continue;
+        };
+        if xppi <= 0.0 || yppi <= 0.0 {
+            continue;
+        }
+        let Some((pw, ph)) = page_size(page) else {
+            continue;
+        };
+        let (w_pt, h_pt) = (w as f32 / xppi * 72.0, h as f32 / yppi * 72.0);
+        if w_pt >= FULL_PAGE_IMAGE_COVERAGE * pw && h_pt >= FULL_PAGE_IMAGE_COVERAGE * ph {
+            pages.insert(page);
+        }
+    }
+    pages
+}
+
+/// True when most pages carry a full-page image — i.e. a scan. Scans often ship
+/// a synthetic text layer whose font-fallback glyphs are split into separate
+/// runs, destroying reading order for lopdf/poppler, so they must be OCR'd.
+fn is_image_based_scan(path: &Path, doc: &lopdf::Document) -> bool {
+    let Some(bin) = pdfimages_path() else {
+        return false;
+    };
+    let mut cmd = crate::process::new(bin);
+    cmd.arg("-list").arg(path);
+    let Ok((Some(status), stdout)) = run_with_timeout(cmd, Duration::from_secs(60)) else {
+        return false;
+    };
+    if !status.success() {
+        return false;
+    }
+    let page_ids = doc.get_pages();
+    if page_ids.is_empty() {
+        return false;
+    }
+    let listing = String::from_utf8_lossy(&stdout);
+    let full = full_page_image_pages(&listing, |p| {
+        page_ids.get(&p).and_then(|&id| page_media_size(doc, id))
+    });
+    !full.is_empty() && full.len() * 2 >= page_ids.len()
+}
+
 /// Extract text via pdftotext (poppler) and check for watermarks/repetition.
 /// Used as a fallback when lopdf cannot parse the PDF but the text layer is
 /// still valid (common for digitally generated PDFs with stream errors).
@@ -348,6 +443,19 @@ impl PdfExtractor {
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
         if pages.is_empty() {
             return Ok(String::new());
+        }
+
+        // Scans carry a synthetic, mis-ordered text layer that neither lopdf nor
+        // poppler can reconstruct; OCR the page images instead.
+        if is_image_based_scan(path, &doc)
+            && let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine)
+        {
+            log::info!(
+                "[PDF] {:?}: image-based scan — OCR bypassed text layer ({} chars)",
+                path.file_name(),
+                ocr_text.chars().count()
+            );
+            return Ok(ocr_text);
         }
 
         // lopdf silently drops characters on fonts lacking a Name-valued
@@ -1493,6 +1601,70 @@ mod tests {
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
+    }
+
+    #[test]
+    fn test_page_media_size_reads_direct_and_inherited() -> Result<()> {
+        let dir = std::env::temp_dir().join("extractor_test_mediabox");
+        std::fs::create_dir_all(&dir)?;
+
+        for (name, on_page) in [("direct.pdf", true), ("inherited.pdf", false)] {
+            let path = dir.join(name);
+            let mut doc = Document::new();
+            let page_id = doc.add_object(Dictionary::from_iter([
+                (b"Type".to_vec(), Object::Name(b"Page".to_vec())),
+            ]));
+            let mediabox = Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ]);
+            let mut pages_entries = vec![
+                (b"Type".to_vec(), Object::Name(b"Pages".to_vec())),
+                (b"Kids".to_vec(), Object::Array(vec![Object::Reference(page_id)])),
+                (b"Count".to_vec(), Object::Integer(1)),
+            ];
+            if !on_page {
+                pages_entries.push((b"MediaBox".to_vec(), mediabox.clone()));
+            }
+            let pages_id = doc.add_object(Dictionary::from_iter(pages_entries));
+            if let Ok(page_dict) = doc.get_dictionary_mut(page_id) {
+                page_dict.set("Parent", Object::Reference(pages_id));
+                if on_page {
+                    page_dict.set("MediaBox", mediabox);
+                }
+            }
+            let catalog_id = doc.add_object(Dictionary::from_iter([
+                (b"Type".to_vec(), Object::Name(b"Catalog".to_vec())),
+                (b"Pages".to_vec(), Object::Reference(pages_id)),
+            ]));
+            doc.trailer.set("Root", Object::Reference(catalog_id));
+            doc.save(&path)?;
+
+            let doc = Document::load(&path)?;
+            let pid = *doc.get_pages().values().next().unwrap();
+            assert_eq!(page_media_size(&doc, pid), Some((612.0, 792.0)), "case {name}");
+        }
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_full_page_image_pages_detects_scan_coverage() {
+        let listing = "\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    1240  1754  rgb     3   8  jpeg   no       551  0   150   150 38.6K 0.6%
+   1     1 stencil    24    16  -       1   1  ccitt  no         7  0   300   300 19B   40%
+   2     0 image     200   150  rgb     3   8  jpeg   no       552  0   150   150 1.0K  0.6%
+   3     0 image    2480  3508  rgb     3   8  jpeg   no       553  0   300   300 90K   0.6%";
+        let a4 = (595.2_f32, 841.68_f32);
+        let mut pages: Vec<u32> = full_page_image_pages(listing, |_| Some(a4)).into_iter().collect();
+        pages.sort_unstable();
+        // p1 (1240x1754@150) and p3 (2480x3508@300) both render to full A4.
+        assert_eq!(pages, vec![1, 3]);
     }
 
     #[test]
