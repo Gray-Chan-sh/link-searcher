@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-20：PDF 漏字修复 —— 无 `/Encoding` 字体优先走 pdftotext
+
+- **问题**：中文 PDF（如 `一审判决书.pdf`）提取后**大量漏字**。日志出现 `[object] Could not parse the encoding, error: DictKey`，字体为 `AAAAAC+STSongti-SC-Regular`（macOS Quartz 导出的子集 TrueType，**无 `/Encoding` 键**）。lopdf 的 `extract_text` 在 `Font::get_font_encoding` 解析失败时回退到**不完整的 `/ToUnicode` CMap 解析**，静默丢弃字符；但残缺文本仍通过 `is_garbled` / `is_sparse` / `is_implausible` 三项质检 → `doc_clean=true`，既有 pdftotext 回退（`if !doc_clean`）从不触发。
+- **改动**：`extractor/pdf.rs` 新增 `has_unparseable_font_encoding(&Document)`——逐页 `get_page_fonts`，若某字体**无 Name 型 `/Encoding` 且有 `/ToUnicode`**（即 lopdf 会走丢字回退的字体）则判定命中。在 `extract_text` **之前**检测到此条件时优先调用 `try_pdftotext_extract`，仅当结果通过 `!is_garbled_text && !is_implausible_text_layer && !is_sparse_text_layer` 才采用并直接返回；否则原样回退 lopdf（无回归）。
+- **误判防护**：仅 `!encoding_is_name && has(ToUnicode)` 命中——简单拉丁字体（无 `/Encoding` 也无 `/ToUnicode`，如测试用 Helvetica Type1）走 StandardEncoding 本就正确，不误判；有 Name 型 `/Encoding` 的字体本就绕过 lopdf 的失败分支，不误判。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`CHANGELOG.md`。
+- **验证**：新增 3 个单测（无 Encoding + 有 ToUnicode → 命中；有 Name Encoding → 不命中；无 ToUnicode → 不命中）；`cargo test --lib` **395 passed / 0 failed**；`cargo check` 0 错误、`cargo clippy` 无新增告警；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-20：指代未绑定 → 澄清提示 + 一键收窄（⑤ 判定 / 收窄）
 
 - **问题**：追问里的指代（"他/该案…"）若无法绑定到具体主体，而材料分属多个主体，系统会直接给一个含糊（甚至答非所问）的回答，用户不知道问题出在哪。

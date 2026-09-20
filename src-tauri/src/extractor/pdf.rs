@@ -349,6 +349,24 @@ impl PdfExtractor {
         if pages.is_empty() {
             return Ok(String::new());
         }
+
+        // lopdf silently drops characters on fonts lacking a Name-valued
+        // /Encoding; when poppler can recover a trustworthy text layer, use it
+        // and skip the lossy lopdf pass entirely.
+        if has_unparseable_font_encoding(&doc)
+            && let Some(text) = try_pdftotext_extract(path)
+            && !is_garbled_text(&text)
+            && !is_implausible_text_layer(&text, pages.len())
+            && !is_sparse_text_layer(&text, pages.len())
+        {
+            log::info!(
+                "[PDF] {:?}: unparseable font /Encoding — pdftotext recovered {} chars",
+                path.file_name(),
+                text.len()
+            );
+            return Ok(text);
+        }
+
         log::info!("[PDF] {:?}: {} pages, extracting text", path.file_name(), pages.len());
         let mut page_texts: Vec<String> = Vec::new();
         for page_num in &pages {
@@ -678,6 +696,29 @@ pub fn is_implausible_text_layer(text: &str, page_count: usize) -> bool {
         quality
             .flags
             .contains(&crate::extractor::quality::QualityFlag::LowPrintable)
+}
+
+/// True when any page font has no Name-valued `/Encoding` but does have a
+/// `/ToUnicode` entry.
+///
+/// `Document::extract_text` then hits `Font::get_font_encoding`'s `DictKey`
+/// fallback ("Could not parse the encoding ... Trying to retrieve ToUnicode"),
+/// which silently DROPS characters while the output still looks clean — so the
+/// `pdftotext` recovery below never fires. Common in Chinese PDFs (macOS
+/// Quartz / WPS subset TrueType fonts such as `AAAAAC+STSongti-SC-Regular`).
+fn has_unparseable_font_encoding(doc: &lopdf::Document) -> bool {
+    for (_, page_id) in doc.get_pages() {
+        let Ok(fonts) = doc.get_page_fonts(page_id) else {
+            continue;
+        };
+        for font in fonts.values() {
+            let encoding_is_name = font.get(b"Encoding").and_then(lopdf::Object::as_name_str).is_ok();
+            if !encoding_is_name && font.has(b"ToUnicode") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub fn prefer_recovered_text(lopdf_text: &str, recovered: &str, page_count: usize) -> bool {
@@ -1342,6 +1383,113 @@ mod tests {
         let extractor = PdfExtractor::new();
         let result = extractor.extract(&path)?;
         assert_eq!(result, "");
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    fn create_pdf_with_font_encoding(
+        path: &Path,
+        encoding: Option<&[u8]>,
+        with_to_unicode: bool,
+    ) -> Result<()> {
+        let mut doc = Document::new();
+        let mut font_entries: Vec<(Vec<u8>, Object)> = vec![
+            (b"Type".to_vec(), Object::Name(b"Font".to_vec())),
+            (b"Subtype".to_vec(), Object::Name(b"TrueType".to_vec())),
+            (b"BaseFont".to_vec(), Object::Name(b"STSongti-SC-Regular".to_vec())),
+        ];
+        if let Some(enc) = encoding {
+            font_entries.push((b"Encoding".to_vec(), Object::Name(enc.to_vec())));
+        }
+        if with_to_unicode {
+            let cmap_id = doc.add_object(Stream::new(
+                Dictionary::new(),
+                b"begincmap endcmap".to_vec(),
+            ));
+            font_entries.push((b"ToUnicode".to_vec(), Object::Reference(cmap_id)));
+        }
+        let font_id = doc.add_object(Dictionary::from_iter(font_entries));
+
+        let content_bytes = "BT /F1 12 Tf 100 700 Td (x) Tj ET".to_string();
+        let content_id = doc.add_object(Stream::new(
+            Dictionary::from_iter([(b"Length".to_vec(), Object::Integer(content_bytes.len() as i64))]),
+            content_bytes.into_bytes(),
+        ));
+        let page_id = doc.add_object(Dictionary::from_iter([
+            (b"Type".to_vec(), Object::Name(b"Page".to_vec())),
+            (b"MediaBox".to_vec(), Object::Array(vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(612),
+                Object::Integer(792),
+            ])),
+            (b"Contents".to_vec(), Object::Reference(content_id)),
+            (
+                b"Resources".to_vec(),
+                Object::Dictionary(Dictionary::from_iter([(
+                    b"Font".to_vec(),
+                    Object::Dictionary(Dictionary::from_iter([(
+                        b"F1".to_vec(),
+                        Object::Reference(font_id),
+                    )])),
+                )])),
+            ),
+        ]));
+        let pages_id = doc.add_object(Dictionary::from_iter([
+            (b"Type".to_vec(), Object::Name(b"Pages".to_vec())),
+            (b"Kids".to_vec(), Object::Array(vec![Object::Reference(page_id)])),
+            (b"Count".to_vec(), Object::Integer(1)),
+        ]));
+        if let Ok(page_dict) = doc.get_dictionary_mut(page_id) {
+            page_dict.set("Parent", Object::Reference(pages_id));
+        }
+        let catalog_id = doc.add_object(Dictionary::from_iter([
+            (b"Type".to_vec(), Object::Name(b"Catalog".to_vec())),
+            (b"Pages".to_vec(), Object::Reference(pages_id)),
+        ]));
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_unparseable_font_encoding_detected_without_encoding_but_with_tounicode() -> Result<()> {
+        let dir = std::env::temp_dir().join("extractor_test_font_enc_risky");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("risky.pdf");
+        create_pdf_with_font_encoding(&path, None, true)?;
+
+        let doc = Document::load(&path)?;
+        assert!(has_unparseable_font_encoding(&doc));
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_unparseable_font_encoding_ignored_when_encoding_named() -> Result<()> {
+        let dir = std::env::temp_dir().join("extractor_test_font_enc_named");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("named.pdf");
+        create_pdf_with_font_encoding(&path, Some(b"WinAnsiEncoding"), true)?;
+
+        let doc = Document::load(&path)?;
+        assert!(!has_unparseable_font_encoding(&doc));
+
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_unparseable_font_encoding_ignored_without_tounicode() -> Result<()> {
+        let dir = std::env::temp_dir().join("extractor_test_font_enc_no_cmap");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("no_cmap.pdf");
+        create_pdf_with_font_encoding(&path, None, false)?;
+
+        let doc = Document::load(&path)?;
+        assert!(!has_unparseable_font_encoding(&doc));
 
         std::fs::remove_dir_all(&dir)?;
         Ok(())
