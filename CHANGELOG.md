@@ -14,6 +14,71 @@
 
 ---
 
+## 2026-09-20：方案 B-3 —— 范围/约束落进 IR，Resolver 依范围收窄
+
+- **背景**：范围解析（`@文件`/`@目录`/`/ext:`/`/date:`/`/范围:`）此前由前端 `scopeParser.ts` 完成、以 `TurnScope` 传给后端，**IR 里没有约束** → 澄清裁决完全无视用户已给的收窄。
+- **改动**：
+  - `Ir` 新增 `constraints: Constraints{ files, dirs, exts, dates }`；`Constraints::from_scope()` 从 `TurnScope` 填入（**解析仍在前端，IR 只做聚合**，避免第二份解析器）。
+  - `build_state` / `build_grounding` 新增 `explicit_scope` 参数：**显式 @ 优先于"主导案卷"启发式**。
+  - 关键：**不新增抑制规则** —— 显式范围只是**收窄候选**，`Resolver` 的计数逻辑天然使"收窄到唯一"时不再发卡（确定性，无需阈值/ golden）。
+- **效果（实测）**：问「**他**在这个法院有多少案件」
+  - 无显式范围 → `State.person = [汪均益, 汪均丰]` → `Ask`（发卡）
+  - `@` 一份只涉汪均益的文件 → `State.person = [汪均益]` → `Bound` → **clarify = None（不再打扰）**
+- **测试**：新增 `explicit_scope_narrows_candidates_and_stops_asking`、`constraints_from_scope_maps_conditions`；10 个 clarify 用例全绿。
+- **涉及文件**：`src-tauri/src/commands/clarify.rs`、`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **392 passed / 0 failed**；`cargo check --tests` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **方案 B 剩余**：B-2 第 1 层连续信号（分数分布形状 → "库里有没有/有没有把握"）**已评估后挂起**——它是 B 里唯一需要阈值/ golden 的部分，且只影响"少问一次"（体验），不影响正确性；待真实"多问/漏问"案例按增量积累后再上。
+
+---
+
+## 2026-09-20：方案 B-1 —— 候选源从「路径」扩到「正文」（机构槽可绑）
+
+- **问题**：v1 的 `Grounding`/`State` 只从**文件路径**抽实体，而**法院等机构名只出现在文书正文里**（路径里没有）→ `这个法院` 一律落到"没有"，机构槽永远绑不上。
+- **改动**：
+  - `clarify.rs` 新增 `content_entities()`：从文本（含**命中片段 snippet**）抽取候选，并对 jieba 拆开的「地名 + 机构」做**合并**（`歙县` + `人民法院` → `歙县人民法院`），否则只会得到泛化词"人民法院"。
+  - `build_state` / `build_grounding` 的输入由"路径列表"改为 **(`路径`, `正文片段`)** 列表；正文实体与路径实体一并入册（仅限主导案卷范围内）。
+  - `ai.rs` 接线改为把 `EvidenceItem.snippet` 一并传入。
+- **效果（实测）**：
+  - B-1 前：`这个法院` → `State.org = []` → `NoSuchType`（"没有"）
+  - B-1 后：正文含"歙县人民法院" → `State.org = [歙县人民法院]` → `Bound { 这个法院 → 歙县人民法院 }`
+- **测试**：新增 `court_slot_binds_from_snippet_content`（正文抽取 → 机构可绑）；既有 8 个用例全部保持通过。
+- **涉及文件**：`src-tauri/src/commands/clarify.rs`、`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **390 passed / 0 failed**；`cargo check --tests` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **方案 B 剩余**：B-2 第 1 层连续信号（分数分布形状 → "库里有没有 / 有没有把握"）、B-3 范围/约束解析 + IR 落地。
+
+---
+
+## 2026-09-20：消歧重构 —— 下游「提案 → 验证 → 裁决」（State / Grounding / Resolver）
+
+- **背景**：此前 `ambiguity_note` 用「词性 + 路径频次 + 黑名单」判定，本质是**枚举式规则**：第 4 轮误列 `申请书 / 最高人民法院`（jieba 把「申请书」误标 `nr`）、`这个法院` 与 `这个人` 同形却应异判、多槽（他 + 这个法院）无法处理。**结论：规则只能做 sound 的初筛，不能充当判定门**（`docs/RAG_PIPELINE.md:171`）。
+- **改动（架构级）**：
+  - 新增 `src-tauri/src/commands/clarify.rs`：**下游**由三层构成——② 脏提案（`propose_ir`，规则版，日后替换为 LLM，契约不变）、③ 验证+裁决（`Grounding` / `SessionState` / `Resolver`）。
+  - **裁决不查词表、不判词性**：按槽的 `stype` 去 State/Grounding **数候选个数** —— `=1` 绑定、`>1` 发卡问、`=0` 明确"没有"。
+  - **候选来源根本改变**：从"证据路径里乱抽专名"改为"**按槽 type 查**"。第 4 轮 `这个案子` 的槽是 `case`，就只查 `case` → `申请书`(doc)、`最高人民法院`(org) **结构性不进入候选**。
+  - `State`/`Grounding` 由**主导案卷**（出现最多的两级目录前缀）构建，模板/书籍路径被挡在 State 之外（抑制跨案污染）。
+  - **删除** `ambiguity_note` / `extract_entities` / `has_referring` / `is_anchor` / `UBIQUITOUS_ORGS` 等枚举式规则；保留 `DOC_TYPE_NOUNS` 作为 **sound-but-incomplete 的前置排除**。
+  - 对外契约不变（`clarify_note` + `clarify_candidates`），前端无需改动。
+- **v1 边界（已知）**：机构名在**正文**里，而 v1 的 Grounding 只扫路径 → 机构槽暂时落到"明确没有"（诚实披露，而非误问）；待方案 B（正文候选抽取）后点亮。
+- **测试**：`clarify.rs` 新增 7 个用例，覆盖四个例子：①「**这个案子**的时间线」→ 绑定 case、**不再弹提示**；②「**这个法院**做的判决」→ 无机构候选 → 明说没有而不是误问；③「**他**在**这个法院**有多少案件」→ person 槽问（汪均益/汪均丰）、org 槽各自判；④「**这个人**在**那个法院**…」→ 同形不同判（靠计数）；⑤「**其他**案件」不再误触发。
+- **涉及文件**：`src-tauri/src/commands/clarify.rs`（新增）、`src-tauri/src/commands/mod.rs`、`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **389 passed / 0 failed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+
+---
+
+## 2026-09-20：澄清提示候选误列文书类型词 / 全局机构名（消歧候选过滤）
+
+- **问题**：第 4 轮追问「梳理这个案子的时间线」时，澄清提示把 **申请书 / 最高人民法院** 当"主体候选"列出。根因：jieba 词典把 `申请书`/`通知书` 误标为 `nr`（人名），而 `ambiguity_note` 只做词性白名单（`nr/ns/nt/nz`）→ 文书类型词冒充实体；`最高人民法院` 等虽为实体（`nt`）但零区分度。二者均非"实例主体"，误导用户（会以为在问最高法的案子）。
+- **改动**（`ai.rs` 消歧规则层，方案 A 止血）：
+  - **A1 类型词过滤**：新增 `DOC_TYPE_NOUNS` 显式词表（申请书/通知书/委托书/判决书…）。**刻意不用后缀正则**——jieba `nr` 中含 191 个"…书/…状/…证"后缀词条，后缀规则会误杀真人名（严慧书、严颖书、姜绍书…）。
+  - **A2 弱锚点过滤**：新增 `UBIQUITOUS_ORGS`（最高人民法院/人民法院/人民政府/人民代表大会…），剔除零区分度的全局机构名。
+  - **A3 指代误触发修复**：门 1 由 `last_q.contains(p)` 子串匹配改为 `has_referring()`——先剥离「其他/其它」再匹配，避免"其他案件…"里的"他"误触发消歧。
+  - **A4 假阴性修复**：门 2 由"问句含任意专名即不提示"改为"含**锚点**才不提示"（复用 `is_anchor`），使问句里的类型词不再误抑制提示。
+- **测试**：新增 `anchor_filter_drops_doc_types_and_ubiquitous_orgs`、`has_referring_ignores_other_pronoun`、`ambiguity_note_regression_round4_no_type_nouns_or_orgs`（以第 4 轮真实证据路径锁定回归；已实测改前必失败）。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **387 passed / 0 failed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-20：指代未绑定 → 澄清提示 + 一键收窄（⑤ 判定 / 收窄）
 
 - **问题**：追问里的指代（"他/该案…"）若无法绑定到具体主体，而材料分属多个主体，系统会直接给一个含糊（甚至答非所问）的回答，用户不知道问题出在哪。

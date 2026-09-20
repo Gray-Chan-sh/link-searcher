@@ -1,0 +1,2137 @@
+{
+ "type": "excalidraw",
+ "version": 2,
+ "source": "claude-code",
+ "elements": [
+  {
+   "id": "title",
+   "type": "text",
+   "text": "检索问答 · 管线时序：四轮对话（含具体数据）",
+   "x": 200,
+   "y": 8,
+   "width": 566.9,
+   "height": 36.4,
+   "angle": 0,
+   "strokeColor": "#1e293b",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100000,
+   "boundElements": null,
+   "fontSize": 26,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  },
+  {
+   "id": "hdr0",
+   "type": "rectangle",
+   "x": 95.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#c2410c",
+   "backgroundColor": "#fed7aa",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100001,
+   "boundElements": [
+    {
+     "id": "hdr0_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr0_lbl",
+   "type": "text",
+   "text": "用户",
+   "x": 103.0,
+   "y": 63.0,
+   "width": 194,
+   "height": 24,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100002,
+   "containerId": "hdr0"
+  },
+  {
+   "id": "life0",
+   "type": "line",
+   "x": 200,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100003,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "hdr1",
+   "type": "rectangle",
+   "x": 355.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#0369a1",
+   "backgroundColor": "#e0f2fe",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100004,
+   "boundElements": [
+    {
+     "id": "hdr1_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr1_lbl",
+   "type": "text",
+   "text": "① 形式初筛\n(规则 · sound)",
+   "x": 363.0,
+   "y": 51.0,
+   "width": 194,
+   "height": 48,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100005,
+   "containerId": "hdr1"
+  },
+  {
+   "id": "life1",
+   "type": "line",
+   "x": 460,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100006,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "hdr2",
+   "type": "rectangle",
+   "x": 615.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#6b21a8",
+   "backgroundColor": "#f3e8ff",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100007,
+   "boundElements": [
+    {
+     "id": "hdr2_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr2_lbl",
+   "type": "text",
+   "text": "② 提议层\n(LLM / 实体)",
+   "x": 623.0,
+   "y": 51.0,
+   "width": 194,
+   "height": 48,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100008,
+   "containerId": "hdr2"
+  },
+  {
+   "id": "life2",
+   "type": "line",
+   "x": 720,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100009,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "hdr3",
+   "type": "rectangle",
+   "x": 875.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#166534",
+   "backgroundColor": "#dcfce7",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100010,
+   "boundElements": [
+    {
+     "id": "hdr3_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr3_lbl",
+   "type": "text",
+   "text": "验证层\nGrounding + State",
+   "x": 883.0,
+   "y": 51.0,
+   "width": 194,
+   "height": 48,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100011,
+   "containerId": "hdr3"
+  },
+  {
+   "id": "life3",
+   "type": "line",
+   "x": 980,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100012,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "hdr4",
+   "type": "rectangle",
+   "x": 1135.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#854d0e",
+   "backgroundColor": "#fef9c3",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100013,
+   "boundElements": [
+    {
+     "id": "hdr4_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr4_lbl",
+   "type": "text",
+   "text": "Resolver\n(裁决)",
+   "x": 1143.0,
+   "y": 51.0,
+   "width": 194,
+   "height": 48,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100014,
+   "containerId": "hdr4"
+  },
+  {
+   "id": "life4",
+   "type": "line",
+   "x": 1240,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100015,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "hdr5",
+   "type": "rectangle",
+   "x": 1395.0,
+   "y": 44,
+   "width": 210,
+   "height": 62,
+   "angle": 0,
+   "strokeColor": "#1e40af",
+   "backgroundColor": "#dbeafe",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100016,
+   "boundElements": [
+    {
+     "id": "hdr5_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "hdr5_lbl",
+   "type": "text",
+   "text": "检索 / 生成",
+   "x": 1403.0,
+   "y": 63.0,
+   "width": 194,
+   "height": 24,
+   "fontSize": 16,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#1e293b",
+   "seed": 100017,
+   "containerId": "hdr5"
+  },
+  {
+   "id": "life5",
+   "type": "line",
+   "x": 1500,
+   "y": 112,
+   "width": 0,
+   "height": 1928,
+   "angle": 0,
+   "strokeColor": "#cbd5e1",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100018,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     0,
+     1928
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": null
+  },
+  {
+   "id": "m0",
+   "type": "arrow",
+   "x": 200,
+   "y": 190,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100019,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m0_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m0_lbl",
+   "type": "text",
+   "text": "① 原句（无 @ / 正则）",
+   "x": 256.475,
+   "y": 170,
+   "width": 147.05,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100020,
+   "containerId": "m0"
+  },
+  {
+   "id": "m1",
+   "type": "arrow",
+   "x": 460,
+   "y": 240,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100021,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m1_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m1_lbl",
+   "type": "text",
+   "text": "放行（只缩小空间）",
+   "x": 528.5,
+   "y": 220,
+   "width": 123,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100022,
+   "containerId": "m1"
+  },
+  {
+   "id": "m2",
+   "type": "arrow",
+   "x": 720,
+   "y": 290,
+   "angle": 0,
+   "width": 520,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100023,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     520,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m2_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m2_lbl",
+   "type": "text",
+   "text": "IR{lookup, slot[case]} + 实体[汪均益]",
+   "x": 847.9749999999999,
+   "y": 270,
+   "width": 264.05000000000007,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100024,
+   "containerId": "m2"
+  },
+  {
+   "id": "m3",
+   "type": "arrow",
+   "x": 1240,
+   "y": 340,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100025,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m3_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m3_lbl",
+   "type": "text",
+   "text": "查 State.case / Grounding",
+   "x": 1018.275,
+   "y": 320,
+   "width": 183.45000000000007,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100026,
+   "containerId": "m3"
+  },
+  {
+   "id": "m4",
+   "type": "arrow",
+   "x": 980,
+   "y": 390,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100027,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m4_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m4_lbl",
+   "type": "text",
+   "text": "汪均益案 ×1",
+   "x": 1070.275,
+   "y": 370,
+   "width": 79.45,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100028,
+   "containerId": "m4"
+  },
+  {
+   "id": "m5",
+   "type": "arrow",
+   "x": 1240,
+   "y": 440,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100029,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m5_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m5_lbl",
+   "type": "text",
+   "text": "BIND(case=汪均益案)",
+   "x": 1301.675,
+   "y": 420,
+   "width": 136.65,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100030,
+   "containerId": "m5"
+  },
+  {
+   "id": "m6",
+   "type": "arrow",
+   "x": 1500,
+   "y": 490,
+   "angle": 0,
+   "width": 1300,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100031,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -1300,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m6_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m6_lbl",
+   "type": "text",
+   "text": "直答（无提示）",
+   "x": 801.5,
+   "y": 470,
+   "width": 97,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100032,
+   "containerId": "m6"
+  },
+  {
+   "id": "m7",
+   "type": "arrow",
+   "x": 200,
+   "y": 640,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100033,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m7_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m7_lbl",
+   "type": "text",
+   "text": "「梳理这个案子的时间线」",
+   "x": 249.0,
+   "y": 620,
+   "width": 162,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100034,
+   "containerId": "m7"
+  },
+  {
+   "id": "m8",
+   "type": "arrow",
+   "x": 460,
+   "y": 690,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100035,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m8_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m8_lbl",
+   "type": "text",
+   "text": "放行",
+   "x": 574.0,
+   "y": 670,
+   "width": 32,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100036,
+   "containerId": "m8"
+  },
+  {
+   "id": "m9",
+   "type": "arrow",
+   "x": 720,
+   "y": 740,
+   "angle": 0,
+   "width": 520,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100037,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     520,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m9_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m9_lbl",
+   "type": "text",
+   "text": "IR{timeline, slot[case]}",
+   "x": 891.1999999999999,
+   "y": 720,
+   "width": 177.60000000000008,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100038,
+   "containerId": "m9"
+  },
+  {
+   "id": "m10",
+   "type": "arrow",
+   "x": 1240,
+   "y": 790,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100039,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m10_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m10_lbl",
+   "type": "text",
+   "text": "查 case",
+   "x": 1082.625,
+   "y": 770,
+   "width": 54.74999999999999,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100040,
+   "containerId": "m10"
+  },
+  {
+   "id": "m11",
+   "type": "arrow",
+   "x": 980,
+   "y": 840,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100041,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m11_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m11_lbl",
+   "type": "text",
+   "text": "汪均益案 ×1",
+   "x": 1070.275,
+   "y": 820,
+   "width": 79.45,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100042,
+   "containerId": "m11"
+  },
+  {
+   "id": "m12",
+   "type": "arrow",
+   "x": 1240,
+   "y": 890,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100043,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m12_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m12_lbl",
+   "type": "text",
+   "text": "BIND → 直答（不弹提示）",
+   "x": 1289.975,
+   "y": 870,
+   "width": 160.05,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100044,
+   "containerId": "m12"
+  },
+  {
+   "id": "m13",
+   "type": "arrow",
+   "x": 1500,
+   "y": 940,
+   "angle": 0,
+   "width": 1300,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100045,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -1300,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m13_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m13_lbl",
+   "type": "text",
+   "text": "时间线回答",
+   "x": 814.5,
+   "y": 920,
+   "width": 71,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100046,
+   "containerId": "m13"
+  },
+  {
+   "id": "m14",
+   "type": "arrow",
+   "x": 200,
+   "y": 1090,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100047,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m14_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m14_lbl",
+   "type": "text",
+   "text": "「这个法院做的判决」",
+   "x": 262.0,
+   "y": 1070,
+   "width": 136,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100048,
+   "containerId": "m14"
+  },
+  {
+   "id": "m15",
+   "type": "arrow",
+   "x": 460,
+   "y": 1140,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100049,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m15_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m15_lbl",
+   "type": "text",
+   "text": "放行",
+   "x": 574.0,
+   "y": 1120,
+   "width": 32,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100050,
+   "containerId": "m15"
+  },
+  {
+   "id": "m16",
+   "type": "arrow",
+   "x": 720,
+   "y": 1190,
+   "angle": 0,
+   "width": 520,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100051,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     520,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m16_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m16_lbl",
+   "type": "text",
+   "text": "IR{lookup, slot[org]}",
+   "x": 901.925,
+   "y": 1170,
+   "width": 156.15000000000006,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100052,
+   "containerId": "m16"
+  },
+  {
+   "id": "m17",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1240,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100053,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m17_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m17_lbl",
+   "type": "text",
+   "text": "查 org",
+   "x": 1086.2,
+   "y": 1220,
+   "width": 47.599999999999994,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100054,
+   "containerId": "m17"
+  },
+  {
+   "id": "m18",
+   "type": "arrow",
+   "x": 980,
+   "y": 1290,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100055,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m18_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m18_lbl",
+   "type": "text",
+   "text": "歙县人民法院 ×1",
+   "x": 1057.275,
+   "y": 1270,
+   "width": 105.45000000000002,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100056,
+   "containerId": "m18"
+  },
+  {
+   "id": "m19",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1340,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100057,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m19_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m19_lbl",
+   "type": "text",
+   "text": "BIND → 直答",
+   "x": 1328.975,
+   "y": 1320,
+   "width": 82.05,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100058,
+   "containerId": "m19"
+  },
+  {
+   "id": "m20",
+   "type": "arrow",
+   "x": 200,
+   "y": 1490,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100059,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m20_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m20_lbl",
+   "type": "text",
+   "text": "「他在这个法院有多少案件」",
+   "x": 242.5,
+   "y": 1470,
+   "width": 175,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100060,
+   "containerId": "m20"
+  },
+  {
+   "id": "m21",
+   "type": "arrow",
+   "x": 460,
+   "y": 1540,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100061,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m21_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m21_lbl",
+   "type": "text",
+   "text": "放行",
+   "x": 574.0,
+   "y": 1520,
+   "width": 32,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100062,
+   "containerId": "m21"
+  },
+  {
+   "id": "m22",
+   "type": "arrow",
+   "x": 720,
+   "y": 1590,
+   "angle": 0,
+   "width": 520,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100063,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     520,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m22_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m22_lbl",
+   "type": "text",
+   "text": "IR{count, slots[person, org]}",
+   "x": 873.3249999999999,
+   "y": 1570,
+   "width": 213.3500000000001,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100064,
+   "containerId": "m22"
+  },
+  {
+   "id": "m23",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1640,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100065,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m23_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m23_lbl",
+   "type": "text",
+   "text": "查 person",
+   "x": 1075.475,
+   "y": 1620,
+   "width": 69.04999999999998,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100066,
+   "containerId": "m23"
+  },
+  {
+   "id": "m24",
+   "type": "arrow",
+   "x": 980,
+   "y": 1690,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100067,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m24_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m24_lbl",
+   "type": "text",
+   "text": "汪均益(5) / 汪均丰(2) → 2",
+   "x": 1021.525,
+   "y": 1670,
+   "width": 176.95000000000005,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100068,
+   "containerId": "m24"
+  },
+  {
+   "id": "m25",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1740,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100069,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m25_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m25_lbl",
+   "type": "text",
+   "text": "查 org",
+   "x": 1086.2,
+   "y": 1720,
+   "width": 47.599999999999994,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100070,
+   "containerId": "m25"
+  },
+  {
+   "id": "m26",
+   "type": "arrow",
+   "x": 980,
+   "y": 1790,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100071,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m26_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m26_lbl",
+   "type": "text",
+   "text": "歙县人民法院 → 1",
+   "x": 1053.7,
+   "y": 1770,
+   "width": 112.60000000000002,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100072,
+   "containerId": "m26"
+  },
+  {
+   "id": "m27",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1840,
+   "angle": 0,
+   "width": 1040,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100073,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -1040,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m27_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m27_lbl",
+   "type": "text",
+   "text": "披露 org=歙县人民法院；问 person（chip）",
+   "x": 581.8,
+   "y": 1820,
+   "width": 276.40000000000003,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100074,
+   "containerId": "m27"
+  },
+  {
+   "id": "m28",
+   "type": "arrow",
+   "x": 200,
+   "y": 1890,
+   "angle": 0,
+   "width": 1040,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100075,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     1040,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m28_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m28_lbl",
+   "type": "text",
+   "text": "选 汪均益（闭环）",
+   "x": 661.425,
+   "y": 1870,
+   "width": 117.15,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100076,
+   "containerId": "m28"
+  },
+  {
+   "id": "m29",
+   "type": "arrow",
+   "x": 1240,
+   "y": 1940,
+   "angle": 0,
+   "width": 260,
+   "height": 0,
+   "strokeColor": "#475569",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "solid",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100077,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     260,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m29_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m29_lbl",
+   "type": "text",
+   "text": "BIND(both) → 计数",
+   "x": 1307.525,
+   "y": 1920,
+   "width": 124.95000000000002,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100078,
+   "containerId": "m29"
+  },
+  {
+   "id": "m30",
+   "type": "arrow",
+   "x": 1500,
+   "y": 1990,
+   "angle": 0,
+   "width": 1300,
+   "height": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 2,
+   "strokeStyle": "dashed",
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100079,
+   "points": [
+    [
+     0,
+     0
+    ],
+    [
+     -1300,
+     0
+    ]
+   ],
+   "startBinding": null,
+   "endBinding": null,
+   "boundElements": [
+    {
+     "id": "m30_lbl",
+     "type": "text"
+    }
+   ]
+  },
+  {
+   "id": "m30_lbl",
+   "type": "text",
+   "text": "计数回答",
+   "x": 821.0,
+   "y": 1970,
+   "width": 58,
+   "height": 18,
+   "fontSize": 13,
+   "fontFamily": 2,
+   "textAlign": "center",
+   "verticalAlign": "middle",
+   "strokeColor": "#334155",
+   "seed": 100080,
+   "containerId": "m30"
+  },
+  {
+   "id": "sec0",
+   "type": "text",
+   "text": "第 1 轮 · 点名提问",
+   "x": 8,
+   "y": 120,
+   "width": 185,
+   "height": 23.799999999999997,
+   "angle": 0,
+   "strokeColor": "#166534",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100081,
+   "boundElements": null,
+   "fontSize": 17,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  },
+  {
+   "id": "sec1",
+   "type": "text",
+   "text": "第 2 轮 · 「这个案子」",
+   "x": 8,
+   "y": 560,
+   "width": 185,
+   "height": 23.799999999999997,
+   "angle": 0,
+   "strokeColor": "#b45309",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100082,
+   "boundElements": null,
+   "fontSize": 17,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  },
+  {
+   "id": "sec2",
+   "type": "text",
+   "text": "第 3 轮 · 「这个法院」",
+   "x": 8,
+   "y": 1010,
+   "width": 185,
+   "height": 23.799999999999997,
+   "angle": 0,
+   "strokeColor": "#b45309",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100083,
+   "boundElements": null,
+   "fontSize": 17,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  },
+  {
+   "id": "sec3",
+   "type": "text",
+   "text": "第 4 轮 · 多槽（他 + 这个法院）",
+   "x": 8,
+   "y": 1410,
+   "width": 185,
+   "height": 23.799999999999997,
+   "angle": 0,
+   "strokeColor": "#991b1b",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100084,
+   "boundElements": null,
+   "fontSize": 17,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  },
+  {
+   "id": "legend",
+   "type": "text",
+   "text": "实线＝请求　虚线＝返回/披露　　Resolver 只做「按槽 type 查 State/Grounding，数候选个数」——不查词表、不判词性",
+   "x": 200,
+   "y": 2010,
+   "width": 1300,
+   "height": 19.599999999999998,
+   "angle": 0,
+   "strokeColor": "#94a3b8",
+   "backgroundColor": "transparent",
+   "fillStyle": "solid",
+   "strokeWidth": 1,
+   "roughness": 0,
+   "opacity": 100,
+   "seed": 100085,
+   "boundElements": null,
+   "fontSize": 14,
+   "fontFamily": 2,
+   "textAlign": "left",
+   "verticalAlign": "top",
+   "containerId": null
+  }
+ ],
+ "appState": {
+  "viewBackgroundColor": "#ffffff"
+ }
+}

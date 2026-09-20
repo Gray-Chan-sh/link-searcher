@@ -2175,9 +2175,28 @@ pub(crate) async fn prepare_conversation_prompt(
         "truncated_to": 50000,
     })));
     let last_question = messages.last().map(|m| m.content.as_str()).unwrap_or("");
-    let (clarify_note, clarify_candidates) = match ambiguity_note(last_question, &evidence) {
-        Some((n, c)) => (Some(n), c),
-        None => (None, Vec::new()),
+    let (clarify_note, clarify_candidates) = {
+        use crate::commands::clarify;
+        let session_paths = prior_evidence_paths(state, session_id);
+        let current: Vec<(String, String)> =
+            evidence.iter().map(|e| (e.path.clone(), e.snippet.clone())).collect();
+        let conditions: Vec<(String, String)> =
+            scope.conditions.iter().map(|c| (c.kind.clone(), c.value.clone())).collect();
+        let mut ir = clarify::propose_ir(last_question);
+        ir.constraints =
+            clarify::Constraints::from_scope(&scope.mention_files, &scope.mention_dirs, &conditions);
+        let explicit_scope = ir.constraints.scope_items();
+        let mut session_state = clarify::build_state(&session_paths, &current, &explicit_scope);
+        for (value, stype) in clarify::question_entities(last_question) {
+            session_state.add(&value, &stype, 3);
+        }
+        let grounding = clarify::build_grounding(&session_paths, &current, &explicit_scope);
+        let resolution = clarify::resolve(&ir, &session_state, &grounding);
+        log::info!("[AI]   clarify ir={:?} verdict={:?}", ir, resolution.verdict);
+        match clarify::clarify_from_resolution(&resolution) {
+            Some((n, c)) => (Some(n), c),
+            None => (None, Vec::new()),
+        }
     };
     if let Some(n) = &clarify_note {
         log::info!("[AI]   clarify note: {}", truncate_text(n, 60));
@@ -2563,44 +2582,18 @@ fn query_terms(query: &str) -> Vec<String> {
     jieba.cut(query, true).iter().map(|w| w.word.to_string()).filter(|w| w.chars().count() >= 2).collect()
 }
 
-/// Referring expressions that need binding to a concrete entity.
-const REFERRING: &[&str] =
-    &["他", "她", "它", "上述", "前述", "本案", "该案", "该文件", "该材料", "这个", "那个", "这些", "那些"];
-
-/// Proper-noun entities (person/place/org/other) via jieba POS — decides whether
-/// a question carries a discriminating anchor. Content-driven, folder-agnostic.
-fn extract_entities(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
-    for t in jieba.tag(text, true) {
-        if matches!(t.tag, "nr" | "ns" | "nt" | "nz") && t.word.chars().count() >= 2 {
-            let w = t.word.to_string();
-            if !out.iter().any(|x| x == &w) {
-                out.push(w);
-            }
-        }
-    }
-    out
-}
-
-/// Clarification note + candidate entities for a question that refers to something
-/// ("他/该案…") without naming it, when the materials split across several entities.
-fn ambiguity_note(last_q: &str, evidence: &[EvidenceItem]) -> Option<(String, Vec<String>)> {
-    if !REFERRING.iter().any(|p| last_q.contains(p)) { return None; }
-    if !extract_entities(last_q).is_empty() { return None; }
-    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for e in evidence.iter().take(30) {
-        for ent in extract_entities(&e.path) {
-            *counts.entry(ent).or_insert(0) += 1;
-        }
-    }
-    let mut cands: Vec<(String, usize)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
-    if cands.len() < 2 { return None; }
-    cands.sort_by(|a, b| b.1.cmp(&a.1));
-    let names: Vec<String> = cands.iter().take(4).map(|(e, _)| e.clone()).collect();
-    let note = format!("（提示：这个问题在多个主体下都有材料 —— {}。如需精确，请用 @ 指定文件或目录。）", names.join(" / "));
-    Some((note, names))
-}
+/// Document/procedure type nouns that jieba mis-tags as proper nouns (「申请书」
+/// 「通知书」→ `nr`「人名」). A category is never a candidate subject
+/// (docs/RAG_PIPELINE.md §⑤). Explicit list, not a suffix rule: …书/…状/…证
+/// would also reject real names (严慧书、严颖书、姜绍书 …).
+///
+/// 这是**sound-but-incomplete** 的前置排除：表内项确非主体，但表不可能全 →
+/// 漏掉的由 clarify（State/Grounding 计数）兜底。
+pub(crate) const DOC_TYPE_NOUNS: &[&str] = &[
+    "申请书", "通知书", "委托书", "判决书", "裁定书", "决定书", "起诉状", "上诉状",
+    "答辩状", "律师函", "情况说明", "公告", "传票", "证据", "合同", "协议",
+    "证明", "证书", "笔录", "清单", "目录", "模板", "样式", "回执",
+];
 
 /// Pick the citation preview from the passage that best matches the query
 /// terms, so the hover card / Markdown export show the referenced text rather
@@ -4509,31 +4502,6 @@ mod retrieval_keyword_tests {
         let paths = vec!["案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx".to_string()];
         let h = rewrite_history(&msgs, &paths);
         assert!(h.contains("汪均益行政上诉案.docx"), "context file missing: {h}");
-    }
-
-    #[test]
-    fn extract_entities_keeps_proper_nouns() {
-        let ents = extract_entities("汪均益与歙县不动产交易中心不履行法定职责案");
-        assert!(ents.iter().any(|e| e == "汪均益"), "person missing: {ents:?}");
-    }
-
-    #[test]
-    fn ambiguity_note_triggers_on_unbound_reference() {
-        let ev = |p: &str| EvidenceItem {
-            file_id: p.into(), path: p.into(), snippet: String::new(),
-            bm25_score: None, semantic_score: None, rrf_score: None,
-            rewritten: false, rewritten_query: None, from_history: false, material_no: 0,
-        };
-        let evidence = vec![
-            ev("案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx"),
-            ev("案件/WJY 汪均益/更正登记/委托书.docx"),
-            ev("案件/YY 姚远/一审/律师函.pdf"),
-            ev("案件/YY 姚远/一审/诉状/证据.pdf"),
-        ];
-        let (note, cands) = ambiguity_note("判决书里为什么认定他是利害关系人？", &evidence).expect("expected a clarify note");
-        assert!(note.contains("汪均益"));
-        assert!(cands.contains(&"汪均益".to_string()), "candidates: {cands:?}");
-        assert!(ambiguity_note("不动产查询需要什么手续？", &evidence).is_none());
     }
 
     #[test]

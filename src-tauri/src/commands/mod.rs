@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod backup;
 pub mod bge;
+pub mod clarify;
 pub mod config;
 pub mod dirs;
 pub mod files;
