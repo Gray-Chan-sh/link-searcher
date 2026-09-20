@@ -310,6 +310,8 @@ struct AiDone {
     #[serde(default)]
     search_terms: Vec<String>,
     #[serde(default)]
+    clarify_candidates: Vec<String>,
+    #[serde(default)]
     hits: usize,
     #[serde(default)]
     total_match_count: usize,
@@ -499,6 +501,7 @@ pub async fn smart_search_stream(
         trace_id: String::new(),
         search_query: query,
         search_terms: vec![],
+        clarify_candidates: vec![],
         hits,
         total_match_count: 0,
         llm_model: String::new(),
@@ -680,12 +683,18 @@ fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
 
 /// 构建检索改写用对话历史字符串。只包含用户消息——助手回答
 /// （尤其是否定结论）回灌会导致自相矛盾的检索查询。
-fn rewrite_history(messages: &[ChatMessage]) -> String {
+fn rewrite_history(messages: &[ChatMessage], context_paths: &[String]) -> String {
     let users: Vec<&ChatMessage> = messages.iter().filter(|m| m.role == "user").collect();
     let mut history_str = String::from("对话历史：\n");
-    let start = users.len().saturating_sub(6);
+    let start = users.len().saturating_sub(8);
     for m in &users[start..] {
-        history_str.push_str(&format!("用户：{}\n", truncate_text(&m.content, 120)));
+        history_str.push_str(&format!("用户：{}\n", truncate_text(&m.content, 300)));
+    }
+    if !context_paths.is_empty() {
+        history_str.push_str("会话已涉及的文件（可用于绑定指代）：\n");
+        for p in context_paths.iter().take(12) {
+            history_str.push_str(&format!("- {}\n", p.rsplit('/').next().unwrap_or(p.as_str())));
+        }
     }
     history_str
 }
@@ -696,11 +705,12 @@ fn rewrite_history(messages: &[ChatMessage]) -> String {
 pub async fn llm_rewrite_query(
     last_q: &str,
     messages: &[ChatMessage],
+    context_paths: &[String],
 ) -> Option<String> {
     if !crate::ai::llm_enabled() {
         return None;
     }
-    let history_str = rewrite_history(messages);
+    let history_str = rewrite_history(messages, context_paths);
     let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
@@ -1140,6 +1150,12 @@ pub(crate) struct PreparedConversation {
     /// jieba-tokenized query terms — the frontend highlights these in the
     /// cited passage shown by the hover preview.
     pub(crate) search_terms: Vec<String>,
+    /// Disclosure note prepended to the answer when the question refers to an
+    /// unnamed entity and the materials split across several distinct ones.
+    pub(crate) clarify_note: Option<String>,
+    /// Candidate entities backing `clarify_note` — rendered as one-click chips
+    /// that re-ask the question narrowed to the picked entity.
+    pub(crate) clarify_candidates: Vec<String>,
     /// Number of BM25 hits before merge with @mention files.
     pub(crate) hits: usize,
     pub(crate) total_match_count: usize,
@@ -1245,7 +1261,8 @@ pub(crate) async fn prepare_conversation_prompt(
     let search_q = if skip_llm_rewrite {
         rule.query.clone()
     } else {
-        match llm_rewrite_query(&last_q, messages).await {
+        let context_paths = prior_evidence_paths(state, session_id);
+        match llm_rewrite_query(&last_q, messages, &context_paths).await {
             Some(llm) if llm != rule.query => llm,
             _ => rule.query.clone(),
         }
@@ -2157,7 +2174,15 @@ pub(crate) async fn prepare_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": 50000,
     })));
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
+    let last_question = messages.last().map(|m| m.content.as_str()).unwrap_or("");
+    let (clarify_note, clarify_candidates) = match ambiguity_note(last_question, &evidence) {
+        Some((n, c)) => (Some(n), c),
+        None => (None, Vec::new()),
+    };
+    if let Some(n) = &clarify_note {
+        log::info!("[AI]   clarify note: {}", truncate_text(n, 60));
+    }
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
 }
 
 /// Post-process LLM response: supplement [N] citations for sentences that
@@ -2328,7 +2353,7 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, .. } =
+    let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
     // 非严格模式：无材料注入时拒绝硬答（避免 LLM 无据发挥）。
     if !has_evidence {
@@ -2351,6 +2376,10 @@ pub async fn conversation_ask(
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let cited = auto_cite(&sanitize_citations_set(&answer, &visible_nums), &visible_evidence);
     log::info!("[AI]   done: {} chars", answer.chars().count());
+    let cited = match clarify_note {
+        Some(n) => format!("{n}\n\n{cited}"),
+        None => cited,
+    };
 
     Ok(cited)
 }
@@ -2390,7 +2419,7 @@ pub async fn conversation_ask_stream(
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, hits, total_match_count, has_evidence, visible_nums, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, hits, total_match_count, has_evidence, visible_nums, mut events } =
         prepared?;
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
@@ -2428,6 +2457,7 @@ pub async fn conversation_ask_stream(
             trace_id,
             search_query,
             search_terms: search_terms.clone(),
+            clarify_candidates: clarify_candidates.clone(),
             hits,
             total_match_count,
             llm_model: cfg.active_llm_model_id,
@@ -2448,6 +2478,9 @@ pub async fn conversation_ask_stream(
         current: 0,
         total: 0,
     });
+    if let Some(n) = &clarify_note {
+        let _ = app.emit("ai-chunk", AiChunk { session_id: session_id.clone(), delta: format!("{n}\n\n"), reasoning: false });
+    }
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
@@ -2484,6 +2517,10 @@ pub async fn conversation_ask_stream(
      let raw_text = result.text.unwrap_or_default();
      log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
      let cited_text = auto_cite(&sanitize_citations_set(&raw_text, &visible_nums), &visible_evidence);
+     let cited_text = match clarify_note {
+         Some(n) => format!("{n}\n\n{cited_text}"),
+         None => cited_text,
+     };
      let _ = app.emit("ai-done", AiDone {
          session_id,
         full_text: cited_text,
@@ -2495,6 +2532,7 @@ pub async fn conversation_ask_stream(
         trace_id,
         search_query,
         search_terms,
+        clarify_candidates,
         hits,
         total_match_count,
         llm_model: cfg.active_llm_model_id,
@@ -2523,6 +2561,45 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
 fn query_terms(query: &str) -> Vec<String> {
     let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
     jieba.cut(query, true).iter().map(|w| w.word.to_string()).filter(|w| w.chars().count() >= 2).collect()
+}
+
+/// Referring expressions that need binding to a concrete entity.
+const REFERRING: &[&str] =
+    &["他", "她", "它", "上述", "前述", "本案", "该案", "该文件", "该材料", "这个", "那个", "这些", "那些"];
+
+/// Proper-noun entities (person/place/org/other) via jieba POS — decides whether
+/// a question carries a discriminating anchor. Content-driven, folder-agnostic.
+fn extract_entities(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
+    for t in jieba.tag(text, true) {
+        if matches!(t.tag, "nr" | "ns" | "nt" | "nz") && t.word.chars().count() >= 2 {
+            let w = t.word.to_string();
+            if !out.iter().any(|x| x == &w) {
+                out.push(w);
+            }
+        }
+    }
+    out
+}
+
+/// Clarification note + candidate entities for a question that refers to something
+/// ("他/该案…") without naming it, when the materials split across several entities.
+fn ambiguity_note(last_q: &str, evidence: &[EvidenceItem]) -> Option<(String, Vec<String>)> {
+    if !REFERRING.iter().any(|p| last_q.contains(p)) { return None; }
+    if !extract_entities(last_q).is_empty() { return None; }
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for e in evidence.iter().take(30) {
+        for ent in extract_entities(&e.path) {
+            *counts.entry(ent).or_insert(0) += 1;
+        }
+    }
+    let mut cands: Vec<(String, usize)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
+    if cands.len() < 2 { return None; }
+    cands.sort_by(|a, b| b.1.cmp(&a.1));
+    let names: Vec<String> = cands.iter().take(4).map(|(e, _)| e.clone()).collect();
+    let note = format!("（提示：这个问题在多个主体下都有材料 —— {}。如需精确，请用 @ 指定文件或目录。）", names.join(" / "));
+    Some((note, names))
 }
 
 /// Pick the citation preview from the passage that best matches the query
@@ -3259,6 +3336,23 @@ fn prior_material_order(state: &AppState, session_id: &str) -> Vec<String> {
         }
     }
     order
+}
+
+/// File paths the session has already surfaced (first-appearance order). Fed to
+/// the rewrite model as entity context so pronouns can bind to case/person names.
+fn prior_evidence_paths(state: &AppState, session_id: &str) -> Vec<String> {
+    if session_id.is_empty() { return Vec::new(); }
+    let h = read_history(&state.data_dir);
+    let Some(session) = h.sessions.into_iter().find(|s| s.id == session_id) else { return Vec::new() };
+    let mut paths: Vec<String> = Vec::new();
+    for turn in &session.per_turn_evidence {
+        for item in &turn.items {
+            if !item.path.is_empty() && !paths.iter().any(|p| p == &item.path) {
+                paths.push(item.path.clone());
+            }
+        }
+    }
+    paths
 }
 
 /// Assign the stable number for a material id, appending new ids.
@@ -4404,9 +4498,42 @@ mod retrieval_keyword_tests {
             ChatMessage { role: "user".into(), content: "关于外联发的股权转让".into() },
             ChatMessage { role: "assistant".into(), content: "根据材料，没有相关记录".into() },
         ];
-        let h = rewrite_history(&msgs);
+        let h = rewrite_history(&msgs, &[]);
         assert!(h.contains("股权转让"), "user content missing: {h}");
         assert!(!h.contains("没有相关记录"), "assistant content leaked: {h}");
+    }
+
+    #[test]
+    fn rewrite_history_includes_context_file_names() {
+        let msgs = vec![ChatMessage { role: "user".into(), content: "为什么认定他是利害关系人".into() }];
+        let paths = vec!["案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx".to_string()];
+        let h = rewrite_history(&msgs, &paths);
+        assert!(h.contains("汪均益行政上诉案.docx"), "context file missing: {h}");
+    }
+
+    #[test]
+    fn extract_entities_keeps_proper_nouns() {
+        let ents = extract_entities("汪均益与歙县不动产交易中心不履行法定职责案");
+        assert!(ents.iter().any(|e| e == "汪均益"), "person missing: {ents:?}");
+    }
+
+    #[test]
+    fn ambiguity_note_triggers_on_unbound_reference() {
+        let ev = |p: &str| EvidenceItem {
+            file_id: p.into(), path: p.into(), snippet: String::new(),
+            bm25_score: None, semantic_score: None, rrf_score: None,
+            rewritten: false, rewritten_query: None, from_history: false, material_no: 0,
+        };
+        let evidence = vec![
+            ev("案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx"),
+            ev("案件/WJY 汪均益/更正登记/委托书.docx"),
+            ev("案件/YY 姚远/一审/律师函.pdf"),
+            ev("案件/YY 姚远/一审/诉状/证据.pdf"),
+        ];
+        let (note, cands) = ambiguity_note("判决书里为什么认定他是利害关系人？", &evidence).expect("expected a clarify note");
+        assert!(note.contains("汪均益"));
+        assert!(cands.contains(&"汪均益".to_string()), "candidates: {cands:?}");
+        assert!(ambiguity_note("不动产查询需要什么手续？", &evidence).is_none());
     }
 
     #[test]

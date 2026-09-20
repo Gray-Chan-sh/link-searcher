@@ -200,6 +200,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           embedding_model: p.embedding_model ?? '',
           search_query: p.search_query ?? '',
           search_terms: p.search_terms ?? [],
+          clarify_candidates: p.clarify_candidates ?? [],
           hits: p.hits ?? 0,
         }]
       }
@@ -257,6 +258,17 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const searchTermsFor = (msgIndex: number) => {
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.search_terms ?? []
+  }
+  const clarifyCandidatesFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_candidates ?? []
+  }
+  const questionFor = (msgIndex: number) => {
+    for (let k = msgIndex - 1; k >= 0; k -= 1) {
+      const m = messages[k]
+      if (m?.role === 'user') return (m.content.split('\n\n---\n引用:')[0] ?? '').trim()
+    }
+    return ''
   }
   const turnNumberFor = (msgIndex: number) => {
     return messages.slice(0, msgIndex).filter(m => m.role === 'user').length - 1
@@ -336,9 +348,9 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   }, [mentionChips, session, conditionChips])
 
 // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
-  const handleSend = useCallback(async () => {
+  const handleSend = useCallback(async (override?: string) => {
     if (sendingRef.current) return
-    const q = input.trim()
+    const q = (override ?? input).trim()
     if (!q || loading || !session) return
     sendingRef.current = true
     // 解析 /命令（/ext /date /范围 /模糊），得到 scope + 净化后文本 + 范围动作
@@ -537,6 +549,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                       // 拼成单个编号（"46"）无法区分是 [46] 还是 [4][6]。
                       return links.join(' ')
                     })}</ReactMarkdown>
+                    {clarifyCandidatesFor(i).length > 0 && (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {clarifyCandidatesFor(i).map(c => (
+                          <button
+                            key={c}
+                            type="button"
+                            onClick={() => handleSend(`${c} ${questionFor(i)}`.trim())}
+                            className="px-2 py-0.5 text-xs rounded-full border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
+                          >{c}</button>
+                        ))}
+                      </div>
+                    )}
                     {activeCite && activeCite.m === i && (
                       <div className="mt-2 rounded-md border border-blue-200 dark:border-blue-800 bg-blue-50/60 dark:bg-blue-900/15 px-2.5 py-2 text-xs">
                         <div className="flex items-start justify-between gap-2">
@@ -818,7 +842,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             />
           </div>
           <button
-            onClick={handleSend}
+            onClick={() => handleSend()}
             disabled={loading || !input.trim() || !session}
             className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >

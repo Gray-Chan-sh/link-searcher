@@ -91,6 +91,8 @@ export interface PerTurnEvidence {
   search_query?: string
   /** jieba 分词后的检索词（前端用于高亮被引用片段） */
   search_terms?: string[]
+  /** 指代未绑定时给出的候选实体（前端渲染为一键收窄的 chips） */
+  clarify_candidates?: string[]
   /** BM25 合并前命中数 */
   hits?: number
 }
@@ -163,6 +165,7 @@ export interface AiDonePayload {
   trace_id?: string
   search_query?: string
   search_terms?: string[]
+  clarify_candidates?: string[]
   hits?: number
   total_match_count?: number
   llm_model?: string

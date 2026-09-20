@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-09-20：指代未绑定 → 澄清提示 + 一键收窄（⑤ 判定 / 收窄）
+
+- **问题**：追问里的指代（"他/该案…"）若无法绑定到具体主体，而材料分属多个主体，系统会直接给一个含糊（甚至答非所问）的回答，用户不知道问题出在哪。
+- **改动（披露式，不阻断作答）**：
+  - **判定**：新增 `extract_entities`（jieba 词性 `nr/ns/nt/nz`，**内容驱动、与目录无关**）与 `ambiguity_note`：当**问句含指代词 + 问句无实体 + 命中材料分属 ≥2 个实体**时，生成澄清提示 + 候选实体。
+  - **披露**：提示以披露式注入答案（流式作为**首个分片**并计入最终文本；非流式前置）。**不拒答、不静默猜测**。
+  - **一键收窄（前端）**：候选实体随 `ai-done`（`clarify_candidates`）下发并持久化到 `per_turn_evidence`；`ChatPanel` 在回答下方渲染为 **chips**，点击即以「实体 + 原问题」**重新提问**（把实体注入检索 query），实现一键精确化。
+- **测试**：`extract_entities_keeps_proper_nouns`、`ambiguity_note_triggers_on_unbound_reference`。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **384 passed / 0 failed**；`cargo check` / `npx tsc -b` 0 错误；`npx vitest run` 31 passed；`npm run lint` 0 errors；`semgrep --severity ERROR` 0 findings。
+
+---
+
+## 2026-09-20：改写上下文加入会话实体 + 放宽改写历史（⑤-1 / ⑤-2）
+
+- **问题**：追问里的指代（如"他"）可能无法绑定到具体人名/案名——改写上下文此前只含用户消息、每条截断 120 字，而**案名往往只出现在证据文件路径里**（用户从没在问句里说过）。
+- **改动**：
+  - **⑤-1**：`llm_rewrite_query` 新增 `context_paths` 参数；`rewrite_history` 追加"会话已涉及的文件（文件名，≤12 条）"，让改写模型能把指代绑定到案名/人名。来源为会话既有证据路径（新增 `prior_evidence_paths`）。
+  - **⑤-2**：改写历史每条截断 120→300 字、最近 6→8 条。
+- **测试**：新增 `rewrite_history_includes_context_file_names`；更新 `rewrite_history_ignores_assistant_turns` 签名。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+- **验证**：`cargo test --lib` **382 passed / 0 failed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-20：引用预览「被引用片段」+ 导出编号对齐（导出复盘修复）
 
 - **背景**：用真实导出复盘验证 ①②③-B③-C。确认 **③-B（会话内稳定编号，跨轮同一文件编号一致）** 与 **③-A（不再复述"编号已失效"）** 生效；同时暴露两处问题并修复。
