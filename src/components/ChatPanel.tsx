@@ -271,10 +271,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.search_terms ?? []
   }
-  const clarifyCandidatesFor = (msgIndex: number) => {
-    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
-    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_candidates ?? []
-  }
   const clarifySlotsFor = (msgIndex: number) => {
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_slots ?? []
@@ -282,13 +278,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const clarifyBlockingFor = (msgIndex: number) => {
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_blocking ?? false
-  }
-  const questionFor = (msgIndex: number) => {
-    for (let k = msgIndex - 1; k >= 0; k -= 1) {
-      const m = messages[k]
-      if (m?.role === 'user') return (m.content.split('\n\n---\n引用:')[0] ?? '').trim()
-    }
-    return ''
   }
   const turnNumberFor = (msgIndex: number) => {
     return messages.slice(0, msgIndex).filter(m => m.role === 'user').length - 1
@@ -589,36 +578,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                       // 拼成单个编号（"46"）无法区分是 [46] 还是 [4][6]。
                       return links.join(' ')
                     })}</ReactMarkdown>
-                    {clarifyCandidatesFor(i).length > 0 && (
-                      <div className="mt-1.5 flex flex-wrap gap-1">
-                        {clarifyCandidatesFor(i).map(c => (
-                          <button
-                            key={c}
-                            type="button"
-                            onClick={() => {
-                              const slots = clarifySlotsFor(i)
-                              if (clarifyBlockingFor(i) && slots.length > 0) {
-                                const slot = slots.find(s => s.options.includes(c)) ?? slots[0]
-                                if (!slot) return
-                                const baseQ = questionFor(i)
-                                const clarifyReply: ClarifyReply = {
-                                  base_question: baseQ,
-                                  bindings: [{ surface: slot.surface, value: c }],
-                                }
-                                if (pendingClarify?.baseQuestion === baseQ) {
-                                  setPendingClarify(null)
-                                  setSlotValues({})
-                                }
-                                handleSend(c, clarifyReply)
-                              } else {
-                                handleSend(`${c} ${questionFor(i)}`.trim())
-                              }
-                            }}
-                            className="px-2 py-0.5 text-xs rounded-full border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
-                          >{c}</button>
-                        ))}
-                      </div>
-                    )}
                     {clarifyBlockingFor(i) && clarifySlotsFor(i).length > 0 && (
                       <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
                         ↳ {clarifySlotsFor(i).map(s => s.surface).join(' / ')}

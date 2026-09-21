@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-09-21：删除澄清候选 chips
+
+- **原因**：上一条 3b-2 的槽位输入框已使 chips 冗余；且候选列表含大量 jieba `nr` 误判的垃圾项（实测 `法律文书 / 修正 / 汪均 / 汪少 / 申请人 / 祖母 / 许可`），**点击会按垃圾实体收窄** —— 属有害而非仅无用。
+- **改动**（`src/components/ChatPanel.tsx`，**纯删除 41 行、零新增**）：删掉 chips 渲染块、chip 点击处理，以及随之变成死代码的 `clarifyCandidatesFor` 与 `questionFor`。
+- **保留**：后端仍发 `clarify_candidates`（前端不再消费，留档便于排查）；澄清提示文本保留（阻塞轮**它本身就是回答**，删了用户就不知道在问什么）；槽位标注 `↳ 他` 保留。
+- **门禁**：`npx tsc -b` 0 错误；`npm run lint` 0 错误 / 28 告警（改动前后一致）；`npm run build` 通过；`cargo test --lib` 409 passed / 0 failed；`semgrep --severity ERROR` 0 findings。
+- **真机验证（用户提供会话导出，session `7bf188da`）—— 3b-2 端到端跑通**：
+  - 可见消息 = `"汪均益"`（用户真打的，历史干净）；
+  - `query_rewrite.original = "判决书里为什么认定他是利害关系人？ 汪均益"` → 原问题随 binding 回传成功；
+  - 后端日志 `referent: Some("汪均益")` + `verdict=Answerable` → 绑定生效、不再追问；
+  - material 46 = 一审判决书，`injected_spans=[[0,10295]]` = **整篇注入**；
+  - 新轮答案**无提示、无候选**。用户此前看到的候选是**上一条追问消息自带的 chips**（已随本次改动删除）。
+- **涉及文件**：`src/components/ChatPanel.tsx`、`CHANGELOG.md`。
+
+---
+
 ## 2026-09-21：澄清追问可手打答案（引用条 + 槽位填空）
 
 - **问题**：指代未绑定时的澄清追问只能点候选 chips（chips 发的是 `"候选值 原问题"` 拼接串）。用户想直接敲"汪均益"会被当成**一条全新问题**（单独检索"汪均益"）→ 答非所问。
