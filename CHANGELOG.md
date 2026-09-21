@@ -20,6 +20,7 @@
 - **顺带修一处误导日志**：`context_assembled` 事件的 `truncated_to` 是硬编码 `50000`，而实际预算是 `max_context_chars`（140000）—— 实测 `total_chars` 121464 却显示"截断到 50000"，排查时会被带偏。改为报告真实预算值。
 - **测试**：新增 3 个单测（`blocked_turn_emits_note_once_and_skips_citations`、`non_blocking_turn_prepends_note_once`、`no_note_returns_cited_text`）；`cargo test --lib` **406 passed / 0 failed**。
 - **为何之前门禁全绿却漏掉**：非流式路径（`conversation_ask`）在阻塞时提前 `return`，**没有**这个 bug；CLI `chat --dry-run` 也不走流式渲染 → 三条测试路径都没覆盖"阻塞 + 流式 + 最终文本拼接"这一组合。新单测直接锁住该组合。
+- **真机复测通过**：重启 app 后按原会话重放（先问"律师受当事人委托…需要什么手续和材料？"，再问"判决书里为什么认定他是利害关系人？"）—— 提示**只出现一次**、**无 `[9]`**，仍为"只问不答"（不生成 AI 分析）。此 bug 只在流式渲染路径可见，单测与 CLI 均无法复现，故以真机结果为准。
 - **涉及文件**：`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
 
 ---
