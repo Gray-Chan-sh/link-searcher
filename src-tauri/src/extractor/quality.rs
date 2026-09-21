@@ -7,6 +7,9 @@ pub struct ExtractMeta {
     pub mean_confidence: Option<f32>,
     pub page_count: Option<u32>,
     pub image_dims: Option<(u32, u32)>,
+    /// FFFD ratio computed on the raw text BEFORE sanitize_text strips replacement chars.
+    /// This ensures HighFffd flag fires correctly even when sanitize_text clears FFFD >15%.
+    pub pre_sanitize_fffd_ratio: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -51,9 +54,16 @@ pub fn lexicon_sizes() -> (usize, usize) {
     (CJK_LEXICON.len(), EN_LEXICON.len())
 }
 
-#[inline]
 fn is_cjk(c: char) -> bool {
-    matches!(c, '\u{4E00}'..='\u{9FFF}' | '\u{3400}'..='\u{4DBF}')
+    matches!(
+        c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+            | '\u{3400}'..='\u{4DBF}'   // CJK Extension A
+            | '\u{3040}'..='\u{309F}'   // Hiragana
+            | '\u{30A0}'..='\u{30FF}'   // Katakana
+            | '\u{AC00}'..='\u{D7AF}'   // Hangul Syllables
+            | '\u{F900}'..='\u{FAFF}'   // CJK Compatibility Ideographs
+    )
 }
 
 // sanitize_text already removes control chars before scoring, so printable metric's
@@ -74,9 +84,14 @@ fn is_printable_allowed(c: char) -> bool {
 }
 
 /// Compute lexicon hit rate: CJK chars from CJK set + whole Latin words in EN set.
+/// Digits and punctuation are excluded from both numerator and denominator
+/// so numeric-heavy files (CSV, spreadsheets) are not penalised.
 fn compute_lexicon_hit_rate(text: &str) -> f32 {
-    let non_ws_count = text.chars().filter(|c| !c.is_whitespace()).count();
-    if non_ws_count == 0 {
+    let countable_count = text
+        .chars()
+        .filter(|c| !c.is_whitespace() && (is_cjk(*c) || c.is_ascii_alphabetic()))
+        .count();
+    if countable_count == 0 {
         return 1.0;
     }
 
@@ -105,12 +120,12 @@ fn compute_lexicon_hit_rate(text: &str) -> f32 {
     }
     flush_latin(&mut latin_run, &mut hit_count);
 
-    hit_count as f32 / non_ws_count as f32
+    hit_count as f32 / countable_count as f32
 }
 
 pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> QualityResult {
     let total_chars = text.chars().count();
-    if total_chars == 0 {
+    if total_chars == 0 || text.chars().all(|c| c.is_whitespace()) {
         return QualityResult {
             score: 0.0,
             printable_ratio: 0.0,
@@ -125,8 +140,12 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
     let printable_count = text.chars().filter(|&c| is_printable_allowed(c)).count();
     let printable_ratio = printable_count as f32 / total_chars as f32;
 
-    let fffd_count = text.chars().filter(|&c| c == '\u{FFFD}').count();
-    let fffd_ratio = fffd_count as f32 / total_chars as f32;
+    let fffd_ratio = meta
+        .pre_sanitize_fffd_ratio
+        .unwrap_or_else(|| {
+            let fffd_count = text.chars().filter(|&c| c == '\u{FFFD}').count();
+            fffd_count as f32 / total_chars as f32
+        });
 
     let confidence = meta.mean_confidence;
     let conf_component = if meta.ocr_used {
@@ -136,13 +155,14 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
     };
 
     let ext_lower = file_ext.to_lowercase();
+    let is_image = matches!(
+        ext_lower.as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
+    );
     let density = if ext_lower == "pdf" {
         let pages = meta.page_count.unwrap_or(1) as f32;
         (total_chars as f32) / pages.max(1.0)
-    } else if matches!(
-        ext_lower.as_str(),
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
-    ) {
+    } else if is_image {
         if let Some((w, h)) = meta.image_dims {
             let area = (w * h) as f32 / 10000.0;
             (total_chars as f32) / area.max(1.0)
@@ -153,7 +173,13 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
         (total_chars as f32) / 1.0
     };
 
-    let density_norm = (density / 200.0).clamp(0.0, 1.0);
+    // ponytail: images use divisor 10 (permissive, calibrated for OCR on 150-300 DPI scans);
+    // PDF/text use divisor 200 (200 chars minimum). Upgrade: per-DPI adaptive formula.
+    let density_norm = if is_image {
+        (density / 10.0).clamp(0.0, 1.0)
+    } else {
+        (density / 200.0).clamp(0.0, 1.0)
+    };
     let lexicon_hit_rate = compute_lexicon_hit_rate(text);
 
     let composite = (0.20 * printable_ratio
@@ -269,6 +295,7 @@ mod tests {
             mean_confidence: None,
             page_count: None,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         let res = compute_quality(text, &meta, "txt");
         assert!(
@@ -308,6 +335,7 @@ mod tests {
             mean_confidence: Some(0.9),
             page_count: None,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         let res_high = compute_quality(text, &meta_high, "png");
         assert!(
@@ -320,6 +348,7 @@ mod tests {
             mean_confidence: Some(0.3),
             page_count: None,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         let res_low = compute_quality(text, &meta_low, "png");
         assert!(
@@ -336,6 +365,7 @@ mod tests {
             mean_confidence: None,
             page_count: Some(1),
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         let res_some = compute_quality(text, &meta_some, "pdf");
         assert!(res_some.score > 0.0);
@@ -345,6 +375,7 @@ mod tests {
             mean_confidence: None,
             page_count: None,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         let res_none = compute_quality(text, &meta_none, "pdf");
         assert!(res_none.score > 0.0);
@@ -437,5 +468,100 @@ mod tests {
         assert!(is_printable_allowed('Я'));
         assert!(is_printable_allowed('α'));
         assert!(is_printable_allowed('→'));
+    }
+
+    #[test]
+    fn test_whitespace_only_text_scores_zero() {
+        let meta = ExtractMeta::default();
+        let res = compute_quality("   \n\t  ", &meta, "txt");
+        assert_eq!(res.score, 0.0, "whitespace-only text should score 0.0");
+        assert!(res.flags.contains(&QualityFlag::LowPrintable));
+        assert!(res.flags.contains(&QualityFlag::LowDensity));
+    }
+
+    #[test]
+    fn test_pre_sanitize_fffd_ratio_used() {
+        let meta = ExtractMeta {
+            pre_sanitize_fffd_ratio: Some(0.30),
+            ..Default::default()
+        };
+        let res = compute_quality("clean text here", &meta, "txt");
+        assert!(
+            res.flags.contains(&QualityFlag::HighFffd),
+            "pre_sanitize_fffd_ratio=0.30 should trigger HighFffd"
+        );
+        assert!(res.fffd_ratio > 0.15);
+    }
+
+    #[test]
+    fn test_fffd_below_threshold_no_flag() {
+        let meta = ExtractMeta {
+            pre_sanitize_fffd_ratio: Some(0.10),
+            ..Default::default()
+        };
+        let res = compute_quality("text with some fffd", &meta, "txt");
+        assert!(
+            !res.flags.contains(&QualityFlag::HighFffd),
+            "fffd_ratio=0.10 should not trigger HighFffd"
+        );
+    }
+
+    #[test]
+    fn test_japanese_text_not_penalised_by_lexicon() {
+        let text = "これは日本語のテストです。東京は日本の首都です。";
+        let meta = ExtractMeta::default();
+        let res = compute_quality(text, &meta, "txt");
+        assert!(
+            res.lexicon_hit_rate > 0.0,
+            "Japanese hiragana/katakana should be counted as CJK, got lexicon_hit_rate={}",
+            res.lexicon_hit_rate
+        );
+    }
+
+    #[test]
+    fn test_image_density_not_always_low_for_ocr_text() {
+        let meta = ExtractMeta {
+            image_dims: Some((100, 100)),
+            ..Default::default()
+        };
+        let text = "这是一段足够长的OCR识别文本包含多个中文字符用于测试密度指标在合理图像尺寸下的表现足够多的文字内容";
+        let res = compute_quality(text, &meta, "png");
+        assert!(
+            res.density_norm >= 0.25,
+            "dense OCR text on small image should not trigger LowDensity, density_norm={}",
+            res.density_norm
+        );
+    }
+
+    #[test]
+    fn test_digits_only_text_excluded_from_lexicon_denominator() {
+        let digits_only = "12345 67890 54321 000111222";
+        let meta = ExtractMeta::default();
+        let res = compute_quality(digits_only, &meta, "txt");
+        assert_eq!(
+            res.lexicon_hit_rate, 1.0,
+            "digits-only text should get lexicon_hit_rate=1.0 (no countable chars), got {}",
+            res.lexicon_hit_rate
+        );
+        assert!(
+            !res.flags.contains(&QualityFlag::LowLexicon),
+            "digits-only text should not trigger LowLexicon"
+        );
+    }
+
+    #[test]
+    fn test_flags_to_json_roundtrip() {
+        let flags = vec![
+            QualityFlag::LowPrintable,
+            QualityFlag::LowConfidence,
+            QualityFlag::LowDensity,
+        ];
+        let json = flags_to_json(&flags);
+        assert!(json.contains("low_printable"));
+        assert!(json.contains("low_confidence"));
+        assert!(json.contains("low_density"));
+
+        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.len(), 3);
     }
 }

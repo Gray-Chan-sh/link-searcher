@@ -4,6 +4,34 @@
 
 ---
 
+## 2026-09-22：文本质量评分系统全面修复（15 项修复 + 7 项新测试）
+
+- **P0 关键缺陷修复**：
+  - `store_content_with_quality` SQLite 并发写入失败时加 try-once-again 重试（与 `mark_extracted` 同类 bug）
+  - 纯空白文本评分从 0.85（绿色）修正为 0.0（红色）
+  - `quality_audit` 参数名 `min_score` → `max_score`（语义修正，前后端联动）
+  - 重提取耗尽时返回真实 new_score（修复前返回 old_score 谎言）
+  - `re_extract_low_quality` 批内按 md5 去重，避免共享内容重复提取
+  - `get_low_quality_files` SQL 加 `reextract_count < 3` 过滤，避免耗尽文件占满 LIMIT
+
+- **P1 信号正确性修复**：
+  - `HighFffd` 标志恢复生效：FFFD 比率在 sanitize 前计算（`pre_sanitize_fffd_ratio`），不再被 `sanitize_text` 清空
+  - PDF OCR 回退时 `ocr_used=true`（13 个 return 路径），`LowConfidence` 对扫描件生效
+  - 图像密度分母从 200 校准为 10（150 DPI A4 扫描件不再误报 LowDensity）
+  - `lexicon_hit_rate` 排除数字/标点参与计数（CSV/表格类文件不再系统性误报 LowLexicon）
+  - `is_cjk()` 扩展覆盖假名（Hiragana/Katakana）、谚文（Hangul）、兼容汉字
+  - `mean_confidence` 新增持久化列，回填分数与索引时一致
+
+- **P2 改进**：
+  - `store_content_with_quality_and_reextract_count` 支持 reextract_count 透传
+  - `content_index(quality_score)` 加索引加速审计查询
+  - 新增 7 个测试覆盖：空白文本、FFFD 信号、日文、纯数字、图像密度、JSON 序列化
+
+- **测试**：`cargo test --lib` 419 passed / 0 failed；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`extractor/quality.rs`、`extractor/mod.rs`、`extractor/pdf.rs`、`indexer.rs`、`commands/index.rs`、`db/tracker.rs`、`db/mod.rs`、`cli.rs`、`tests/test_pdf_ocr.rs`、`api/index.ts`、`api/client.ts`、`CHANGELOG.md`。
+
+---
+
 ## 2026-09-22：多轮追问时指代消解不再拦截 LLM
 
 - **根因**：系统有两条独立运行、互不通信的指代消解管道。管道 A（LLM 查询改写）已把「他」展开为「汪均益」，仅用于检索；管道 B（规则 `clarify`）独立处理原始问句，仍看到字面"他"→创建 person 槽→数 state 里 2+ 个候选人→判定 Ambiguous→`clarify_blocking=true`→LLM 被跳过，直接返回模板追问文案（`took_ms: 0`）。管道 A 的改写结果从未喂给管道 B，两者对同一个代词做了两套重复且不一致的判断。

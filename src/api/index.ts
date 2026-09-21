@@ -99,9 +99,9 @@ export interface QualityAuditEntry {
   preview: string
 }
 
-export async function qualityAudit(minScore?: number, limit?: number): Promise<QualityAuditEntry[]> {
+export async function qualityAudit(maxScore?: number, limit?: number): Promise<QualityAuditEntry[]> {
   return client.invoke<QualityAuditEntry[]>('quality_audit', {
-    minScore: minScore ?? null,
+    maxScore: maxScore ?? null,
     limit: limit ?? 100,
   })
 }

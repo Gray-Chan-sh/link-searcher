@@ -102,6 +102,7 @@ pub fn extract_text_with_meta(
                         mean_confidence: stats.mean_confidence,
                         page_count: None,
                         image_dims: dims,
+                        pre_sanitize_fffd_ratio: None,
                     };
                     (Ok(text), meta)
                 }
@@ -131,6 +132,18 @@ pub fn extract_text_with_meta(
             (result, quality::ExtractMeta::default())
         }
     };
+
+    let pre_sanitize_fffd_ratio = raw_res.as_ref().ok().map(|t| {
+        let total = t.chars().count();
+        if total > 0 {
+            t.chars().filter(|&c| c == '\u{FFFD}').count() as f32 / total as f32
+        } else {
+            0.0
+        }
+    });
+
+    let mut meta = meta;
+    meta.pre_sanitize_fffd_ratio = pre_sanitize_fffd_ratio;
 
     raw_res.map(|t| sanitize_text(&t)).map(|t| (t, meta))
 }

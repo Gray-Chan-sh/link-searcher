@@ -287,7 +287,20 @@ impl IndexerService {
                 None,
                 Some(&quality),
             ) {
-                log::warn!("[INDEX] 存储提取内容失败: {e}");
+                log::warn!("[INDEX] store_content retry for {}: {e}", job.file_id);
+                if let Err(e2) = crate::db::tracker::store_content_with_quality(
+                    conn,
+                    &hash,
+                    &extracted.0,
+                    ocr_used,
+                    None,
+                    Some(&quality),
+                ) {
+                    log::warn!(
+                        "[INDEX] store_content retry FAILED for {}: {e2} (quality 将丢失，backfill 可补回)",
+                        job.file_id
+                    );
+                }
             }
             extracted.0
         };
@@ -1085,7 +1098,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let md5 = rec.md5.expect("md5 should be set after indexing");
-        let (score, _) = crate::db::tracker::get_content_quality(&conn, &md5)
+        let (score, _, _) = crate::db::tracker::get_content_quality(&conn, &md5)
             .unwrap()
             .expect("quality row should exist");
         assert!(

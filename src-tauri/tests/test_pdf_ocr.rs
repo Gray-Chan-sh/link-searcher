@@ -10,8 +10,8 @@ fn test_ocr_20111201() {
     let extractor = PdfExtractor::new();
     eprintln!("=== Testing PDF OCR with chi_sim ===");
     match extractor.extract_with_lang(pdf, "chi_sim", None) {
-        Ok(text) => {
-            eprintln!("SUCCESS: {} chars", text.len());
+        Ok((text, ocr_used)) => {
+            eprintln!("SUCCESS: {} chars (ocr={})", text.len(), ocr_used);
             let preview = if text.len() > 500 { &text[..text.floor_char_boundary(500)] } else { &text };
             eprintln!("PREVIEW:\n{}", preview);
         }

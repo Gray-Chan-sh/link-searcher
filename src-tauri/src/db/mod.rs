@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -222,6 +222,10 @@ fn ensure_quality_columns(tx: &Connection) -> Result<()> {
         tx.execute_batch("ALTER TABLE content_index ADD COLUMN reextract_count INTEGER NOT NULL DEFAULT 0")
             .context("failed to add reextract_count")?;
     }
+    if !has("mean_confidence") {
+        tx.execute_batch("ALTER TABLE content_index ADD COLUMN mean_confidence REAL")
+            .context("failed to add mean_confidence")?;
+    }
     Ok(())
 }
 
@@ -256,8 +260,10 @@ const CREATE_TABLES_SQL: &str = "
         ocr_duration_ms INTEGER,
         quality_score   REAL,
         quality_flags   TEXT NOT NULL DEFAULT '[]',
-        reextract_count INTEGER NOT NULL DEFAULT 0
+        reextract_count INTEGER NOT NULL DEFAULT 0,
+        mean_confidence REAL
     );
+    CREATE INDEX IF NOT EXISTS idx_ci_quality ON content_index(quality_score);
 
     CREATE TABLE IF NOT EXISTS dir_config (
         id              TEXT PRIMARY KEY,
@@ -564,6 +570,7 @@ mod tests {
         assert!(names.contains(&"quality_score".to_string()), "missing quality_score: {names:?}");
         assert!(names.contains(&"quality_flags".to_string()), "missing quality_flags: {names:?}");
         assert!(names.contains(&"reextract_count".to_string()), "missing reextract_count: {names:?}");
+        assert!(names.contains(&"mean_confidence".to_string()), "missing mean_confidence: {names:?}");
     }
 
     #[test]
@@ -576,7 +583,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "4");
+        assert_eq!(version, "5");
     }
 
     #[test]

@@ -1478,9 +1478,9 @@ pub(crate) fn reextract_one(
     let conn = db_pool
         .get()
         .map_err(|e| anyhow::anyhow!("db error: {e}"))?;
-    let (new_score, _new_count) = match tracker::get_content_quality(&conn, &md5)? {
+    let (new_score, _new_count, _new_confidence) = match tracker::get_content_quality(&conn, &md5)? {
         Some(v) => v,
-        None => (None, 0),
+        None => (None, 0, None),
     };
 
     let (next_count, exhausted) = next_reextract_state(old_count, old_score, new_score);
@@ -1505,7 +1505,7 @@ pub(crate) fn reextract_one(
         return Ok(ReextractOutcome {
             reextracted: true,
             old_score,
-            new_score: old_score,
+            new_score,
             reason: Some("exhausted".into()),
         });
     }
@@ -1554,11 +1554,11 @@ pub async fn get_quality_summary(
 #[tauri::command]
 pub async fn quality_audit(
     state: State<'_, AppState>,
-    min_score: Option<f64>,
+    max_score: Option<f64>,
     limit: Option<usize>,
 ) -> Result<Vec<tracker::LowQualityRow>, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let score = min_score.unwrap_or(0.5);
+    let score = max_score.unwrap_or(0.5);
     let lim = limit.unwrap_or(100).min(1000);
     tracker::get_low_quality_files(&conn, score, lim).map_err(|e| format!("{e}"))
 }
@@ -1570,7 +1570,7 @@ pub async fn re_extract_file(
     engine: Option<String>,
 ) -> Result<ReextractOutcome, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let (old_score, old_count) = {
+    let (old_score, old_count, _old_confidence) = {
         let rec = tracker::get_file_by_id(&conn, &file_id)
             .map_err(|e| format!("{e}"))?
             .ok_or_else(|| "file not found".to_string())?;
@@ -1580,7 +1580,7 @@ pub async fn re_extract_file(
             .ok_or_else(|| "file has no md5".to_string())?;
         match tracker::get_content_quality(&conn, &md5).map_err(|e| format!("{e}"))? {
             Some(v) => v,
-            None => (None, 0),
+            None => (None, 0, None),
         }
     };
     drop(conn);
@@ -1615,6 +1615,7 @@ pub async fn re_extract_low_quality(
         let mut ok = 0usize;
         let mut failed = 0usize;
         let mut exhausted = 0usize;
+        let mut seen_md5s = std::collections::HashSet::new();
 
         for row in &rows {
             let Some(ref file_id) = row.file_id else {
@@ -1622,6 +1623,9 @@ pub async fn re_extract_low_quality(
             };
             if row.reextract_count >= 3 {
                 exhausted += 1;
+                continue;
+            }
+            if !seen_md5s.insert(&row.md5) {
                 continue;
             }
 
@@ -1700,6 +1704,7 @@ pub(crate) fn run_quality_backfill(
             mean_confidence: None,
             page_count: None,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
 
         if ext == "pdf" {
@@ -2130,6 +2135,7 @@ mod tests {
                 mean_confidence: None,
                 page_count: None,
                 image_dims: None,
+                pre_sanitize_fffd_ratio: None,
             };
             let quality = crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
             let flags_json = crate::extractor::quality::flags_to_json(&quality.flags);
@@ -2139,9 +2145,9 @@ mod tests {
         let still_missing = crate::db::tracker::get_content_missing_quality(&conn, 100).unwrap();
         assert_eq!(still_missing.len(), 0, "all rows should be scored");
 
-        let (score_a, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
+        let (score_a, _, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
         assert!(score_a.unwrap() > 0.5, "score_a={score_a:?}");
-        let (score_b, _) = crate::db::tracker::get_content_quality(&conn, "md5_b").unwrap().unwrap();
+        let (score_b, _, _) = crate::db::tracker::get_content_quality(&conn, "md5_b").unwrap().unwrap();
         assert!(score_b.unwrap() > 0.5, "score_b={score_b:?}");
     }
 
@@ -2163,7 +2169,7 @@ mod tests {
         let still_missing = crate::db::tracker::get_content_missing_quality(&conn, 100).unwrap();
         assert_eq!(still_missing.len(), 0);
 
-        let (score, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
+        let (score, _, _) = crate::db::tracker::get_content_quality(&conn, "md5_a").unwrap().unwrap();
         assert!(score.unwrap() > 0.5);
     }
 }

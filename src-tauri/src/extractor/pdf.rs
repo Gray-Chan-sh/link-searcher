@@ -381,7 +381,7 @@ impl PdfExtractor {
         path: &Path,
         lang: &str,
         engine: Option<super::ocr::OcrEngineType>,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         log::info!("[PDF] extracting {:?}", path.file_name());
         let engine = super::ocr::preferred_engine(engine);
         let doc = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -400,13 +400,13 @@ impl PdfExtractor {
                         path.file_name(),
                         text.len()
                     );
-                    return Ok(text);
+                    return Ok((text, false));
                 }
                 // anydoc handles Quartz/CFF PDFs that lopdf and pdftotext both fail on
                 match anydoc::to_markdown(path) {
                     Ok(md) if md.len() > 100 => {
                         log::info!("[PDF] {:?}: anydoc fallback {} chars", path.file_name(), md.len());
-                        return Ok(md);
+                        return Ok((md, false));
                     }
                     Ok(_) => log::info!("[PDF] {:?}: anydoc returned empty, falling to image OCR", path.file_name()),
                     Err(anydoc_err) => log::info!("[PDF] {:?}: anydoc {anydoc_err}, falling to image OCR", path.file_name()),
@@ -416,7 +416,7 @@ impl PdfExtractor {
                     path.file_name()
                 );
                 return if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
-                    Ok(text)
+                    Ok((text, true))
                 } else {
                     Err(anyhow::anyhow!(
                         "failed to load PDF and no OCR fallback available: {e}"
@@ -429,10 +429,10 @@ impl PdfExtractor {
                     path.file_name()
                 );
                 if let Some(text) = try_pdftotext_extract(path) {
-                    return Ok(text);
+                    return Ok((text, false));
                 }
                 if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
-                    return Ok(text);
+                    return Ok((text, true));
                 }
                 return Err(anyhow::anyhow!(
                     "lopdf panicked and no fallback available for {:?}",
@@ -442,7 +442,7 @@ impl PdfExtractor {
         };
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
         if pages.is_empty() {
-            return Ok(String::new());
+            return Ok((String::new(), false));
         }
 
         // Scans carry a synthetic, mis-ordered text layer that neither lopdf nor
@@ -455,7 +455,7 @@ impl PdfExtractor {
                 path.file_name(),
                 ocr_text.chars().count()
             );
-            return Ok(ocr_text);
+            return Ok((ocr_text, true));
         }
 
         // lopdf silently drops characters on fonts lacking a Name-valued
@@ -472,7 +472,7 @@ impl PdfExtractor {
                 path.file_name(),
                 text.len()
             );
-            return Ok(text);
+            return Ok((text, false));
         }
 
         log::info!("[PDF] {:?}: {} pages, extracting text", path.file_name(), pages.len());
@@ -514,7 +514,7 @@ impl PdfExtractor {
                                 path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
                             );
                             if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
-                                return Ok(ocr_text);
+                                return Ok((ocr_text, true));
                             }
                         }
                         class.pages_needing_ocr
@@ -544,7 +544,7 @@ impl PdfExtractor {
                         text.len(),
                         merged.len()
                     );
-                    return Ok(text);
+                    return Ok((text, false));
                 }
             }
         }
@@ -576,7 +576,7 @@ impl PdfExtractor {
 
             if ocr_count == 0 {
                 log::info!("[PDF] {:?}: clean text, skipping OCR", path.file_name());
-                return Ok(merged);
+                return Ok((merged, false));
             }
             if ocr_count < page_count {
                 // MIXED: splice per-page OCR results into the text layer
@@ -596,7 +596,7 @@ impl PdfExtractor {
                 if ocr_pages.len() == ocr_count {
                     let merged_text = merge_page_texts(&page_texts, &ocr_pages);
                     log::info!("[PDF] {:?}: per-page OCR complete, {} chars", path.file_name(), merged_text.len());
-                    return Ok(merged_text);
+                    return Ok((merged_text, true));
                 }
                 log::warn!(
                     "[PDF] {:?}: per-page OCR partially failed ({}/{}), falling back to whole-document OCR",
@@ -609,10 +609,10 @@ impl PdfExtractor {
             path.file_name(), is_wm, is_garbled, is_rep, is_sparse, is_implausible);
 
         if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
-            return Ok(ocr_text);
+            return Ok((ocr_text, true));
         }
 
-        Ok(merged)
+        Ok((merged, false))
     }
 
     pub fn extract_with_meta(
@@ -621,14 +621,14 @@ impl PdfExtractor {
         lang: &str,
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<(String, super::quality::ExtractMeta)> {
-        let text = self.extract_with_lang(path, lang, engine)?;
+        let (text, ocr_used) = self.extract_with_lang(path, lang, engine)?;
         let page_count = get_pdf_page_count(path).ok();
-        // TODO(wave2): thread PDF OCR confidence from try_ocr_fallback
         let meta = super::quality::ExtractMeta {
-            ocr_used: false,
+            ocr_used,
             mean_confidence: None,
             page_count,
             image_dims: None,
+            pre_sanitize_fffd_ratio: None,
         };
         Ok((text, meta))
     }
@@ -1186,10 +1186,8 @@ fn extract_and_ocr_page_via_pdfimages(
 impl Extractor for PdfExtractor {
     /// Prefer [`extract_with_lang`] for language-aware extraction.
     fn extract(&self, path: &Path) -> Result<String> {
-        // Read the global ocr_lang setting instead of hard-coding "eng",
-        // so direct extract() calls honor the user's language preference.
         let lang = global_ocr_lang();
-        self.extract_with_lang(path, &lang, None)
+        self.extract_with_lang(path, &lang, None).map(|(text, _ocr)| text)
     }
 }
 

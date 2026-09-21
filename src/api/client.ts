@@ -205,7 +205,7 @@ const MAPPINGS: Record<string, Mapping> = {
 
   // ── Quality ──
   get_quality_summary: { method: 'GET', path: '/api/quality/summary' },
-  quality_audit: { method: 'GET', path: '/api/quality/audit', paramMap: { minScore: 'min_score' } },
+  quality_audit: { method: 'GET', path: '/api/quality/audit', paramMap: { maxScore: 'max_score' } },
   re_extract_file: (a) => ({
     method: 'POST', path: '/api/quality/re-extract-file',
     body: { file_id: a.fileId, engine: a.engine },

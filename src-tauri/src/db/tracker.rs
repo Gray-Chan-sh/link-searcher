@@ -542,15 +542,31 @@ pub fn store_content_with_quality(
     ocr_ms: Option<i64>,
     quality: Option<&crate::extractor::quality::QualityResult>,
 ) -> Result<()> {
+    store_content_with_quality_and_reextract_count(conn, md5, text, ocr_used, ocr_ms, quality, 0)
+}
+
+pub fn store_content_with_quality_and_reextract_count(
+    conn: &Connection,
+    md5: &str,
+    text: &str,
+    ocr_used: bool,
+    ocr_ms: Option<i64>,
+    quality: Option<&crate::extractor::quality::QualityResult>,
+    reextract_count: i64,
+) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
-    let (score, flags_json) = match quality {
-        Some(q) => (Some(q.score as f64), crate::extractor::quality::flags_to_json(&q.flags)),
-        None => (None, "[]".to_string()),
+    let (score, flags_json, confidence) = match quality {
+        Some(q) => (
+            Some(q.score as f64),
+            crate::extractor::quality::flags_to_json(&q.flags),
+            q.confidence,
+        ),
+        None => (None, "[]".to_string(), None),
     };
     conn.execute(
         "INSERT OR REPLACE INTO content_index \
-         (md5,text_content,indexed_at,char_count,ocr_used,ocr_duration_ms,quality_score,quality_flags,reextract_count) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0)",
+         (md5,text_content,indexed_at,char_count,ocr_used,ocr_duration_ms,quality_score,quality_flags,reextract_count,mean_confidence) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         rusqlite::params![
             md5,
             text,
@@ -560,6 +576,8 @@ pub fn store_content_with_quality(
             ocr_ms,
             score,
             flags_json,
+            reextract_count,
+            confidence,
         ],
     )
     .context("store_content_with_quality failed")?;
@@ -621,6 +639,7 @@ pub fn get_low_quality_files(conn: &Connection, max_score: f64, limit: usize) ->
              FROM content_index ci \
              LEFT JOIN file_tracking ft ON ci.md5 = ft.md5 \
              WHERE ci.quality_score IS NOT NULL AND ci.quality_score < ?1 \
+                   AND ci.reextract_count < 3 \
              ORDER BY ci.quality_score ASC \
              LIMIT ?2",
         )
@@ -644,11 +663,15 @@ pub fn get_low_quality_files(conn: &Connection, max_score: f64, limit: usize) ->
         .context("collect get_low_quality_files")
 }
 
-pub fn get_content_quality(conn: &Connection, md5: &str) -> Result<Option<(Option<f64>, i64)>> {
+pub fn get_content_quality(conn: &Connection, md5: &str) -> Result<Option<(Option<f64>, i64, Option<f64>)>> {
     match conn.query_row(
-        "SELECT quality_score, reextract_count FROM content_index WHERE md5 = ?1",
+        "SELECT quality_score, reextract_count, mean_confidence FROM content_index WHERE md5 = ?1",
         rusqlite::params![md5],
-        |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, i64>(1)?)),
+        |row| Ok((
+            row.get::<_, Option<f64>>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+        )),
     ) {
         Ok(v) => Ok(Some(v)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1583,7 +1606,7 @@ mod tests {
         let qr = quality_result(0.82, vec![]);
         store_content_with_quality(&conn, "q1", "good text", false, None, Some(&qr)).unwrap();
 
-        let (score, reext_count) = get_content_quality(&conn, "q1").unwrap().unwrap();
+        let (score, reext_count, _conf) = get_content_quality(&conn, "q1").unwrap().unwrap();
         assert!((score.unwrap() - 0.82).abs() < 0.01, "score should be ~0.82, got {score:?}");
         assert_eq!(reext_count, 0);
     }
@@ -1593,7 +1616,7 @@ mod tests {
         let conn = db();
         store_content_with_quality(&conn, "q2", "plain text", true, Some(50), None).unwrap();
 
-        let (score, reext_count) = get_content_quality(&conn, "q2").unwrap().unwrap();
+        let (score, reext_count, _conf) = get_content_quality(&conn, "q2").unwrap().unwrap();
         assert!(score.is_none(), "no quality → NULL score");
         assert_eq!(reext_count, 0);
         assert_eq!(get_content(&conn, "q2").unwrap().unwrap(), "plain text");
@@ -1645,12 +1668,12 @@ mod tests {
         store_content_with_quality(&conn, "rx1", "text", false, None, None).unwrap();
 
         update_reextract_state(&conn, "rx1", 2, "[\"low_printable\"]").unwrap();
-        let (score, count) = get_content_quality(&conn, "rx1").unwrap().unwrap();
+        let (score, count, _conf) = get_content_quality(&conn, "rx1").unwrap().unwrap();
         assert_eq!(count, 2);
         assert!(score.is_none());
 
         update_reextract_state(&conn, "rx1", 3, "[\"high_fffd\"]").unwrap();
-        let (_, count) = get_content_quality(&conn, "rx1").unwrap().unwrap();
+        let (_, count, _conf) = get_content_quality(&conn, "rx1").unwrap().unwrap();
         assert_eq!(count, 3);
     }
 
@@ -1724,7 +1747,7 @@ mod tests {
 
         update_content_quality(&conn, "ucq1", 0.85, r#"["low_printable"]"#).unwrap();
 
-        let (score, _count) = get_content_quality(&conn, "ucq1").unwrap().unwrap();
+        let (score, _count, _conf) = get_content_quality(&conn, "ucq1").unwrap().unwrap();
         assert!((score.unwrap() - 0.85).abs() < 0.01);
     }
 

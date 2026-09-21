@@ -532,12 +532,12 @@ pub fn run_cli() -> Result<()> {
                         .md5
                         .clone()
                         .ok_or_else(|| anyhow::anyhow!("file has no md5"))?;
-                    let (old_score, old_count) =
+                    let (old_score, old_count, _old_confidence) =
                         match db::tracker::get_content_quality(&conn, &md5)
                             .context("failed to read quality state")?
                         {
                             Some(v) => v,
-                            None => (None, 0),
+                            None => (None, 0, None),
                         };
                     drop(conn);
 
