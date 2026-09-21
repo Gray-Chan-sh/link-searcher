@@ -364,7 +364,12 @@ pub fn run_cli() -> Result<()> {
                     println!("[澄清槽] 无（无歧义，或 --bind 已绑定）");
                 } else {
                     for s in &prepared.clarify_slots {
-                        println!("[澄清槽] {} ({}) → {} 项候选", s.surface, s.stype, s.options.len());
+                        // 候选列表只在这里打印（用户可见文案里已刻意不列），是排查
+                        // 候选质量的唯一观测点——GUI 路径无法无头检查。
+                        println!(
+                            "[澄清槽] {} ({}) → {} 项候选: {}",
+                            s.surface, s.stype, s.options.len(), s.options.join(" / ")
+                        );
                     }
                 }
                 for (i, ev) in prepared.evidence.iter().enumerate().take(30) {

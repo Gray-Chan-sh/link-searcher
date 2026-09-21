@@ -177,9 +177,13 @@ pub fn resolve(ir: &Ir, state: &SessionState, grounding: &Grounding) -> Resoluti
     }
 }
 
-/// 把裁决结果转成「**问什么**」：披露文案 + 候选值。无 Ask 则返回 None（不打扰用户）。
-/// 尾部的「**怎么答**」指引不在这里 —— 它取决于交互模式（阻塞轮有槽位输入框，
-/// 非阻塞轮只有 `@` 可用），由调用方 [`crate::commands::ai`] 按 `blocking` 追加。
+/// 把裁决结果转成「**问哪个槽**」：待澄清的表层词（如 `「他」`）+ 候选值。
+/// 无 Ask 则返回 None（不打扰用户）。
+///
+/// 完整句子与交互指引**都不在这里**：它们取决于模式（阻塞轮下方有槽位输入框，
+/// 非阻塞轮只有 `@` 可用），由调用方 [`crate::commands::ai`] 按 `blocking` 组装。
+/// **候选列表不进用户可见文案** —— 它含 jieba 的粘连碎片（`人宋` / `代常宏` /
+/// `常宏系`），列出来会误导；只在 `clarify_candidates` 里留给 CLI `--dry-run` 排查。
 pub fn clarify_from_resolution(res: &Resolution) -> Option<(String, Vec<String>)> {
     let asks: Vec<(&str, &Vec<String>)> = res
         .outcomes
@@ -193,16 +197,16 @@ pub fn clarify_from_resolution(res: &Resolution) -> Option<(String, Vec<String>)
         return None;
     }
     let mut cands: Vec<String> = Vec::new();
-    let mut parts: Vec<String> = Vec::new();
+    let mut surfaces: Vec<String> = Vec::new();
     for (surface, options) in asks {
-        parts.push(format!("{surface} → {}", options.join(" / ")));
+        surfaces.push(format!("「{surface}」"));
         for o in options {
             if !cands.contains(o) {
                 cands.push(o.clone());
             }
         }
     }
-    Some((format!("（提示：{}。）", parts.join("；")), cands))
+    Some((surfaces.join("、"), cands))
 }
 
 /// 结构化的追问槽位。前端据此渲染"填空"控件，并把用户答案作为 binding 回传。
@@ -753,4 +757,5 @@ mod tests {
             assert!(got.iter().any(|(w, _)| w == place), "{place} 被误杀: {got:?}");
         }
     }
+
 }

@@ -2320,15 +2320,19 @@ pub(crate) async fn prepare_conversation_prompt(
             .into_iter()
             .map(|a| ClarifySlot { surface: a.surface, stype: a.stype, options: a.options })
             .collect();
-        // 「怎么答」指引取决于模式：阻塞轮下方有槽位输入框，非阻塞轮（提示+作答）
-        // 没有输入框、只能靠 @ 收窄。`clarify_from_resolution` 只产出「问什么」。
-        let tail = if blocking {
-            "请在下方填写具体指代。"
-        } else {
-            "如需精确，请用 @ 指定文件或目录。"
-        };
+        // 提示文案按模式分叉：阻塞轮在等用户填槽，非阻塞轮已经把答案给出去了、
+        // 只需说明"按谁答的"。候选列表不进文案（含 jieba 粘连碎片，会误导）。
         match clarify::clarify_from_resolution(&resolution) {
-            Some((n, c)) => (Some(format!("{n}{tail}")), c, slots, blocking),
+            Some((surfaces, c)) => {
+                let note = if blocking {
+                    format!("（提示：请明确{surfaces}的指代。）请在下方填写具体指代。")
+                } else {
+                    format!(
+                        "（提示：{surfaces}的指代不明确，以下回答按材料中最相关的对象作答。）如需精确，请用 @ 指定文件或目录。"
+                    )
+                };
+                (Some(note), c, slots, blocking)
+            }
             None => (None, Vec::new(), Vec::new(), false),
         }
     };
