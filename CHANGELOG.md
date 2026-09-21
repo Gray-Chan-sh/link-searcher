@@ -4,6 +4,45 @@
 
 ---
 
+## 2026-09-21：澄清提示重复输出 + 误挂引用（真机验证新会话时发现）
+
+- **现象**：用真机新会话验证上一条「澄清升级」时发现，`判决书里为什么认定他是利害关系人？`（未绑定指代 + 问句无锚点）的答案把澄清提示**输出了两遍**，且第二遍被插入 `[9]`：
+  ```
+  （提示：他 → 汪均益 / 汪少荣 / … 许可。如需精确，请用 @ 指定文件或目录。）
+
+  （提示：他 → 汪均益 / 汪少荣 / … 许可。[9]如需精确，请用 @ 指定文件或目录。）
+  ```
+  （`took_ms=0` → LLM 确已跳过，"只问不答"本身生效；坏的只是**最终文本拼接**。）
+- **根因**（流式路径 `conversation_ask_stream`，两处叠加）：
+  1. 阻塞分支把 `result.text` 设为 `clarify_note.clone()` —— 此时"答案"**就是**提示本身；而末尾 `match clarify_note { Some(n) => format!("{n}\n\n{cited}") }` 又**前置了一次** → `ai-done.full_text` = 提示 + 提示；
+  2. 同一段里对 `raw_text`（此刻即提示）跑了 `auto_cite` → 提示正文列出的实体名（"汪均益"）命中 material 9 → 在句尾挂上 `[9]`。**系统生成的澄清提示本不该过引用匹配**。
+- **改动**（`commands/ai.rs`）：抽出纯函数 `compose_answer_text(clarify_blocking, raw_text, clarify_note, cite)` —— 阻塞轮**直接返回 `raw_text` 一份且不调用 `cite`**；非阻塞轮才前置提示并保留 `auto_cite` 结果。流式路径改为调用该函数（抽出即为可测）。
+- **顺带修一处误导日志**：`context_assembled` 事件的 `truncated_to` 是硬编码 `50000`，而实际预算是 `max_context_chars`（140000）—— 实测 `total_chars` 121464 却显示"截断到 50000"，排查时会被带偏。改为报告真实预算值。
+- **测试**：新增 3 个单测（`blocked_turn_emits_note_once_and_skips_citations`、`non_blocking_turn_prepends_note_once`、`no_note_returns_cited_text`）；`cargo test --lib` **406 passed / 0 failed**。
+- **为何之前门禁全绿却漏掉**：非流式路径（`conversation_ask`）在阻塞时提前 `return`，**没有**这个 bug；CLI `chat --dry-run` 也不走流式渲染 → 三条测试路径都没覆盖"阻塞 + 流式 + 最终文本拼接"这一组合。新单测直接锁住该组合。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+
+---
+
+## 2026-09-21：澄清升级 —— 指代未绑定且提问无锚点时「只问不答」
+
+- **问题**：多轮追问「判决书里为什么认定他是利害关系人？」（人称代词「他」，且问句里**没有任何具名实体**）会答"材料中没有判决书"。实测根因**不在检索或注入**：
+  - 该问题下判决书的 BM25 名次为 55~88（**只留本轮锚点则 120/160**）—— 因为 `判决书/认定/利害/关系人` **全是泛词**（DF 478/1178/286/262），**问句里没有任何强锚点**；
+  - 系统**已经识别出歧义**（澄清提示正常触发："他 → 汪均益 / 汪均 / …"），但**仍用错误案件硬答** —— 即 `docs/RAG_PIPELINE.md:171` 所称"**自信地答错**"（最坏的失败模式）。
+- **诊断中否定的三个假设（记录以免重走）**：
+  1. **注入层预算不足** —— 已实测：加大排名中后文档的预算（`MIN_PER_FILE` 1500→4600）整体 **+1 题**，但对本题**无效**（判决书根本不在注入列表）；
+  2. **"改写污染稀释锚点"** —— app 日志显示该轮 `final_kws` 里 6/10 是上一轮的泛词（律师/当事人/委托/不动产/进行/手续），但**去掉这些词后排名反而更低**（120/160）→ 污染不是主因；
+  3. **排名方差** —— 同一问题同历史连跑 5 次，判决书名次**一致缺席**，是稳定失败而非抖动。
+- **改动**：
+  - `commands/clarify.rs`：新增 `ROLE_NOUN`（被告/原告/第三人/上诉人/被上诉人/申请人/我方/对方/本方）作为**提案层脏词典**；**仅当问句里没有任何具名实体时**才为角色名词产槽 —— 避免"汪均益案中，被告歙县…"这类已锚定的提问被误判为需澄清。裁决仍由 Resolver 按 State/Grounding **计数**判定（沿用 `2408b16` 架构，不新增判定门）。
+  - `commands/ai.rs`：新增 `clarify_is_blocking(q, resolution)` —— 裁决为 `Ambiguous` **且** 提问无具名实体 **且** 存在 `case`/`person` 槽的 Ask 时，**只问不答**（跳过 LLM，直接返回澄清问题与候选 chips）。非流式与流式两条路径均已接入。
+  - `cli.rs`：`chat --dry-run` 打印澄清信息与模式（`只问不答` / `提示+作答`），便于排查。
+- **测试**：新增 4 个单测（`role_noun_slot_only_without_named_entity`、`pronoun_slot_for_unanchored_question`、`blocking_only_when_unanchored_and_unbound`、`anchored_question_is_never_blocking`）；`cargo test --lib` **403 passed / 0 failed**。
+- **实测**：35 题 Span Hit 保持 **30/35**（无回归）；已具名提问（"汪均益案中，被告歙县…"）与无指代提问（"22963 号判决…"）**均不触发**澄清 ✓。
+- **涉及文件**：`src-tauri/src/commands/clarify.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/cli.rs`、`CHANGELOG.md`。
+
+---
+
 ## 2026-09-21：RAG 注入层修复 —— 答案段进不了上下文（含 P0 评测工具 + Golden v2）
 
 - **现象**：`reasoning` 类问题（"判决书里为什么认定…"）回答反复称"材料中没有判决书"，但判决书**已被检索到**（BM25 排名第 19、注入列表第 1）。根因不在检索，而在**注入层**。

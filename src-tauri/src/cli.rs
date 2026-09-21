@@ -334,6 +334,10 @@ pub fn run_cli() -> Result<()> {
                     "[三路检索] 命中 {} 份文件，注入 {} 条证据（full_recall={}）",
                     prepared.total_match_count, prepared.evidence.len(), full_recall
                 );
+                if let Some(n) = &prepared.clarify_note {
+                    let mode = if prepared.clarify_blocking { "只问不答" } else { "提示+作答" };
+                    println!("[澄清/{mode}] {n}");
+                }
                 for (i, ev) in prepared.evidence.iter().enumerate().take(30) {
                     println!(
                         "  [{:>3}] bm25={} sem={} path={}",

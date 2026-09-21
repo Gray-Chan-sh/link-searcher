@@ -208,6 +208,15 @@ const DEMONSTRATIVE: &[&str] = &["这个", "那个", "这些", "那些"];
 const PRECOMPOSED: &[(&str, &str)] =
     &[("本案", "case"), ("该案", "case"), ("该文件", "doc"), ("该材料", "doc")];
 
+/// 关系型角色名词：本身不指名，必须靠上文才能确定指代（"被告"是哪个案子的被告？）。
+/// 仅当问句里**没有任何具名实体**时才产槽——否则"汪均益案中，被告歙县…"这类
+/// 已由问句自身锚定的提问会被误判为需要澄清。
+const ROLE_NOUN: &[(&str, &str)] = &[
+    ("被告", "person"), ("原告", "person"), ("第三人", "person"),
+    ("上诉人", "person"), ("被上诉人", "person"), ("申请人", "person"),
+    ("我方", "person"), ("对方", "person"), ("本方", "person"),
+];
+
 /// 类型名词 → 槽类型。**这是提案层的脏词典**（允许不全）：Resolver 会用
 /// State/Grounding 的计数验证，认不出就落到 NoSuchType 披露，不会误绑。
 const NOUN_TYPE: &[(&str, &str)] = &[
@@ -240,6 +249,7 @@ pub fn propose_ir(q: &str) -> Ir {
         "lookup"
     };
     let toks = jieba_tags(q);
+    let has_named = !content_entities(q).is_empty();
     let mut slots: Vec<Slot> = Vec::new();
     let mut i = 0;
     while i < toks.len() {
@@ -261,6 +271,10 @@ pub fn propose_ir(q: &str) -> Ir {
             }
             slots.push(Slot { stype: stype.into(), surface, referent: None });
         } else if let Some((_, st)) = PRECOMPOSED.iter().find(|(k, _)| k == w) {
+            slots.push(Slot { stype: (*st).into(), surface: w.clone(), referent: None });
+        } else if !has_named
+            && let Some((_, st)) = ROLE_NOUN.iter().find(|(k, _)| k == w)
+        {
             slots.push(Slot { stype: (*st).into(), surface: w.clone(), referent: None });
         }
         i += 1;
@@ -415,6 +429,34 @@ pub fn build_grounding(
 
 #[cfg(test)]
 mod tests {
+    /// 角色名词只在"问句没有任何具名实体"时产槽——已具名的提问不该被误判为需澄清。
+    #[test]
+    fn role_noun_slot_only_without_named_entity() {
+        let bare = propose_ir("被告在答辩状里是怎么抗辩的？");
+        assert!(
+            bare.slots.iter().any(|s| s.surface == "被告"),
+            "无具名实体时应为「被告」产槽: {:?}",
+            bare.slots
+        );
+        let named = propose_ir("汪均益案中，被告歙县自然资源和规划局在答辩状里是怎么抗辩的？");
+        assert!(
+            !named.slots.iter().any(|s| s.surface == "被告"),
+            "已具名时不应为「被告」产槽: {:?}",
+            named.slots
+        );
+    }
+
+    /// 第 2 轮那道题：人称代词「他」应产 person 槽（无具名实体）。
+    #[test]
+    fn pronoun_slot_for_unanchored_question() {
+        let ir = propose_ir("判决书里为什么认定他是利害关系人？");
+        assert!(
+            ir.slots.iter().any(|s| s.stype == "person"),
+            "应为人称代词产 person 槽: {:?}",
+            ir.slots
+        );
+    }
+
     use super::*;
 
     /// 一个聚焦会话：汪均益案卷 + 跨案污染源（模板/书籍）。

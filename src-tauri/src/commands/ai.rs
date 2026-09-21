@@ -1195,6 +1195,9 @@ pub(crate) struct PreparedConversation {
     /// Candidate entities backing `clarify_note` — rendered as one-click chips
     /// that re-ask the question narrowed to the picked entity.
     pub(crate) clarify_candidates: Vec<String>,
+    /// 指代未绑定 **且** 提问里没有任何具名实体 → 无锚点可依。此时硬答会用错误
+    /// 的案件作答（RAG_PIPELINE.md 所称"自信地答错"），故改为只问不答、不调用 LLM。
+    pub(crate) clarify_blocking: bool,
     /// Number of BM25 hits before merge with @mention files.
     pub(crate) hits: usize,
     pub(crate) total_match_count: usize,
@@ -1215,9 +1218,16 @@ const CONTEXT_BUDGET: usize = 150_000;
 const SYSTEM_OVERHEAD: usize = 2_000;
 const ANSWER_RESERVE: usize = 8_000;
 /// 单份材料的预算 = 剩余预算的该百分比（递减分配）。排名靠前的材料拿更多，
-/// 长文档才有足够篇幅覆盖位于文末的答案段；低于 [`MIN_PER_FILE`] 不再注入。
+/// 长文档才有足够篇幅覆盖位于文末的答案段。
+///
+/// [`MIN_PER_FILE`] 是**可用性下限**：实测答案块在一份文档里常排到第 3 名，
+/// 装下它需要约 4600 字（3 块）。下限过低（如 1500）会让排名中后的文档只拿到
+/// 1 块，出现"进了注入却看不到答案"。
 const PER_FILE_PCT: usize = 14;
-const MIN_PER_FILE: usize = 1_500;
+const MIN_PER_FILE: usize = 4_600;
+/// 头块（标题/当事人/案号）仅在预算够放 4 块时才带上；独立于 [`MIN_PER_FILE`]，
+/// 否则抬高后者会顺带禁掉头块。
+const HEAD_MIN_BUDGET: usize = 6_000;
 /// 全库文件级向量相似度阈值。实测标定（bge-small-zh-v1.5，11,679 条向量）：
 /// 真实查询的最高余弦落在 0.61~0.77，中位数 0.26~0.45。原值 0.65 高于部分
 /// 查询的 max（"联嵘"查询 max=0.6111），导致向量通道对该类查询完全失效；
@@ -2230,10 +2240,10 @@ pub(crate) async fn prepare_conversation_prompt(
         "material_count": docs.len(),
         "total_chars": context.chars().count(),
         "strict_docs": strict_docs,
-        "truncated_to": 50000,
+        "truncated_to": max_context_chars,
     })));
     let last_question = messages.last().map(|m| m.content.as_str()).unwrap_or("");
-    let (clarify_note, clarify_candidates) = {
+    let (clarify_note, clarify_candidates, clarify_blocking) = {
         use crate::commands::clarify;
         let session_paths = prior_evidence_paths(state, session_id);
         let current: Vec<(String, String)> =
@@ -2251,15 +2261,16 @@ pub(crate) async fn prepare_conversation_prompt(
         let grounding = clarify::build_grounding(&session_paths, &current, &explicit_scope);
         let resolution = clarify::resolve(&ir, &session_state, &grounding);
         log::info!("[AI]   clarify ir={:?} verdict={:?}", ir, resolution.verdict);
+        let blocking = clarify_is_blocking(last_question, &resolution);
         match clarify::clarify_from_resolution(&resolution) {
-            Some((n, c)) => (Some(n), c),
-            None => (None, Vec::new()),
+            Some((n, c)) => (Some(n), c, blocking),
+            None => (None, Vec::new(), false),
         }
     };
     if let Some(n) = &clarify_note {
         log::info!("[AI]   clarify note: {}", truncate_text(n, 60));
     }
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
 }
 
 /// Post-process LLM response: supplement [N] citations for sentences that
@@ -2430,8 +2441,12 @@ pub async fn conversation_ask(
     );
     crate::ai::reset_ai_cancel();
 
-    let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, .. } =
+    let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, clarify_blocking, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
+    if clarify_blocking {
+        log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
+        return Ok(clarify_note.unwrap_or_default());
+    }
     // 非严格模式：无材料注入时拒绝硬答（避免 LLM 无据发挥）。
     if !has_evidence {
         log::warn!("[AI]   no evidence injected, refusing to answer (non-stream)");
@@ -2496,7 +2511,7 @@ pub async fn conversation_ask_stream(
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, hits, total_match_count, has_evidence, visible_nums, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, clarify_blocking, hits, total_match_count, has_evidence, visible_nums, mut events } =
         prepared?;
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
@@ -2561,14 +2576,19 @@ pub async fn conversation_ask_stream(
     let session_clone = session_id.clone();
     let app_inner = app.clone();
     log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
-    let result = tokio::task::spawn_blocking(move || {
-        let mut emit = |d: &str, is_reasoning: bool| {
-            let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: is_reasoning });
-        };
-        crate::ai::chat_stream(&system, &user_msg, &mut emit)
-    })
-    .await
-    .map_err(|e| format!("task panicked: {e}"))?;
+    let result = if clarify_blocking {
+        log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
+        crate::ai::ChatStreamOutcome { text: clarify_note.clone(), took_ms: 0, cancelled: false }
+    } else {
+        tokio::task::spawn_blocking(move || {
+            let mut emit = |d: &str, is_reasoning: bool| {
+                let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: is_reasoning });
+            };
+            crate::ai::chat_stream(&system, &user_msg, &mut emit)
+        })
+        .await
+        .map_err(|e| format!("task panicked: {e}"))?
+    };
     log::info!("[AI]   chat_stream returned: chars={} cancelled={} took_ms={}", result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0), result.cancelled, result.took_ms);
 
     log::info!(
@@ -2593,11 +2613,9 @@ pub async fn conversation_ask_stream(
      }
      let raw_text = result.text.unwrap_or_default();
      log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
-     let cited_text = auto_cite(&sanitize_citations_set(&raw_text, &visible_nums), &visible_evidence);
-     let cited_text = match clarify_note {
-         Some(n) => format!("{n}\n\n{cited_text}"),
-         None => cited_text,
-     };
+     let cited_text = compose_answer_text(clarify_blocking, raw_text, clarify_note, |raw| {
+         auto_cite(&sanitize_citations_set(raw, &visible_nums), &visible_evidence)
+     });
      let _ = app.emit("ai-done", AiDone {
          session_id,
         full_text: cited_text,
@@ -2622,6 +2640,38 @@ pub async fn conversation_ask_stream(
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+}
+
+/// 是否应「只问不答」：指代未绑定 **且** 提问里没有任何具名实体 —— 无锚点可依时
+/// 硬答会用错误的案件作答（RAG_PIPELINE.md 所称"自信地答错"），不如先问清楚。
+fn clarify_is_blocking(q: &str, res: &crate::commands::clarify::Resolution) -> bool {
+    use crate::commands::clarify::{SlotOutcome, Verdict};
+    res.verdict == Verdict::Ambiguous
+        && crate::commands::clarify::question_entities(q).is_empty()
+        && res.outcomes.iter().any(|o| matches!(
+            o,
+            SlotOutcome::Ask { stype, .. } if stype == "case" || stype == "person"
+        ))
+}
+
+/// Compose a turn's final text. A blocked clarification turn never ran the LLM, so
+/// `raw_text` already IS the note: return it once and skip `cite` — running citation
+/// matching over the note attaches bogus `[N]` from entity names it lists.
+fn compose_answer_text(
+    clarify_blocking: bool,
+    raw_text: String,
+    clarify_note: Option<String>,
+    cite: impl FnOnce(&str) -> String,
+) -> String {
+    if clarify_blocking {
+        raw_text
+    } else {
+        let cited = cite(&raw_text);
+        match clarify_note {
+            Some(n) => format!("{n}\n\n{cited}"),
+            None => cited,
+        }
+    }
 }
 
 pub fn truncate_text(s: &str, max_chars: usize) -> String {
@@ -2764,7 +2814,7 @@ fn chunked_or_truncated_with_budget(
     // 文档头块先入包：承载标题/当事人/案号等身份信息，且"这是谁/编号是多少"
     // 一类浅层问题答案常在此。仅在预算够放 4 块时才带——否则它会挤掉一份
     // 小预算文档里唯一的答案块（排名靠后的文档预算本就接近下限）。
-    if char_budget >= MIN_PER_FILE * 4
+    if char_budget >= HEAD_MIN_BUDGET
         && let Some(head) = chunks.first()
         && !push(head, &mut used, &mut packed) {
             return finish(packed);
@@ -4602,6 +4652,76 @@ mod retrieval_keyword_tests {
         assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
         let short = extract_retrieval_keywords("第 12 号");
         assert!(short.iter().all(|k| k != "12"), "短数字无区分度，应丢弃: {short:?}");
+    }
+}
+
+#[cfg(test)]
+mod clarify_blocking_tests {
+    use super::*;
+    use crate::commands::clarify::{Resolution, SlotOutcome, Verdict};
+
+    fn res(v: Verdict, stype: &str) -> Resolution {
+        Resolution {
+            verdict: v,
+            outcomes: vec![SlotOutcome::Ask {
+                surface: "他".into(),
+                stype: stype.into(),
+                options: vec!["甲".into(), "乙".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn blocking_only_when_unanchored_and_unbound() {
+        let q = "判决书里为什么认定他是利害关系人？";
+        assert!(clarify_is_blocking(q, &res(Verdict::Ambiguous, "person")), "无锚点+未绑定 → 应只问不答");
+        assert!(clarify_is_blocking(q, &res(Verdict::Ambiguous, "case")));
+        // 裁决已绑定 → 不问
+        assert!(!clarify_is_blocking(q, &res(Verdict::Answerable, "person")));
+        // 槽类型不是 case/person（如 doc/org）→ 不阻断
+        assert!(!clarify_is_blocking(q, &res(Verdict::Ambiguous, "doc")));
+    }
+
+    #[test]
+    fn anchored_question_is_never_blocking() {
+        // 已具名 → 有锚点可依，不该拒答
+        let q = "汪均益案中，被告歙县自然资源和规划局在答辩状里是怎么抗辩的？";
+        assert!(!clarify_is_blocking(q, &res(Verdict::Ambiguous, "person")));
+    }
+
+    /// 阻塞轮 `raw_text` 就是提示本身 → 必须只输出一份，且绝不能跑 auto_cite
+    /// （提示列出的实体名会误挂材料引用，如 [9]）。
+    #[test]
+    fn blocked_turn_emits_note_once_and_skips_citations() {
+        let note = "（提示：他 → 汪均益 / 汪少荣。如需精确，请用 @ 指定文件或目录。）";
+        let mut cite_called = false;
+        let out = compose_answer_text(true, note.to_string(), Some(note.to_string()), |_| {
+            cite_called = true;
+            "提示：他 → 汪均益 [9]".to_string()
+        });
+        assert!(!cite_called, "阻塞轮不应调用 auto_cite");
+        assert_eq!(out, note, "提示必须只出现一次");
+        assert_eq!(out.matches("提示：").count(), 1, "提示重复输出");
+        assert!(!out.contains('['), "提示不该带引用编号");
+    }
+
+    /// 非阻塞轮：提示前置一次，答案正文保留 auto_cite 结果。
+    #[test]
+    fn non_blocking_turn_prepends_note_once() {
+        let out = compose_answer_text(
+            false,
+            "答案正文".to_string(),
+            Some("（提示：他 → 甲）".to_string()),
+            |raw| format!("{raw}[1]"),
+        );
+        assert_eq!(out, "（提示：他 → 甲）\n\n答案正文[1]");
+    }
+
+    /// 无提示时原样返回带引用的正文。
+    #[test]
+    fn no_note_returns_cited_text() {
+        let out = compose_answer_text(false, "答案正文".to_string(), None, |raw| format!("{raw}[2]"));
+        assert_eq!(out, "答案正文[2]");
     }
 }
 
