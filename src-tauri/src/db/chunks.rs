@@ -133,12 +133,8 @@ pub fn select_relevant_chunks<'a>(chunks: &'a [DocChunk], query: &str, k: usize)
         return chunks.iter().collect();
     }
     let tokens = lexical_tokens(query);
-    let score = |text: &str| -> usize {
-        let lower = text.to_lowercase();
-        tokens.iter().map(|t| lower.matches(t.as_str()).count()).sum()
-    };
     let mut scored: Vec<(usize, &DocChunk)> =
-        chunks.iter().map(|c| (score(&c.text), c)).collect();
+        chunks.iter().map(|c| (lexical_score(&c.text, &tokens), c)).collect();
     if scored.iter().all(|(s, _)| *s == 0) {
         return chunks.iter().take(k).collect();
     }
@@ -147,6 +143,54 @@ pub fn select_relevant_chunks<'a>(chunks: &'a [DocChunk], query: &str, k: usize)
     let mut picked: Vec<&DocChunk> = scored.into_iter().take(k).map(|(_, c)| c).collect();
     picked.sort_by_key(|c| c.chunk_index);
     picked
+}
+
+/// 分块向量相似度在打包排序中的权重（其余给词法相关性）。
+const SEMANTIC_WEIGHT: f32 = 0.5;
+
+/// Chunks ordered for budgeted packing, most relevant first, plus whether any
+/// relevance signal was found at all (`false` → caller falls back).
+///
+/// Blends lexical overlap with chunk-vector similarity (`hit_chunks` carries
+/// the similarities of chunks that cleared the vector threshold). Either signal
+/// alone was measured unreliable: lexical overlap favours chunks that merely
+/// repeat query terms, while vector similarity lets most chunks clear the
+/// threshold.
+pub fn chunks_for_packing<'a>(
+    chunks: &'a [DocChunk],
+    query: &str,
+    hit_chunks: &[(usize, f32)],
+) -> (Vec<&'a DocChunk>, bool) {
+    let tokens = lexical_tokens(query);
+    let sims: std::collections::HashMap<usize, f32> = hit_chunks.iter().copied().collect();
+    let lex: Vec<usize> = chunks.iter().map(|c| lexical_score(&c.text, &tokens)).collect();
+    let lex_max = lex.iter().copied().max().unwrap_or(0);
+    let has_signal = lex_max > 0 || !sims.is_empty();
+    let lex_max = lex_max.max(1) as f32;
+    let mut scored: Vec<(f32, &DocChunk)> = chunks
+        .iter()
+        .zip(lex)
+        .map(|(c, l)| {
+            let sem = sims.get(&(c.chunk_index as usize)).copied().unwrap_or(0.0);
+            (
+                sem * SEMANTIC_WEIGHT + (l as f32 / lex_max) * (1.0 - SEMANTIC_WEIGHT),
+                c,
+            )
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    (scored.into_iter().map(|(_, c)| c).collect(), has_signal)
+}
+
+fn lexical_score(text: &str, tokens: &[String]) -> usize {
+    // 先去掉所有空白：部分扫描件 OCR 输出"每字之间带空格"，不去空白则
+    // 任何多字词都匹配不上，该文档的分块相关性信号会整体归零。
+    let lower: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    tokens.iter().map(|t| lower.matches(t.as_str()).count()).sum()
 }
 
 /// Chunk indexed contents that exceed the threshold but have no chunks yet.

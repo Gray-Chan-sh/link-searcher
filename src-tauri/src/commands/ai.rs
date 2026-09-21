@@ -257,6 +257,9 @@ pub struct EvidenceItem {
     /// callers fall back to positional index in that case.
     #[serde(default)]
     pub material_no: usize,
+    /// Source-document char ranges that actually reached the prompt.
+    #[serde(default)]
+    pub injected_spans: Vec<(usize, usize)>,
 }
 
 /// Retrieval hit carrying its scores; semantic fields are `None` unless
@@ -389,6 +392,7 @@ fn prepare_smart_prompt(
                 rewritten_query: None,
                 from_history: false,
                 material_no: 0,
+                injected_spans: Vec::new(),
             });
         }
         drop(conn);
@@ -774,8 +778,12 @@ fn extract_retrieval_keywords(query: &str) -> Vec<String> {
         if w.is_empty() || w.chars().count() < 2 || is_retrieval_stopword(w) {
             continue;
         }
-        // 过滤纯数字/标点/字母（如 "41833" 案件号无路径匹配价值）
-        if w.chars().all(|c| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace()) {
+        // 4 位以上的纯数字保留：案号/编号（如 "22963"）是文件名里的强锚点，
+        // 丢弃它会让"22963 号判决…"这类提问匹配不到目标文件。
+        let digits = w.chars().filter(|c| c.is_ascii_digit()).count();
+        if digits < 4
+            && w.chars().all(|c| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace())
+        {
             continue;
         }
         if out.iter().any(|k: &String| k == w) {
@@ -903,6 +911,37 @@ pub(crate) fn rrf_add(
     weight: f64,
 ) {
     *acc.entry(file_id.to_string()).or_insert(0.0) += weight / (RRF_K + rank0 as f64 + 1.0);
+}
+
+/// 诊断：设 `LINK_SEARCHER_TRACE_TARGET=<路径子串>` 时，记录目标文档在管线各步的
+/// 名次（BM25 通道 → 入池 → 三通道合并 → rerank → 注入候选），用于排查
+/// "检索到了却被挤出注入"。未设环境变量时零开销。
+fn trace_rank<'a>(
+    label: &str,
+    ids_iter: impl Iterator<Item = &'a str>,
+    targets: &[String],
+) {
+    if targets.is_empty() { return; }
+    let mut total = 0usize;
+    let mut pos = None;
+    for (i, fid) in ids_iter.enumerate() {
+        total += 1;
+        if pos.is_none() && targets.iter().any(|t| t == fid) { pos = Some(i + 1); }
+    }
+    log::info!(
+        "[TRACE] {label:<28} {} / {total}",
+        pos.map(|p| p.to_string()).unwrap_or_else(|| "缺席".to_string())
+    );
+}
+
+fn trace_target_ids(state: &AppState, sub: &str) -> Vec<String> {
+    if sub.is_empty() { return Vec::new(); }
+    let Ok(conn) = state.db.get() else { return Vec::new() };
+    let Ok(mut stmt) = conn.prepare("SELECT id FROM file_tracking WHERE path LIKE ?1") else { return Vec::new() };
+    let pat = format!("%{sub}%");
+    stmt.query_map([&pat], |r| r.get::<_, String>(0))
+        .map(|it| it.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
 }
 
 /// Semantic rerank of BM25 hits: embed the query, score the stored
@@ -1175,6 +1214,10 @@ pub(crate) struct PreparedConversation {
 const CONTEXT_BUDGET: usize = 150_000;
 const SYSTEM_OVERHEAD: usize = 2_000;
 const ANSWER_RESERVE: usize = 8_000;
+/// 单份材料的预算 = 剩余预算的该百分比（递减分配）。排名靠前的材料拿更多，
+/// 长文档才有足够篇幅覆盖位于文末的答案段；低于 [`MIN_PER_FILE`] 不再注入。
+const PER_FILE_PCT: usize = 14;
+const MIN_PER_FILE: usize = 1_500;
 /// 全库文件级向量相似度阈值。实测标定（bge-small-zh-v1.5，11,679 条向量）：
 /// 真实查询的最高余弦落在 0.61~0.77，中位数 0.26~0.45。原值 0.65 高于部分
 /// 查询的 max（"联嵘"查询 max=0.6111），导致向量通道对该类查询完全失效；
@@ -1459,6 +1502,7 @@ pub(crate) async fn prepare_conversation_prompt(
         .map(|v| !v.eq_ignore_ascii_case("mix"))
         .unwrap_or(true);
     let mut rrf_acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let trace_ids_v = trace_target_ids(state, &std::env::var("LINK_SEARCHER_TRACE_TARGET").unwrap_or_default());
     // 从问句提炼核心实体词（如"常宏"），三通道共用：
     // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
     // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
@@ -1507,6 +1551,7 @@ pub(crate) async fn prepare_conversation_prompt(
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
+        trace_rank("1. BM25 通道原始输出", bm25_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
         // 精英加成按"纯 BM25 名次"（bm25_score 降序）判定，而非通道内迭代名次：
         // 内层 semantic_fuse 会按分数混合重排该通道，若按重排名次加成，"字面强
         // 但语义中等"的文档在通道内已被压到几十名开外，外层再无从救起。
@@ -1529,6 +1574,7 @@ pub(crate) async fn prepare_conversation_prompt(
             rrf_add(&mut rrf_acc, &hit.file_id, rank, channel_w);
             if all_seen.insert(hit.file_id.clone()) { all_hits.push(hit); }
         }
+        trace_rank("2. 仅 BM25 入池", all_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
         emit_progress("bm25", &format!("BM25 完成，命中 {} 份", bm25_count), bm25_count, bm25_count);
         let has_locked_scope = mention_file_ids.is_some() && mention_file_ids.as_ref().is_some_and(|ids| !ids.is_empty());
         if crate::ai::embedding_enabled() && !has_locked_scope {
@@ -1596,13 +1642,18 @@ pub(crate) async fn prepare_conversation_prompt(
                         let first_rank = md5_first_rank.get(&md5).copied().unwrap_or(0);
                         for fid in file_ids {
                             rrf_add(&mut rrf_acc, &fid, first_rank, chunk_rrf_weight);
-                            if !all_seen.insert(fid.clone()) { continue; }
-                            all_hits.push(ScoredHit {
-                                file_id: fid, path: String::new(), bm25_score: None,
-                                semantic_score: chunks.first().map(|(_, s)| *s as f64),
-                                rrf_score: None, from_history: false,
-                                from_chunk: true, hit_chunks: chunks.clone(),
-                            });
+                            if all_seen.insert(fid.clone()) {
+                                all_hits.push(ScoredHit {
+                                    file_id: fid, path: String::new(), bm25_score: None,
+                                    semantic_score: chunks.first().map(|(_, s)| *s as f64),
+                                    rrf_score: None, from_history: false,
+                                    from_chunk: true, hit_chunks: chunks.clone(),
+                                });
+                            } else if let Some(h) = all_hits.iter_mut().find(|h| h.file_id == fid) {
+                                // 文件已从 BM25/向量通道进池 → 命中块仍须并入，
+                                // 否则注入层退回阅读顺序、丢掉文末的答案段。
+                                h.hit_chunks.extend(chunks.iter().copied());
+                            }
                         }
                     }
                 }
@@ -1689,6 +1740,7 @@ pub(crate) async fn prepare_conversation_prompt(
         // 统一排序：三通道命中按混合分（weighted_mix）降序排列，而非按通道
         // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
         // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。
+        trace_rank("3. 三通道合并+范围过滤后", all_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
         if all_hits.len() > 1 {
             if use_rrf {
                 for h in &mut all_hits {
@@ -1788,7 +1840,8 @@ pub(crate) async fn prepare_conversation_prompt(
                         let perm = apply_rerank_order(&all_hits, &rerank_idx, &scores, fusion_w);
                         let new_hits: Vec<ScoredHit> = perm.iter().map(|&i| all_hits[i].clone()).collect();
                         all_hits = new_hits;
-                        log::info!("[AI]   rerank: reordered {} candidates", rerank_idx.len());
+                        trace_rank("4. rerank 后", all_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
+                log::info!("[AI]   rerank: reordered {} candidates", rerank_idx.len());
                     }
                     Some(scores) => {
                         log::warn!("[AI]   rerank: score count mismatch ({} vs {}), keeping original order", scores.len(), rerank_idx.len());
@@ -1897,7 +1950,7 @@ pub(crate) async fn prepare_conversation_prompt(
     for (fid, resolved_path, md5, text) in mention_files_with_content.iter() {
         let n = assign_material_no(&mut material_order, fid);
         mention_has_content = true;
-        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_mention_file, &[]);
+        let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_mention_file, &[]);
         if !injected.trim().is_empty() {
             docs.push(format!("[{n}]（{resolved_path}）\n{injected}"));
             mention_budget_used = mention_budget_used.saturating_add(injected.chars().count());
@@ -1913,6 +1966,7 @@ pub(crate) async fn prepare_conversation_prompt(
                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                 from_history: false,
                 material_no: n,
+                injected_spans,
             });
         }
     }
@@ -1937,7 +1991,7 @@ pub(crate) async fn prepare_conversation_prompt(
     let mut history_budget_used = 0usize;
     for (fid, resolved_path, md5, text) in history_files_with_content.iter() {
         let n = assign_material_no(&mut material_order, fid);
-        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_history_file, &[]);
+        let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_history_file, &[]);
         if !injected.trim().is_empty() {
             docs.push(format!("[{n}]（{resolved_path}）\n{injected}"));
             history_budget_used = history_budget_used.saturating_add(injected.chars().count());
@@ -1953,6 +2007,7 @@ pub(crate) async fn prepare_conversation_prompt(
                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                 from_history: true,
                 material_no: n,
+                injected_spans,
             });
         }
     }
@@ -1974,6 +2029,7 @@ pub(crate) async fn prepare_conversation_prompt(
         .filter(|h| !h.from_history && !mention_index.contains_key(&h.path) && scoped(h))
         .take(inject_limit)
         .collect();
+    trace_rank("5. content_hits(注入候选)", content_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
         .saturating_sub(ANSWER_RESERVE);
@@ -1989,9 +2045,9 @@ pub(crate) async fn prepare_conversation_prompt(
                         let per_file = if full_recall {
                             content_budget
                         } else {
-                            content_budget / content_hits.len().max(1)
+                            (content_budget * PER_FILE_PCT / 100).max(MIN_PER_FILE).min(content_budget)
                         };
-                        let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
+                        let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
                         if !injected.trim().is_empty() {
                             let n = assign_material_no(&mut material_order, &hit.file_id);
                             docs.push(format!("[{n}]（{}）\n{}", rec.path, injected));
@@ -2006,10 +2062,11 @@ pub(crate) async fn prepare_conversation_prompt(
                                 rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                                 from_history: false,
                                 material_no: n,
+                                injected_spans,
                             });
                             content_budget = content_budget.saturating_sub(injected.chars().count());
                         }
-                        if content_budget == 0 { break; }
+                        if content_budget < MIN_PER_FILE { break; }
                     }
         inject_idx += 1;
         if inject_idx.is_multiple_of(10) || inject_idx == content_hits.len() {
@@ -2060,7 +2117,7 @@ pub(crate) async fn prepare_conversation_prompt(
             let mut injected_n = 0usize;
             for (fid, path, md5, text) in &scope_files {
                 let n = assign_material_no(&mut material_order, fid);
-                let injected = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &[]);
+                let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &[]);
                 if injected.trim().is_empty() { continue }
                 docs.push(format!("[{n}]（{path}）\n{injected}"));
                 evidence.push(EvidenceItem {
@@ -2074,6 +2131,7 @@ pub(crate) async fn prepare_conversation_prompt(
                     rewritten_query: if rewritten { Some(search_q.clone()) } else { None },
                     from_history: false,
                     material_no: n,
+                    injected_spans,
                 });
                 injected_n += 1;
             }
@@ -2088,7 +2146,7 @@ pub(crate) async fn prepare_conversation_prompt(
     let source_ids_final = evidence.iter().map(|e| e.file_id.clone()).collect();
     let source_files_final = evidence.iter().map(|e| e.path.clone()).collect();
 
-    let max_context_chars = if full_recall { CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE } else { 50_000 };
+    let max_context_chars = CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE;
     let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
 
     // Layer 2: Chat history recall — keyword-match previous AI responses.
@@ -2632,6 +2690,9 @@ fn cited_excerpt(text: &str, terms: &[String], max_chars: usize) -> String {
 /// chunk-vector channel (`hit_chunks` non-empty), those exact chunks are
 /// injected first (semantic evidence), then remaining budget is filled with
 /// lexically-relevant chunks. Falls back to truncation without chunks.
+///
+/// Returns the injected text plus the **source-document char ranges** it
+/// covers, so callers can tell whether a given passage reached the prompt.
 fn chunked_or_truncated_with_budget(
     conn: &rusqlite::Connection,
     md5: &str,
@@ -2639,8 +2700,8 @@ fn chunked_or_truncated_with_budget(
     query: &str,
     char_budget: usize,
     hit_chunks: &[(usize, f32)],
-) -> String {
-    if char_budget == 0 { return String::new(); }
+) -> (String, Vec<(usize, usize)>) {
+    if char_budget == 0 { return (String::new(), Vec::new()); }
     let text_full_chars = text.chars().count();
     // 原文超出预算 → 必然无法完整注入。给 LLM 显式标记"材料被截断"，
     // 避免它把注入的部分当作全文下结论（静默截断 → 可感知截断）。
@@ -2649,43 +2710,67 @@ fn chunked_or_truncated_with_budget(
     } else {
         String::new()
     };
+    let head_span = (0usize, text_full_chars.min(char_budget));
     if text_full_chars <= char_budget {
-        return format!("{}{}", truncate_text(text, char_budget), truncated_note);
+        return (format!("{}{}", truncate_text(text, char_budget), truncated_note), vec![head_span]);
     }
     let chunks = crate::db::chunks::get_chunks(conn, md5).unwrap_or_default();
     if chunks.is_empty() {
-        return format!("{}{}", truncate_text(text, char_budget), truncated_note);
+        return (format!("{}{}", truncate_text(text, char_budget), truncated_note), vec![head_span]);
     }
-    let hit_set: std::collections::HashSet<i64> =
-        hit_chunks.iter().map(|(idx, _)| *idx as i64).collect();
-    let mut packed: Vec<String> = Vec::new();
+    let mut packed: Vec<(String, (usize, usize))> = Vec::new();
     let mut used = 0usize;
-    let push = |c: &crate::db::chunks::DocChunk, used: &mut usize, packed: &mut Vec<String>| {
+    let push = |c: &crate::db::chunks::DocChunk,
+                used: &mut usize,
+                packed: &mut Vec<(String, (usize, usize))>| {
         let chunk_chars = c.text.chars().count() + 20;
         if *used + chunk_chars > char_budget {
             if packed.is_empty() {
-                packed.push(truncate_text(&c.text, char_budget));
+                packed.push((
+                    truncate_text(&c.text, char_budget),
+                    (c.start_char as usize, c.start_char as usize + char_budget),
+                ));
             }
             return false;
         }
-        packed.push(format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text));
+        packed.push((
+            format!("（第{}-{}字）\n{}", c.start_char, c.end_char, c.text),
+            (c.start_char as usize, c.end_char as usize),
+        ));
         *used += chunk_chars;
         true
     };
-    let mut finish = |packed: Vec<String>| {
+    let finish = |packed: Vec<(String, (usize, usize))>| {
         if packed.is_empty() {
-            return String::new();
+            return (String::new(), Vec::new());
         }
-        format!("{}\n···\n{}", packed.join("\n···\n"), truncated_note)
+        let spans: Vec<(usize, usize)> = packed.iter().map(|(_, s)| *s).collect();
+        let body = packed.into_iter().map(|(t, _)| t).collect::<Vec<_>>().join("\n···\n");
+        (format!("{body}\n···\n{truncated_note}"), spans)
     };
-    // 1) 语义命中块优先（保持 chunk_index 阅读顺序）
-    for chunk in chunks.iter().filter(|c| hit_set.contains(&c.chunk_index)) {
-        if !push(chunk, &mut used, &mut packed) { return finish(packed); }
-    }
-    if used >= char_budget { return finish(packed); }
-    // 2) 剩余预算按词重叠补足
-    let relevant = crate::db::chunks::select_relevant_chunks(&chunks, query, chunks.len());
-    for chunk in relevant.iter().filter(|c| !hit_set.contains(&c.chunk_index)) {
+    // 统一排序后打包。命中块不能无条件优先：查询含通用词时多数块都"命中"，
+    // 按阅读顺序优先会把预算全花在文档开头，位于文末的答案段反而进不来。
+    let (by_relevance, has_lexical_signal) =
+        crate::db::chunks::chunks_for_packing(&chunks, query, hit_chunks);
+    let order: Vec<&crate::db::chunks::DocChunk> = if has_lexical_signal {
+        by_relevance
+    } else {
+        let mut sims = hit_chunks.to_vec();
+        sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        sims.iter()
+            .filter_map(|(idx, _)| chunks.iter().find(|c| c.chunk_index == *idx as i64))
+            .collect()
+    };
+    // 文档头块先入包：承载标题/当事人/案号等身份信息，且"这是谁/编号是多少"
+    // 一类浅层问题答案常在此。仅在预算够放 4 块时才带——否则它会挤掉一份
+    // 小预算文档里唯一的答案块（排名靠后的文档预算本就接近下限）。
+    if char_budget >= MIN_PER_FILE * 4
+        && let Some(head) = chunks.first()
+        && !push(head, &mut used, &mut packed) {
+            return finish(packed);
+        }
+    for chunk in order {
+        if chunk.chunk_index == 0 { continue; }
         if !push(chunk, &mut used, &mut packed) { break; }
     }
     finish(packed)
@@ -3500,6 +3585,7 @@ mod history_tests {
                     rewritten_query: Some("项目 背景".into()),
                     from_history: false,
                     material_no: 0,
+                    injected_spans: Vec::new(),
                 }],
                 trace_id: "s1#t1".into(),
                 took_ms: 5200,
@@ -3604,6 +3690,7 @@ mod history_tests {
                     rewritten_query: Some("万联发股权转让".into()),
                     from_history: false,
                     material_no: 0,
+                    injected_spans: Vec::new(),
                 }],
                 ..Default::default()
             }],
@@ -3997,6 +4084,7 @@ mod history_tests {
             rewritten_query: Some("季度报告 它的风险".into()),
             from_history: false,
             material_no: 0,
+            injected_spans: Vec::new(),
         };
         let json = serde_json::to_string(&e).unwrap();
         let back: EvidenceItem = serde_json::from_str(&json).unwrap();
@@ -4059,6 +4147,7 @@ mod history_tests {
                     rewritten_query: Some("q".into()),
                     from_history: false,
                     material_no: 0,
+                    injected_spans: Vec::new(),
                 }],
                 ..Default::default()
             }],
@@ -4230,6 +4319,7 @@ mod auto_cite_tests {
             bm25_score: None, semantic_score: None, rrf_score: None,
             rewritten: false, rewritten_query: None, from_history: false,
             material_no: 0,
+            injected_spans: Vec::new(),
         }
     }
 
@@ -4296,6 +4386,7 @@ mod auto_cite_md_tests {
             bm25_score: None, semantic_score: None, rrf_score: None,
             rewritten: false, rewritten_query: None, from_history: false,
             material_no: 0,
+            injected_spans: Vec::new(),
         }
     }
 
@@ -4505,10 +4596,12 @@ mod retrieval_keyword_tests {
     }
 
     #[test]
-    fn ignores_pure_numbers() {
+    fn keeps_case_numbers_but_drops_short_numbers() {
         let kws = extract_retrieval_keywords("41833号案件 常宏");
-        assert!(kws.iter().all(|k| k != "41833"), "got: {kws:?}");
+        assert!(kws.iter().any(|k| k == "41833"), "案号是文件名锚点，不应丢弃: {kws:?}");
         assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
+        let short = extract_retrieval_keywords("第 12 号");
+        assert!(short.iter().all(|k| k != "12"), "短数字无区分度，应丢弃: {short:?}");
     }
 }
 
@@ -4522,7 +4615,7 @@ mod chunk_budget_tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_db(&conn).unwrap();
         let long = "违约".repeat(2000); // 4000 字符
-        let out = chunked_or_truncated_with_budget(&conn, "md5-x", &long, "违约", 500, &[]);
+        let (out, _) = chunked_or_truncated_with_budget(&conn, "md5-x", &long, "违约", 500, &[]);
         // 截断提示元信息不计入内容预算；正文部分仍应受限。
         let body = out.split("〔注：").next().unwrap_or(&out);
         assert!(body.chars().count() <= 520, "budget exceeded: {}", body.chars().count());
@@ -4535,7 +4628,7 @@ mod chunk_budget_tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_db(&conn).unwrap();
         let long = "违约".repeat(2000); // 4000 字符
-        let out = chunked_or_truncated_with_budget(&conn, "md5-note", &long, "违约", 500, &[]);
+        let (out, _) = chunked_or_truncated_with_budget(&conn, "md5-note", &long, "违约", 500, &[]);
         assert!(out.contains("材料过长"), "missing truncation notice: {}", &out[out.len().saturating_sub(80)..]);
         assert!(out.contains("未全部展示"), "missing truncation notice: {}", &out[out.len().saturating_sub(80)..]);
     }
@@ -4546,7 +4639,7 @@ mod chunk_budget_tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_db(&conn).unwrap();
         let short = "常宏诉万城公司股东资格确认纠纷案";
-        let out = chunked_or_truncated_with_budget(&conn, "md5-y", short, "常宏", 10_000, &[]);
+        let (out, _) = chunked_or_truncated_with_budget(&conn, "md5-y", short, "常宏", 10_000, &[]);
         assert_eq!(out, short);
     }
 
@@ -4555,7 +4648,7 @@ mod chunk_budget_tests {
     fn zero_budget_returns_empty() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::init_db(&conn).unwrap();
-        let out = chunked_or_truncated_with_budget(&conn, "md5-z", "任意内容", "q", 0, &[]);
+        let (out, _) = chunked_or_truncated_with_budget(&conn, "md5-z", "任意内容", "q", 0, &[]);
         assert!(out.is_empty());
     }
 
@@ -4575,8 +4668,29 @@ mod chunk_budget_tests {
         assert!(!chunks.is_empty(), "chunks should exist for long text");
         // 预算只够 1 块，命中块是最后一块 → 应返回它而非第一块
         let hit_idx = chunks.last().unwrap().chunk_index as usize;
-        let out = chunked_or_truncated_with_budget(&conn, md5, &long, "无关词", 700, &[(hit_idx, 0.9)]);
+        let (out, _) = chunked_or_truncated_with_budget(&conn, md5, &long, "无关词", 700, &[(hit_idx, 0.9)]);
         assert!(out.contains(&format!("第{}", chunks.last().unwrap().start_char)), "hit chunk not prioritized: {out}");
+    }
+
+    /// 返回值第二项是**源文档坐标**的注入区间——评测据此判定答案段是否进入上下文
+    #[test]
+    fn returns_source_document_spans() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+        let md5 = "md5-spans";
+        let long = format!("{}。{}。", "A".repeat(6000), "B".repeat(6000));
+        crate::db::tracker::store_content(&conn, md5, &long, false, None).unwrap();
+        let windows = crate::db::chunks::chunk_text(&long);
+        crate::db::chunks::replace_chunks(&conn, md5, &windows).unwrap();
+        let chunks = crate::db::chunks::get_chunks(&conn, md5).unwrap();
+        let last = chunks.last().unwrap();
+        let (_, spans) = chunked_or_truncated_with_budget(
+            &conn, md5, &long, "无关词", 700, &[(last.chunk_index as usize, 0.9)],
+        );
+        assert_eq!(spans, vec![(last.start_char as usize, last.end_char as usize)]);
+
+        let short = "短文本";        let (_, whole) = chunked_or_truncated_with_budget(&conn, "md5-w", short, "q", 10_000, &[]);
+        assert_eq!(whole, vec![(0, short.chars().count())]);
     }
 
     /// 追问泛词（检索关键词为空）时，LLM 重写丢失父问句核心实体 → 硬性兜底补全。

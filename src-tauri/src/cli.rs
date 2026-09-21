@@ -50,6 +50,12 @@ pub enum Cli {
         /// Dry run: 3-way scan + injection summary, skip LLM call
         #[arg(long)]
         dry_run: bool,
+        /// With --dry-run: also print the source-document char ranges injected
+        #[arg(long)]
+        dump_injected: bool,
+        /// Prior turns as JSON: [{"role":"user","content":"…"}, …]
+        #[arg(long)]
+        history: Option<PathBuf>,
     },
     /// OCR-quality health check (headless)
     Quality {
@@ -109,6 +115,31 @@ pub enum QualityCmd {
 
 fn fmt_score(score: Option<f64>) -> String {
     score.map(|s| format!("{s:.3}")).unwrap_or_else(|| "-".into())
+}
+
+fn build_messages(
+    query: &str,
+    history: Option<&PathBuf>,
+) -> Result<Vec<crate::commands::ai::ChatMessage>> {
+    let mut messages: Vec<crate::commands::ai::ChatMessage> = Vec::new();
+    if let Some(path) = history {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("cannot read history file: {}", path.display()))?;
+        let prior: Vec<serde_json::Value> =
+            serde_json::from_str(&raw).context("history must be a JSON array of {role, content}")?;
+        for m in prior {
+            let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user").to_string();
+            let content = m.get("content").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            if !content.is_empty() {
+                messages.push(crate::commands::ai::ChatMessage { role, content });
+            }
+        }
+    }
+    messages.push(crate::commands::ai::ChatMessage {
+        role: "user".into(),
+        content: query.to_string(),
+    });
+    Ok(messages)
 }
 
 pub fn run_cli() -> Result<()> {
@@ -253,7 +284,7 @@ pub fn run_cli() -> Result<()> {
                 }
             }
         }
-        Cli::Chat { query, scope, full_recall, no_llm, dry_run } => {
+        Cli::Chat { query, scope, full_recall, no_llm, dry_run, dump_injected, history } => {
             let data_dir = config::load_config().data_dir;
             let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
 
@@ -286,10 +317,7 @@ pub fn run_cli() -> Result<()> {
                 inherit_from: vec![],
                 conditions: vec![],
             };
-            let messages = vec![crate::commands::ai::ChatMessage {
-                role: "user".into(),
-                content: query.clone(),
-            }];
+            let messages = build_messages(&query, history.as_ref())?;
 
             if dry_run {
                 let prepared = tokio::runtime::Builder::new_current_thread()
@@ -314,6 +342,15 @@ pub fn run_cli() -> Result<()> {
                         ev.semantic_score.map(|s| format!("{s:.3}")).unwrap_or("-".into()),
                         ev.path
                     );
+                    if dump_injected {
+                        let spans = ev
+                            .injected_spans
+                            .iter()
+                            .map(|(s, e)| format!("{s}-{e}"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        println!("        spans=[{spans}]");
+                    }
                 }
                 if prepared.evidence.len() > 30 {
                     println!("  ... 共 {} 条证据，仅显示前 30 条", prepared.evidence.len());
@@ -376,10 +413,7 @@ pub fn run_cli() -> Result<()> {
                 inherit_from: vec![],
                 conditions: vec![],
             };
-            let messages = vec![crate::commands::ai::ChatMessage {
-                role: "user".into(),
-                content: query.clone(),
-            }];
+            let messages = build_messages(&query, history.as_ref())?;
             let prepared = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
