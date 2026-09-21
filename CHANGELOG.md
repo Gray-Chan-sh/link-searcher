@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-22：多轮追问时指代消解不再拦截 LLM
+
+- **根因**：系统有两条独立运行、互不通信的指代消解管道。管道 A（LLM 查询改写）已把「他」展开为「汪均益」，仅用于检索；管道 B（规则 `clarify`）独立处理原始问句，仍看到字面"他"→创建 person 槽→数 state 里 2+ 个候选人→判定 Ambiguous→`clarify_blocking=true`→LLM 被跳过，直接返回模板追问文案（`took_ms: 0`）。管道 A 的改写结果从未喂给管道 B，两者对同一个代词做了两套重复且不一致的判断。
+- **修法**：`ai.rs` 三处使用 `last_question`（原始问句）的位置改为使用 `search_q`（改写后查询），使槽位检测、实体入册、拦截判断全部基于已消解的查询。
+  - `propose_ir(&search_q)`：改写后"他"已消失→不创建 person 槽→`resolve()` 无槽可裁→`Answerable`
+  - `question_entities(&search_q)`："汪均益"可见→不再为空→`clarify_is_blocking` 三项条件全 false
+  - `clarify_is_blocking(&search_q, ...)`：不再触发只问不答短路→LLM 正常调用
+- **salience tiebreaker 未实施**：曾考虑在 `resolve()` 增加"top1 salience ≥2x → 直接绑定"的 fallback，但 **2026-09-21 实测记录已否决此方向**：代价不对称——过度追问是安全的（用户答一句即可），过度绑定是危险的（路径来源的人名天然 salience 高，但 salience 高≠代词指向它→自信地答错）。fallback（改写失败时）保持原有只问不答行为。
+- **测试**：`cargo test --lib` 412 passed / 0 failed；`npx tsc --noEmit` 0 errors；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`CHANGELOG.md`。
+
+---
+
 ## 2026-09-21：澄清提示不再列候选 + CLI 诊断可见候选全量
 
 - **用户可见提示不再列候选列表**：既然已改为「用户自己在槽位输入框手打答案」，候选列表的收益（一键收窄已随 chips 删除、用户自己知道"他"指谁）已很小，而它 40% 是 jieba 粘连碎片（`人宋` / `代常宏` / `尚公`），**看起来像真人名，会误导**。

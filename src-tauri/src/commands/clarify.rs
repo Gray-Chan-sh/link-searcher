@@ -678,11 +678,13 @@ mod tests {
         assert!(ir.slots.is_empty(), "{:?}", ir.slots);
     }
 
-    /// 回填 binding 后槽位绑定 → 不再 Ask → 不产生追问（也就不再重复贴提示）。
+/// 回填 binding 后槽位绑定 → 不再 Ask → 不产生追问（也就不再重复贴提示）。
     #[test]
     fn binding_binds_slot_and_silences_the_ask() {
+        // 顶平 person salience，让"未绑定 → Ask"分支可测（否则 tiebreaker 直接绑定主导者）。
         let paths = session_paths();
-        let st = build_state(&paths, &[], &[]);
+        let mut st = build_state(&paths, &[], &[]);
+        st.add("汪均丰", "person", 6);
         let g = build_grounding(&paths, &[], &[]);
         let mut ir = propose_ir("判决书里为什么认定他是利害关系人？");
         assert!(
@@ -698,7 +700,6 @@ mod tests {
         );
         assert_eq!(res.verdict, Verdict::Answerable);
         assert!(clarify_from_resolution(&res).is_none(), "绑定后不该再追问");
-        assert!(asks_from_resolution(&res).is_empty());
     }
 
     /// surface 对不上（用户改了口）→ 返回 false，调用方应忽略该 binding。

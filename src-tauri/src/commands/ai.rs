@@ -2289,7 +2289,7 @@ pub(crate) async fn prepare_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": max_context_chars,
     })));
-    let last_question = last_q.as_str();
+    // 指代消解基于改写后的 search_q：代词已在改写中展开，避免规则管道二次误判歧义。
     let (clarify_note, clarify_candidates, clarify_slots, clarify_blocking) = {
         use crate::commands::clarify;
         let session_paths = prior_evidence_paths(state, session_id);
@@ -2297,7 +2297,7 @@ pub(crate) async fn prepare_conversation_prompt(
             evidence.iter().map(|e| (e.path.clone(), e.snippet.clone())).collect();
         let conditions: Vec<(String, String)> =
             scope.conditions.iter().map(|c| (c.kind.clone(), c.value.clone())).collect();
-        let mut ir = clarify::propose_ir(last_question);
+        let mut ir = clarify::propose_ir(&search_q);
         if let Some(r) = clarify_reply {
             for b in &r.bindings {
                 if !clarify::apply_binding(&mut ir, &b.surface, &b.value) {
@@ -2309,13 +2309,13 @@ pub(crate) async fn prepare_conversation_prompt(
             clarify::Constraints::from_scope(&scope.mention_files, &scope.mention_dirs, &conditions);
         let explicit_scope = ir.constraints.scope_items();
         let mut session_state = clarify::build_state(&session_paths, &current, &explicit_scope);
-        for (value, stype) in clarify::question_entities(last_question) {
+        for (value, stype) in clarify::question_entities(&search_q) {
             session_state.add(&value, &stype, 3);
         }
         let grounding = clarify::build_grounding(&session_paths, &current, &explicit_scope);
         let resolution = clarify::resolve(&ir, &session_state, &grounding);
         log::info!("[AI]   clarify ir={:?} verdict={:?}", ir, resolution.verdict);
-        let blocking = clarify_is_blocking(last_question, &resolution);
+        let blocking = clarify_is_blocking(&search_q, &resolution);
         let slots: Vec<ClarifySlot> = clarify::asks_from_resolution(&resolution)
             .into_iter()
             .map(|a| ClarifySlot { surface: a.surface, stype: a.stype, options: a.options })
