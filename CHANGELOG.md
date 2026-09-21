@@ -22,7 +22,8 @@
   **前提错了**：路径**干净但不完整** —— 它只覆盖"名字进了文件名"的人。真实案例里 9 个真人中只有 1 个在文件名里，其余（`宋东兵`/`常宏`/`张力`/`张芳`）只在正文里。按来源收紧 = **把真人一起丢掉** → 退化成 `RAG_PIPELINE.md:171` 所称的「**自信地答错**」，而澄清子系统存在的唯一理由就是防它。**已整体撤除**（含 3 条单测）。
   - **结论：这个方向不该修。** 失败代价不对称 —— **过度追问是安全的**（用户答一句即可），**过度绑定是危险的**（自信地答错）。既然"真人名 vs 粘连碎片"当前无 sound 判据（本日已有两个方案被实测否决：子串去重、来源分层），保留"全量计数"这个**保守**选择才是对的。
 - **测试**：`cargo test --lib` **412 passed / 0 failed**；`cargo check --all-targets` 0 错误；`semgrep --severity ERROR` 0 findings。
-- **涉及文件**：`src-tauri/src/commands/clarify.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/cli.rs`、`CHANGELOG.md`。
+- **结案归档**：`docs/RAG_PIPELINE.md` 新增「澄清候选质量（已结案：不修）」小节（两类垃圾的成因与状态、两个被实测否决的方案、代价不对称的判定依据、彻底解决需换 NER），并在「排查线索」补上 `--dry-run` 的 `[澄清槽]` 观测点。
+- **涉及文件**：`src-tauri/src/commands/clarify.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/cli.rs`、`docs/RAG_PIPELINE.md`、`CHANGELOG.md`。
 
 ---
 
