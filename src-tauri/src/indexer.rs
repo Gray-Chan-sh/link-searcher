@@ -536,6 +536,8 @@ impl IndexerService {
             total as f64 / total_elapsed.as_secs_f64().max(0.001),
         );
 
+        crate::commands::index::schedule_backfill_embeddings(&self.db);
+
         Ok(results)
     }
 
@@ -635,6 +637,8 @@ impl IndexerService {
                 .context("failed to update indexed status")?;
 
             log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
+
+            crate::commands::index::schedule_backfill_embeddings(&self.db);
 
             // Periodic auto-commit every N successful files (reuse held writer).
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;

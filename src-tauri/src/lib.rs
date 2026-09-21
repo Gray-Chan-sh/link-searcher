@@ -546,6 +546,15 @@ get_dir_children,
                     });
                 }
 
+                // Backfill doc-level embeddings (idempotent; also refreshes
+                // vectors whose content was re-extracted).
+                {
+                    let pool_e = db_ref.clone();
+                    std::thread::spawn(move || {
+                        let _ = crate::commands::index::run_backfill_embeddings_public(&pool_e);
+                    });
+                }
+
                 log::info!("[STARTUP] scan: {} dirs done", dirs.len());
                 drop(slog);
 

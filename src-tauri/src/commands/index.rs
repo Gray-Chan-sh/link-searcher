@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
 use serde::Serialize;
@@ -939,9 +939,39 @@ fn run_backfill_embeddings(
     })
 }
 
-/// Files that are indexed (indexed=1) but lack an embedding, with their
-/// cached extracted text. The join goes through `content_index` by md5, so
-/// no re-extraction / re-OCR is needed.
+/// Background-caller wrapper (mirrors [`run_backfill_chunk_embeddings_public`]).
+pub fn run_backfill_embeddings_public(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+) -> Result<(), String> {
+    run_backfill_embeddings(db).map(|_| ())
+}
+
+/// Debounced post-index doc-embedding backfill: `SCHEDULED` admits a single
+/// pending run and the 3s delay coalesces watcher/batch bursts.
+pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
+    static SCHEDULED: AtomicBool = AtomicBool::new(false);
+
+    if !crate::ai::embedding_enabled() || SCHEDULED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let pool = db.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        SCHEDULED.store(false, Ordering::SeqCst);
+        // Re-checked after the delay so concurrent schedules don't stack runs.
+        if crate::state::running_task_ids().iter().any(|t| t == "backfill") {
+            return;
+        }
+        if let Err(e) = run_backfill_embeddings(&pool) {
+            log::warn!("[AI] 调度回填失败: {e}");
+        }
+    });
+}
+
+/// Files whose document embedding is missing or stale, with cached extracted
+/// text (joined via `content_index` by md5 — no re-extraction needed).
+/// `e.updated_at < ci.indexed_at` marks content re-extracted after the
+/// embedding was written; both columns are unix seconds.
 fn missing_embedding_rows(
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<Vec<(String, String)>> {
@@ -950,8 +980,9 @@ fn missing_embedding_rows(
             "SELECT ft.id, ci.text_content
              FROM file_tracking ft
              JOIN content_index ci ON ft.md5 = ci.md5
+             LEFT JOIN doc_embeddings e ON e.file_id = ft.id
              WHERE ft.indexed = 1 AND ft.status = 'active'
-               AND NOT EXISTS (SELECT 1 FROM doc_embeddings e WHERE e.file_id = ft.id)",
+               AND (e.file_id IS NULL OR e.updated_at < ci.indexed_at)",
         )
         .context("prepare missing-embedding query")?;
     let rows = stmt
@@ -1790,6 +1821,32 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, id_a);
         assert_eq!(rows[0].1, "content a");
+    }
+
+    #[test]
+    fn backfill_picks_files_whose_embedding_is_stale() {
+        let conn = setup_conn();
+        conn.execute("INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d1','/tmp',1,0,0)", [])
+            .unwrap();
+        let id = tracker::upsert_file(&conn, "/s.txt", "d1", 1000, 10, Some("md5s")).unwrap();
+        tracker::store_content(&conn, "md5s", "old content", false, None).unwrap();
+        tracker::update_indexed(&conn, &id, Some("md5s")).unwrap();
+        tracker::upsert_embedding(&conn, &id, &[1.0, 2.0]).unwrap();
+
+        assert!(
+            missing_embedding_rows(&conn).unwrap().is_empty(),
+            "fresh embedding must not be selected"
+        );
+
+        conn.execute(
+            "UPDATE content_index SET indexed_at = indexed_at + 10 WHERE md5 = 'md5s'",
+            [],
+        )
+        .unwrap();
+
+        let rows = missing_embedding_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "content re-extracted after the embedding must be selected");
+        assert_eq!(rows[0].0, id);
     }
 
     /// End-to-end: run_verify_core re-extracts a file whose stored content is

@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-09-21：修复「重新索引后文档级向量不再重建」—— RAG 问答找不到已索引文件
+
+- **现象**：RAG 多轮问答中，已索引的 `案件/WJY 汪均益/行政诉讼/一审/第二次/一审判决书.pdf` 始终不被引用，助手反复回答"材料中没有判决书"。该文件 `indexed=1`、`content_index` 有 10295 字（OCR）、Tantivy 可命中（"转继承"/"汪均晋" 均搜得到），纯 BM25 排名第 19。
+- **根因**：该文件**缺文档级向量**（`doc_embeddings` 无行）。四路检索（BM25 / 整篇语义 / 段落语义 / 路径）只走通 BM25 一路；融合按"多通道共识"排序，单通道文档排名吃亏 → 掉出注入上限（`MAX_CONTENT_INJECT=30`）→ 模型从未看到它。
+  - **删除路径**：`delete_file`（删除/移动事件，Syncthing 原子写常见）会 `delete_embedding`；文件重新出现时 `upsert_file` 把 `status` 重置回 `active` 并重新索引，但**没有任何路径重建 doc 向量**。
+  - **重建缺口**：`run_backfill_embeddings` 只在 `trigger_scan`（UI 扫描）结束与手动命令时触发——**启动扫描 `startup_scan`、`reindex_file`、`re_extract_*`、`heal_index_integrity`、watcher 全都不补**。
+  - **附带发现**：`clear_stale_embeddings`（`indexer.rs`）实为**空操作**——`extract_and_index_single` 内部的 `mark_extracted` 已先写入新 md5，`old_md5 == new_hash` 恒成立，内容变更时旧向量从不清理（静默按旧内容参与语义排序）。本次不删该函数，改由回填侧兜底。
+- **改动**：
+  - `commands/index.rs`：`missing_embedding_rows` 选取条件由「只补缺失」扩为「补缺失 + 刷新过期」——`LEFT JOIN doc_embeddings` 后 `e.file_id IS NULL OR e.updated_at < ci.indexed_at`（两列同为 unix 秒，可直接比较）；新增 `run_backfill_embeddings_public` 与去抖调度器 `schedule_backfill_embeddings`（`AtomicBool` 合并并发触发 + 3s 延迟合并 watcher/批次突发，运行前复查 `running_task_ids` 避免叠加）。
+  - `indexer.rs`：`index_file` 与 `batch_index` 成功收尾各挂一次 `schedule_backfill_embeddings` → 覆盖 watcher 与全部手动命令（`reindex_file` / `reindex_files` / `re_extract_file` / `re_extract_low_quality` / `reextract_missing_content` / `heal_index_integrity` / `verify` / `restore`），以及全部扫描路径（启动 / 全量 / 增量）。
+  - `lib.rs`：启动维护块（chunk 回填旁）新增 doc 回填兜底。
+- **实测验证**：启动回填日志 `向量回填开始: 25 个文件缺向量` → `回填完成: 25 处理, 0 失败, 剩余 0`（与改动前只读预测的 25 个可修复文件一致）；同一问句 `chat --dry-run` 中 `一审判决书.pdf` 由**不在前 30** 变为**第 4 位**（bm25=43.88 / sem=0.545）。当前 `status='active'` 的缺/过期向量数 = 0。
+- **影响面**：此前 302 个缺向量文件中，194 个为 `status='deleted'`（检索本就排除，无害），**108 个 `active`** 受影响；其中 25 个有 `content_index`（本次回填修复），另 83 个无提取内容（需重提取，独立问题，本次未处理）。
+- **测试**：新增 `backfill_picks_files_whose_embedding_is_stale`；`cargo test --lib` **398 passed / 0 failed**。
+- **涉及文件**：`src-tauri/src/commands/index.rs`、`src-tauri/src/indexer.rs`、`src-tauri/src/lib.rs`、`CHANGELOG.md`。
+- **验证**：`cargo check --all-targets` 0 错误；`cargo test --lib` 398 passed；`semgrep --severity ERROR` 0 findings。
+
+
+---
+
 ## 2026-09-20：PDF 漏字修复（二）—— 扫描件识别 + 改走 OCR（修正上一版）
 
 - **上一版为何无效**：`一审判决书.pdf` 重索引后仍漏字。实测确认它是 **macOS Quartz 扫描件**（`pdfinfo` Producer=Quartz PDFContext；`pdfimages` 显示每页一张整页图 1240×1754@150dpi + CCITT 掩码），其上叠了一层**合成为文字层**——`人/行/自/一/用/月/日/身/生/山…` 等字被 macOS 用**回退字体拆成独立文本 run**（`委托代理` 与 `人` 分两次绘制）：
