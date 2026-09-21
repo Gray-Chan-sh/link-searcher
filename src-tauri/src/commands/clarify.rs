@@ -177,7 +177,9 @@ pub fn resolve(ir: &Ir, state: &SessionState, grounding: &Grounding) -> Resoluti
     }
 }
 
-/// 把裁决结果转成 UI 契约：披露文案 + 一键收窄候选。无 Ask 则返回 None（不打扰用户）。
+/// 把裁决结果转成「**问什么**」：披露文案 + 候选值。无 Ask 则返回 None（不打扰用户）。
+/// 尾部的「**怎么答**」指引不在这里 —— 它取决于交互模式（阻塞轮有槽位输入框，
+/// 非阻塞轮只有 `@` 可用），由调用方 [`crate::commands::ai`] 按 `blocking` 追加。
 pub fn clarify_from_resolution(res: &Resolution) -> Option<(String, Vec<String>)> {
     let asks: Vec<(&str, &Vec<String>)> = res
         .outcomes
@@ -200,7 +202,7 @@ pub fn clarify_from_resolution(res: &Resolution) -> Option<(String, Vec<String>)
             }
         }
     }
-    Some((format!("（提示：{}。如需精确，请用 @ 指定文件或目录。）", parts.join("；")), cands))
+    Some((format!("（提示：{}。）", parts.join("；")), cands))
 }
 
 /// 结构化的追问槽位。前端据此渲染"填空"控件，并把用户答案作为 binding 回传。
@@ -323,7 +325,9 @@ pub fn propose_ir(q: &str) -> Ir {
 /// 从文本抽取候选实体：词性 + 「地名+机构」合并（歙县 + 人民法院 → 歙县人民法院）。
 /// 提案层，允许脏——能否绑定由 Resolver 按计数裁决。
 fn content_entities(text: &str) -> Vec<(String, String)> {
-    let toks = jieba_tags(text);
+    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
+    let toks: Vec<(String, String)> =
+        jieba.tag(text, true).iter().map(|t| (t.word.to_string(), t.tag.to_string())).collect();
     let mut out = Vec::new();
     for (i, (w, tag)) in toks.iter().enumerate() {
         let tag = tag.as_str();
@@ -342,7 +346,12 @@ fn content_entities(text: &str) -> Vec<(String, String)> {
             continue;
         }
         let stype = match tag {
-            "nr" => "person",
+            "nr" => {
+                if is_spurious_person_name(&jieba, w) {
+                    continue;
+                }
+                "person"
+            }
             "ns" => "place",
             "nz" => "other",
             _ => continue,
@@ -352,6 +361,16 @@ fn content_entities(text: &str) -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// jieba 的 HMM 词性模型会按上下文把**词典里的普通词**误标为 `nr`（实测
+/// `申请人 / 许可 / 修正 / 经审查 / 法定继承 / 祖父母` 全中）。真人名天然是 OOV
+/// —— jieba 词典不收录个人姓名 —— 故「标了 nr 却能在词典里查到」即为误标。
+///
+/// **只对人名用这条**：地名/机构名可以已经词汇化（`歙县` / `黄山市` /
+/// `最高人民法院` 都在词典里），对它们用会误杀真实机构。
+fn is_spurious_person_name(jieba: &jieba_rs::Jieba, w: &str) -> bool {
+    jieba.has_word(w)
 }
 
 fn is_type_noun(w: &str) -> bool {
@@ -695,5 +714,43 @@ mod tests {
         let res = resolve(&propose_ir("他在这个法院有多少案件"), &st, &g);
         let asks = asks_from_resolution(&res);
         assert!(asks.iter().any(|a| a.surface == "他" && a.stype == "person"), "{asks:?}");
+    }
+
+    /// 词典里的普通词被 jieba 的 HMM 误标为 nr（人名）→ 必须丢弃。
+    /// 三句均为实测会触发误标的真实法条句子。
+    #[test]
+    fn dictionary_words_tagged_as_person_are_dropped() {
+        for (sentence, junk) in [
+            ("申请人应当提交下列材料：登记申请书、申请人身份证明、不动产权属证书。", "申请人"),
+            ("经审查，该行政许可申请符合法定条件，本机关决定予以许可。", "许可"),
+            ("本实施细则根据《不动产登记暂行条例》制定，修正后自公布之日起施行。", "修正"),
+        ] {
+            let got = content_entities(sentence);
+            assert!(!got.iter().any(|(w, _)| w == junk), "{junk} 应被丢弃: {got:?}");
+        }
+    }
+
+    /// 真人名是 OOV → 必须幸存（防误杀）。
+    #[test]
+    fn real_person_names_survive() {
+        let got = content_entities(
+            "本院认为，原告在申请更正登记时仅提供了与汪少荣、汪昌发、汪昌祚等亲属关系的证据。",
+        );
+        for name in ["汪少荣", "汪昌发", "汪昌祚"] {
+            assert!(
+                got.iter().any(|(w, t)| w == name && t == "person"),
+                "{name} 应幸存: {got:?}"
+            );
+        }
+    }
+
+    /// 地名/机构名**可以**是词典词（歙县/黄山市/最高人民法院）→ 不能误杀。
+    /// 这条锁死「has_word 过滤只作用于 nr」的边界。
+    #[test]
+    fn place_names_in_dictionary_survive() {
+        for place in ["歙县", "黄山市"] {
+            let got = content_entities(place);
+            assert!(got.iter().any(|(w, _)| w == place), "{place} 被误杀: {got:?}");
+        }
     }
 }

@@ -2320,8 +2320,15 @@ pub(crate) async fn prepare_conversation_prompt(
             .into_iter()
             .map(|a| ClarifySlot { surface: a.surface, stype: a.stype, options: a.options })
             .collect();
+        // 「怎么答」指引取决于模式：阻塞轮下方有槽位输入框，非阻塞轮（提示+作答）
+        // 没有输入框、只能靠 @ 收窄。`clarify_from_resolution` 只产出「问什么」。
+        let tail = if blocking {
+            "请在下方填写具体指代。"
+        } else {
+            "如需精确，请用 @ 指定文件或目录。"
+        };
         match clarify::clarify_from_resolution(&resolution) {
-            Some((n, c)) => (Some(n), c, slots, blocking),
+            Some((n, c)) => (Some(format!("{n}{tail}")), c, slots, blocking),
             None => (None, Vec::new(), Vec::new(), false),
         }
     };
