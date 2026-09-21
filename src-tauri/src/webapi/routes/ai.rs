@@ -334,6 +334,7 @@ async fn conversation_ask_handler(
         body.session_retrieval_scope,
         body.strict_docs,
         Some(body.full_recall),
+        None,
     )
     .await
     .map_err(|e| ApiError { error: e })?;
@@ -442,6 +443,7 @@ async fn conversation_ask_stream_handler(
             body.session_retrieval_scope,
             body.strict_docs,
             Some(body.full_recall),
+            None,
         )
         .await
         {

@@ -6,7 +6,7 @@ import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { fileTypeIcon } from '../utils/fileIcon'
-import { cancelAiRequest, conversationAskStream, listenAiProgress, openFile, type AiDonePayload, type ChatMessage, type ChatSession, type AiProgressPayload } from '../api/files'
+import { cancelAiRequest, conversationAskStream, listenAiProgress, openFile, type AiDonePayload, type ChatMessage, type ChatSession, type AiProgressPayload, type ClarifyReply, type ClarifySlot } from '../api/files'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
@@ -74,6 +74,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   // 就地展开的引用卡：{ m: 消息下标, n: 材料编号(1-based) }
   const [activeCite, setActiveCite] = useState<{ m: number; n: number; path: string; snippet: string } | null>(null)
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
+  const [pendingClarify, setPendingClarify] = useState<{ baseQuestion: string; slots: ClarifySlot[] } | null>(null)
+  const [slotValues, setSlotValues] = useState<Record<string, string>>({})
   const scrollRef = useRef<HTMLDivElement>(null)
   // 流式自动跟随：用户主动上滚查看历史时暂停跟随，回到底部后恢复
   const stickToBottomRef = useRef(true)
@@ -114,6 +116,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     setInput('')
     setActiveCite(null)
     setHoverCite(null)
+    setPendingClarify(null)
+    setSlotValues({})
   }, [session?.id])
 
   // 消费父组件（树状浏览器）发来的待插入路径：追加 `@路径` 到输入框并更新 chips
@@ -201,6 +205,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           search_query: p.search_query ?? '',
           search_terms: p.search_terms ?? [],
           clarify_candidates: p.clarify_candidates ?? [],
+          clarify_slots: p.clarify_slots ?? [],
+          clarify_blocking: p.clarify_blocking ?? false,
           hits: p.hits ?? 0,
         }]
       }
@@ -212,6 +218,12 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         pending_query: null,
         pending_started_at: null,
       })
+      if (p.clarify_blocking && p.clarify_slots && p.clarify_slots.length > 0) {
+        const lastUser = [...messagesRef.current].reverse().find(m => m.role === 'user')
+        const baseQ = lastUser ? (lastUser.content.split('\n\n---\n引用:')[0] ?? '').trim() : ''
+        setPendingClarify({ baseQuestion: baseQ, slots: p.clarify_slots })
+        setSlotValues({})
+      }
     }
 
     const sync = () => {
@@ -262,6 +274,14 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const clarifyCandidatesFor = (msgIndex: number) => {
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_candidates ?? []
+  }
+  const clarifySlotsFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_slots ?? []
+  }
+  const clarifyBlockingFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_blocking ?? false
   }
   const questionFor = (msgIndex: number) => {
     for (let k = msgIndex - 1; k >= 0; k -= 1) {
@@ -348,7 +368,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   }, [mentionChips, session, conditionChips])
 
 // 解析输入文本：/命令 与 chips（@mention 由 chips 管理，不再依赖文本解析）
-  const handleSend = useCallback(async (override?: string) => {
+  const handleSend = useCallback(async (override?: string, clarifyReply: ClarifyReply | null = null) => {
     if (sendingRef.current) return
     const q = (override ?? input).trim()
     if (!q || loading || !session) return
@@ -423,7 +443,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
     try {
       // ponytail: smart_search_stream bypasses scope/semantic/rewrite; always use conversation path
-      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? true, session.full_recall ?? false)
+      await conversationAskStream([...messages, searchMsg], sourceIds, session.id, scope, mergedScope, session.strict_docs ?? true, session.full_recall ?? false, clarifyReply)
       // 命令成功返回后内容经 ai-chunk/ai-done 事件写入，无需在此处理。
     } catch (e) {
       markStreamEnded(session.id)
@@ -439,6 +459,26 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     }
     sendingRef.current = false
   }, [input, loading, session, messages, sourceIds, patchSession, onSessionChange, mentionChips, pendingMention, onMentionConsumed, insertMention])
+
+  const handleClarifySubmit = useCallback(() => {
+    if (!pendingClarify) return
+    let filled = pendingClarify.slots
+      .map(s => ({ surface: s.surface, value: (slotValues[s.surface] ?? '').trim() }))
+      .filter(s => s.value.length > 0)
+    if (filled.length === 0 && input.trim()) {
+      const first = pendingClarify.slots[0]
+      if (first) filled = [{ surface: first.surface, value: input.trim() }]
+    }
+    if (filled.length === 0) return
+    const visibleText = filled.map(s => s.value).join('、')
+    const clarifyReply: ClarifyReply = {
+      base_question: pendingClarify.baseQuestion,
+      bindings: filled.map(s => ({ surface: s.surface, value: s.value })),
+    }
+    setPendingClarify(null)
+    setSlotValues({})
+    handleSend(visibleText, clarifyReply)
+  }, [pendingClarify, slotValues, input, handleSend])
 
   // 依赖只能是 session.id：若含 pending_query，handleSend 一设置它就会立刻清掉
   // 刚写的 pending_started_at，使 loading 恒为 false。
@@ -555,10 +595,33 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                           <button
                             key={c}
                             type="button"
-                            onClick={() => handleSend(`${c} ${questionFor(i)}`.trim())}
+                            onClick={() => {
+                              const slots = clarifySlotsFor(i)
+                              if (clarifyBlockingFor(i) && slots.length > 0) {
+                                const slot = slots.find(s => s.options.includes(c)) ?? slots[0]
+                                if (!slot) return
+                                const baseQ = questionFor(i)
+                                const clarifyReply: ClarifyReply = {
+                                  base_question: baseQ,
+                                  bindings: [{ surface: slot.surface, value: c }],
+                                }
+                                if (pendingClarify?.baseQuestion === baseQ) {
+                                  setPendingClarify(null)
+                                  setSlotValues({})
+                                }
+                                handleSend(c, clarifyReply)
+                              } else {
+                                handleSend(`${c} ${questionFor(i)}`.trim())
+                              }
+                            }}
                             className="px-2 py-0.5 text-xs rounded-full border border-blue-300 dark:border-blue-700 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-900/30 transition-colors"
                           >{c}</button>
                         ))}
+                      </div>
+                    )}
+                    {clarifyBlockingFor(i) && clarifySlotsFor(i).length > 0 && (
+                      <div className="mt-1 text-[10px] text-amber-600 dark:text-amber-400">
+                        ↳ {clarifySlotsFor(i).map(s => s.surface).join(' / ')}
                       </div>
                     )}
                     {activeCite && activeCite.m === i && (
@@ -794,6 +857,45 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         </div>
       )}
 
+      {pendingClarify && (
+        <div className="px-4 py-2 border-t border-gray-200 dark:border-gray-800 space-y-1.5">
+          <div className="flex items-center gap-1.5 text-xs">
+            <span className="text-gray-400 shrink-0">↳</span>
+            <span className="text-gray-500 dark:text-gray-400 truncate flex-1">
+              {t('clarify_reply_prefix')}{pendingClarify.baseQuestion}
+            </span>
+            <button
+              type="button"
+              onClick={() => { setPendingClarify(null); setSlotValues({}) }}
+              className="shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 leading-none px-1"
+              aria-label={t('clarify_clear')}
+            >×</button>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {pendingClarify.slots.map(slot => (
+              <div key={slot.surface} className="inline-flex items-center gap-1 text-xs">
+                <span className="text-gray-600 dark:text-gray-300 whitespace-nowrap">{slot.surface} =</span>
+                <input
+                  type="text"
+                  value={slotValues[slot.surface] ?? ''}
+                  onChange={e => setSlotValues(prev => ({ ...prev, [slot.surface]: e.target.value }))}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      handleClarifySubmit()
+                    }
+                  }}
+                  placeholder={t('clarify_slot_placeholder')}
+                  disabled={loading}
+                  className="w-28 border border-gray-300 dark:border-gray-600 rounded px-1.5 py-0.5 text-xs bg-white dark:bg-gray-900 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500"
+                  aria-label={`${slot.surface} ${t('clarify_slot_placeholder')}`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {llmEnabled ? (
         <div className="relative px-4 py-2 border-t border-gray-200 dark:border-gray-800 flex gap-2 items-start">
           <MentionPicker
@@ -829,7 +931,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               value={input}
               onChange={e => handleInputChange(e.target.value)}
               onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (pendingClarify) handleClarifySubmit(); else handleSend() }
                 if (e.key === 'Backspace' && !input && mentionChips.length > 0) {
                   handleChipRemove(mentionChips[mentionChips.length - 1]!.path)
                 }
@@ -842,8 +944,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             />
           </div>
           <button
-            onClick={() => handleSend()}
-            disabled={loading || !input.trim() || !session}
+            onClick={() => pendingClarify ? handleClarifySubmit() : handleSend()}
+            disabled={loading || !session || (pendingClarify ? !Object.values(slotValues).some(v => v.trim()) && !input.trim() : !input.trim())}
             className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             {t('send')}

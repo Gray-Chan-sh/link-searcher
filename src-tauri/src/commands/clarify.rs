@@ -203,6 +203,44 @@ pub fn clarify_from_resolution(res: &Resolution) -> Option<(String, Vec<String>)
     Some((format!("（提示：{}。如需精确，请用 @ 指定文件或目录。）", parts.join("；")), cands))
 }
 
+/// 结构化的追问槽位。前端据此渲染"填空"控件，并把用户答案作为 binding 回传。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AskSlot {
+    pub surface: String,
+    pub stype: String,
+    pub options: Vec<String>,
+}
+
+/// 与 [`clarify_from_resolution`] 同源，但保留 `stype` —— 前端需要它来把答案
+/// 精确回填到对应槽位。
+pub fn asks_from_resolution(res: &Resolution) -> Vec<AskSlot> {
+    res.outcomes
+        .iter()
+        .filter_map(|o| match o {
+            SlotOutcome::Ask { surface, stype, options } => Some(AskSlot {
+                surface: surface.clone(),
+                stype: stype.clone(),
+                options: options.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 回填用户答案：按 `surface` 命中槽位并写入 `referent`。命中后 [`resolve`] 走
+/// `Bound` 分支 → 不再产生 Ask → 不再重复追问。返回是否命中（未命中说明用户
+/// 改了口，调用方应忽略该 binding）。
+pub fn apply_binding(ir: &mut Ir, surface: &str, value: &str) -> bool {
+    let mut hit = false;
+    for s in &mut ir.slots {
+        if s.surface == surface {
+            s.referent = Some(value.to_string());
+            hit = true;
+        }
+    }
+    hit
+}
+
 const PERSON_PRONOUN: &[&str] = &["他", "她"];
 const DEMONSTRATIVE: &[&str] = &["这个", "那个", "这些", "那些"];
 const PRECOMPOSED: &[(&str, &str)] =
@@ -615,5 +653,47 @@ mod tests {
         let ir = propose_ir("其他案件的时间线");
         assert_eq!(ir.intent, "timeline");
         assert!(ir.slots.is_empty(), "{:?}", ir.slots);
+    }
+
+    /// 回填 binding 后槽位绑定 → 不再 Ask → 不产生追问（也就不再重复贴提示）。
+    #[test]
+    fn binding_binds_slot_and_silences_the_ask() {
+        let paths = session_paths();
+        let st = build_state(&paths, &[], &[]);
+        let g = build_grounding(&paths, &[], &[]);
+        let mut ir = propose_ir("判决书里为什么认定他是利害关系人？");
+        assert!(
+            matches!(resolve(&ir, &st, &g).outcomes[0], SlotOutcome::Ask { .. }),
+            "未绑定时应追问: {:?}",
+            resolve(&ir, &st, &g).outcomes
+        );
+        assert!(apply_binding(&mut ir, "他", "汪均益"));
+        let res = resolve(&ir, &st, &g);
+        assert_eq!(
+            res.outcomes[0],
+            SlotOutcome::Bound { surface: "他".into(), value: "汪均益".into() }
+        );
+        assert_eq!(res.verdict, Verdict::Answerable);
+        assert!(clarify_from_resolution(&res).is_none(), "绑定后不该再追问");
+        assert!(asks_from_resolution(&res).is_empty());
+    }
+
+    /// surface 对不上（用户改了口）→ 返回 false，调用方应忽略该 binding。
+    #[test]
+    fn binding_miss_reports_false() {
+        let mut ir = propose_ir("判决书里为什么认定他是利害关系人？");
+        assert!(!apply_binding(&mut ir, "她", "汪均益"));
+        assert!(ir.slots.iter().all(|s| s.referent.is_none()), "{:?}", ir.slots);
+    }
+
+    /// asks_from_resolution 保留 stype，供前端定位槽位。
+    #[test]
+    fn asks_carry_stype_for_the_frontend() {
+        let paths = session_paths();
+        let st = build_state(&paths, &[], &[]);
+        let g = build_grounding(&paths, &[], &[]);
+        let res = resolve(&propose_ir("他在这个法院有多少案件"), &st, &g);
+        let asks = asks_from_resolution(&res);
+        assert!(asks.iter().any(|a| a.surface == "他" && a.stype == "person"), "{asks:?}");
     }
 }

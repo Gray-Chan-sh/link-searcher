@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-21：澄清追问可手打答案（引用条 + 槽位填空）
+
+- **问题**：指代未绑定时的澄清追问只能点候选 chips（chips 发的是 `"候选值 原问题"` 拼接串）。用户想直接敲"汪均益"会被当成**一条全新问题**（单独检索"汪均益"）→ 答非所问。
+- **设计前提**：追问来自**结构化槽位**（`Slot{surface:"他", stype:"person"}`），系统确切知道自己在问什么 → 用户回答**无需语义解析**，直接把文本当作该槽位的值即可（若追问是 LLM 自由生成的，反而得反过来解析"刚才问了啥"）。
+- **交互（引用条 + 槽位填空）**：问题文本挂在输入框**上方**作为引用条（**不可编辑**，输入框只装答案）；每槽位一个输入框（多槽位天然支持）；`[×]` 撤掉引用条即回退为普通新问题；可见消息就是用户真打的答案（**不拼原问题**，历史干净可读）。
+- **后端**（`commands/ai.rs`、`commands/clarify.rs`）：
+  - 新增 `ClarifyReply{base_question, bindings:[{surface,value}]}`（一次回复可绑多个槽）与 `ClarifySlot{surface,stype,options}`。IPC 协议：顶层参数 camelCase `clarifyReply`，**嵌套字段 snake_case**（与既有 `TurnScope` 的 `mention_files` 约定一致）。
+  - **激活 `Slot.referent`**：该字段与 `resolve` 的 `Bound` 分支（`clarify.rs:131`）此前**从未被执行**（`propose_ir` 四处全写 `None`）。新增 `apply_binding` 按 `surface` 回填 → `resolve` 走 `Bound` → **不再 Ask**，答案前也不再重复贴候选提示。
+  - 新增 `asks_from_resolution`（保留 `stype`）；**不动** `clarify_from_resolution`，避免破坏 chips 既有契约。
+  - `prepare_conversation_prompt` 新增 `clarify_reply`：本轮问题改为「`base_question` + 各绑定值」——绑定值即强检索锚点，否则检索退化成对"汪均益"的单词查询。
+  - `AiDone` 新增 `clarify_slots` / `clarify_blocking`。
+- **前端**（`api/files.ts`、`components/ChatPanel.tsx`、`i18n/{zh,en}.ts`）：引用条 + 每槽位输入框 + chips 保留为快捷方式并收敛到同一提交路径。**非阻塞轮（提示+作答）的 chips 行为逐字未改**（`else` 分支仍是原拼接表达式）。chip 的 base_question/slots 取自**它自己那一轮**（`questionFor(i)` / `clarifySlotsFor(i)`），避免上滚点旧轮 chip 时张冠李戴。
+- **CLI**：新增 `--bind <surface>=<value>`（如 `--bind '他=陈骥'`）与 `[澄清槽]` 打印 → **无需 GUI 即可验证绑定链路**。
+- **实测**：
+  ```
+  $ link-searcher chat "判决书里为什么认定他是利害关系人？" --dry-run
+  [澄清/只问不答] （提示：他 → 陈骥 / 法律文书 / 常宏 / …）
+  [澄清槽] 他 (person) → 21 项候选
+
+  $ link-searcher chat "判决书里为什么认定他是利害关系人？" --dry-run --bind '他=陈骥'
+  [澄清槽] 无（无歧义，或 --bind 已绑定）      ← 绑定后不再追问
+  ```
+  检索命中数 2845 → 3371，证明「原问题+锚点」确实进了检索；`--bind '她=陈骥'`（surface 对不上）会 `warn` 忽略并回退为正常追问 ✓。
+- **测试**：新增 3 个单测（`binding_binds_slot_and_silences_the_ask`、`binding_miss_reports_false`、`asks_carry_stype_for_the_frontend`）。
+- **门禁**：`cargo check --all-targets` 0 错误、`cargo test --lib` **409 passed / 0 failed**、`npx tsc -b` 0 错误、`npm run lint` 0 错误（28 个既有告警，改动前后一致，已用 `git stash` 对照确认）、`npm run build` 通过、`semgrep --severity ERROR` **0 findings**。
+- **未解决（记录）**：垃圾候选的**根因仍在** —— `content_entities`（`clarify.rs:287`）直接信任 jieba 的 `nr`/`ns` 标注；实测 `申请人/经审查/许可/修正/法定继承/祖父母` 全被判成 person、`之日起` 判成 place。这不只影响显示：`resolve` 按候选**个数**裁决（`1→绑定`、`>1→问`），垃圾候选会把本该唯一绑定的提问撑成歧义 → **多问一轮**。本改动让用户不必从垃圾列表里选（可手打），但**裁决污染未修**。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/clarify.rs`、`src-tauri/src/cli.rs`、`src-tauri/src/webapi/routes/ai.rs`、`src/api/files.ts`、`src/components/ChatPanel.tsx`、`src/i18n/zh.ts`、`src/i18n/en.ts`、`CHANGELOG.md`。
+
+---
+
 ## 2026-09-21：澄清提示重复输出 + 误挂引用（真机验证新会话时发现）
 
 - **现象**：用真机新会话验证上一条「澄清升级」时发现，`判决书里为什么认定他是利害关系人？`（未绑定指代 + 问句无锚点）的答案把澄清提示**输出了两遍**，且第二遍被插入 `[9]`：

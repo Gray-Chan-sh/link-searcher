@@ -315,6 +315,10 @@ struct AiDone {
     #[serde(default)]
     clarify_candidates: Vec<String>,
     #[serde(default)]
+    clarify_slots: Vec<ClarifySlot>,
+    #[serde(default)]
+    clarify_blocking: bool,
+    #[serde(default)]
     hits: usize,
     #[serde(default)]
     total_match_count: usize,
@@ -506,6 +510,8 @@ pub async fn smart_search_stream(
         search_query: query,
         search_terms: vec![],
         clarify_candidates: vec![],
+        clarify_slots: vec![],
+        clarify_blocking: false,
         hits,
         total_match_count: 0,
         llm_model: String::new(),
@@ -1175,6 +1181,31 @@ pub(crate) fn bm25_relevant_hits(
     Ok(bm25_hits.into_iter().take(limit).collect())
 }
 
+/// 前端回填的槽位绑定：用户在澄清追问里给出的答案。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClarifyBinding {
+    pub surface: String,
+    pub value: String,
+}
+
+/// 一次澄清回复：被回答的原问题 + 该问题各槽位的答案。
+/// `base_question` 必须回传——前端只把答案本身作为可见消息，否则检索会退化成
+/// 对答案（如"汪均益"）的单词查询。
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ClarifyReply {
+    pub base_question: String,
+    pub bindings: Vec<ClarifyBinding>,
+}
+
+/// 结构化的追问槽位（回传前端渲染填空控件）。比 `clarify_candidates` 多带
+/// `stype`，前端靠它把答案回填到正确的槽位。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ClarifySlot {
+    pub surface: String,
+    pub stype: String,
+    pub options: Vec<String>,
+}
+
 /// Assembled conversation prompt + the (possibly updated) source file list
 /// backing it. Follow-up questions re-retrieve relevant documents so the
 /// answer (and the frontend source list) reflects the newest question.
@@ -1195,6 +1226,9 @@ pub(crate) struct PreparedConversation {
     /// Candidate entities backing `clarify_note` — rendered as one-click chips
     /// that re-ask the question narrowed to the picked entity.
     pub(crate) clarify_candidates: Vec<String>,
+    /// Same asks as `clarify_candidates`, but structured (carries `stype`) so the
+    /// frontend can render a per-slot fill-in and send back a `ClarifyBinding`.
+    pub(crate) clarify_slots: Vec<ClarifySlot>,
     /// 指代未绑定 **且** 提问里没有任何具名实体 → 无锚点可依。此时硬答会用错误
     /// 的案件作答（RAG_PIPELINE.md 所称"自信地答错"），故改为只问不答、不调用 LLM。
     pub(crate) clarify_blocking: bool,
@@ -1281,6 +1315,7 @@ pub(crate) async fn prepare_conversation_prompt(
     skip_llm_rewrite: bool,
     app: Option<&tauri::AppHandle>,
     session_id: &str,
+    clarify_reply: Option<&ClarifyReply>,
 ) -> Result<PreparedConversation, String> {
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = app {
@@ -1301,6 +1336,18 @@ pub(crate) async fn prepare_conversation_prompt(
         };
     }
     let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    // 澄清回填：用户回答追问时，前端只发答案本身（如"汪均益"），原问题随 binding
+    // 回传。此处用「原问题 + 答案」作为本轮问题，答案即强锚点，检索才不会退化成
+    // 对"汪均益"的单词查询。
+    let last_q = match clarify_reply {
+        Some(r) if !r.base_question.trim().is_empty() => {
+            let base = r.base_question.trim();
+            let anchors: Vec<&str> =
+                r.bindings.iter().map(|b| b.value.trim()).filter(|v| !v.is_empty()).collect();
+            if anchors.is_empty() { base.to_string() } else { format!("{base} {}", anchors.join(" ")) }
+        }
+        _ => last_q,
+    };
     log::info!("[AI] ▶ prepare q=\"{}\" scope={} files strict={}",
         truncate_text(&last_q, 40),
         session_retrieval_scope.len(),
@@ -2229,7 +2276,7 @@ pub(crate) async fn prepare_conversation_prompt(
         }
         format!("{}\n当前问题：{}", history_str, last_q)
     } else {
-        last_q
+        last_q.clone()
     };
     // 将 @mention 替换为 [N] 编号引用（路径字符串不进 LLM）。
     for (path, idx) in &mention_index {
@@ -2242,8 +2289,8 @@ pub(crate) async fn prepare_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": max_context_chars,
     })));
-    let last_question = messages.last().map(|m| m.content.as_str()).unwrap_or("");
-    let (clarify_note, clarify_candidates, clarify_blocking) = {
+    let last_question = last_q.as_str();
+    let (clarify_note, clarify_candidates, clarify_slots, clarify_blocking) = {
         use crate::commands::clarify;
         let session_paths = prior_evidence_paths(state, session_id);
         let current: Vec<(String, String)> =
@@ -2251,6 +2298,13 @@ pub(crate) async fn prepare_conversation_prompt(
         let conditions: Vec<(String, String)> =
             scope.conditions.iter().map(|c| (c.kind.clone(), c.value.clone())).collect();
         let mut ir = clarify::propose_ir(last_question);
+        if let Some(r) = clarify_reply {
+            for b in &r.bindings {
+                if !clarify::apply_binding(&mut ir, &b.surface, &b.value) {
+                    log::warn!("[AI]   clarify binding missed: surface={} value={}", b.surface, b.value);
+                }
+            }
+        }
         ir.constraints =
             clarify::Constraints::from_scope(&scope.mention_files, &scope.mention_dirs, &conditions);
         let explicit_scope = ir.constraints.scope_items();
@@ -2262,15 +2316,19 @@ pub(crate) async fn prepare_conversation_prompt(
         let resolution = clarify::resolve(&ir, &session_state, &grounding);
         log::info!("[AI]   clarify ir={:?} verdict={:?}", ir, resolution.verdict);
         let blocking = clarify_is_blocking(last_question, &resolution);
+        let slots: Vec<ClarifySlot> = clarify::asks_from_resolution(&resolution)
+            .into_iter()
+            .map(|a| ClarifySlot { surface: a.surface, stype: a.stype, options: a.options })
+            .collect();
         match clarify::clarify_from_resolution(&resolution) {
-            Some((n, c)) => (Some(n), c, blocking),
-            None => (None, Vec::new(), false),
+            Some((n, c)) => (Some(n), c, slots, blocking),
+            None => (None, Vec::new(), Vec::new(), false),
         }
     };
     if let Some(n) = &clarify_note {
         log::info!("[AI]   clarify note: {}", truncate_text(n, 60));
     }
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
 }
 
 /// Post-process LLM response: supplement [N] citations for sentences that
@@ -2425,6 +2483,7 @@ pub async fn conversation_ask(
     session_retrieval_scope: Vec<String>,
     strict_docs: bool,
     full_recall: Option<bool>,
+    clarify_reply: Option<ClarifyReply>,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -2442,7 +2501,7 @@ pub async fn conversation_ask(
     crate::ai::reset_ai_cancel();
 
     let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, clarify_blocking, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "").await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "", clarify_reply.as_ref()).await?;
     if clarify_blocking {
         log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
         return Ok(clarify_note.unwrap_or_default());
@@ -2488,6 +2547,7 @@ pub async fn conversation_ask_stream(
     session_retrieval_scope: Vec<String>,
     strict_docs: bool,
     full_recall: Option<bool>,
+    clarify_reply: Option<ClarifyReply>,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -2506,12 +2566,12 @@ pub async fn conversation_ask_stream(
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
 
-    let prepared = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id).await;
+    let prepared = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref()).await;
     match &prepared {
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, clarify_blocking, hits, total_match_count, has_evidence, visible_nums, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, total_match_count, has_evidence, visible_nums, mut events } =
         prepared?;
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
@@ -2550,6 +2610,8 @@ pub async fn conversation_ask_stream(
             search_query,
             search_terms: search_terms.clone(),
             clarify_candidates: clarify_candidates.clone(),
+            clarify_slots: clarify_slots.clone(),
+            clarify_blocking,
             hits,
             total_match_count,
             llm_model: cfg.active_llm_model_id,
@@ -2628,6 +2690,8 @@ pub async fn conversation_ask_stream(
         search_query,
         search_terms,
         clarify_candidates,
+        clarify_slots,
+        clarify_blocking,
         hits,
         total_match_count,
         llm_model: cfg.active_llm_model_id,
@@ -3981,7 +4045,7 @@ mod history_tests {
         let session_scope = vec!["案件/X/庭审录音".to_string()];
 
         let prep = prepare_conversation_prompt(
-            &state, &messages, &[], &scope, &session_scope, true, false, true, None, "",
+            &state, &messages, &[], &scope, &session_scope, true, false, true, None, "", None,
         )
         .await
         .expect("strict 目录引用在检索零命中时应回退注入范围内文件，而非报错");
@@ -4930,7 +4994,7 @@ mod chunk_budget_tests {
         let session_scope = vec!["案件/和嘉案/聊天记录".to_string()];
         let strict = false;
 
-        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "").await.unwrap();
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None).await.unwrap();
 
         // 缺陷 1：改写 query 必须保留父问句实体"毛弟"
         assert!(prep.search_query.contains("毛弟"), "改写 query 必须含毛弟: {:?}", prep.search_query);
@@ -5004,7 +5068,7 @@ mod chunk_budget_tests {
 
         // skip_llm_rewrite=true 走规则改写（无 LLM 网关）→ 追问"帮我整理一下摘要"检索关键词为空，
         // 父实体经 rewrite 补入 → 但父文件内容无词重叠 → BM25 0 命中 → 历史注入兜底。
-        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "").await.unwrap();
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None).await.unwrap();
         assert!(
             prep.evidence.iter().any(|e| e.from_history && e.file_id == f1),
             "BM25 0 命中时历史证据必须经 Layer 0.5 注入且带 from_history: {:?}",

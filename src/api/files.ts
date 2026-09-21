@@ -75,6 +75,19 @@ export interface ChatMessage {
   content: string
 }
 
+/** 澄清槽位：后端返回的待绑定指代（surface = 表层词如「他」，stype = 实体类型如 person） */
+export interface ClarifySlot {
+  surface: string
+  stype: string
+  options: string[]
+}
+
+/** 澄清回复（前端 → 后端）：base_question = 触发追问的原问题，bindings = 各槽位绑定的值 */
+export interface ClarifyReply {
+  base_question: string
+  bindings: { surface: string; value: string }[]
+}
+
 export interface PerTurnEvidence {
   turn_index: number
   file_ids: string[]
@@ -93,6 +106,10 @@ export interface PerTurnEvidence {
   search_terms?: string[]
   /** 指代未绑定时给出的候选实体（前端渲染为一键收窄的 chips） */
   clarify_candidates?: string[]
+  /** 阻塞型澄清追问的槽位列表（每个槽位含表层词、类型、候选选项） */
+  clarify_slots?: ClarifySlot[]
+  /** 是否阻塞式追问——true 时前端进入待澄清状态，等待用户手打或点 chip */
+  clarify_blocking?: boolean
   /** BM25 合并前命中数 */
   hits?: number
 }
@@ -149,8 +166,8 @@ export interface ScopeCondition {
   parsed?: string | null
 }
 
-export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean): Promise<string> {
-  return client.invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false })
+export async function conversationAsk(messages: ChatMessage[], sourceIds: string[], scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean, clarifyReply?: ClarifyReply | null): Promise<string> {
+  return client.invoke<string>('conversation_ask', { messages, sourceIds, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false, clarifyReply: clarifyReply ?? null })
 }
 
 // ── Streaming AI (Tauri events) ──
@@ -166,6 +183,8 @@ export interface AiDonePayload {
   search_query?: string
   search_terms?: string[]
   clarify_candidates?: string[]
+  clarify_slots?: ClarifySlot[]
+  clarify_blocking?: boolean
   hits?: number
   total_match_count?: number
   llm_model?: string
@@ -176,8 +195,8 @@ export async function smartSearchStream(query: string, sessionId: string): Promi
   return client.invoke<void>('smart_search_stream', { query, sessionId })
 }
 
-export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean): Promise<void> {
-  return client.invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false })
+export async function conversationAskStream(messages: ChatMessage[], sourceIds: string[], sessionId: string, scope?: TurnScope, sessionRetrievalScope?: string[], strictDocs?: boolean, fullRecall?: boolean, clarifyReply?: ClarifyReply | null): Promise<void> {
+  return client.invoke<void>('conversation_ask_stream', { messages, sourceIds, sessionId, scope: scope ?? {}, sessionRetrievalScope: sessionRetrievalScope ?? [], strictDocs: strictDocs ?? false, fullRecall: fullRecall ?? false, clarifyReply: clarifyReply ?? null })
 }
 
 export async function searchFilePaths(prefix: string, limit?: number): Promise<string[]> {

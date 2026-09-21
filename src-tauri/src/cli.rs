@@ -56,6 +56,11 @@ pub enum Cli {
         /// Prior turns as JSON: [{"role":"user","content":"…"}, …]
         #[arg(long)]
         history: Option<PathBuf>,
+        /// Simulate a clarification reply: bind the user's answer to a slot
+        /// (format `surface=value`, e.g. `他=汪均益`). Exercises the same
+        /// path the GUI's fill-in control uses.
+        #[arg(long)]
+        bind: Option<String>,
     },
     /// OCR-quality health check (headless)
     Quality {
@@ -284,7 +289,7 @@ pub fn run_cli() -> Result<()> {
                 }
             }
         }
-        Cli::Chat { query, scope, full_recall, no_llm, dry_run, dump_injected, history } => {
+        Cli::Chat { query, scope, full_recall, no_llm, dry_run, dump_injected, history, bind } => {
             let data_dir = config::load_config().data_dir;
             let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
 
@@ -318,6 +323,23 @@ pub fn run_cli() -> Result<()> {
                 conditions: vec![],
             };
             let messages = build_messages(&query, history.as_ref())?;
+            // `--bind` 只是把 GUI 填空控件回传的 ClarifyBinding 在命令行里造出来，
+            // 走的是同一条后端路径（原问题取 query 本身）。
+            let binding = match bind.as_deref() {
+                Some(spec) => {
+                    let (surface, value) = spec
+                        .split_once('=')
+                        .with_context(|| format!("--bind 需要 surface=value 格式，收到: {spec}"))?;
+                    Some(crate::commands::ai::ClarifyReply {
+                        base_question: query.clone(),
+                        bindings: vec![crate::commands::ai::ClarifyBinding {
+                            surface: surface.trim().to_string(),
+                            value: value.trim().to_string(),
+                        }],
+                    })
+                }
+                None => None,
+            };
 
             if dry_run {
                 let prepared = tokio::runtime::Builder::new_current_thread()
@@ -325,7 +347,7 @@ pub fn run_cli() -> Result<()> {
                     .build()
                     .context("failed to create tokio runtime")?
                 .block_on(crate::commands::ai::prepare_conversation_prompt(
-                    &state, &messages, &[], &turn_scope, &[], false, full_recall, true, None, "",
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, true, None, "", binding.as_ref(),
                 ))
                     .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
                 drop(prepared.events);
@@ -337,6 +359,13 @@ pub fn run_cli() -> Result<()> {
                 if let Some(n) = &prepared.clarify_note {
                     let mode = if prepared.clarify_blocking { "只问不答" } else { "提示+作答" };
                     println!("[澄清/{mode}] {n}");
+                }
+                if prepared.clarify_slots.is_empty() {
+                    println!("[澄清槽] 无（无歧义，或 --bind 已绑定）");
+                } else {
+                    for s in &prepared.clarify_slots {
+                        println!("[澄清槽] {} ({}) → {} 项候选", s.surface, s.stype, s.options.len());
+                    }
                 }
                 for (i, ev) in prepared.evidence.iter().enumerate().take(30) {
                     println!(
@@ -423,7 +452,7 @@ pub fn run_cli() -> Result<()> {
                 .build()
                 .context("failed to create tokio runtime")?
                 .block_on(crate::commands::ai::prepare_conversation_prompt(
-                    &state, &messages, &[], &turn_scope, &[], false, full_recall, false, None, "",
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, false, None, "", binding.as_ref(),
                 ))
                 .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
             if !prepared.has_evidence {
