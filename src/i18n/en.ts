@@ -236,6 +236,7 @@ const en: Record<string, string> = {
     file_type: 'File Type',
     preview: 'Preview',
     next: 'Next',
+    back: 'Back',
     skip: 'Skip',
     get_started: 'Get Started',
 
@@ -279,6 +280,7 @@ const en: Record<string, string> = {
     cancel_scan: 'Cancel Scan',
     incl_errors: 'incl. errors',
     index_progress: 'Index Progress',
+    maintenance_tools: 'Maintenance Tools',
     indexing: 'Indexing',
     extracted_but_not_indexed: 'Extracted, waiting to be written to the index (search will work soon)',
     scan_info: 'Scan Info',
@@ -332,6 +334,8 @@ const en: Record<string, string> = {
     copy_name: 'Copy Name',
     copied_path: 'Path copied',
     copied_name: 'Name copied',
+  copy_content: 'Copy',
+  copied_content: 'Copied',
     score: 'Score: {score}',
     duplicates_count: '{count} duplicates',
 
@@ -498,6 +502,14 @@ const en: Record<string, string> = {
     dep_center_title: 'Dependency Center',
     dep_center_desc: 'Detect runtime dependencies and install per platform (models via mirror).',
     dep_missing_banner: '{n} recommended dependencies missing — open Dependency Center',
+    wizard_welcome_title: 'Welcome to Link-Searcher',
+    wizard_welcome_desc: 'Three steps to get started: add a library → build the index → search file contents.',
+    wizard_done_title: 'You\u2019re all set',
+    wizard_done_desc: 'Recommended components are configured. Start searching.',
+    wizard_done_partial: 'Some components are missing — install them later in \u201CSettings → Dependency Center\u201D.',
+    wizard_section: 'Setup Wizard',
+    wizard_section_desc: 'Re-run the first-launch setup wizard.',
+    wizard_rerun: 'Run wizard again',
 
     // ── Quality / OCR quality framework ──
     quality_section: 'Quality',

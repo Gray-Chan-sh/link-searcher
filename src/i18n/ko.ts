@@ -222,6 +222,7 @@ const ko: Record<string, string> = {
     file_type: '파일 형식',
     preview: '미리보기',
     next: '다음',
+    back: '뒤로',
     skip: '건너뛰기',
     get_started: '시작하기',
 
@@ -261,6 +262,7 @@ const ko: Record<string, string> = {
     cancel_scan: '스캔 취소',
     incl_errors: '오류 포함',
     index_progress: '인덱스 진행률',
+    maintenance_tools: '유지보수 도구',
     indexing: '인덱싱 중',
     extracted_but_not_indexed: '추출됨, 인덱스에 쓰기 대기 중 (검색이 곧 가능해집니다)',
     scan_info: '스캔 정보',
@@ -314,6 +316,8 @@ const ko: Record<string, string> = {
     copy_name: '이름 복사',
     copied_path: '경로 복사됨',
     copied_name: '이름 복사됨',
+  copy_content: '복사',
+  copied_content: '복사됨',
     score: '점수: {score}',
     duplicates_count: '{count}개의 중복',
 
@@ -480,6 +484,14 @@ const ko: Record<string, string> = {
     dep_center_title: '의존성 센터',
     dep_center_desc: '런타임 의존성을 감지하고 플랫폼별로 설치합니다.',
     dep_missing_banner: '권장 의존성 {n}개 미설치 — 의존성 센터 열기',
+    wizard_welcome_title: 'Link-Searcher에 오신 것을 환영합니다',
+    wizard_welcome_desc: '세 단계로 시작: 라이브러리 추가 → 인덱스 구축 → 파일 내용 검색.',
+    wizard_done_title: '준비 완료',
+    wizard_done_desc: '기본 구성 요소 설정이 완료되었습니다. 시작하세요.',
+    wizard_done_partial: '일부 구성 요소가 설치되지 않았습니다. 나중에 「설정 → 의존성 센터」에서 설치하세요.',
+    wizard_section: '설정 마법사',
+    wizard_section_desc: '최초 실행 설정 마법사를 다시 실행합니다.',
+    wizard_rerun: '마법사 다시 실행',
 
     // Quality health
     quality_health: '품질 건강 검진',

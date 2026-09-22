@@ -1,0 +1,1 @@
+export const SETUP_WIZARD_EVENT = 'open-setup-wizard'

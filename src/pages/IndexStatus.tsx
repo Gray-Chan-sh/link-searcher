@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
 import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, backfillQuality, type IndexError, type QualityAuditEntry } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
-import { LoadingSpinner, RefreshIcon } from '../icons'
+import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
@@ -45,6 +45,7 @@ export default function IndexStatus() {
   const [backfillingQuality, setBackfillingQuality] = useState(false)
   const [qualityBackfillMsg, setQualityBackfillMsg] = useState<string | null>(null)
   const [reextractingId, setReextractingId] = useState<string | null>(null)
+  const [showTools, setShowTools] = useState(false)
 
   useEffect(() => {
     aiCapabilities().then(c => { setEmbedCapable(c.embedding); setLlmCapable(c.llm) }).catch(() => {})
@@ -306,11 +307,11 @@ export default function IndexStatus() {
             {t('index_status_overview')}
           </p>
         </div>
-      <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <button
             onClick={handleScan}
             disabled={status?.is_scanning}
-            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg disabled:opacity-50 transition-colors"
           >
             <RefreshIcon className="size-4" />
             {t('scan_now')}
@@ -318,47 +319,12 @@ export default function IndexStatus() {
           {status?.is_scanning && (
             <button
               onClick={handleCancelScan}
-              className="px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
+              className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-900 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/40 transition-colors"
             >
+              <XIcon className="size-4" />
               {t('cancel_scan')}
             </button>
           )}
-          <button
-            onClick={handleBackfill}
-            disabled={taskActive('backfill') || !embedCapable || status?.is_scanning}
-            title={embedCapable ? '补齐缺失的语义向量（不重新提取/OCR）' : 'AI Embedding 网关未配置'}
-            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/40 disabled:opacity-50 transition-colors"
-          >
-            {taskActive('backfill') && <LoadingSpinner className="size-4" />}
-            ✦ 补齐语义向量
-          </button>
-          <button
-            onClick={handleReextract}
-            disabled={taskActive('reextract') || status?.is_scanning}
-            title="重新提取缺失内容的文件（如旧版 .doc 扫描件，批量修复）"
-            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
-          >
-            {taskActive('reextract') && <LoadingSpinner className="size-4" />}
-            ↻ 重提取缺失内容
-          </button>
-          <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="已确认空内容、被自动跳过验证的文件">
-            <input
-              type="checkbox"
-              checked={forceDead}
-              onChange={e => setForceDead(e.target.checked)}
-              className="accent-blue-600"
-            />
-            含已标记文件
-          </label>
-          <button
-            onClick={handleVerify}
-            disabled={taskActive('verify') || status?.is_scanning}
-            title="验证索引内容有效性：内容为空的已索引文件将自动重试一次"
-            className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/40 disabled:opacity-50 transition-colors"
-          >
-            {taskActive('verify') && <LoadingSpinner className="size-4" />}
-            ✓ 验证索引有效性
-          </button>
           <button
             onClick={handleRebuild}
             disabled={rebuilding}
@@ -367,46 +333,25 @@ export default function IndexStatus() {
             {rebuilding && <LoadingSpinner className="size-4" />}
             {t('rebuild_index')}
           </button>
-</div>
+        </div>
+      </div>
 
-            <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
-              <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
-                {t('topic_clusters')}
-                {clusterLoading && <LoadingSpinner className="size-3 ml-2 inline" />}
-              </h3>
-              {!llmCapable ? (
-                <p className="text-xs text-gray-400 dark:text-gray-500">{t('ai_llm_unavailable')}</p>
-              ) : (
-                <div className="space-y-2">
-                  {clusters === null && !clusterError && (
-                    <p className="text-xs text-gray-500 dark:text-gray-400">{t('topic_clusters_hint')}</p>
-                  )}
-                  {clusters !== null && (
-                    <div className="space-y-2 max-h-64 overflow-y-auto">
-                      {clusters.map(c => (
-                        <div key={c.topic} className="text-xs">
-                          <span className="font-medium text-gray-900 dark:text-gray-100">📁 {c.topic}</span>
-                          <span className="text-gray-400 dark:text-gray-500 ml-1">({c.files.length})</span>
-                          <div className="text-gray-500 dark:text-gray-400 break-all">{c.files.join('、')}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {clusterError && (
-                    <p className="text-xs text-red-600 dark:text-red-400">{clusterError}</p>
-                  )}
-                  {!clusterLoading && (
-                    <button
-                      onClick={runClustering}
-                      className="px-3 py-1 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
-                    >
-                      {t('run_topic_clusters')}
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+      {/* Scan progress */}
+      <div className="mb-6 p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+            {t('index_progress')}
+            {scanPhase && ` — ${scanPhase === 'index' ? `${t('indexing')}...` : `${t('scanning')}...`}`}
+          </span>
+          <span className="text-xs text-gray-500 dark:text-gray-400">{progress}%</span>
+        </div>
+        <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
+          <div
+            className="h-full bg-blue-600 rounded-full transition-all duration-500"
+            style={{ width: `${progress}%` }}
+          />
+        </div>
+      </div>
 
       {backfillMsg && (
         <div className="mb-4 px-4 py-3 text-sm text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
@@ -438,15 +383,18 @@ export default function IndexStatus() {
       {status && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('total_files')} value={status.total_files.toLocaleString()} color="gray" /></div>
-            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" /></div>
-            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} /></div>
-            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('ocred')} value={status.ocred.toLocaleString()} color="purple" /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('total_files')} value={status.total_files.toLocaleString()} color="gray" icon={<FileTextIcon className="size-4" />} /></div>
+            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" icon={<CheckIcon className="size-4" />} /></div>
+            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} icon={<RefreshIcon className="size-4" />} /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('ocred')} value={status.ocred.toLocaleString()} color="purple" icon={<FileImageIcon className="size-4" />} /></div>
             <div
               className={`p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg cursor-pointer hover:border-red-300 dark:hover:border-red-700 transition-colors ${status.errors > 0 ? 'cursor-pointer' : ''}`}
               onClick={status.errors > 0 ? handleShowErrors : undefined}
             >
-              <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{t('errors')}</p>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-xs font-medium text-gray-500 dark:text-gray-400">{t('errors')}</p>
+                <XIcon className="size-4 text-gray-400 dark:text-gray-500" />
+              </div>
               <p className={`text-2xl font-semibold ${status.errors > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
                 {status.errors.toLocaleString()}
               </p>
@@ -576,20 +524,55 @@ export default function IndexStatus() {
             </div>
           )}
 
-          <div className="mb-6">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
-                {t('index_progress')}
-                {scanPhase && ` — ${scanPhase === 'index' ? `${t('indexing')}...` : `${t('scanning')}...`}`}
-              </span>
-              <span className="text-xs text-gray-500 dark:text-gray-400">{progress}%</span>
-            </div>
-            <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-600 rounded-full transition-all duration-500"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
+          {/* Maintenance tools */}
+          <div className="mb-6 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+            <button
+              onClick={() => setShowTools(!showTools)}
+              className="w-full flex items-center justify-between p-4 text-sm font-medium text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-gray-800/50 rounded-lg transition-colors"
+            >
+              <span>{t('maintenance_tools')}</span>
+              <ChevronDownIcon className={`size-4 text-gray-400 dark:text-gray-500 transition-transform ${showTools ? 'rotate-180' : ''}`} />
+            </button>
+            {showTools && (
+              <div className="px-4 pb-4 flex flex-wrap items-center gap-2 border-t border-gray-200 dark:border-gray-800 pt-3">
+                <button
+                  onClick={handleBackfill}
+                  disabled={taskActive('backfill') || !embedCapable || status?.is_scanning}
+                  title={embedCapable ? '补齐缺失的语义向量（不重新提取/OCR）' : 'AI Embedding 网关未配置'}
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg hover:bg-purple-100 dark:hover:bg-purple-900/40 disabled:opacity-50 transition-colors"
+                >
+                  {taskActive('backfill') && <LoadingSpinner className="size-4" />}
+                  ✦ 补齐语义向量
+                </button>
+                <button
+                  onClick={handleReextract}
+                  disabled={taskActive('reextract') || status?.is_scanning}
+                  title="重新提取缺失内容的文件（如旧版 .doc 扫描件，批量修复）"
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-50 transition-colors"
+                >
+                  {taskActive('reextract') && <LoadingSpinner className="size-4" />}
+                  ↻ 重提取缺失内容
+                </button>
+                <button
+                  onClick={handleVerify}
+                  disabled={taskActive('verify') || status?.is_scanning}
+                  title="验证索引内容有效性：内容为空的已索引文件将自动重试一次"
+                  className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-teal-700 dark:text-teal-300 bg-teal-50 dark:bg-teal-900/20 border border-teal-200 dark:border-teal-800 rounded-lg hover:bg-teal-100 dark:hover:bg-teal-900/40 disabled:opacity-50 transition-colors"
+                >
+                  {taskActive('verify') && <LoadingSpinner className="size-4" />}
+                  ✓ 验证索引有效性
+                </button>
+                <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 cursor-pointer select-none" title="已确认空内容、被自动跳过验证的文件">
+                  <input
+                    type="checkbox"
+                    checked={forceDead}
+                    onChange={e => setForceDead(e.target.checked)}
+                    className="accent-blue-600"
+                  />
+                  含已标记文件
+                </label>
+              </div>
+            )}
           </div>
 
           {showErrors && errorsList.length > 0 && (
@@ -693,13 +676,51 @@ export default function IndexStatus() {
               )}
             </div>
           </div>
+
+          <div className="mt-6 p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+            <h3 className="text-sm font-medium text-gray-900 dark:text-gray-100 mb-2">
+              {t('topic_clusters')}
+              {clusterLoading && <LoadingSpinner className="size-3 ml-2 inline" />}
+            </h3>
+            {!llmCapable ? (
+              <p className="text-xs text-gray-400 dark:text-gray-500">{t('ai_llm_unavailable')}</p>
+            ) : (
+              <div className="space-y-2">
+                {clusters === null && !clusterError && (
+                  <p className="text-xs text-gray-500 dark:text-gray-400">{t('topic_clusters_hint')}</p>
+                )}
+                {clusters !== null && (
+                  <div className="space-y-2 max-h-64 overflow-y-auto">
+                    {clusters.map(c => (
+                      <div key={c.topic} className="text-xs">
+                        <span className="font-medium text-gray-900 dark:text-gray-100">📁 {c.topic}</span>
+                        <span className="text-gray-400 dark:text-gray-500 ml-1">({c.files.length})</span>
+                        <div className="text-gray-500 dark:text-gray-400 break-all">{c.files.join('、')}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {clusterError && (
+                  <p className="text-xs text-red-600 dark:text-red-400">{clusterError}</p>
+                )}
+                {!clusterLoading && (
+                  <button
+                    onClick={runClustering}
+                    className="px-3 py-1 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
+                  >
+                    {t('run_topic_clusters')}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </>
       )}
     </div>
   )
 }
 
-function StatCard({ label, value, color, subtitle }: { label: string; value: string; color: 'gray' | 'green' | 'yellow' | 'red' | 'purple'; subtitle?: string }) {
+function StatCard({ label, value, color, subtitle, icon }: { label: string; value: string; color: 'gray' | 'green' | 'yellow' | 'red' | 'purple'; subtitle?: string; icon?: ReactNode }) {
   const colors: Record<string, string> = {
     gray: 'text-gray-900 dark:text-gray-100',
     green: 'text-green-600 dark:text-green-400',
@@ -709,7 +730,10 @@ function StatCard({ label, value, color, subtitle }: { label: string; value: str
   }
   return (
     <div className="p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg transition-colors">
-      <p className="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">{label}</p>
+      <div className="flex items-center justify-between mb-1">
+        <p className="text-xs font-medium text-gray-500 dark:text-gray-400">{label}</p>
+        {icon && <span className="text-gray-400 dark:text-gray-500">{icon}</span>}
+      </div>
       <p className={`text-2xl font-semibold ${colors[color]}`}>{value}</p>
       {subtitle && <p className="text-xs text-gray-400 dark:text-gray-500 mt-0.5">{subtitle}</p>}
     </div>

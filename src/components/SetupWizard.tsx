@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { useSetup, type ProgressState } from '../hooks/useSetup'
 import { LoadingSpinner } from '../icons'
 import type { DepStatus } from '../api/settings'
+import { isTauri } from '../utils/platform'
 
 interface SetupWizardProps {
   onDone: () => void
@@ -26,8 +28,6 @@ function fmtBytes(bytes: number): string {
 
 function progressPct(p: ProgressState | null, dep: DepStatus): number | null {
   if (!p || p.dep !== dep.id) return null
-  // current file bytes / expected size is an upper bound; fall back to file
-  // count fraction when size is unknown.
   if (dep.size_bytes > 0 && p.bytes > 0) {
     const frac = p.bytes / dep.size_bytes
     if (frac > 0 && frac < 1.2) return Math.min(100, Math.round(frac * 100))
@@ -36,17 +36,18 @@ function progressPct(p: ProgressState | null, dep: DepStatus): number | null {
   return null
 }
 
+const FEATURES = [
+  { icon: '📁', titleKey: 'ob_step1_title', descKey: 'ob_step1_desc' },
+  { icon: '🔍', titleKey: 'ob_step2_title', descKey: 'ob_step2_desc' },
+  { icon: '🎉', titleKey: 'ob_step3_title', descKey: 'ob_step3_desc' },
+] as const
+
+/** Unified first-run wizard: feature intro → recommended deps → get started. */
 export default function SetupWizard({ onDone }: SetupWizardProps) {
   const { t } = useI18n()
+  const navigate = useNavigate()
   const setup = useSetup()
-  const [dismissed, setDismissed] = useState(false)
-
-  // Auto-close when all recommended deps are ready.
-  useEffect(() => {
-    if (!setup.loading && setup.status?.all_recommended_ready) {
-      onDone()
-    }
-  }, [setup.loading, setup.status, onDone])
+  const [step, setStep] = useState(0)
 
   const recommended = useMemo(
     () => (setup.status?.deps ?? []).filter(d => d.recommended),
@@ -55,116 +56,211 @@ export default function SetupWizard({ onDone }: SetupWizardProps) {
   const missing = useMemo(() => recommended.filter(d => !d.available), [recommended])
   const installingDep = setup.activeDep
   const doneCount = recommended.length - missing.length
+  const depsReady = !setup.loading && recommended.length > 0 && missing.length === 0
 
-  if (dismissed) return null
+  useEffect(() => {
+    if (step === 1 && depsReady) setStep(2)
+  }, [step, depsReady])
+
+  const finish = () => onDone()
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/60 backdrop-blur-sm p-4">
       <div className="bg-white dark:bg-gray-900 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
+        {/* Header + step indicator */}
         <div className="p-6 border-b border-gray-200 dark:border-gray-800">
+          <div className="flex gap-1.5 mb-4">
+            {[0, 1, 2].map(i => (
+              <div
+                key={i}
+                className={`h-1 flex-1 rounded-full ${i <= step ? 'bg-blue-600' : 'bg-gray-200 dark:bg-gray-700'}`}
+              />
+            ))}
+          </div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
-            {t('setup_title')}
+            {step === 0 ? t('wizard_welcome_title') : step === 1 ? t('setup_title') : t('wizard_done_title')}
           </h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {t('setup_desc')}
+            {step === 0 ? t('wizard_welcome_desc') : step === 1 ? t('setup_desc') : t('wizard_done_desc')}
           </p>
         </div>
 
-        <div className="p-6 space-y-3 max-h-[50vh] overflow-y-auto">
-          {/* Summary */}
-          <div className="text-sm text-gray-600 dark:text-gray-400">
-            {t('setup_progress', { done: doneCount, total: recommended.length })}
-          </div>
+        <div className="p-6 space-y-4 max-h-[50vh] overflow-y-auto">
+          {/* Step 0: feature intro */}
+          {step === 0 && (
+            <div className="space-y-3">
+              {FEATURES.map(f => (
+                <div
+                  key={f.titleKey}
+                  className="flex items-start gap-4 p-4 rounded-xl border border-gray-200 dark:border-gray-700"
+                >
+                  <span className="text-3xl leading-none mt-0.5">{f.icon}</span>
+                  <div>
+                    <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{t(f.titleKey)}</p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">{t(f.descKey)}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
-          {/* List */}
-          {recommended.map(dep => {
-            const installing = installingDep === dep.id
-            const pct = progressPct(setup.progress, dep)
-            return (
-              <div
-                key={dep.id}
-                className={`flex items-start gap-3 p-3 rounded-lg border ${
-                  dep.available
-                    ? 'border-green-200 dark:border-green-900 bg-green-50/60 dark:bg-green-900/10'
-                    : 'border-gray-200 dark:border-gray-700'
-                }`}
-              >
-                <div className="mt-0.5 text-lg">
-                  {dep.available ? (
-                    <span className="text-green-600 dark:text-green-400">✓</span>
-                  ) : installing ? (
-                    <LoadingSpinner className="size-5 text-blue-500" />
-                  ) : (
-                    <span className="text-amber-500">○</span>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{dep.name}</p>
-                  <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                    {dep.hint}
-                    {dep.size_bytes > 0 && ` · ${fmtSize(dep.size_bytes)}`}
-                  </p>
-                  {installing && pct !== null && (
-                    <div className="mt-2">
-                      <div className="h-1.5 w-full bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-                        <div className="h-full bg-blue-500 transition-all" style={{ width: `${pct}%` }} />
-                      </div>
-                      <p className="text-xs text-gray-500 mt-1">
-                        {setup.progress && fmtBytes(setup.progress.bytes)} · {pct}%
-                      </p>
-                    </div>
-                  )}
-                  {!dep.available && setup.lastResult?.dep === dep.id && (
-                    <p className={`text-xs mt-1 ${setup.lastResult.success ? 'text-green-600' : 'text-red-500'}`}>
-                      {setup.lastResult.message}
-                    </p>
-                  )}
-                </div>
-                {!dep.available && (
-                  <button
-                    onClick={() => void setup.startInstall(dep.id)}
-                    disabled={!!installingDep}
-                    className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
-                  >
-                    {installing && <LoadingSpinner className="size-3.5" />}
-                    {installing ? t('installing') : t('install')}
-                  </button>
-                )}
+          {/* Step 1: recommended deps */}
+          {step === 1 && (
+            <div className="space-y-3">
+              <div className="text-sm text-gray-600 dark:text-gray-400">
+                {t('setup_progress', { done: doneCount, total: recommended.length })}
               </div>
-            )
-          })}
 
-          {missing.length === 0 && (
-            <p className="text-center text-sm text-green-600 dark:text-green-400 py-4">
-              {t('setup_all_ready')}
-            </p>
+              {recommended.map(dep => {
+                const installing = installingDep === dep.id
+                const pct = progressPct(setup.progress, dep)
+                return (
+                  <div
+                    key={dep.id}
+                    className={`flex items-start gap-3 p-3 rounded-lg border ${
+                      dep.available
+                        ? 'border-green-200 dark:border-green-900 bg-green-50/60 dark:bg-green-900/10'
+                        : 'border-gray-200 dark:border-gray-700'
+                    }`}
+                  >
+                    <div className="mt-0.5 text-lg">
+                      {dep.available ? (
+                        <span className="text-green-600 dark:text-green-400">✓</span>
+                      ) : installing ? (
+                        <LoadingSpinner className="size-5 text-blue-500" />
+                      ) : (
+                        <span className="text-amber-500">○</span>
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-gray-900 dark:text-gray-100">{dep.name}</p>
+                      <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                        {dep.hint}
+                        {dep.size_bytes > 0 && ` · ${fmtSize(dep.size_bytes)}`}
+                      </p>
+                      {installing && pct !== null && (
+                        <div className="mt-2">
+                          <div className="h-1.5 w-full bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
+                            <div className="h-full bg-blue-500 transition-all" style={{ width: `${pct}%` }} />
+                          </div>
+                          <p className="text-xs text-gray-500 mt-1">
+                            {setup.progress && fmtBytes(setup.progress.bytes)} · {pct}%
+                          </p>
+                        </div>
+                      )}
+                      {!dep.available && setup.lastResult?.dep === dep.id && (
+                        <p className={`text-xs mt-1 ${setup.lastResult.success ? 'text-green-600' : 'text-red-500'}`}>
+                          {setup.lastResult.message}
+                        </p>
+                      )}
+                    </div>
+                    {!dep.available && (
+                      <button
+                        onClick={() => void setup.startInstall(dep.id)}
+                        disabled={!!installingDep}
+                        className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                      >
+                        {installing && <LoadingSpinner className="size-3.5" />}
+                        {installing ? t('installing') : t('install_now')}
+                      </button>
+                    )}
+                  </div>
+                )
+              })}
+
+              {missing.length === 0 && (
+                <p className="text-center text-sm text-green-600 dark:text-green-400 py-4">
+                  {t('setup_all_ready')}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Step 2: getting started */}
+          {step === 2 && (
+            <div className="space-y-3">
+              <div className="text-center py-4">
+                <div className="text-5xl mb-3">🚀</div>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {isTauri() && missing.length > 0
+                    ? t('wizard_done_partial')
+                    : t('setup_all_ready')}
+                </p>
+              </div>
+              <button
+                onClick={() => { finish(); navigate('/directories') }}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              >
+                📁 {t('ob_step1_action')}
+              </button>
+              <button
+                onClick={() => { finish(); navigate('/') }}
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              >
+                🔍 {t('ob_step3_action')}
+              </button>
+            </div>
           )}
         </div>
 
+        {/* Footer */}
         <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-800 flex items-center justify-between gap-3">
-          <button
-            onClick={() => {
-              if (installingDep) {
-                void setup.cancelInstall()
-              } else {
-                setDismissed(true)
-                onDone()
-              }
-            }}
-            className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
-          >
-            {installingDep ? t('cancel') : t('setup_skip')}
-          </button>
-          <button
-            onClick={() => {
-              const next = missing.find(d => d.id !== installingDep)
-              if (next) void setup.startInstall(next.id)
-            }}
-            disabled={missing.length === 0 || !!installingDep}
-            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
-          >
-            {t('setup_install_all')}
-          </button>
+          {step === 0 ? (
+            <button
+              onClick={finish}
+              className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+            >
+              {t('skip')}
+            </button>
+          ) : (
+            <button
+              onClick={() => setStep(s => s - 1)}
+              className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+            >
+              {t('back')}
+            </button>
+          )}
+
+          {step === 0 && (
+            <button
+              onClick={() => setStep(1)}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+            >
+              {t('next')}
+            </button>
+          )}
+
+          {step === 1 && (
+            <div className="flex items-center gap-2">
+              {missing.length > 0 && (
+                <button
+                  onClick={() => {
+                    const next = missing.find(d => d.id !== installingDep)
+                    if (next) void setup.startInstall(next.id)
+                  }}
+                  disabled={!!installingDep}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
+                >
+                  {t('setup_install_all')}
+                </button>
+              )}
+              <button
+                onClick={() => setStep(2)}
+                className="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded-lg transition-colors"
+              >
+                {missing.length === 0 ? t('next') : t('skip')}
+              </button>
+            </div>
+          )}
+
+          {step === 2 && (
+            <button
+              onClick={finish}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+            >
+              {t('done')}
+            </button>
+          )}
         </div>
       </div>
     </div>

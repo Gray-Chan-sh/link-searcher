@@ -1,6 +1,7 @@
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import type { ConfigInfo } from '../../api/config'
+import { SETUP_WIZARD_EVENT } from '../../utils/setupWizard'
 import { Section, SelectField } from './SettingsFields'
 
 const LANG_OPTIONS = [
@@ -72,6 +73,16 @@ export function GeneralTab({ appConfig, migrating, migrationProgress, migrationS
             { value: 'system', label: t('system') },
           ]}
         />
+      </Section>
+
+      <Section title={t('wizard_section')}>
+        <p className="text-sm text-gray-500 dark:text-gray-400">{t('wizard_section_desc')}</p>
+        <button
+          onClick={() => window.dispatchEvent(new CustomEvent(SETUP_WIZARD_EVENT))}
+          className="mt-2 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+        >
+          {t('wizard_rerun')}
+        </button>
       </Section>
     </div>
   )

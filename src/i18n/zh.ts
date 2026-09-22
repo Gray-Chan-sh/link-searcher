@@ -236,6 +236,7 @@ const zh: Record<string, string> = {
     file_type: '文件类型',
     preview: '预览',
     next: '下一步',
+    back: '上一步',
     skip: '跳过',
     get_started: '开始使用',
 
@@ -279,6 +280,7 @@ const zh: Record<string, string> = {
     cancel_scan: '取消扫描',
     incl_errors: '含错误',
     index_progress: '索引进度',
+    maintenance_tools: '维护工具',
     indexing: '索引中',
     extracted_but_not_indexed: '已提取，等待写入索引（搜索稍后可用）',
     scan_info: '扫描信息',
@@ -332,6 +334,8 @@ const zh: Record<string, string> = {
     copy_name: '复制名称',
     copied_path: '已复制路径',
     copied_name: '已复制名称',
+  copy_content: '复制',
+  copied_content: '已复制',
     score: '得分：{score}',
     duplicates_count: '{count} 份重复',
 
@@ -498,6 +502,14 @@ const zh: Record<string, string> = {
     dep_center_title: '依赖中心',
     dep_center_desc: '检测本机运行依赖并按平台安装（模型均走镜像下载）。',
     dep_missing_banner: '有 {n} 项推荐依赖未安装，点击进入「依赖中心」',
+    wizard_welcome_title: '欢迎使用 Link-Searcher',
+    wizard_welcome_desc: '只需三步即可开始：添加资料库 → 构建索引 → 搜索文件内容。',
+    wizard_done_title: '准备就绪',
+    wizard_done_desc: '基础组件已配置完成，开始使用吧。',
+    wizard_done_partial: '部分组件未安装，可稍后在「设置 → 依赖中心」补装。',
+    wizard_section: '初始化向导',
+    wizard_section_desc: '重新运行首次启动的初始化向导。',
+    wizard_rerun: '重新运行向导',
 
     // ── Quality / OCR quality framework ──
     quality_section: '质量',

@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-09-22：索引状态页视觉重构（信息架构分层）
+
+- **索引状态页信息架构重组**：7 个操作按钮从 header 平铺改为层级分明的布局 —— 扫描/取消/重建留在顶部；补齐向量、重提取、验证有效折叠进「维护工具」区块，降低视觉噪声（`src/pages/IndexStatus.tsx`）
+- **统计卡片增加图标**：5 张 stat 卡（总文件/已索引/待处理/已OCR/错误）各配一个 SVG 图标提升可扫视性
+- **扫描进度条独立醒目化**：扫描中进度条从散落位置移至 header 下方独立卡片展示，含百分比、阶段文案、取消操作
+- **主题聚类卡片归位**：从 header 右侧区域移出，独立置于页面底部
+- **新增翻译 key**：`maintenance_tools`（四种语言）
+
+---
+
+## 2026-09-22：合并首启双向导 + 设置页一键向导
+
+- **两个向导合并为一个统一向导**：原 `OnboardingWizard`（功能介绍 3 步）与 `SetupWizard`（推荐依赖下载）合并为单一分步向导 `SetupWizard`，流程为「功能介绍 → 依赖检测/下载 → 准备就绪」。首启时一个弹窗覆盖两种情况（`src/components/SetupWizard.tsx`）
+- **删除冗余组件**：`src/components/OnboardingWizard.tsx` 已删除，其文案（`ob_step*`）复用进新向导的功能介绍步骤
+- **设置页新增「初始化向导」区块**：通用设置页加入「重新运行向导」按钮，通过 `open-setup-wizard` 自定义事件触发，随时重新打开向导（`src/components/settings/GeneralTab.tsx`、`src/utils/setupWizard.ts`）
+- **弹窗状态收敛**：`App.tsx` 移除 `showOnboarding`/`handleOnboardingClose`，统一由 `setupPending` 单一状态控制；完成/跳过时同时写入 `onboarding_done` 与 `localStorage`
+- **新增翻译 key**：`wizard_welcome_title`、`wizard_done_*`、`wizard_section`、`wizard_rerun`、`back`（四种语言）
+
+---
+
 ## 2026-09-22：文本质量评分系统全面修复（15 项修复 + 7 项新测试）
 
 - **P0 关键缺陷修复**：

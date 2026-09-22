@@ -22,16 +22,15 @@ import Quality from './pages/Quality'
 import StatusBar from './components/StatusBar'
 import MobileNav from './components/MobileNav'
 import MobileHeader from './components/MobileHeader'
-import OnboardingWizard from './components/OnboardingWizard'
 import ToastContainer from './components/ToastContainer'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import SetupWizard from './components/SetupWizard'
+import { SETUP_WIZARD_EVENT } from './utils/setupWizard'
 
 export default function App() {
   const { theme, setTheme } = useTheme()
   const { t } = useI18n()
   const navigate = useNavigate()
-  const [showOnboarding, setShowOnboarding] = useState(false)
   const [showTokenDialog, setShowTokenDialog] = useState(false)
   const [tokenInput, setTokenInput] = useState('')
   const [setupPending, setSetupPending] = useState(false)
@@ -89,13 +88,14 @@ export default function App() {
 
   useEffect(() => {
     if (localStorage.getItem('onboarding_completed') === 'true') return
+    if (sessionStorage.getItem('setup_prompt_skipped') === '1') return
     getSettings().then(s => {
       if (s['onboarding_done'] !== 'true') {
-        setShowOnboarding(true)
+        setSetupPending(true)
       }
     }).catch(() => {
       if (localStorage.getItem('onboarding_completed') !== 'true') {
-        setShowOnboarding(true)
+        setSetupPending(true)
       }
     })
   }, [])
@@ -143,9 +143,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Re-open the unified wizard from Settings ("run wizard again" button).
+  useEffect(() => {
+    const open = () => setSetupPending(true)
+    window.addEventListener(SETUP_WIZARD_EVENT, open)
+    return () => window.removeEventListener(SETUP_WIZARD_EVENT, open)
+  }, [])
+
   const handleSetupDone = () => {
     setSetupPending(false)
     sessionStorage.setItem('setup_prompt_skipped', '1')
+    localStorage.setItem('onboarding_completed', 'true')
+    updateSettings({ onboarding_done: 'true' }).catch(() => {})
     checkSetup()
   }
 
@@ -154,12 +163,6 @@ export default function App() {
       localStorage.setItem('settings_tab', JSON.stringify('deps'))
     } catch { /* ignore */ }
     navigate('/settings')
-  }
-
-  const handleOnboardingClose = () => {
-    setShowOnboarding(false)
-    localStorage.setItem('onboarding_completed', 'true')
-    updateSettings({ onboarding_done: 'true' }).catch(() => {})
   }
 
   const cycleTheme = () => {
@@ -246,8 +249,6 @@ export default function App() {
       <MobileNav />
 
       {setupPending && <SetupWizard onDone={handleSetupDone} />}
-
-      {showOnboarding && <OnboardingWizard onClose={handleOnboardingClose} />}
 
       <ToastContainer />
 

@@ -222,6 +222,7 @@ const ja: Record<string, string> = {
     file_type: 'ファイルタイプ',
     preview: 'プレビュー',
     next: '次へ',
+    back: '戻る',
     skip: 'スキップ',
     get_started: '始める',
 
@@ -261,6 +262,7 @@ const ja: Record<string, string> = {
     cancel_scan: 'スキャンをキャンセル',
     incl_errors: 'エラーを含む',
     index_progress: 'インデックス進捗',
+    maintenance_tools: 'メンテナンスツール',
     indexing: 'インデックス中',
     extracted_but_not_indexed: '抽出済み、インデックスへの書き込み待ち（検索は間もなく利用可能）',
     scan_info: 'スキャン情報',
@@ -314,6 +316,8 @@ const ja: Record<string, string> = {
     copy_name: '名前をコピー',
     copied_path: 'パスをコピーしました',
     copied_name: '名前をコピーしました',
+  copy_content: 'コピー',
+  copied_content: 'コピーしました',
     score: 'スコア: {score}',
     duplicates_count: '{count}件の重複',
 
@@ -480,6 +484,14 @@ const ja: Record<string, string> = {
     dep_center_title: '依存センター',
     dep_center_desc: '実行時依存関係を検出し、プラットフォーム別にインストールします。',
     dep_missing_banner: '推奨依存関係 {n} 件が未インストール — 依存センターを開く',
+    wizard_welcome_title: 'Link-Searcher へようこそ',
+    wizard_welcome_desc: '3ステップで開始できます：ライブラリ追加 → インデックス構築 → ファイル内容を検索。',
+    wizard_done_title: '準備完了',
+    wizard_done_desc: '基本コンポーネントの設定が完了しました。使い始めましょう。',
+    wizard_done_partial: '一部のコンポーネントが未インストールです。「設定 → 依存センター」で後からインストールできます。',
+    wizard_section: 'セットアップウィザード',
+    wizard_section_desc: '初回起動時のセットアップウィザードを再実行します。',
+    wizard_rerun: 'ウィザードを再実行',
 
     // Quality health
     quality_health: '品質ヘルスチェック',

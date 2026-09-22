@@ -4,7 +4,8 @@ import remarkGfm from 'remark-gfm'
 import remarkCjkFriendly from 'remark-cjk-friendly/parseOnly'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
-import { LoadingSpinner } from '../icons'
+import { LoadingSpinner, CopyIcon, CheckIcon } from '../icons'
+import { toast } from '../utils/toast'
 import { fileTypeIcon } from '../utils/fileIcon'
 import { cancelAiRequest, conversationAskStream, listenAiProgress, openFile, type AiDonePayload, type ChatMessage, type ChatSession, type AiProgressPayload, type ClarifyReply, type ClarifySlot } from '../api/files'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
@@ -76,6 +77,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
   const [pendingClarify, setPendingClarify] = useState<{ baseQuestion: string; slots: ClarifySlot[] } | null>(null)
   const [slotValues, setSlotValues] = useState<Record<string, string>>({})
+  const [copiedId, setCopiedId] = useState<number | null>(null)
+
+  const handleCopyMessage = useCallback((idx: number, content: string) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopiedId(idx)
+      toast(t('copied_content'))
+      setTimeout(() => setCopiedId(null), 1500)
+    }).catch(() => {})
+  }, [t])
   const scrollRef = useRef<HTMLDivElement>(null)
   // 流式自动跟随：用户主动上滚查看历史时暂停跟随，回到底部后恢复
   const stickToBottomRef = useRef(true)
@@ -518,12 +528,24 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
           </div>
         )}
         {messages.map((m, i) => (
-          <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-            <div className={`max-w-[85%] px-3 py-2 rounded-lg text-sm ${
+          <div key={i} className={`group flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`relative max-w-[85%] px-3 py-2 rounded-lg text-sm ${
               m.role === 'user'
                 ? 'bg-blue-600 text-white whitespace-pre-wrap'
                 : 'bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 prose prose-sm max-w-full dark:prose-invert'
             }`}>
+              <button
+                type="button"
+                onClick={() => handleCopyMessage(i, m.content)}
+                className={`absolute top-1.5 right-1.5 p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${
+                  m.role === 'user'
+                    ? 'text-white/70 hover:text-white hover:bg-white/20'
+                    : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 hover:bg-gray-200 dark:hover:bg-gray-700'
+                }`}
+                title={t('copy_content')}
+              >
+                {copiedId === i ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
+              </button>
                             {m.role === 'user'
                 ? m.content
                 : (
