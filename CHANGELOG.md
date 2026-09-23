@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-23：`db/tracker.rs` 拆分（1774 → 1304 行 + 2 子模块）
+
+- 抽出内聚存储层到 `db/tracker/`，`pub use` 重导出保持 `crate::db::tracker::X` 路径不变：
+  - `db/tracker/embeddings.rs`（217）：文档 / chunk / QA 向量读写（little-endian f32 blob）
+  - `db/tracker/content.rs`（277）：`content_index` 去重缓存 + 质量评分持久化
+- **验证**：`cargo check --all-targets` 0 错误（无新增告警）；`cargo test --lib` **425 passed / 0 failed**。
+- **涉及文件**：`src-tauri/src/db/tracker.rs`、`src-tauri/src/db/tracker/{embeddings,content}.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-23：`extractor/pdf.rs` 拆分（1917 → 1073 行 + 4 子模块）
 
 - 抽出内聚逻辑到 `extractor/pdf/`，用 `pub` / `pub(crate)` / `pub(super)` 重导出保持既有路径不变（`PdfExtractor`、`get_pdf_page_count`、`poppler_available`、`is_pdftoppm_available`、`ocr_pdf_via_pdfimages` 等外部调用零改动）：
