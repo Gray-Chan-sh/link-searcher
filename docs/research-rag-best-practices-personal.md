@@ -335,25 +335,25 @@
 
 ### 9.1 现有 RAG 管线速览（生产链路）
 
-生产链路是 `commands/ai.rs` 里的单体 `prepare_conversation_prompt`（约 L960–1508），**不是** `ai/skills/*` 脚手架（`prepare_conversation_prompt_pipeline` 标了 `#[allow(dead_code)]`，未接生产——见 L1512-1520）。一轮问答的数据流：
+生产链路是 `commands/ai/prompt.rs` 里的单体 `prepare_conversation_prompt`（约 L180 起）；`ai/skills/*` 脚手架与 `prepare_conversation_prompt_pipeline` 已删除（双份实现收敛）。一轮问答的数据流：
 
 ```
 用户输入（+@引用 chips + 检索范围 + strict/full_recall 开关）
- → ① 查询改写 rewrite_query(L514 规则/指代消解) + llm_rewrite_query(L597, 5s 超时降级, skip_llm_rewrite 可关)
- → ② 范围解析（L1043-1134）：dir_config 精确→dir_ids；文件路径→file_id；LIKE 回退；父吞子 merge_scope_prefixes(L1109)
- → ③ extract_retrieval_keywords(L658, jieba, MAX_KEYWORDS=3) → bm25_query = kws OR 连接(L1183-1187)
- → ④ 三路检索（L1196-1224）：
-      a. BM25 bm25_relevant_hits(L827, Tantivy, top = max(total_files,500))
-      b. 向量 vector_scan_with_query_emb（L1215, 阈值 0.65）+ chunk 级（阈值 0.55）
-         —— 仅 embed 一次两通道共享（L1211-1213）；有锁定范围（@文件）时整段跳过（L1205-1206）
-      c. path_match_files（SQL LIKE 文件名）
-     三路并集 → weighted_mix/semantic_fuse（L730/749, score = w·cos_norm+(1−w)·bm25_norm）
- → ⑤ 旧来源保留（非 strict 时 ≤3 份 from_history）
- → ⑥ Layer 0 引用文件均摊预算注入（L1384-1388, 共 CONTEXT_BUDGET/3）+ Layer 1 命中注入（≤30 份, L1319/1355）
- → ⑦ strict 拒绝（L1469-1482）：missing mention / 无内容 / context 空 → 报错返回；**非 strict 无此检查**
- → ⑧ context = docs.join 后 truncate_text(max_context_chars)（L1466, 关 full_recall=50k, 开=140k, L1465）
- → ⑨ system prompt（"仅基于材料回答…标注 [N]" L1483）+ user_msg（@mention→[N] 替换 L1497-1499）
- → ⑩ chat_stream → ai-chunk 事件流式 → auto_cite(L1562) 兜底补 [N] → ai_events 落库
+ → ① 查询改写 rewrite_query（commands/ai/rewrite.rs 约 L17，规则/指代消解） + llm_rewrite_query（约 L88, 5s 超时降级, skip_llm_rewrite 可关）
+ → ② 范围解析（commands/ai/prompt.rs 约 L300-392）：dir_config 精确→dir_ids；文件路径→file_id；LIKE 回退；父吞子 merge_scope_prefixes（约 L334）
+ → ③ extract_retrieval_keywords（commands/ai/rewrite.rs 约 L148, jieba, MAX_KEYWORDS=3） → bm25_query = kws OR 连接（prompt.rs 约 L466-471）
+ → ④ 四路检索（prompt.rs 约 L480-790）：
+      a. BM25 bm25_relevant_hits（commands/ai/retrieval.rs 约 L329, Tantivy, top = max(total_files,500)）
+      b. 向量 vector_scan_with_query_emb（ai/mod.rs 约 L429, 阈值 0.55）+ chunk 级（阈值 0.55）
+         —— 仅 embed 一次两通道共享；有锁定范围（@文件）时整段跳过（prompt.rs 约 L509）
+      c. path_match_files（db/tracker.rs 约 L675, SQL LIKE 文件名）
+     四路并集 → RRF 排名融合（commands/ai/retrieval.rs；内层兼容 weighted_mix/semantic_fuse 约 L141/204）
+ → ⑤ 旧来源保留（非 strict 时 ≤3 份 from_history）（prompt.rs 约 L827-852）
+ → ⑥ Layer 0 引用文件均摊预算注入（prompt.rs 约 L864-904, 共 CONTEXT_BUDGET/3）+ Layer 1 命中注入（≤30 份, prompt.rs 约 L948-967）
+ → ⑦ strict 拒绝（prompt.rs 约 L1113-1125）：missing mention / 无内容 / context 空 → 报错返回；**非 strict 无此检查**
+ → ⑧ context = docs.join 后 truncate_text(max_context_chars)（prompt.rs 约 L1079-1080, 关 full_recall=50k, 开=140k）
+ → ⑨ system prompt（"仅基于材料回答…标注 [N]" prompt.rs 约 L1138）+ user_msg（@mention→[N] 替换 prompt.rs 约 L1154-1157）
+ → ⑩ chat_stream → ai-chunk 事件流式 → auto_cite（commands/ai/cite.rs 约 L16）兜底补 [N] → ai_events 落库
 ```
 
 规模参照（**实测 2026-09-02**）：最大库 com.link-searcher.app 有 22,441 个 active 文件、2.65 亿字，其中 75% ≤1 万字、82 篇 >20 万字、5 篇 >100 万字（最长 667 万字）；另一库 /Volumes/Data/index 的 doc_chunks 已达 **12.5 万行**（跨 1195 个长文档），但 chunk_embeddings 仅 1154（回填滞后 ~100 倍）。**量级= chunk 12.5 万–50 万+，全表暴力余弦不再免费**（见下第 10 章 P1 规模适配）。
@@ -364,9 +364,9 @@
 
 | # | Link-Searcher 现状 | 业界共识（第一部分锚点） | 结论 |
 |---|---|---|---|
-| 1 | 三路检索：BM25 + 文件级向量 + chunk 级向量，加权融合（ai.rs L1196-1224） | 混合检索是性价比之王（§1.1, +8–15 recall / +50ms；Anthropic BM25 补 embedding 失败率 -49%） | **已做到位**。中文/编号/型号类查询靠 BM25 腿，语义靠向量腿 |
+| 1 | 四路检索：BM25 + 文件级向量 + chunk 级向量 + 路径匹配，RRF 融合（prompt.rs 约 L480-790） | 混合检索是性价比之王（§1.1, +8–15 recall / +50ms；Anthropic BM25 补 embedding 失败率 -49%） | **已做到位**。中文/编号/型号类查询靠 BM25 腿，语义靠向量腿 |
 | 2 | ≤1 万字符小文件整篇直存不切块（chunks.rs CHUNK_THRESHOLD=10_000）；>1 万字符按 1500 字 + 200 overlap、句界对齐切块 | §1.1 Pinecone"小文档可能根本不需要切分"；固定大小切分是合理起点 | **符合**。1500 字对中文 ≈1500 token（中英混合文档会略少），略高于业界 128–1024 token 常见上限但可接受——且实际注入用"词重叠选块 + 预算截断"补偿 |
-| 3 | 引用策略 A：检索层给 chunk/文件编号 → 提示词强制 [N]（L1483）→ 前端 `[N]` 链接跳原文（ChatPanel `#ref:`） | §4.1 RedHop/Neel Mishra：检索器编号 + 强制引用 + 校验，是唯一推荐管线 | **骨架正确**，但校验层缺失（见 ❌#2） |
+| 3 | 引用策略 A：检索层给 chunk/文件编号 → 提示词强制 [N]（prompt.rs 约 L1138）→ 前端 `[N]` 链接跳原文（ChatPanel `#ref:`） | §4.1 RedHop/Neel Mishra：检索器编号 + 强制引用 + 校验，是唯一推荐管线 | **骨架正确**，但校验层缺失（见 ❌#2） |
 | 4 | 检索范围控制：@文件/@目录、scope 快照、父吞子、strict 模式、跨轮保留（docs 08 §步骤4） | §6.1 NotebookLM/Perplexity"范围限定再问" | **已做到位**，是差异化优势 |
 | 5 | 查询改写克制：规则指代消解（rewrite_query）+ 可选 LLM 改写（5s 超时降级），无 multi-query/HyDE | §3.1"叠满反而更差"；只对短查询/指代有用 | **符合"克制"原则**，且已有降级 |
 | 6 | 多轮历史注入但截断 500 字/条（L1488-1490） | §4.1 别无限累积上下文 | **符合** |
@@ -375,16 +375,16 @@
 
 | # | 缺口 | 现状（文件:行号） | 业界锚点 | 影响 |
 |---|---|---|---|---|
-| 1 | **0 命中/低置信时仍硬答** | strict 关闭时 context 为空也照常走 LLM（拒绝逻辑仅在 strict_docs 内 L1469-1482） | §4.1/§6.2"资料不足就明说"优于硬编；Perplexity 低置信给兜底 | 检索不到时模型自由发挥 → 幻觉答案，最伤信任 |
-| 2 | **引用无白名单校验（幻觉引用没被剥离）** | auto_cite(L1562) 只"补 [N]"不"校验剥离"越界 [N]；前端只渲染、不过滤 | §4.2 RedHop"策略 A 必须程序校验，LLM 自造引用事后难发现" | 回答里出现不在材料里的 [N] → 用户点开是错误来源 |
-| 3 | **长文档注入从头部截断，静默丢尾部** | context = truncate_text(50k/140k, L1466)；非 full_recall 时 BM25 命中 ≤30 份且每份按预算截断（L1355） | §4.1 Lost in the Middle；截断应"可感知"而非静默 | 长文档尾部结论/关键段落静默丢失，用户无感 |
-| 4 | **文件级向量只编全文前 2000 字符** | embed 入口统一截断 `truncate_for_embed`（ai/mod.rs L169-176, EMBED_MAX_CHARS=2000）；文件级向量因此只编码文档头部 | §1.1（chunk 粒度决定检索上限） | 长文档中后段细节在文件级通道无信号（已靠 chunk 向量缓解，但头部偏好仍在） |
-| 5 | **向量检索=每轮全表拉 SQLite BLOB 暴力余弦** | db/tracker.rs get_all_embeddings/get_all_chunk_embeddings → ai/mod.rs vector_full_scan 余弦 | §5.1 Faiss"少量搜索直接 Flat"；1 万向量全内存毫秒级 | 1 万级量级下 release 检索尚可用（debug dry-run 全流程 ~1m、release ~14s，大头是本地 BGE 推理），但每轮全表解码 + 无内存驻留，随文档增长线性劣化，且与 embedding 延迟叠加 |
-| 6 | **查询 embedding 无缓存** | 每轮问答现算查询向量（L1213）；本地 BGE debug 下单次 ~85s（CHANGELOG），有 5s 超时保护 | §5.1 查询 embedding 缓存是最便宜的优化之一 | 本地模型下每轮都付 embedding 延迟 |
-| 7 | **Web 模式无 ai-progress 事件** | webapi/mod.rs BRIDGED_EVENTS 只含 ai-chunk/ai-done，不含 ai-progress | §6（可感知性：阶段进度是信任的一部分） | Web 端无"检索中/生成中"阶段反馈 |
+| 1 | **0 命中/低置信时仍硬答** | strict 关闭时 context 为空也照常走 LLM（拒绝逻辑仅在 strict_docs 内，prompt.rs 约 L1113-1125） | §4.1/§6.2"资料不足就明说"优于硬编；Perplexity 低置信给兜底 | 检索不到时模型自由发挥 → 幻觉答案，最伤信任 |
+| 2 | **引用无白名单校验（幻觉引用没被剥离）** | auto_cite（commands/ai/cite.rs 约 L16）只"补 [N]"不"校验剥离"越界 [N]；前端只渲染、不过滤 | §4.2 RedHop"策略 A 必须程序校验，LLM 自造引用事后难发现" | 回答里出现不在材料里的 [N] → 用户点开是错误来源 |
+| 3 | **长文档注入从头部截断，静默丢尾部** | context = truncate_text(50k/140k, prompt.rs 约 L1079-1080)；非 full_recall 时 BM25 命中 ≤30 份且每份按预算截断（prompt.rs 约 L954-1045） | §4.1 Lost in the Middle；截断应"可感知"而非静默 | 长文档尾部结论/关键段落静默丢失，用户无感 |
+| 4 | **文件级向量只编全文前 2000 字符** | embed 入口统一截断 `truncate_for_embed`（ai/mod.rs 约 L256, EMBED_MAX_CHARS=2000）；文件级向量因此只编码文档头部 | §1.1（chunk 粒度决定检索上限） | 长文档中后段细节在文件级通道无信号（已靠 chunk 向量缓解，但头部偏好仍在） |
+| 5 | **向量检索=每轮全表拉 SQLite BLOB 暴力余弦** | db/tracker/embeddings.rs get_all_embeddings/get_all_chunk_embeddings → ai/mod.rs vector_full_scan（约 L418）余弦 | §5.1 Faiss"少量搜索直接 Flat"；1 万向量全内存毫秒级 | 1 万级量级下 release 检索尚可用（debug dry-run 全流程 ~1m、release ~14s，大头是本地 BGE 推理），但每轮全表解码 + 无内存驻留，随文档增长线性劣化，且与 embedding 延迟叠加 |
+| 6 | **查询 embedding 无缓存** | 每轮问答现算查询向量（prompt.rs 约 L517-518）；本地 BGE debug 下单次 ~85s（CHANGELOG），有 5s 超时保护 | §5.1 查询 embedding 缓存是最便宜的优化之一 | 本地模型下每轮都付 embedding 延迟 |
+| 7 | ~~**Web 模式无 ai-progress 事件**~~（已修复） | webapi/mod.rs BRIDGED_EVENTS 现含 ai-progress（原只含 ai-chunk/ai-done） | §6（可感知性：阶段进度是信任的一部分） | Web 端已可见"检索中/生成中"阶段反馈 |
 | 8 | **完全无评测基线** | 无 golden set、无离线评测脚本；改检索/提示词无法量化对错 | §7 RAGAS；"先跑基线再谈优化"；golden set ≥30 条 | **最关键的缺失**：现在无法证明"改完更准了" |
 | 9 | **chunk 无结构/语境** | chunks.rs 纯字符窗口切块，无标题/章节/页码信息；仅打印 `（第{start}-{end}字）` | §1.5 Contextual Retrieval 廉价版（路径+标题前缀） | 检索/引用的定位精度有上限；无法跳原文段落 |
-| 10 | **ai/skills/* 与生产单体双份实现** | prepare_conversation_prompt_pipeline #[allow(dead_code)]（L1512）；行为与单体有漂移 | §（工程收敛） | 后续改哪层容易错；Skill 版已退化 |
+| 10 | ~~**ai/skills/* 与生产单体双份实现**~~（已收敛） | `ai/skills/*` 与 `prepare_conversation_prompt_pipeline` 已删除，生产只剩单体 `commands/ai/prompt.rs` | §（工程收敛） | 双份实现风险已消除 |
 
 #### 🚫 明确不做（避免过度工程；第一部分已有量化论据）
 
@@ -400,9 +400,9 @@
 ### 9.3 关键缺口细节（附代码位置）
 
 见上表。三个 P0 缺口的精确触发路径：
-- **0 命中硬答**：`prepare_conversation_prompt` 返回的 `context` 为空/极短时，只有 `strict_docs==true` 才 `return Err(...)`（L1469-1482）；非 strict 时带着空 context 继续 → `chat_stream` 让 LLM 基于"材料：\n"硬答。
-- **幻觉引用**：`auto_cite(L1562)` 的职责是"给没引用的句子补 [N]"；对 LLM 自己输出的越界编号（如 [99]）无白名单拦截。前端 `#ref:` 渲染基于 evidence 数组索引，越界编号会指向错误/不存在的来源。
-- **静默截断**：`truncate_text`（L1466）对拼好的 docs 截断到 50k/140k 字符，被截掉的内容无任何提示（事件里只有 total_chars/truncated_to，L1501-1506）。
+- **0 命中硬答**：`prepare_conversation_prompt` 返回的 `context` 为空/极短时，只有 `strict_docs==true` 才 `return Err(...)`（prompt.rs 约 L1113-1125）；非 strict 时带着空 context 继续 → `chat_stream` 让 LLM 基于"材料：\n"硬答。
+- **幻觉引用**：`auto_cite（commands/ai/cite.rs 约 L16）` 的职责是"给没引用的句子补 [N]"；对 LLM 自己输出的越界编号（如 [99]）无白名单拦截。前端 `#ref:` 渲染基于 evidence 数组索引，越界编号会指向错误/不存在的来源。
+- **静默截断**：`truncate_text`（prompt.rs 约 L1079-1080）对拼好的 docs 截断到 50k/140k 字符，被截掉的内容无任何提示（事件里只有 total_chars/truncated_to，prompt.rs 约 L1159-1164）。
 
 ---
 
@@ -426,7 +426,7 @@
 - 为什么：RedHop"策略 A 必须程序校验"（§4.2）；越界 [N] 会指向错误来源，比没引用更伤信任。
 - 怎么做：
   - `chat_stream`/`conversation_ask` 拿到完整回答后：正则提取所有 `[N]`，与本次注入材料的真实编号集合（evidence 里的合法 [N]）比对 → **剥离不在白名单的 [N]**（保留文字，删编号）。
-  - `auto_cite` 补引前先做白名单校验（它当前假设所有 [N] 合法，L1562 附近）。
+  - `auto_cite` 补引前先做白名单校验（它当前假设所有 [N] 合法，commands/ai/cite.rs 约 L16 附近）。
   - 加单测：回答含 `[99]`/`[abc]`/越界编号 → 校验后剥离；回答引用真实编号 → 保留。
   - 涉及：`commands/ai.rs`（新增 sanitize_citations）、`ai/mod.rs`（如 chat_stream 兜底）。
 - 怎么验：单测覆盖越界/非数字/真实编号三态；golden set 中 citation-precision 用例通过（§7.4）。
@@ -464,7 +464,7 @@
 - 怎么验：基准脚本对比单轮问答检索耗时；重启/索引变更后缓存正确失效。
 
 **P1-D 结构感知切分（原 P2-3 上提）**
-- 为什么：82 篇 >20 万字 + 5 篇 >100 万字，若用 1500 字盲窗硬切会切出大量语义不完整块（准确度上限被切分决定）；PDF 提取器已保留 form-feed 分页信号（extractor/pdf.rs L129），但 doc_chunks 没利用。结构感知是长文档问答准确度的**前置条件**，不是锦上添花。
+- 为什么：82 篇 >20 万字 + 5 篇 >100 万字，若用 1500 字盲窗硬切会切出大量语义不完整块（准确度上限被切分决定）；PDF 提取器已保留 form-feed 分页信号（extractor/pdf.rs 约 L43），但 doc_chunks 没利用。结构感知是长文档问答准确度的**前置条件**，不是锦上添花。
 - 怎么做：对 >50k 字长文档启用结构感知切分（识别 `\f` 页界/标题行/章节），chunk 前缀带"路径 + 页区间/章节名"；≤10k 短文档维持现状。**代价是重切分+重嵌入这些长文档**——但配合 P1-B 懒嵌入，只重嵌被命中的块，成本可控。
   - 涉及：`db/chunks.rs`（切分器升级 + chunk 存 prefix/页码）、`commands/index.rs`（重切回填）、`commands/ai.rs`（注入带页码）。
 - 怎么验：golden set 中"长文档段落级引用"用例；重切仅影响 >50k 文档，短文档零变化。
@@ -481,7 +481,7 @@
 - 为什么：现在无任何量化基线；"改完更准了"无法证明（§7 全节）。这是本路线图**最该先铺**的一项，且规模越大越需要（P1-A/B/D 每个都改检索行为，无评测无法验收）。
 - 怎么做：
   - 建 `tests/golden/`（或 `scripts/eval/`）：30–60 条 QA，覆盖 事实抽取 / **超长文档中后段定位** / 跨文件综合 / 精确编号匹配 / **不可答（拒答）** / 近义词表述；每条标注支撑文件 + 期望要点。**语料用真实大库子集（固定快照目录 + 独立 data_dir），保证可重复、可进 CI**。
-  - 离线评测脚本：**复用现成 `chat --dry-run` CLI（cli.rs L235-268）作检索桩**——对每条 golden 问题跑 dry-run，解析 `[N] bm25=.. sem=.. path=..` 输出比对支撑文件，算 Context Recall@10/Precision@10/nDCG@10，**无需新写 Rust 检索入口**。生成层 Faithfulness + Answer Relevancy 用真实 `chat` 回答 + 较强 API judge。
+  - 离线评测脚本：**复用现成 `chat --dry-run` CLI（cli.rs 约 L292-344）作检索桩**——对每条 golden 问题跑 dry-run，解析 `[N] bm25=.. sem=.. path=..` 输出比对支撑文件，算 Context Recall@10/Precision@10/nDCG@10，**无需新写 Rust 检索入口**。生成层 Faithfulness + Answer Relevancy 用真实 `chat` 回答 + 较强 API judge。
   - **评测脚本必须固定 embedding 配置**（dry-run 走 prepare_conversation_prompt，未配置 embedding 时向量通道静默跳过）——用 local:bge-large 固定，保证数字可比。
   - 每次改 chunk / embedding / prompt / 模型 / 检索逻辑（尤其 P1-A/B/D）必跑；结果写 `tests/golden/last_run.json` 可 diff。
   - 涉及：新增 `scripts/eval/`、固定测试语料目录、`docs/` 记录基线。

@@ -6,7 +6,7 @@
 
 欢迎！本手册按**学习路径**组织，建议按顺序阅读。每章包含 step-by-step 操作步骤、截图标注和验证清单。
 
-> ✅ **E2E 测试覆盖**：核心功能已通过自动化 GUI 测试（101 个用例，全部通过），包括 8 个页面路由加载、AI 流式对话、主题切换、搜索交互等。详见 `docs/12-testing.md`。
+> ✅ **E2E 测试覆盖**：核心功能已通过自动化 GUI 测试（101 个用例，全部通过），包括 9 个页面路由加载、AI 流式对话、主题切换、搜索交互等。详见 `docs/12-testing.md`。
 
 ---
 
@@ -38,7 +38,7 @@
 
 ### [第六章：设置详解](06-settings.md)
 
-通用 / 索引 / 文档解析 / AI / 备份 / 性能 / 系统 标签页。
+通用 / 索引 / 依赖中心 / 文档解析 / AI / 备份 / 性能 / 系统 标签页。
 
 ### [第七章：索引管理](07-index-manage.md)
 
@@ -58,7 +58,7 @@
 
 ### [第十章：命令行](10-cli.md)
 
-link-searcher search / scan / watch / health。
+link-searcher index（别名 search）/ scan / watch / health / chat / quality / index-qa。
 
 ---
 
@@ -68,7 +68,7 @@ link-searcher search / scan / watch / health。
 
 ### [第十二章：自动化测试](12-testing.md)
 
-37 个 E2E 用例，覆盖 8 个页面路由 + AI 流式对话全链路。
+101 个 E2E 用例，覆盖 9 个页面路由 + AI 流式对话全链路。
 
 ---
 

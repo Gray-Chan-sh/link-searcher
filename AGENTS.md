@@ -95,11 +95,14 @@ semgrep scan \
 
 | 文件 | 说明 |
 |------|------|
-| `src-tauri/src/lib.rs` | Tauri 初始化 + 启动流程 |
+| `src-tauri/src/lib.rs` | Tauri 初始化 + 启动流程 + 命令注册 |
 | `src-tauri/src/scanner/mod.rs` | 全量/增量/启动扫描 |
 | `src-tauri/src/indexer.rs` | 索引服务（batch_index / MD5 / 去重） |
-| `src-tauri/src/db/tracker.rs` | 文件追踪 CRUD + 统计 |
+| `src-tauri/src/db/tracker.rs` | 文件追踪 CRUD + 统计（子模块 `db/tracker/{content,embeddings}.rs`） |
 | `src-tauri/src/extractor/paddleocr.rs` | PaddleOCR 内置引擎 |
+| `src-tauri/src/extractor/pdf.rs` | PDF 提取入口（子模块 `extractor/pdf/{poppler,scan,quality,ocr}.rs`） |
+| `src-tauri/src/commands/ai.rs` | AI 摘要 / RAG 问答 / 多轮聊天（子模块 `commands/ai/{cite,session,rewrite,retrieval,prompt}.rs`） |
+| `src-tauri/src/commands/index.rs` | 索引状态/扫描/重建（子模块 `commands/index/{embeddings,verify,integrity}.rs`） |
 | `src/pages/SearchPage.tsx` | 搜索页 |
 | `src/pages/Browse.tsx` | 浏览页（表格视图） |
 | `src/pages/IndexStatus.tsx` | 索引状态页 |

@@ -1,7 +1,7 @@
 # RAG 检索层评测（Context Recall@10）
 
 `scripts/eval/run_rag_eval.sh` 提供可重复的检索质量基线：对 golden set 的每个
-问题跑 `link-searcher chat --dry-run`（三路检索 + 注入，**不调用 LLM**），把注入
+问题跑 `link-searcher chat --dry-run`（四路检索 + 注入，**不调用 LLM**），把注入
 的 evidence（按相关度排序）与该问句标注的支撑文件比对，输出 Context Recall@10
 与 Success@10。
 

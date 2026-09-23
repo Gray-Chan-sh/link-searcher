@@ -53,7 +53,7 @@
 | 代码 | `.py` `.rs` `.ts` `.js` `.html` `.css` `.sql` `.sh` | 作为文本处理 |
 | 未知 | 任意 | 纯文本回退尝试 |
 | 压缩包 | `.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.gz` `.bz2` `.xz` | 枚举条目，文本直接读，Office/PDF/图片走提取管线 |
-| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + CAM++ 说话人分离，支持吴语/粤语/闽语 |
+| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + pyannote 分段 + CAM++ 说话人分离 |
 
 ### OCR（文字识别）
 
@@ -136,10 +136,12 @@
 |------|------|
 | **系统托盘** | 关闭窗口默认隐藏到托盘（显示/隐藏 + 退出菜单，左键切换窗口）；托盘菜单「退出」真正退出 |
 | **开机自启** | 可选（macOS LaunchAgent / Windows 启动项） |
-| **命令行搜索** | `link-searcher search "keyword"`（别名 `index`） |
+| **命令行搜索** | `link-searcher index "keyword"`（别名 `search`） |
 | **命令行扫描/监控** | `link-searcher scan [dir]` 扫描并退出；`link-searcher watch dir` 实时监控文件变更 |
 | **索引健康检查** | `link-searcher health` |
+| **命令行 AI 问答** | `link-searcher chat "问题"`（支持 `--scope` / `--no-llm` / `--dry-run` 等） |
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
+| **QA 生成** | `link-searcher index-qa` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
 | **远程 WebUI / API** | 可选 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），默认关闭，设置页开启并可切换 localhost / LAN；Token 轮换需已认证，忘记 Token 只能从桌面端重置 |
@@ -227,11 +229,16 @@ link-searcher/
 ├── src-tauri/                 # Rust 后端
 │   ├── src/
 │   │   ├── main.rs            # 程序入口
-│   │   ├── lib.rs             # Tauri 初始化 + 启动流程
-│   │   ├── cli.rs             # 命令行接口
+│   │   ├── lib.rs             # Tauri 初始化 + 启动流程 + 命令注册
+│   │   ├── boot.rs            # 启动引导（依赖自检等）
+│   │   ├── process.rs         # 子进程辅助
+│   │   ├── cli.rs             # 命令行接口（index/scan/watch/health/chat/quality/index-qa）
 │   │   ├── config.rs          # 配置文件管理
 │   │   ├── state.rs           # AppState（全局状态）
-│   │   ├── indexer.rs          # 索引服务（batch_index、流式 MD5、自动commit）
+│   │   ├── indexer.rs         # 索引服务（batch_index、流式 MD5、自动 commit）
+│   │   ├── ai/                # 本地嵌入推理（local_embed）
+│   │   ├── deps/              # 运行依赖模型目录/下载（PaddleOCR / BGE / FunASR）
+│   │   ├── logs/              # 日志 + 扫描会话日志
 │   │   ├── search/            # Tantivy 搜索引擎
 │   │   │   ├── mod.rs         # IndexManager（reader 缓存）
 │   │   │   ├── schema.rs      # 字段定义 + tokenizer 注册
@@ -240,42 +247,63 @@ link-searcher/
 │   │   ├── db/                # SQLite 数据库
 │   │   │   ├── mod.rs         # 初始化 + 迁移 + VACUUM + 清理
 │   │   │   ├── tracker.rs     # 文件追踪（CRUD + 统计 + 路径迁移）
+│   │   │   ├── tracker/       # content（去重缓存/质量评分）、embeddings（向量读写）
+│   │   │   ├── chunks.rs      # 长文档分块
+│   │   │   ├── ai_events.rs   # AI 推理事件链
+│   │   │   ├── search_history.rs # 搜索历史
 │   │   │   └── dir_config.rs  # 目录配置
 │   │   ├── extractor/         # 文本提取
 │   │   │   ├── mod.rs         # 格式路由
 │   │   │   ├── ocr.rs         # OCR 引擎调度
 │   │   │   ├── paddleocr.rs   # PaddleOCR 集成（模型运行期定位 + 引擎池并行）
-│   │   │   ├── pdf.rs         # PDF 提取 + pdftoppm OCR
+│   │   │   ├── pdf.rs         # PDF 提取入口
+│   │   │   ├── pdf/           # poppler（二进制发现）、scan（扫描件判定）、quality（文本层质量）、ocr（扫描件 OCR 管线）
 │   │   │   ├── office/        # Office 提取（rwml/calamine/anydoc 原生，无外部依赖）
 │   │   │   ├── image.rs       # 图片 OCR
+│   │   │   ├── apple_vision.rs / windows_ocr.rs # 系统原生 OCR
+│   │   │   ├── audio.rs       # 音频 STT + 说话人分离
+│   │   │   ├── archive.rs     # 压缩包枚举
+│   │   │   ├── quality.rs     # 提取质量评分
+│   │   │   ├── lexicons/      # 质量评分词典
 │   │   │   └── text.rs        # 纯文本提取
 │   │   ├── scanner/           # 目录扫描 + 文件监控
 │   │   │   ├── mod.rs         # full/incremental/startup_scan + handle_event
 │   │   │   ├── watcher.rs     # FileWatcher（后台线程 + 自动重连）
 │   │   │   └── helpers.rs     # 排除规则 + 路径转换 + needs_reindex
-│   │   └── commands/          # Tauri IPC 命令
-│   │       ├── search.rs      # 搜索/建议/导出/文件类型统计
-│   │       ├── index.rs       # 索引状态/扫描/重建/取消/健康检查
-│   │       ├── files.rs       # 文件列表/预览/打开/浏览
-│   │       ├── dirs.rs        # 目录管理/目录树
-│   │       ├── config.rs      # 配置读写/数据迁移
-│   │       ├── settings.rs    # 设置管理
-│   │       ├── backup.rs      # 备份恢复
-│   │       ├── tesseract.rs   # OCR 引擎管理
-│   │       ├── ai.rs          # AI 摘要 / RAG 问答 / 多轮聊天
-│   │       ├── clarify.rs     # 指代消解（State / Grounding / Resolver）
-│   │       ├── bge.rs         # BGE 嵌入模型安装
-│   │       ├── funasr.rs      # FunASR 语音模型安装
-│   │       └── performance.rs # 硬件检测 / 自动调参
-│   ├── webapi/                # 可选 HTTPS REST API（axum + rustls）
+│   │   ├── commands/          # Tauri IPC 命令
+│   │   │   ├── search.rs      # 搜索/建议/导出/文件类型统计
+│   │   │   ├── index.rs       # 索引状态/扫描/重建/取消/健康检查
+│   │   │   ├── index/         # embeddings（向量回填）、verify（验证/重提取）、integrity（DB↔Tantivy 自愈）
+│   │   │   ├── files.rs       # 文件列表/预览/打开/浏览
+│   │   │   ├── dirs.rs        # 目录管理/目录树
+│   │   │   ├── config.rs      # 配置读写/数据迁移
+│   │   │   ├── settings.rs    # 设置管理
+│   │   │   ├── backup.rs      # 备份恢复
+│   │   │   ├── tesseract.rs   # OCR 引擎管理
+│   │   │   ├── ai.rs          # AI 摘要 / RAG 问答 / 多轮聊天
+│   │   │   ├── ai/            # cite（引用）、session（会话）、rewrite（改写）、retrieval（检索融合）、prompt（提示组装）
+│   │   │   ├── clarify.rs     # 指代消解（State / Grounding / Resolver）
+│   │   │   ├── bge.rs         # BGE 嵌入模型安装
+│   │   │   ├── funasr.rs      # FunASR 语音模型安装
+│   │   │   ├── logs.rs        # 日志命令
+│   │   │   ├── helpers.rs     # 命令公共辅助
+│   │   │   └── performance.rs # 硬件检测 / 自动调参
+│   │   ├── webapi/            # 可选 HTTPS REST API（axum + rustls）
+│   │   │   ├── mod.rs         # 服务启动 + 事件桥白名单
+│   │   │   ├── auth.rs / tls.rs / static_files.rs / state.rs
+│   │   │   └── routes/        # search / files / index / ai / dirs / config / settings / backup / logs / events / tesseract
 │   ├── models/                # PaddleOCR ONNX 模型（PP-OCRv5）
 │   ├── capabilities/          # Tauri 权限配置
 │   └── tests/                 # 集成测试 + IPC 测试
 ├── src/                       # React 前端
-│   ├── api/                   # IPC 调用封装（search / settings / files / config / index）
-│   ├── components/            # 通用组件（SearchBar / FilterPanel / PreviewPanel / ChatPanel / StatusBar / ResultList）
+│   ├── api/                   # IPC 调用封装（search / settings / files / dirs / config / index / logs / backup / client）
+│   ├── components/            # 通用组件（SearchBar / FilterPanel / PreviewPanel / ChatPanel / StatusBar / ResultList / SetupWizard …）
+│   │   └── settings/          # 设置页各标签页（General / Index / Deps / Docs / Ai / Backup / Performance / System）
 │   ├── pages/                 # 页面（Search / Browse / DirManager / IndexStatus / Quality / LogViewer / Settings / FileTypes / AiChat）
-│   ├── hooks/                 # 自定义 Hook（useSearch / useDirs / useTheme / useSettings* / useIndexStatus）
+│   ├── hooks/                 # 自定义 Hook（useSearch / useDirs / useIndexStatus / useSettings* / usePersistentState / useSetup）
+│   ├── utils/                 # 工具函数（+ __tests__ 前端单测）
+│   ├── ai/                    # 流式状态存储（streamStore）
+│   ├── theme.tsx              # 主题（浅色/深色/跟随系统）
 │   └── i18n/                  # 国际化（zh / en / ja / ko）
 ├── assets/                    # 静态资源（字体等）
 ├── USER_MANUAL.md             # 用户手册（索引，正文在 docs/）
@@ -292,15 +320,12 @@ link-searcher/
 cd src-tauri && cargo test
 ```
 
-当前测试：Rust 单元测试 `cargo test --lib` **425 passed**；前端 `npm test`（vitest）**31 passed**；GUI 交互用例 **101**（`test-visual/`，见 [TEST_REPORT](docs/TEST_REPORT.md)）。
+当前测试：Rust 单元测试 `cargo test --lib` **425 passed**（1 ignored）；前端 `npm test`（vitest）**56 passed**；GUI 交互用例 **101**（`test-visual/`，见 [TEST_REPORT](docs/TEST_REPORT.md)）。
 
 ### 性能测试套件
 
 ```bash
-# 生成测试数据（需要 Python 依赖：reportlab, python-docx, openpyxl, Pillow）
-python3 scripts/gen_test_data.py /tmp/ls-test-1k 1000
-
-# 运行性能测试（需先构建：npm run tauri build）
+# 运行性能测试（需先构建：npm run tauri build；<test_data_dir> 需自行准备）
 ./scripts/perf_scan.sh /tmp/ls-test-1k 1k-files
 ```
 

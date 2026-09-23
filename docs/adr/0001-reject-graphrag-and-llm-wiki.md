@@ -27,7 +27,7 @@ Link-Searcher 是一个本地优先的文档全文搜索工具，附带可选的
 
 **不采用 GraphRAG，也不采用 LLM Wiki 模式。**
 
-现有架构（混合检索 + 两级漏斗 + 有范围限定的 RAG 对话）保持不变。`ai_topic_clusters` 命令（`commands/ai.rs:105`）继续作为全库主题概览的轻量替代。
+现有架构（混合检索 + 两级漏斗 + 有范围限定的 RAG 对话）保持不变。`ai_topic_clusters` 命令（`commands/ai.rs:108`）继续作为全库主题概览的轻量替代。
 
 ---
 
@@ -93,7 +93,7 @@ LLM Wiki 模式同样需要用强模型做全量编译，且需要持续维护�
 |------|------|--------------|
 | 明确不做清单 | `docs/research-rag-best-practices-personal.md:503` | 项目已独立否决全库 LLM 重算、全库 ANN、全库进上下文等 GraphRAG/LLM Wiki 的前置依赖 |
 | 文件监控 + 增量更新 | `docs/ARCHITECTURE.md:160`; AGENTS.md scanner 模块 | 语料持续变动，一次性离线索引（GraphRAG 设计前提）与实际使用模式冲突 |
-| 两级漏斗已替代全库扫描 | commit `1b9908e`; `commands/ai.rs:1393`; `ai/mod.rs:429`; `db/tracker.rs:1000` | chunk 级余弦只对粗筛命中集做，已将扫描量从全库 chunk 降到命中集 chunk，无需全库索引 |
+| 两级漏斗已替代全库扫描 | commit `1b9908e`; `commands/ai/prompt.rs`（漏斗编排，约 L534-561）; `ai/mod.rs:532`（`chunk_vector_scan_for_md5s`）; `db/tracker/embeddings.rs:171`（`get_chunk_embeddings_by_md5s`） | chunk 级余弦只对粗筛命中集做，已将扫描量从全库 chunk 降到命中集 chunk，无需全库索引 |
 | chunk 向量增量回填 | 实现：commit `1b9908e`；问题：`docs/research-rag-best-practices-personal.md:455`（1154 / 125,243 ≈ 1%）；结果：本文理由 1 规模快照（2026-09-16 实测比值 1.0） | chunk 向量覆盖率从 ~1% 收敛到 100%，证明增量路径可行；GraphRAG 无此路径 |
 
 ### 理由 3：已有能力覆盖 + 实测无缺口（Existing Coverage + No Measured Gap）
@@ -102,17 +102,17 @@ LLM Wiki 模式同样需要用强模型做全量编译，且需要持续维护�
 
 | 能力 | 已有实现 | 代码位置 |
 |------|---------|---------|
-| 全库主题概览 | `ai_topic_clusters` 命令：拉取文档摘要/前 200 字，单次 LLM 调用做主题分组 | `commands/ai.rs:105`; `db/mod.rs:317`（`doc_summaries` 表）; `lib.rs:101`（注册） |
-| 跨文档综合 + 引用 | RAG 对话管线：查询改写、三路检索、引用编号校验、范围控制 | `commands/ai.rs:2039`（`conversation_ask_stream`） |
-| 规模适配检索 | 两级漏斗：文档级粗筛 → 命中集 chunk 级精检，粗筛 0 命中时回退全库 chunk 扫描 | commit `1b9908e`; `commands/ai.rs:1393`; `ai/mod.rs:429`（`chunk_vector_scan_for_md5s`）; `db/tracker.rs:1000`（`get_chunk_embeddings_by_md5s`） |
+| 全库主题概览 | `ai_topic_clusters` 命令：拉取文档摘要/前 200 字，单次 LLM 调用做主题分组 | `commands/ai.rs:108`; `db/mod.rs:323`（`doc_summaries` 表）; `lib.rs:101`（注册） |
+| 跨文档综合 + 引用 | RAG 对话管线：查询改写、四路检索、引用编号校验、范围控制 | `commands/ai.rs:563`（`conversation_ask_stream`） |
+| 规模适配检索 | 两级漏斗：文档级粗筛 → 命中集 chunk 级精检，粗筛 0 命中时回退全库 chunk 扫描 | commit `1b9908e`; `commands/ai/prompt.rs`（漏斗编排，约 L534-561）; `ai/mod.rs:532`（`chunk_vector_scan_for_md5s`）; `db/tracker/embeddings.rs:171`（`get_chunk_embeddings_by_md5s`） |
 | 检索质量度量 | 评测脚本：golden set + `chat --dry-run`，输出 Context Recall@10 / Success@10 | commit `d99ce91`; `scripts/eval/run_rag_eval.sh`; `scripts/eval/README.md` |
 | 生产链路收敛 | 删除 `ai/skills/` 脚手架，收敛到单一生产路径 | commit `a49265c`（2026-09-03） |
 
 **评测现状：**
 
-冒烟跑（3 个问句）报告 Recall@10 = 100%（`CHANGELOG.md:802`：smoke 验证）。reranker 因此被延后（`CHANGELOG.md:810`：P2-4 reranker 评测未证明需要，当前 Recall@10=100%）。
+冒烟跑（3 个问句）报告 Recall@10 = 100%（`CHANGELOG.md:1859`：smoke 验证）。reranker 因此被延后（`CHANGELOG.md:1867`：P2-4 reranker 评测未证明需要，当前 Recall@10=100%）。
 
-必须诚实说明：3 个问句的样本过小，不能作为"检索质量已无瓶颈"的结论性证据。评测基础设施已经存在，但其当前样本不足以产生可信结论。`scripts/eval/README.md:39` 指出 golden set 应标注 30 至 60 条问句。在 golden set 扩充到该规模并跑出可信基线之前，"无缺口"这一判断的置信度有限。扩充 golden set 是后续工作的前置条件，不是本 ADR 的内容。
+必须诚实说明：3 个问句的样本过小，不能作为"检索质量已无瓶颈"的结论性证据。评测基础设施已经存在，但其当前样本不足以产生可信结论。`scripts/eval/README.md:52` 指出 golden set 应标注 30 至 60 条问句。在 golden set 扩充到该规模并跑出可信基线之前，"无缺口"这一判断的置信度有限。扩充 golden set 是后续工作的前置条件，不是本 ADR 的内容。
 
 ### 前提澄清
 
@@ -136,19 +136,19 @@ LLM Wiki 模式同样需要用强模型做全量编译，且需要持续维护�
 
 1. **Golden set 扩充到 30 至 60 条问句后，Context Recall@10 跌破 90%。**
    - 度量方式：按 `scripts/eval/README.md` 准备 golden 目录，跑 `scripts/eval/run_rag_eval.sh`，读取 Recall@10 输出。
-   - 阈值理由：90% 意味着每 10 个相关文档有 1 个被漏检。当前冒烟样本（3 问句, 100%）太小，阈值仅在 golden set 达到推荐规模（30 至 60 条, `scripts/eval/README.md:39`）后才有统计意义。低于 90% 时，引入实体/图结构检索层的成本可能被可度量的检索失败所证明。
+   - 阈值理由：90% 意味着每 10 个相关文档有 1 个被漏检。当前冒烟样本（3 问句, 100%）太小，阈值仅在 golden set 达到推荐规模（30 至 60 条, `scripts/eval/README.md:52`）后才有统计意义。低于 90% 时，引入实体/图结构检索层的成本可能被可度量的检索失败所证明。
 
 2. **出现一个具体的、真实的用户需求：跨文档多跳关系查询或全库主题综合，且当前 RAG 可证明无法满足。**
    - 度量方式：将该用例加入 golden set，跑评测确认 Recall@10 = 0（或回答正确性被 judge 判定为失败），而非假设性推理。
-   - `ai_topic_clusters` 命令已提供主题分组（`commands/ai.rs:105`）。触发条件是该命令或现有 RAG 对话在某个具体问题上可证明失败，且该问题类型是用户实际需要的，不是想象出来的。
+   - `ai_topic_clusters` 命令已提供主题分组（`commands/ai.rs:108`）。触发条件是该命令或现有 RAG 对话在某个具体问题上可证明失败，且该问题类型是用户实际需要的，不是想象出来的。
 
 3. **语料规模在任一方向发生实质性变化：**
    - (a) 活跃文件降至 ~200 以下：LLM Wiki 模式进入其验证有效区间（~100 sources, per Karpathy gist），该选项重新开放。
-   - (b) doc 级向量增长到数十万：重开 ANN / 内存驻留问题。项目已在 ~11k 向量时暂缓内存驻留（`CHANGELOG.md:808`：doc 向量 1.1 万条全表拉 + 余弦约几十 ms 非瓶颈，推迟到 doc 向量几十万级再做）。
+   - (b) doc 级向量增长到数十万：重开 ANN / 内存驻留问题。项目已在 ~11k 向量时暂缓内存驻留（`CHANGELOG.md:1865`：doc 向量 1.1 万条全表拉 + 余弦约几十 ms 非瓶颈，推迟到 doc 向量几十万级再做）。
    - 度量方式：`SELECT COUNT(*) FROM file_tracking WHERE status='active'` 和 `SELECT COUNT(*) FROM doc_embeddings`。
 
 4. **出现产品（非检索质量）层面对知识图谱可视化的需求。**
-   - 这是一个产品决策，不是检索架构决策。在考虑 GraphRAG 之前，首先应评估是否能低成本可视化现有 `ai_topic_clusters` 输出（`commands/ai.rs:105`），该命令已按主题分组文档。
+   - 这是一个产品决策，不是检索架构决策。在考虑 GraphRAG 之前，首先应评估是否能低成本可视化现有 `ai_topic_clusters` 输出（`commands/ai.rs:108`），该命令已按主题分组文档。
    - 度量方式：有产品规格或用户请求明确要求图结构可视化。
 
 ---
@@ -165,7 +165,7 @@ LLM Wiki 模式同样需要用强模型做全量编译，且需要持续维护�
 
 ### (iii) 用本地模型跑 GraphRAG，而非云 API
 
-**未采纳。** 项目的 LLM 子系统支持本地和 API 两种模型。但 GraphRAG 索引在实测语料上需要 ≥125,000 次 chunk 级 LLM 调用。按项目实测的本地推理吞吐（embedding: bge-small-zh-v1.5 ONNX/CPU 48 至 100 块/s, `CHANGELOG.md:816`; LLM 生成: 14B Q4 约 10 至 40 tok/s, `docs/research-rag-best-practices-personal.md:180`），实体提取阶段是数小时的离线任务，且无增量更新路径。语料被 `notify` 监控器（300 ms 防抖）持续变动，任何变更都需要重跑管线的大部分步骤。本地模型不解决成本和增量更新的根本问题，只把成本从 API 费用变为本地计算时间。
+**未采纳。** 项目的 LLM 子系统支持本地和 API 两种模型。但 GraphRAG 索引在实测语料上需要 ≥125,000 次 chunk 级 LLM 调用。按项目实测的本地推理吞吐（embedding: bge-small-zh-v1.5 ONNX/CPU 48 至 100 块/s, `CHANGELOG.md:1873`; LLM 生成: 14B Q4 约 10 至 40 tok/s, `docs/research-rag-best-practices-personal.md:180`），实体提取阶段是数小时的离线任务，且无增量更新路径。语料被 `notify` 监控器（300 ms 防抖）持续变动，任何变更都需要重跑管线的大部分步骤。本地模型不解决成本和增量更新的根本问题，只把成本从 API 费用变为本地计算时间。
 
 ---
 

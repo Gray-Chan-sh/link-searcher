@@ -64,7 +64,7 @@
 - [x] **`.ods` `.odp` `.rtf` `.epub` 浏览筛选**：前端 filter + 后端路由
 - [x] **音频 STT**：FunASR-Nano ONNX 推理，8 种音频格式，Python助手脚本
 - [x] **热词增量计数**：jieba 分词 + SQLite，ASR 识别精度增强
-- [x] **FunASR 零 Python 化（方案 B）**：sherpa-onnx crate（1.13.4）替代 Python venv 推理，下载预转 FunASR-Nano ONNX int8 模型（~842MB）；首次使用（模型未就绪）时自动下载，后台进度 + 完成后可立即索引（复用 install_funasr 事件模式）；部署不打包模型、不装 torch，删除 venv/install_funasr 逻辑
+- [x] **FunASR 零 Python 化（方案 B）**：sherpa-onnx crate（1.13）替代 Python venv 推理，下载预转 FunASR-Nano ONNX int8 模型（~842MB）；首次使用（模型未就绪）时自动下载，后台进度 + 完成后可立即索引（复用 install_funasr 事件模式）；部署不打包模型、不装 torch，删除 venv/install_funasr 逻辑
 - [x] **提取内容质量检测**：对全部文件的正文提取结果做三类检查——①提取内容为空（md5 存在但无文本）②明显乱码（不可打印字符/替换符占比高、无有效中文/英文词）③明显水印文本（"证据"、"仅供"、"附件"等重复水印、极短内容如页码）。检测出的文件标记 quality_bad，支持批量重新提取。接近 P3 的完整性对账 + RAG 内容分析，但独立为可操作项
 
 ---
@@ -74,10 +74,10 @@
 - [x] **向量搜索 / AI 增强**：一期 AI 网关+语义搜索（BM25×向量 RRF）；二期 AI 摘要 + 跨文件 RAG 问答（`/chat/completions`）
 - [x] **对话式文档检索（多轮 RAG）**：已实现——`conversation_ask_stream` + `prepare_conversation_prompt` 支持每轮重新检索、query rewrite（规则 + LLM 双路）、跨轮 scope 累计、来源去重与证据标注、推理事件时间线（2026-08-25 核实）
 - [x] **长文档分块检索**：已实现——索引时按 ~1500 字符 +200 overlap 句界切块存 `doc_chunks` 表（md5 键），RAG 注入对 >50K 文档选 top-8 词法相关段落（带「第X-Y字」标记），扫描后自动回填存量文档（2026-08-25）
-- [x] **安全的远程 WebUI 与 API**：可选的 HTTPS 守护进程（axum + rustls，非 Tauri 插件），暴露 20 个 RESTful 端点（搜索/浏览/文件预览/索引状态/扫描/AI 问答/会话 CRUD），Bearer Token 认证 + 自签名 TLS 证书，默认关闭需显式启用，绑定地址可选 localhost/LAN，设置页可配置端口/Token/绑定地址
+- [x] **安全的远程 WebUI 与 API**：可选的 HTTPS 守护进程（axum + rustls，非 Tauri 插件），暴露 70 个 RESTful 路由（搜索/浏览/文件预览/索引状态/扫描/AI 问答/会话 CRUD/备份/日志/事件等），Bearer Token 认证 + 自签名 TLS 证书，默认关闭需显式启用，绑定地址可选 localhost/LAN，设置页可配置端口/Token/绑定地址
 - [x] **监控目录热重载**：已实现——update_dir 后自动触发增量扫描 + 重启 watcher（2026-08-25 核实）
 - [x] **多语言界面**：中/英/日/韩 UI 完整覆盖，设置页切换（i18n/{zh,en,ja,ko}.ts；2026-08-25 核实）
-- [x] **CLI 增强**：已有 `index`(别名 search)、`scan [dir]`、`watch dir`、`health` 子命令，无 GUI 可用（2026-08-25 核实）
+- [x] **CLI 增强**：已有 `index`(别名 search)、`scan [dir]`、`watch dir`、`health`、`chat`、`quality backfill|audit|reextract`、`index-qa` 子命令与全局 `--data-dir`，无 GUI 可用（2026-09-23 核实）
 - [x] **RAG 内容分析**：摘要（AI 摘要按钮）、跨文件关联（askDocuments/聊天）、主题聚类（索引状态页 `ai_topic_clusters`，2026-08-25）
 
 ---

@@ -24,7 +24,7 @@
 
 ### 现状
 
-`useSearch` 已暴露 `suggestions`、`fetchSuggestions`、`clearSuggestions`，`SearchBar` 从未接收这些 props。`suggest()` 后端已实现（Tantivy `content_suggest` 字段前缀查询）。
+`useSearch` 已暴露 `suggestions`、`fetchSuggestions`、`clearSuggestions`，`SearchBar` 已接收这些 props（选择回调名为 `onPickSuggestion`）。`suggest()` 后端已实现（Tantivy `content_suggest` 字段前缀查询）。
 
 ### 修改
 
@@ -40,7 +40,7 @@ interface SearchBarProps {
   suggestions: string[]
   onFetchSuggestions: (prefix: string) => void
   onClearSuggestions: () => void
-  onSelectSuggestion: (suggestion: string) => void
+  onPickSuggestion: (suggestion: string) => void
 }
 ```
 
@@ -67,7 +67,7 @@ interface SearchBarProps {
   suggestions={search.suggestions}
   onFetchSuggestions={search.fetchSuggestions}
   onClearSuggestions={search.clearSuggestions}
-  onSelectSuggestion={(s) => {
+  onPickSuggestion={(s) => {
     search.setQuery(s)
     search.submitSearch()
   }}
@@ -149,7 +149,7 @@ useEffect(() => {
 
 ### 现状
 
-后端 `SearchParams` 已支持 `fuzzy`、`date_from`、`date_to`，前端 `search()` 参数已传递，但 UI 从无暴露。
+后端 `SearchParams` 已支持 `fuzzy`、`date_from`、`date_to`，但前端 `search()` 签名未含这些参数、UI 从无暴露。
 
 ### 修改
 
@@ -837,7 +837,7 @@ useEffect(() => {
 
 ### 现状
 
-搜索框 placeholder 显示 `(⌘K)` 但并无实际绑定。
+搜索框 placeholder 显示 `(⌘K)`，且已绑定全局 ⌘K / Ctrl+K 聚焦搜索框（`src/components/SearchBar.tsx`）。
 
 ### 修改
 

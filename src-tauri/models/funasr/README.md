@@ -6,8 +6,9 @@ ONNX 导出模型，**不再需要 Python / venv / torch / 外部进程**。
 
 支持中文（含吴语、粤语、闽语、客家话、赣语、湘语、晋语等 7 大方言 + 26 地区口音）、英文、日文，以及歌词/说唱识别。
 
-> ⚠️ 与旧版（Python venv）相比，**不再输出 `[Speaker X]` 说话人分离**——sherpa-onnx 的
-> FunASR-Nano 接口只返回整段转写文本。索引搜索不受影响。
+> ⚠️ 与旧版（Python venv）相比，**说话人分离仍然保留**——sherpa-onnx 的
+> `OfflineSpeakerDiarization` 流水线（pyannote 分段 + CAM++ 嵌入）在模型就绪时输出
+> `[说话人N]` 前缀。索引搜索不受影响。
 
 ## 模型下载（一次性，~850MB）
 
@@ -45,7 +46,11 @@ models/funasr/
 ├── encoder_adaptor.int8.onnx   # 227M 音频编码器
 ├── llm.int8.onnx               # 573M 语音 LLM
 ├── embedding.int8.onnx         # 149M 文本嵌入
-└── Qwen3-0.6B/                 # tokenizer（merges.txt / tokenizer.json / vocab.json）
+├── silero_vad.onnx             # VAD 长音频分段（独立下载，非归档内）
+├── Qwen3-0.6B/                 # tokenizer（merges.txt / tokenizer.json / vocab.json）
+└── models/diarization/         # 说话人分离模型（独立下载）
+    ├── seg.onnx                # pyannote 分段
+    └── emb.onnx                # CAM++ 说话人嵌入
 ```
 
 ## 工作原理
@@ -56,7 +61,7 @@ models/funasr/
 
 识别器在 `OnceLock` 中全局复用，避免每个文件重新加载 ~950M int8 权重。
 解码参数对齐官方配置：`greedy_search`、`temperature=1e-6`、`top_p=0.8`、
-`user_prompt="语音转写："`、`max_new_tokens=512`。
+`user_prompt="语音转写："`、`max_new_tokens=1024`。
 
 ## 常见问题
 

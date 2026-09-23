@@ -1,6 +1,6 @@
 # 第十二章：自动化测试
 
-> GUI 交互用例 101 个（`test-visual/`，见 [TEST_REPORT](TEST_REPORT.md)）+ Rust 集成测试，覆盖 8 个页面路由 + AI 流式对话全链路。
+> GUI 交互用例 101 个（`test-visual/`，见 [TEST_REPORT](TEST_REPORT.md)）+ Rust 集成测试，覆盖 9 个页面路由 + AI 流式对话全链路。
 
 ---
 
@@ -104,7 +104,7 @@ Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 ### 终端 1：启动调试 App
 
 ```bash
-cd /Volumes/Data/Project/Link-Searcher
+cd <项目根目录>
 npx tauri dev
 ```
 

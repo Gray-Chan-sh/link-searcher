@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-23：全量文档同步 —— 修正与代码漂移（结构树 / 页面数 / CLI / RAG 描述 / 模型说明）
+
+- **背景**：近期模块拆分（`commands/ai`、`commands/index`、`db/tracker`、`extractor/pdf`）与功能迭代后，多篇文档与代码脱节，做一次全仓审计并同步（共 34 篇 Markdown）。
+- **核心文档**：`README.md` 项目结构树重写（`webapi/` 归位 `src-tauri/src/`，补新拆分子模块与 `ai/ deps/ logs/ boot.rs process.rs` 等顶层模块）、CLI 别名方向纠正（`index` 为主命令、`search` 为别名）并补 `chat`/`quality`/`index-qa`、前端测试数 31→56、删除不存在的 `scripts/gen_test_data.py` 示例、说话人分离说明补 pyannote 分段；`AGENTS.md` 关键文件表补子模块；`ROADMAP.md` WebAPI 端点数 20→70、CLI 清单补全、sherpa 版本 1.13.4→1.13；`USER_MANUAL.md`（根）设置标签页与 CLI 描述补全。
+- **用户手册 `docs/01–12`**：全系列页面数 8→9（新增质量页）；`02` 删除已移除的目录配置面板/保存按钮/私密开关；`09` 备份/导出/恢复/失效目录改到「设置 → 备份」、索引目录 `index/`→`.ls-index`；`07` 「开始扫描」=全量、删除不存在的下拉全量扫描；`05` 删除不存在的左侧目录树与列头排序；`06` 标签顺序/主题下拉/「测试 OCR 引擎」文案/reranker 下拉/系统页区块/上限默认 100→1000；`08` 占位文案/「已改写」/双导出按钮/总预算恒 140k/阈值 0.55；`04` 通配符方向/模糊开关；`11` DPI 200→300、方言支持说明与 Fun-ASR-Nano 模型能力对齐、音频时长限制说明更新（30 分钟截断已移除）；`10` 补全 CLI；`03` 状态与区域文案。
+- **设计与流程**：`ARCHITECTURE.md` 三路→四路检索、三层→四层注入（含 Layer 0.5）、Layer 2 非摘要而是对话回忆、融合改 RRF、截断支持任意位置 chunk、`ai-progress` 已桥接；`RAG_PIPELINE.md` 引用编号已改会话内稳定；`SEARCH_UX_IMPLEMENTATION.md`、`EXTRACTION_SPECIAL_CASES.md`（pdf 子模块归属）、`golden-v2-design.md`、`rag-eval-baseline.md` 同步。
+- **测试/研究/模型**：`TEST_REPORT.md`（版本 `v0.2.0-dev`→`1.1.2`、用例分布合计 96→101）、`e2e-coverage-report.md`、`gui-test-plan.md`（数据目录 `com.link-searcher.app`→`link-searcher`、统计同步）；`research-rag-best-practices-personal.md` 与 `adr/0001` 仅更新因拆分失效的代码路径/行号（结论保留）；`models/funasr/README.md` 改为已实现说话人分离、补 VAD/分离模型、`max_new_tokens` 512→1024；`models/ppocrv5/README.md` 下载来源改 GitHub Releases 镜像链。
+- **验证**：`cargo test --lib` **425 passed / 1 ignored**；文档相对链接无死链。
+- **涉及文件**：`README.md`、`AGENTS.md`、`ROADMAP.md`、`USER_MANUAL.md`、`docs/*.md`、`docs/adr/0001-reject-graphrag-and-llm-wiki.md`、`src-tauri/models/{funasr,ppocrv5}/README.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-23：收尾 —— `.gitignore` 忽略 Tauri 平台 schema 与本机 `.npmrc`
 
 - 将 Tauri 构建生成的 `src-tauri/gen/schemas/*-schema.json`（保留已入库的 `desktop-schema.json`）与本机 npm 镜像配置 `.npmrc` 加入 `.gitignore`，避免构建产物/本机配置污染工作区；恢复 `desktop-schema.json`（仅换行差异、无内容变更）（`.gitignore`）

@@ -29,8 +29,6 @@
 | 语义搜索入口 | MCP execute_js 验证"语义"按钮 | ✅ |
 | 空搜索 | Mock IPC `search` | ✅ |
 | 搜索建议 | Mock IPC `suggest` | ✅ |
-| 搜索框输入文字 | MCP type_text | ✅ |
-| 回车触发搜索 | MCP press_key(Enter) | ✅ |
 
 ### 浏览页
 

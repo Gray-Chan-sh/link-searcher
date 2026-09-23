@@ -152,19 +152,23 @@ v2 **重写**（替换 v1，不追加）。v1 的 88 题保留为**回归基线*
 ## 6. 工具改动（P0）
 
 1. **`chat --dry-run --dump-injected`**
-   现状只打印 `path=`，看不到注入了哪些文字。改为额外打印每份材料的
-   **注入字符区间**，例如：
+   现状每份材料打印 `bm25=… sem=… path=…`；加 `--dump-injected` 后在下一行
+   额外打印每份材料的**注入字符区间**，例如：
    ```
-   [  4] path=…/一审判决书.pdf injected=4553 spans=[0-1500, 7764-9260, 1300-2797]
+     [  4] bm25=0.42 sem=0.613 path=…/一审判决书.pdf
+           spans=[0-1500, 7764-9260, 1300-2797]
    ```
-   实现：让内容组装函数除返回文本外，一并返回覆盖的字符区间。
+   （输出中**没有** `injected=` 字段，注入字数由区间推算。）
 
 2. **`chat --history <json>`**
    现状 CLI 是单轮。改为可从文件读取 `[{role, content}, …]` 作为对话历史
    （底层 `prepare_conversation_prompt` 已接受 messages 数组，仅需在 CLI 暴露）。
 
-3. **评测脚本**：解析 `answer_spans`（引文归一化定位）、按会话回放多轮、
-   输出上述指标。建议拆成两个脚本：检索/注入层（确定性）与回答层（需 LLM）。
+3. **评测脚本（未落地）**：解析 `answer_spans`（引文归一化定位）、按会话回放多轮、
+   输出上述指标的能力**尚未实现**——`scripts/eval/` 下只有 `run_rag_eval.sh`、
+   `run_eval_answerable.py`、`run_ocr_eval.sh`，均不解析 `answer_spans`、也不计算
+   `Span Hit`；`docs/rag-eval-baseline.md` 登记的 Span Hit 目前无脚本可复现。
+   建议拆成两个脚本：检索/注入层（确定性）与回答层（需 LLM）。
 
 ---
 

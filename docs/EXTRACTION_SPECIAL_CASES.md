@@ -2,7 +2,7 @@
 
 > 本文档是维护参考，从 `src-tauri/src/extractor/` 源码和 `CHANGELOG.md` 中提取。
 > 所有函数名、常量、阈值均按源码核实。分支计数为近似值，以代码为准。
-> 最后核实日期：2026-09-21，对应 `extractor/` 模块树。
+> 最后核实日期：2026-09-23，对应 `extractor/` 模块树（含 `pdf/` 子模块拆分）。
 
 ---
 
@@ -31,7 +31,7 @@
 | # | 类型 | 扩展名 | 提取路径 | 源文件 |
 |---|------|--------|----------|--------|
 | 1 | 纯文本 | `txt md csv json xml yaml yml toml ini cfg log py rs ts js html css sql sh bat ps1 env conf properties` | `TextExtractor` + 编码检测 | `text.rs` |
-| 2 | PDF | `pdf` | `PdfExtractor::extract_with_lang` 多阶段 | `pdf.rs` |
+| 2 | PDF | `pdf` | `PdfExtractor::extract_with_lang` 多阶段 | `pdf.rs` + `pdf/`（quality/ocr/poppler/scan） |
 | 3 | Office legacy | `doc` | `rwml` 纯 Rust 解析 | `office/mod.rs` |
 | 4 | Office 表格 | `xls xlsx xlsm xlsb` | `calamine`（每格式独立 reader） | `office/mod.rs` |
 | 5 | Office 现代 | `docx docm ppt pptx pptm ppsm ppsx pps pot odt ods odp rtf epub` | `anydoc::to_markdown` | `office/mod.rs` |
@@ -49,7 +49,7 @@
 
 ### 3.1 PDF（约 35 条）
 
-PDF 分支按问题来源分 7 组。
+PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality.rs`（文本层质量判定）、`pdf/ocr.rs`（OCR 管线）、`pdf/poppler.rs`（poppler 工具）、`pdf/scan.rs`（满版图像/扫描检测）四个子模块；下表函数名沿用调用名，路径归属见第 5 节。
 
 **加载/panic（5 条）**
 
@@ -121,9 +121,9 @@ PDF 分支按问题来源分 7 组。
 |------|------|------|
 | DPI 配置缺失/非法 | 默认 300，clamp [100, 600] | `normalize_pdf_dpi` |
 
-另有辅助函数 `page_media_size`（跟随 Parent 获取继承的 MediaBox）、
-`full_page_image_pages`（解析 pdfimages -list 输出）、
-`normalize_for_watermark`（剥离 >=30 字符的十六进制串、日期、URL），
+另有辅助函数 `page_media_size`（`pdf/scan.rs`，跟随 Parent 获取继承的 MediaBox）、
+`full_page_image_pages`（`pdf/scan.rs`，解析 pdfimages -list 输出）、
+`normalize_for_watermark`（`pdf/quality.rs`，剥离 >=30 字符的十六进制串、日期、URL），
 不计入主分支但影响判定结果。
 
 ### 3.2 纯文本（8 条）
@@ -364,24 +364,44 @@ score = 0.20 * printable_ratio
 | 常量/阈值 | 值 | 函数 | 用途 |
 |-----------|-----|------|------|
 | `LARGE_SCAN_PAGE_THRESHOLD` | 20 | `should_ocr_pages_individually` | 超过则逐页 OCR |
-| `LARGE_SCAN_OCR_BUDGET` | 600s | `run_pdf_ocr_pipeline` | 逐页 OCR 时间预算 |
-| `FULL_PAGE_IMAGE_COVERAGE` | 0.8 | `full_page_image_pages` | 满版图像覆盖率 |
-| `MIN_PAGE_IMAGE_AREA` | 100_000 px^2 | `extract_and_ocr_page_via_pdfimages` | 最小扫描页图像面积 |
+| `LARGE_SCAN_OCR_BUDGET` | 600s | `run_pdf_ocr_pipeline`（`pdf/ocr.rs`） | 逐页 OCR 时间预算 |
+| pdftotext 接受下限 | 100 字符 | `try_pdftotext_extract` | |
+| anydoc 接受下限 | 100 字符 | `extract_with_lang` | |
+| DPI 默认/范围 | 300, [100, 600] | `normalize_pdf_dpi` | |
+| pdftotext 超时 | 120s | `try_pdftotext_extract` | |
+
+### pdf/quality.rs
+
+| 常量/阈值 | 值 | 函数 | 用途 |
+|-----------|-----|------|------|
 | 稀疏阈值 | <50 非空白字符/页 | `is_sparse_text_layer` | |
 | 乱码阈值 | >30% 可疑字符 或 <5% 非空白 | `is_garbled_text` | |
 | 水印阈值 | >80% 相邻页前缀匹配 | `is_watermark_text` | |
 | 重复阈值 | >60% 非空行重复 | `is_repetitive` | |
 | 不合理阈值 | >20_000 非空白字符/页 | `is_implausible_text_layer` | |
-| pdftotext 接受下限 | 100 字符 | `try_pdftotext_extract` | |
-| anydoc 接受下限 | 100 字符 | `extract_with_lang` | |
+
+### pdf/ocr.rs
+
+| 常量/阈值 | 值 | 函数 | 用途 |
+|-----------|-----|------|------|
+| `MIN_PAGE_IMAGE_AREA` | 100_000 px^2 | `extract_and_ocr_page_via_pdfimages` | 最小扫描页图像面积 |
 | pdfimages-OCR 接受下限 | 100 字符 | `try_ocr_fallback` | |
-| DPI 默认/范围 | 300, [100, 600] | `normalize_pdf_dpi` | |
-| pdfinfo 超时 | 60s | `get_pdf_page_count` | |
-| pdfimages -list 超时 | 60s | `is_image_based_scan` | |
-| pdftotext 超时 | 120s | `try_pdftotext_extract` | |
 | pdftoppm 整文档渲染超时 | 120s | `ocr_pdf_via_pdftoppm` | |
 | 逐页 pdftoppm 超时 | 30s | `ocr_single_pdf_page` | |
 | 逐页 pdfimages 超时 | 30s | `extract_and_ocr_page_via_pdfimages` | |
+
+### pdf/poppler.rs
+
+| 常量/阈值 | 值 | 函数 | 用途 |
+|-----------|-----|------|------|
+| pdfinfo 超时 | 60s | `get_pdf_page_count` | |
+
+### pdf/scan.rs
+
+| 常量/阈值 | 值 | 函数 | 用途 |
+|-----------|-----|------|------|
+| `FULL_PAGE_IMAGE_COVERAGE` | 0.8 | `full_page_image_pages` | 满版图像覆盖率 |
+| pdfimages -list 超时 | 60s | `is_image_based_scan` | |
 
 ### text.rs
 
