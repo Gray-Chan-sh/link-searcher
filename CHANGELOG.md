@@ -4,6 +4,14 @@
 
 ---
 
+## 2026-09-24：移除 CI workflow，仅保留打 tag 发布
+
+- **背景**：`ci.yml` 在每次 push 到 `master` / PR 时都跑三平台 `cargo test --lib` + `cargo build`，但本地提交前已强制 `cargo check` / 测试，且 `release.yml` 打 tag 时本就会在 4 个目标上完整构建，日常推 `master` 属重复劳动。
+- **变更**：删除 `.github/workflows/ci.yml`，仅保留 `release.yml`（push tag `v*` 或手动 dispatch 时构建并发布）。
+- **涉及文件**：`.github/workflows/ci.yml`（删除）、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：修复 winget 安装 ffmpeg/poppler 后状态仍显示未安装（✗）
 
 - **根因**：`find_ffmpeg_binary` / `find_poppler_binary` 靠枚举硬编码目录找二进制，未覆盖 winget 的落点（`%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin`），且结果被 `OnceLock<Option<PathBuf>>` 缓存，安装后同一会话不重算。winget 实际只把路径写进注册表 PATH，运行中的进程仍用启动时的旧 PATH 快照，故「安装完成」后一直 ✗。
