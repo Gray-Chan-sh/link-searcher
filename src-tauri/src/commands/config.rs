@@ -90,6 +90,7 @@ pub fn update_config(
         active_llm_model_id: new_config.active_llm_model_id,
         semantic_weight: new_config.semantic_weight,
         active_reranker_model_id: new_config.active_reranker_model_id,
+        pending_cleanup_dir: current.pending_cleanup_dir.clone(),
     };
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.
@@ -374,24 +375,31 @@ pub async fn migrate_data(
         let _ = std::fs::remove_dir_all(&tmp);
         emit("cleanup", 90);
 
-        // Persist the new data dir before removing the old one.
+        // Persist the new data dir before touching the old one. Record the old
+        // dir as pending cleanup: this process still holds its log/DB handles,
+        // so on Windows the delete below is expected to fail. Startup retries
+        // once those handles are released.
         let mut loaded = load_config();
         loaded.data_dir = new_path.clone().into();
+        loaded.pending_cleanup_dir = Some(old.to_path_buf());
         if let Err(e) = save_config(&loaded) {
             return Err(format!("保存配置失败: {e}"));
         }
 
-        // Best-effort removal of the old data dir — failure is a warning only.
-        if let Err(e) = std::fs::remove_dir_all(old) {
-            let _ = app_clone.emit(
-                "migration-warning",
-                serde_json::json!({
-                    "message": format!("旧数据目录删除失败，请手动清理: {}", old.display())
-                }),
-            );
-            log::warn!("[MIGRATE] failed to remove old data dir {:?}: {e}", old);
-        } else {
-            log::info!("[MIGRATE] removed old data dir {:?}", old);
+        // Best-effort removal now. If it succeeds, clear the pending marker;
+        // otherwise leave it for the next startup (no user-facing warning).
+        match std::fs::remove_dir_all(old) {
+            Ok(()) => {
+                log::info!("[MIGRATE] removed old data dir {:?}", old);
+                loaded.pending_cleanup_dir = None;
+                let _ = save_config(&loaded);
+            }
+            Err(e) => {
+                log::warn!(
+                    "[MIGRATE] old data dir {:?} still in use ({e}); will retry at next startup",
+                    old
+                );
+            }
         }
         Ok(())
     })

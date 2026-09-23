@@ -6,7 +6,7 @@ import { usePersistentState } from '../hooks/usePersistentState'
 import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
-import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress, type MigrationWarning } from '../api/config'
+import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress } from '../api/config'
 import { checkBgeInstalled, getVersion, installBge, updateSettings } from '../api/settings'
 import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
@@ -45,9 +45,6 @@ export default function Settings() {
     listen<MigrationProgress>('migration-progress', payload => {
       setMigrationProgress(payload.progress)
       setMigrationStage(payload.stage)
-    }).then(u => unlisteners.push(u))
-    listen<MigrationWarning>('migration-warning', payload => {
-      void alert(payload.message, '迁移警告')
     }).then(u => unlisteners.push(u))
     listen<{ success: boolean; message: string }>('bge-install-done', async payload => {
       setBgeInstalling(false)

@@ -51,10 +51,6 @@ export interface MigrationProgress {
     progress: number
 }
 
-export interface MigrationWarning {
-    message: string
-}
-
 export interface MigrationCompleted {
     message: string
 }

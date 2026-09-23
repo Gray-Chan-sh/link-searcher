@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-24：数据迁移后不再弹「旧目录删除失败」警告，改由下次启动自动清理
+
+- **根因**：迁移命令在拷贝完数据后立即 `remove_dir_all` 旧数据目录（`commands/config.rs`）。但当前进程仍持有旧目录的文件句柄 —— 日志（`lib.rs` 用 `env_logger::Target::Pipe` 打开 `app.log`）与 SQLite 连接池（`data.db`/`-wal`/`-shm`）在进程整个生命周期内不释放，Windows 不允许删除已打开的文件，于是必然失败并弹出「旧数据目录删除失败，请手动清理」。
+- **修复**：迁移时先把旧目录路径写入配置新增字段 `pending_cleanup_dir`（`AppConfig`），再尝试删除；成功则清空标记，失败只记 WARN 日志、**不再弹窗**。下次启动时 `config::run_pending_cleanup` 在 `lib.rs` setup 早期（新进程尚未打开旧目录）重试删除，成功即清空标记，仍失败保留待下次重试。含安全护栏：绝不删除当前活动数据目录或其父目录。核心逻辑抽为纯函数 `try_cleanup` 便于测试。
+- **前端**：移除 Settings 页已失效的 `migration-warning` 监听与 `MigrationWarning` 类型。
+- **验证**：`cargo check` 0 错误；`cargo test --lib config::` 新增 2 例通过；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/lib.rs`、`src/pages/Settings.tsx`、`src/api/config.ts`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：移除 CI workflow，仅保留打 tag 发布
 
 - **背景**：`ci.yml` 在每次 push 到 `master` / PR 时都跑三平台 `cargo test --lib` + `cargo build`，但本地提交前已强制 `cargo check` / 测试，且 `release.yml` 打 tag 时本就会在 4 个目标上完整构建，日常推 `master` 属重复劳动。

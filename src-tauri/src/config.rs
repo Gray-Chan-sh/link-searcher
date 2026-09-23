@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use serde::{Serialize, Deserialize};
 
@@ -131,6 +131,11 @@ pub struct AppConfig {
     /// 语义搜索融合时：score = w×cosine + (1-w)×bm25_norm。
     #[serde(default = "default_semantic_weight")]
     pub semantic_weight: f64,
+    /// 迁移后遗留的旧数据目录。迁移时进程仍持有其文件句柄（日志/数据库），
+    /// Windows 下无法立即删除，故记录路径，待下次启动（句柄已释放）再清理。
+    /// 删除成功后清空；仍失败则保留，下次启动重试。
+    #[serde(default)]
+    pub pending_cleanup_dir: Option<PathBuf>,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -155,6 +160,7 @@ impl Default for AppConfig {
             active_reranker_model_id: String::new(),
             active_llm_model_id: String::new(),
             semantic_weight: 0.3,
+            pending_cleanup_dir: None,
         }
     }
 }
@@ -313,6 +319,42 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     write_config_file(config)
 }
 
+/// 删除一个迁移遗留目录（纯逻辑，便于测试）。返回仍需下次重试的路径：
+/// `None` 表示已删除 / 无需删除；`Some` 表示删除失败需保留。
+/// 安全护栏：绝不删除当前活动数据目录，也不删除其父目录。
+fn try_cleanup(pending: &Path, current: &Path) -> Option<PathBuf> {
+    if pending == current || current.starts_with(pending) || !pending.exists() {
+        return None;
+    }
+    match std::fs::remove_dir_all(pending) {
+        Ok(()) => {
+            log::info!("[MIGRATE] cleaned up old data dir {:?}", pending);
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                "[MIGRATE] still failed to clean up old data dir {:?}: {e}",
+                pending
+            );
+            Some(pending.to_path_buf())
+        }
+    }
+}
+
+/// 启动时清理迁移遗留的旧数据目录。上一次迁移进程仍持有旧目录的日志/数据库
+/// 句柄，Windows 下删除会失败；此刻新进程尚未打开旧目录，是安全窗口。
+/// 删除成功（或目录已不存在）则清空待删标记，失败则保留供下次启动重试。
+pub fn run_pending_cleanup(current_data_dir: &Path) {
+    let mut config = load_config();
+    let Some(pending) = config.pending_cleanup_dir.clone() else {
+        return;
+    };
+    if try_cleanup(&pending, current_data_dir).is_none() {
+        config.pending_cleanup_dir = None;
+        let _ = save_config(&config);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -403,6 +445,34 @@ mod tests {
         let mut config = AppConfig::default();
         assert!(!migrate_legacy_gateways(&mut config));
         assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn pending_cleanup_removes_stale_dir_and_clears_flag() {
+        let base = std::env::temp_dir().join(format!("ls_cleanup_{}", uuid::Uuid::new_v4()));
+        let old = base.join("old");
+        let current = base.join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(old.join("data.db"), b"x").unwrap();
+
+        assert!(try_cleanup(&old, &current).is_none(), "stale dir must be deleted");
+        assert!(!old.exists(), "old dir should be gone");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn pending_cleanup_never_deletes_active_or_parent_dir() {
+        let base = std::env::temp_dir().join(format!("ls_cleanup_{}", uuid::Uuid::new_v4()));
+        let current = base.join("data");
+        std::fs::create_dir_all(&current).unwrap();
+
+        assert!(try_cleanup(&current, &current).is_none());
+        assert!(current.exists(), "active dir must survive");
+
+        assert!(try_cleanup(&base, &current).is_none());
+        assert!(base.exists(), "parent of active dir must survive");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
