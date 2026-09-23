@@ -17,7 +17,7 @@ use serde::Serialize;
 use super::paddleocr;
 use imageproc::distance_transform::Norm;
 
-/// Supported language codes for OCR.
+/// Supported language codes for OCR (referenced by tests; unused in release).
 #[allow(dead_code)]
 const SUPPORTED_LANGUAGES: &[&str] = &["eng", "chi_sim", "jpn", "kor"];
 

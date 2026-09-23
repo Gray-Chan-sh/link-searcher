@@ -465,6 +465,17 @@ const en: Record<string, string> = {
     backup_remap: 'Remap',
     backup_remove: 'Remove',
     backup_remap_select: 'Select new directory path',
+    save: 'Save',
+    backup_failed: 'Backup failed',
+    backup_export_failed: 'Export failed',
+    backup_restore_confirm: 'Restore from this backup? Current data will be overwritten.',
+    backup_restore_done: 'Restore complete, restarting the app',
+    backup_restore_failed: 'Restore failed',
+    backup_remap_failed: 'Remap failed',
+    backup_remove_confirm: 'Remove this directory and its indexed files?',
+    backup_remove_failed: 'Remove failed',
+    backup_delete_confirm: 'Delete this backup?',
+    backup_delete_failed: 'Delete backup failed',
 
     err_empty_response: 'AI returned no content, please retry',
 

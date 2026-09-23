@@ -26,6 +26,7 @@ export default function Settings() {
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
   const [bgeInstalling, setBgeInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingSettingsRef = useRef<Record<string, string>>({})
 
   const ocr = useSettingsOcr()
   const backup = useSettingsBackup()
@@ -99,9 +100,15 @@ export default function Settings() {
   const handleFieldChange = (key: string, value: string) => {
     setValue(key, value)
     setLocalError(null)
+    // Batch every field changed in the debounce window into one update: a
+    // per-call `{[key]: value}` payload would drop all but the last change
+    // when several fields are set in the same tick (e.g. 一键优化).
+    pendingSettingsRef.current = { ...pendingSettingsRef.current, [key]: value }
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
-      updateSettings({ [key]: value })
+      const batch = pendingSettingsRef.current
+      pendingSettingsRef.current = {}
+      updateSettings(batch)
         .catch(e => setLocalError(e instanceof Error ? e.message : 'Failed to save setting'))
     }, 300)
   }

@@ -134,7 +134,7 @@
 
 | 功能 | 说明 |
 |------|------|
-| **关闭行为** | 关闭窗口直接退出程序（系统托盘已在 [路线图](CHANGELOG.md#路线图) 中规划） |
+| **系统托盘** | 关闭窗口默认隐藏到托盘（显示/隐藏 + 退出菜单，左键切换窗口）；托盘菜单「退出」真正退出 |
 | **开机自启** | 可选（macOS LaunchAgent / Windows 启动项） |
 | **命令行搜索** | `link-searcher search "keyword"`（别名 `index`） |
 | **命令行扫描/监控** | `link-searcher scan [dir]` 扫描并退出；`link-searcher watch dir` 实时监控文件变更 |
@@ -142,6 +142,7 @@
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
+| **远程 WebUI / API** | 可选 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），默认关闭，设置页开启并可切换 localhost / LAN；Token 轮换需已认证，忘记 Token 只能从桌面端重置 |
 
 ---
 
@@ -200,6 +201,15 @@ npm run tauri build
 |-----|------|
 | 桌面框架 | Tauri 2.x |
 | 前端 | React 19 + TypeScript + Tailwind CSS 4 |
+| 搜索引擎 | Tantivy 0.22 |
+| 数据库 | SQLite（rusqlite + r2d2 连接池） |
+| 中文分词 | jieba-rs |
+| OCR | PaddleOCR PP-OCRv5 + tract（纯 Rust ONNX 推理） |
+| 文本提取 | lopdf / calamine / anydoc / rwml（无 LibreOffice 依赖） |
+| 语音识别 | sherpa-onnx（FunASR-Nano ONNX） |
+| 文件监控 | notify + notify-debouncer-full（300ms 防抖） |
+| 并行处理 | Rayon |
+| 图片处理 | image-rs + imageproc |
 
 > 📚 **文档导航**
 > - [用户手册](docs/USER_MANUAL.md) — 面向使用者的 12 章手册
@@ -207,14 +217,6 @@ npm run tauri build
 > - [检索问答流程](docs/RAG_PIPELINE.md) — 提问后系统做了什么（纯行为描述，含已知薄弱场景与排查线索）
 > - [检索评测基线](docs/rag-eval-baseline.md) — 检索质量度量与变更门禁
 > - [搜索 UX 实现](docs/SEARCH_UX_IMPLEMENTATION.md)
-| 搜索引擎 | Tantivy 0.22 |
-| 数据库 | SQLite（rusqlite + r2d2 连接池） |
-| 中文分词 | jieba-rs |
-| OCR | PaddleOCR PP-OCRv5 + tract（纯 Rust ONNX 推理） |
-| 文本提取 | lopdf / calamine / quick-xml |
-| 文件监控 | notify + notify-debouncer-full（300ms 防抖） |
-| 并行处理 | Rayon |
-| 图片处理 | image-rs + imageproc |
 
 ---
 
@@ -260,18 +262,23 @@ link-searcher/
 │   │       ├── settings.rs    # 设置管理
 │   │       ├── backup.rs      # 备份恢复
 │   │       ├── tesseract.rs   # OCR 引擎管理
-│   │       └── logs.rs        # 日志查看
+│   │       ├── ai.rs          # AI 摘要 / RAG 问答 / 多轮聊天
+│   │       ├── clarify.rs     # 指代消解（State / Grounding / Resolver）
+│   │       ├── bge.rs         # BGE 嵌入模型安装
+│   │       ├── funasr.rs      # FunASR 语音模型安装
+│   │       └── performance.rs # 硬件检测 / 自动调参
+│   ├── webapi/                # 可选 HTTPS REST API（axum + rustls）
 │   ├── models/                # PaddleOCR ONNX 模型（PP-OCRv5）
 │   ├── capabilities/          # Tauri 权限配置
 │   └── tests/                 # 集成测试 + IPC 测试
 ├── src/                       # React 前端
 │   ├── api/                   # IPC 调用封装（search / settings / files / config / index）
-│   ├── components/            # 通用组件（SearchBar / FilterPanel / PreviewPanel / StatusBar / ResultList）
-│   ├── pages/                 # 页面（Search / Browse / Directories / IndexStatus / Settings）
-│   ├── hooks/                 # 自定义 Hook（useSearch / useDirs / useTheme）
-│   └── i18n/                  # 国际化（en / zh）
+│   ├── components/            # 通用组件（SearchBar / FilterPanel / PreviewPanel / ChatPanel / StatusBar / ResultList）
+│   ├── pages/                 # 页面（Search / Browse / DirManager / IndexStatus / Quality / LogViewer / Settings / FileTypes / AiChat）
+│   ├── hooks/                 # 自定义 Hook（useSearch / useDirs / useTheme / useSettings* / useIndexStatus）
+│   └── i18n/                  # 国际化（zh / en / ja / ko）
 ├── assets/                    # 静态资源（字体等）
-├── USER_MANUAL.md             # 用户手册
+├── USER_MANUAL.md             # 用户手册（索引，正文在 docs/）
 └── README.md                  # 本文件
 ```
 
@@ -285,7 +292,7 @@ link-searcher/
 cd src-tauri && cargo test
 ```
 
-当前测试：81 个（80 单元 + 9 集成 + 6 IPC），全部通过。
+当前测试：Rust 单元测试 `cargo test --lib` **425 passed**；前端 `npm test`（vitest）**31 passed**；GUI 交互用例 **101**（`test-visual/`，见 [TEST_REPORT](docs/TEST_REPORT.md)）。
 
 ### 性能测试套件
 

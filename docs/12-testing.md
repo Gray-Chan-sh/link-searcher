@@ -1,8 +1,10 @@
 # 第十二章：自动化测试
 
-> 37 个 E2E 用例，覆盖 8 个页面路由 + AI 流式对话全链路。
+> GUI 交互用例 101 个（`test-visual/`，见 [TEST_REPORT](TEST_REPORT.md)）+ Rust 集成测试，覆盖 8 个页面路由 + AI 流式对话全链路。
 
 ---
+
+> ⚠️ **历史说明**：下表为较早的 37 用例（15 Mock IPC + 22 MCP）测试体系，已被 101 用例的 `test-visual/` GUI 套件取代；保留供追溯。
 
 Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 

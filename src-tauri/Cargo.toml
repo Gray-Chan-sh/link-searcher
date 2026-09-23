@@ -31,7 +31,6 @@ notify-debouncer-full = "0.4"
 rayon = "1"
 lopdf = "0.34"
 calamine = "0.26"
-quick-xml = "0.36"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -47,7 +46,6 @@ tract-onnx = "0.20"
 tokenizers = "0.20"
 ab_glyph = "0.2"
 encoding_rs = "0.8"
-chardetng = "1.0"
 unicode-normalization = "0.1"
 opener = "0.7"
 anyhow = "1"
@@ -62,10 +60,7 @@ tar = "0.4.46"
 flate2 = "1.1.9"
 bzip2 = "0.6.1"
 xz2 = "0.1.7"
-symphonia = { version = "0.6.0", features = ["all"] }
 hound = "3.5.1"
-kaldi-native-fbank = "0.1.0"
-ndarray = "0.17.2"
 pdf-inspector = "1"
 sherpa-onnx = "1.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
@@ -116,3 +111,8 @@ custom-protocol = ["tauri/custom-protocol"]
 # tract-core/tract-linalg/tokenizers 等重度计算依赖由此获得 SIMD 加速
 [profile.dev.package."*"]
 opt-level = 3
+# 依赖不生成调试信息：dev profile 默认 debug=2（全量），叠加 opt-level=3 后
+# rustc 峰值内存与 target 体积都很大（target/debug 曾达 21.9GB）。
+# 关掉依赖调试信息可大幅降低内存/磁盘，且不影响运行时性能；
+# 业务代码（workspace 本 crate）仍保留完整调试信息。
+debug = false

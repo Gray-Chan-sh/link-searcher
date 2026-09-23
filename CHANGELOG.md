@@ -1,6 +1,86 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 9月7日。v0.2.0：运行依赖按需安装 + 首启向导 + 发布版瘦身 + GUI 测试框架
+> 2026年7月30日 — 9月23日。v1.1.2：运行依赖按需安装 + 首启向导 + 发布版瘦身 + RAG 检索质量治理 + Web API 安全加固
+
+---
+
+## 2026-09-23：`commands/index.rs` 拆分（2201 → 1539 行 + 3 子模块）
+
+- 抽出内聚核心逻辑到 `commands/index/`，命令仍留在 `index.rs` 薄包装，`pub use` / `pub(crate) use` 保持 `crate::commands::index::X` 路径不变：
+  - `commands/index/embeddings.rs`（252）：doc/chunk 向量回填 + 去抖调度器（`run_backfill_embeddings_public` / `run_backfill_chunk_embeddings_public` / `schedule_backfill_embeddings` / `BackfillReport`）
+  - `commands/index/verify.rs`（204）：`run_verify_core` + `reextract_one` / `next_reextract_state` + `VerifyReport`
+  - `commands/index/integrity.rs`（243）：DB↔Tantivy 自愈 `run_index_integrity_heal` + `IndexHealReport`
+- **验证**：`cargo check --all-targets` 0 错误（无新增告警）；`cargo test --lib` **425 passed / 0 failed**。
+- **涉及文件**：`src-tauri/src/commands/index.rs`、`src-tauri/src/commands/index/{embeddings,verify,integrity}.rs`、`CHANGELOG.md`
+
+---
+
+## 2026-09-23：`commands/ai.rs` 拆分（5195 → 2421 行 + 5 子模块）
+
+- **背景**：`commands/ai.rs` 达 5195 行，为全仓最大文件，命令、检索融合、改写、会话持久化、Prompt 组装、引用处理全糅在一起。
+- **拆法**：保留 `ai.rs` 为模块根（命令 + 共享类型 + 测试），新增 `commands/ai/` 子模块并 `pub use` 重导出，使 `crate::commands::ai::X` 路径不变（`cli.rs` / `webapi/routes/ai.rs` / `lib.rs` / 集成测试零改动）：
+  - `ai/cite.rs`（144）：`auto_cite` / `sanitize_citations(_set)` / `keyword_overlap`
+  - `ai/session.rs`（687）：`ChatSession` 等结构 + `chat_history_path`/`read/write_history` + 会话 CRUD 实现 + Markdown/JSON 导出 + `AiEventJson` 与事件辅助
+  - `ai/rewrite.rs`（239）：`rewrite_query` / `llm_rewrite_query` / 停用词 / 关键词提取 / 父实体补全
+  - `ai/retrieval.rs`（428）：`merge_scope_prefixes` / `hit_in_scope` / `weighted_mix` / `semantic_fuse` / rerank / trace / `bm25_relevant_hits`
+  - `ai/prompt.rs`（1399）：`prepare_smart_prompt` / `prepare_conversation_prompt` / 预算打包 / `truncate_text` / 引用组装
+- **命令留在模块根**：所有 `#[tauri::command]` 保留在 `ai.rs`（薄包装调用 `session::*`），避免 tauri `generate_handler!` 的隐藏 `__cmd__` 宏随函数搬入子模块后无法解析。
+- **测试不迁移**：`#[cfg(test)]` 全部留在 `ai.rs`，通过 `use super::*` / `pub(super)` / `#[cfg(test)] use` 访问子模块函数。
+- **验证**：`cargo check --all-targets` 0 错误（清理了新增的未用导入告警）；`cargo test --lib` **425 passed / 0 failed**；集成测试 `merge_scope_test` 4 passed。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/ai/{cite,session,rewrite,retrieval,prompt}.rs`、`CHANGELOG.md`
+
+---
+
+## 2026-09-23：文档收尾 —— LICENSE、设置/测试/架构/评测基线更新
+
+- **新增 `LICENSE`**：README 徽章原指向不存在的文件，补 MIT 许可证（Copyright 2026 Link-Searcher contributors）
+- **`docs/06-settings.md`**：标签页清单补「依赖中心」；新增「初始化向导」说明；移除指向不存在截图的坏链（`settings-performance.png`）
+- **`docs/gui-test-plan.md`**：标注为历史设计稿、权威结果以 `TEST_REPORT.md` 为准，并修正 87/101 统计表内部矛盾
+- **`docs/ARCHITECTURE.md`**：补「2026-09 主要变更」摘要（RAG/消歧/质量评分/首启向导/WebAPI 安全/索引页重构），日期更新至 2026-09-23
+- **`docs/rag-eval-baseline.md`**：变更记录补 2026-09-21 Golden v2 + 注入层修复（Span Hit 14/35 → 29/35），并注明与 top-10 Recall/Success 口径不可直接比较
+- **涉及文件**：`LICENSE`、`docs/06-settings.md`、`docs/gui-test-plan.md`、`docs/ARCHITECTURE.md`、`docs/rag-eval-baseline.md`、`CHANGELOG.md`
+
+---
+
+## 2026-09-23：`/范围:子目录` 解析 + 激活前端测试 + 清理未用依赖与调试代码
+
+- **`/范围:<子目录>` 未实现**：非根子目录既非监控根也非文件，原逻辑直接忽略（`TODO`）。改为经全树搜索（`search_tree_prune`）解析出相对路径前缀；抽出纯函数 `pickScopeDir`（末段精确匹配的目录优先，其次任意目录，最后任意匹配），因目录树懒加载只含根层、不能只查内存树（`src/utils/scopeResolve.ts`、`src/pages/AiChat.tsx`）
+- **两个前端测试被 vitest 排除**：`scopeParser.test.ts` / `translateErr.test.ts` 原为 Node 原生 `assert` 顶层执行（无 test 套件，被 `vitest.config.ts` exclude）。改写为 vitest 风格并解除排除；`npm test` 由 2 文件 / 31 用例 → **5 文件 / 56 用例**
+- **清理未使用依赖**：移除零引用的 `quick-xml`、`chardetng`、`kaldi-native-fbank`、`ndarray`、`symphonia`（后者带 `all` feature，体积可观）（`src-tauri/Cargo.toml`）
+- **清理调试代码**：删除 `IndexStatus.tsx` 写 `/tmp/link-searcher-debug.log` 的调试块与 `useIndexStatus.ts` 的 `console.log`（改用既有 `confirm` 工具）；删除已过期的 `#[allow(dead_code)]`（`commands/backup.rs`）；删去 `DepsTab.tsx` 恒等的三元表达式（`dep.size_bytes > 0 ? A : A`）
+- **门禁**：`cargo check` 0 错误；`cargo test --lib` **425 passed**；`npx tsc -b` 0 错误；`npm run lint` 0 错误；`npm test` 56 passed
+- **涉及文件**：`src/pages/AiChat.tsx`、`src/utils/scopeResolve.ts`、`src/utils/__tests__/{scopeParser,translateErr,scopeResolve}.test.ts`、`vitest.config.ts`、`src/pages/IndexStatus.tsx`、`src/hooks/useIndexStatus.ts`、`src-tauri/Cargo.toml`、`src-tauri/src/commands/backup.rs`、`CHANGELOG.md`
+
+---
+
+## 2026-09-23：首启托盘失效 + 设置批量保存丢字段 + i18n 缺口；文档纠偏
+
+- **首启无监控目录时托盘/关窗失效**：`lib.rs` 在 `dirs.is_empty()` 时提前 `return Ok(())`，跳过了窗口图标、系统托盘与「关闭隐藏到托盘」处理器 —— 全新安装点关闭会直接退出且无托盘。改为不提前返回，仅记录日志跳过扫描，托盘/窗口初始化照常执行（`src-tauri/src/lib.rs`）
+- **设置「一键优化」只保存最后一个字段**：`Settings.tsx` 的 debounce 用单个 timer + 单字段 payload，同一 tick 内连续三次 `onFieldChange` 只有最后一次生效，另两个字段刷新后丢失。改为累积到 pending map、一次提交（`src/pages/Settings.tsx`）
+- **i18n 缺口补齐**：ja/ko 缺 14 个 refine/clarify key，四种语言全缺 10 个 `backup_*` 与 `save` key（此前界面直接显示原始 key）；全部补齐（`src/i18n/{zh,en,ja,ko}.ts`）
+- **文档纠偏**：README 测试数字 81（且自身算术不成立）→ 实测 425 单元 / 31 前端 / 101 GUI；项目结构补全 pages/hooks/新增命令/webapi；技术栈补 anydoc/rwml/sherpa-onnx；新增「远程 WebUI/API」功能行并更新系统托盘描述；修复被割裂的技术栈表格；CHANGELOG 标题日期/版本更新到 9-23 / v1.1.2；ROADMAP 更新日期并勾选已完成的质量检测；索引状态页「四张→五张统计卡片」（`docs/03`、`docs/07`）；测试文档 37→101 并标注历史（`docs/12-testing.md`、`USER_MANUAL.md`、`docs/USER_MANUAL.md`）
+- **门禁**：`cargo check` 0 错误；`npx tsc -b` 0 错误；`npm run lint` 0 错误（28 项既有告警）
+- **涉及文件**：`src-tauri/src/lib.rs`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`README.md`、`ROADMAP.md`、`CHANGELOG.md`、`USER_MANUAL.md`、`docs/{03-wait-index.md,07-index-manage.md,12-testing.md,USER_MANUAL.md}`
+
+---
+
+## 2026-09-23：Web API 安全修复 —— token 端点认证绕过 + 静态文件路径穿越
+
+- **P0 认证绕过**：`/api/auth/token` 原被放在鉴权中间件之外且 handler 不校验旧 token —— 任何能访问端口者（默认绑定 `0.0.0.0`，可被局域网访问）可把 token 改成已知值，随后以管理员身份调用全部 API。改为并入受保护的 `settings::router`；`routes/mod.rs` 删除 `auth_free_routes`。忘记 token 只能从桌面端设置页重置（走 Tauri IPC，不受影响）（`src-tauri/src/webapi/routes/mod.rs`、`routes/settings.rs`）
+- **P0 路径穿越**：SPA 静态文件 fallback 在鉴权中间件之外合并，且 `dist_dir().join(rel)` 未校验 `..`，`curl --path-as-is '/../../data.db'` 可读取 dist 之外任意文件。新增纯函数 `resolve_static_path`（`canonicalize` 后校验仍在 dist 前缀内），越界/不存在退回 `index.html`（`src-tauri/src/webapi/static_files.rs`）
+- **恒定时间 token 比较**：`auth.rs` 由 `==` 改为自实现的 `constant_time_eq`（长度差并入同一累加器，不短路），消除时序侧信道
+- **前端配套**：web 端「Token」对话框改为先以**当前** token 调 `update_token`、成功后再切换本地 token，避免鉴权上线后正常轮换也被拒（`src/App.tsx`、`src/components/MobileHeader.tsx`）
+- **测试**：新增 6 个单测（恒定时间比较 3 + 静态路径解析 3，覆盖 `..`、绝对路径、缺失文件、前缀填充）；`webapi` 模块首次有测试
+- **门禁**：`cargo check --all-targets` 0 错误；`cargo test --lib` **425 passed / 0 failed**；`npx tsc -b` 0 错误。⚠️ 本机未安装 semgrep，提交前需在开发机补跑 `semgrep --severity ERROR`
+- **涉及文件**：`src-tauri/src/webapi/routes/mod.rs`、`routes/settings.rs`、`static_files.rs`、`auth.rs`、`src/App.tsx`、`src/components/MobileHeader.tsx`、`CHANGELOG.md`
+
+---
+
+## 2026-09-23：降低本地 `tauri dev` 构建内存峰值
+
+- **依赖关闭调试信息**：`[profile.dev.package."*"]` 新增 `debug = false`。dev profile 默认 `debug=2`（全量调试信息），叠加既有的依赖 `opt-level=3`，导致 rustc 峰值内存约 5GB、`target/debug` 膨胀至 21.9GB；关闭后不影响依赖运行时性能，业务 crate 仍保留完整调试信息（`src-tauri/Cargo.toml`）
+- **限制并行 rustc 数量**：新增 `src-tauri/.cargo/config.toml`，`[build] jobs = 4`（12 逻辑核 → 4），压住并行编译内存峰值；CI runner 为 3-4 vCPU，不受影响
+- **实测效果**（干净重建 26 分钟）：峰值内存 5GB → **2.87GB**，`target/debug` 21.9GB → **14.2GB**
 
 ---
 

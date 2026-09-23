@@ -419,8 +419,10 @@ get_dir_children,
             };
 
             if dirs.is_empty() {
-                log::info!("[STARTUP] 无已配置目录，跳过启动扫描");
-                return Ok(());
+                // Do NOT return early: the window icon, system tray and
+                // close-to-tray handler further below must still be installed
+                // on a fresh install with no monitored directories.
+                log::info!("[STARTUP] 无已配置目录，跳过启动扫描（仍初始化托盘/窗口）");
             }
 
             // One-time migration: normalize legacy separator variants, then

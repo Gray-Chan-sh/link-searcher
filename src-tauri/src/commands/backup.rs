@@ -100,7 +100,6 @@ fn save_chain(backup_dir: &std::path::Path, chain: &ChainHead) -> Result<(), Str
     std::fs::rename(&tmp, &path).map_err(|e| format!("failed to write chain file: {e}"))
 }
 
-#[allow(dead_code)]
 /// 把 `.ls-index` / `data.db` / `config.json` / `chat_history.json` 写入 `dest`，
 /// 返回清单。data.db 用 SQLite 在线备份 API（WAL 安全），Busy/Locked 重试 3 次。
 fn snapshot_core(state: &AppState, dest: &std::path::Path) -> Result<SnapshotManifest, String> {

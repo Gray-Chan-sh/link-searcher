@@ -22,9 +22,10 @@ export default function MobileHeader({ theme, cycleTheme }: MobileHeaderProps) {
   const handleSaveToken = async () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
-    setToken(trimmed)
     try {
+      // Send the current token as authorization, then adopt the new one.
       await invoke('update_token', { token: trimmed })
+      setToken(trimmed)
       setShowTokenDialog(false)
       window.location.reload()
     } catch {

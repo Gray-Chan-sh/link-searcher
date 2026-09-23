@@ -60,18 +60,29 @@ export default function App() {
       .catch(() => setAuthFailed(true))
     return () => window.removeEventListener('auth-failed', onAuthFailed)
   }, [])
+  // Change the *server-side* token (already authenticated): rotate with the
+  // current token as authorization, then adopt the new one.
   const handleSaveToken = async () => {
     const trimmed = tokenInput.trim()
     if (!trimmed) return
-    setToken(trimmed)
     try {
       await invoke('update_token', { token: trimmed })
+      setToken(trimmed)
       setShowTokenDialog(false)
       setAuthFailed(false)
       window.location.reload()
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Token 更新失败')
     }
+  }
+
+  // Log in with the token issued by the desktop app: only store it locally and
+  // reload — the server token cannot (and must not) be set unauthenticated.
+  const handleLoginToken = () => {
+    const trimmed = tokenInput.trim()
+    if (!trimmed) return
+    setToken(trimmed)
+    window.location.reload()
   }
 
   const navItems = [
@@ -287,13 +298,13 @@ export default function App() {
               type="text"
               value={tokenInput}
               onChange={e => setTokenInput(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleSaveToken() }}
+              onKeyDown={e => { if (e.key === 'Enter') handleLoginToken() }}
               placeholder="输入 Bearer Token"
               className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 mb-4"
               autoFocus
             />
             <div className="flex justify-end">
-              <button onClick={() => { handleSaveToken(); setAuthFailed(false) }} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
+              <button onClick={handleLoginToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
             </div>
           </div>
         </div>

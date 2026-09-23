@@ -8,6 +8,7 @@ import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
 import { getSettings, listOcrEngines } from '../api/settings'
 import { useI18n } from '../i18n'
+import { confirm } from '../utils/platform'
 import EmptyState from '../components/EmptyState'
 import { StatsCardSkeleton } from '../components/Skeleton'
 
@@ -122,35 +123,13 @@ export default function IndexStatus() {
   }, [status?.scan_delta])
 
   const handleRebuild = async () => {
-    const logFile = '/tmp/link-searcher-debug.log'
-    const writeLog = async (msg: string) => {
-      const ts = new Date().toISOString()
-      const { writeTextFile, exists, readTextFile } = await import('@tauri-apps/plugin-fs')
-      const existing = await exists(logFile).catch(() => false)
-      const prev = existing ? await readTextFile(logFile).catch(() => '') : ''
-      await writeTextFile(logFile, prev + `[${ts}] [IndexStatus] ${msg}\n`).catch(() => {})
-    }
-    try { await writeLog('handleRebuild called') } catch {}
-    let confirmed = false
-    try {
-      const { ask } = await import('@tauri-apps/plugin-dialog')
-      confirmed = await ask(t('confirm_rebuild'), { title: '确认' })
-      try { await writeLog(`confirm result: ${confirmed}`) } catch {}
-    } catch (e) {
-      try { await writeLog(`confirm FAILED: ${e}`) } catch {}
-    }
-    if (!confirmed) {
-      try { await writeLog('user cancelled or confirm failed, returning') } catch {}
-      return
-    }
+    const confirmed = await confirm(t('confirm_rebuild'), t('rebuild_index'))
+    if (!confirmed) return
     setRebuilding(true)
     try {
       await rebuild()
-      try { await writeLog('rebuild() completed successfully') } catch {}
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      try { await writeLog(`rebuild() FAILED: ${msg}`) } catch {}
-      setScanError(msg)
+      setScanError(e instanceof Error ? e.message : String(e))
     } finally {
       setRebuilding(false)
     }

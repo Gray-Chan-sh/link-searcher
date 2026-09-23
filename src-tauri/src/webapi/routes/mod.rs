@@ -15,7 +15,6 @@ use axum::{
     response::{IntoResponse, Json},
     Router,
 };
-use axum::routing::post;
 use serde::Serialize;
 
 use crate::webapi::auth;
@@ -41,10 +40,10 @@ impl IntoResponse for ApiError {
 }
 
 pub fn build_router(state: ApiState) -> Router {
-    // Token update must be outside auth middleware — user needs this to fix an invalid token
-    let auth_free_routes = Router::new()
-        .route("/api/auth/token", post(settings::update_token_handler));
-
+    // All `/api/*` routes (including token rotation) sit behind bearer auth.
+    // A forgotten token can only be reset from the desktop Settings page —
+    // an unauthenticated reset endpoint would let anyone on the network
+    // overwrite the token and take over the API.
     search::router(state.clone())
         .merge(files::router(state.clone()))
         .merge(index::router(state.clone()))
@@ -60,7 +59,6 @@ pub fn build_router(state: ApiState) -> Router {
             state.clone(),
             auth::bearer_auth,
         ))
-        .merge(auth_free_routes)
         .fallback(static_files::serve_static)
         .with_state(state)
 }

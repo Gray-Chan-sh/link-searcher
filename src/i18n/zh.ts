@@ -465,6 +465,17 @@ const zh: Record<string, string> = {
     backup_remap: '重映射',
     backup_remove: '移除',
     backup_remap_select: '选择新的目录路径',
+    save: '保存',
+    backup_failed: '备份失败',
+    backup_export_failed: '导出失败',
+    backup_restore_confirm: '确定从此备份恢复？当前数据将被覆盖。',
+    backup_restore_done: '恢复完成，正在重启应用',
+    backup_restore_failed: '恢复失败',
+    backup_remap_failed: '重映射失败',
+    backup_remove_confirm: '确定移除此目录及其索引文件？',
+    backup_remove_failed: '移除失败',
+    backup_delete_confirm: '确定删除此备份？',
+    backup_delete_failed: '删除备份失败',
 
     err_empty_response: 'AI 未返回任何内容，请重试',
 

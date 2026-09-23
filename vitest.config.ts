@@ -5,8 +5,6 @@ export default defineConfig({
     exclude: [
       'node_modules/**',
       '.opencode/**',
-      'src/utils/__tests__/scopeParser.test.ts',
-      'src/utils/__tests__/translateErr.test.ts',
     ],
   },
 })

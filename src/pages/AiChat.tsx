@@ -4,6 +4,7 @@ import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { searchTreePrune } from '../api/files'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
+import { pickScopeDir } from '../utils/scopeResolve'
 import { saveFile, confirm } from '../utils/platform'
 import { PlusIcon, TrashIcon, FolderIcon, FolderOpenIcon, FileTextIcon, ChevronDownIcon, LoadingSpinner } from '../icons'
 import ChatPanel from '../components/ChatPanel'
@@ -181,26 +182,32 @@ export default function AiChat() {
   }, [activeSession, handleSessionChange])
 
   // /范围:全库或目录路径 → 解析为路径并更新会话范围（全库→""，根目录→""，子目录→相对路径）
-  const handleScopeAction = useCallback((action: string) => {
+  const handleScopeAction = useCallback(async (action: string) => {
     if (!activeSession) return
     if (action === 'clear') {
       handleSessionChange({ ...activeSession, retrieval_scope: [] })
       return
     }
-    if (action.startsWith('dir:')) {
-      const dirName = action.slice(4)
-      // 全库关键字 → 空字符串（全库检索）
-      if (dirName === '全库') {
-        handleAddToScope('')
-        return
-      }
-      // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录（根目录→空字符串）
-      const hit = dirTrees.find(dt => dt.label === dirName || dt.basePath.endsWith('/' + dirName))
-      if (hit) {
-        handleAddToScope('')
-      }
-      // TODO: 非根子目录匹配 → 相对路径
+    if (!action.startsWith('dir:')) return
+    const dirName = action.slice(4).trim()
+    if (!dirName) return
+    // 全库关键字 → 空字符串（全库检索）
+    if (dirName === '全库') {
+      handleAddToScope('')
+      return
     }
+    // 匹配 dirTrees 中 label 或 basePath 尾部命中的目录（根目录→空字符串）
+    const hit = dirTrees.find(dt => dt.label === dirName || dt.basePath.endsWith('/' + dirName))
+    if (hit) {
+      handleAddToScope('')
+      return
+    }
+    // 非根子目录：目录树是懒加载的（只含根层），改用全树搜索解析出相对路径前缀
+    try {
+      const matches = await searchTreePrune(dirName)
+      const dirPath = pickScopeDir(matches, dirName)
+      if (dirPath) handleAddToScope(dirPath)
+    } catch { /* 解析失败则维持原范围 */ }
   }, [activeSession, dirTrees, handleSessionChange, handleAddToScope])
 
   // 树状根目录的会话范围设置：空字符串 = 全库（该监控根即为全库）

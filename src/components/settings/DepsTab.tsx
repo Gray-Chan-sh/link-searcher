@@ -89,7 +89,7 @@ export function DepsTab() {
                     disabled={!!active && !installing}
                     className="shrink-0 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-lg transition-colors"
                   >
-                    {installing ? t('cancel') : dep.size_bytes > 0 ? t('install_now') : t('install_now')}
+                    {installing ? t('cancel') : t('install_now')}
                   </button>
                 )}
               </div>

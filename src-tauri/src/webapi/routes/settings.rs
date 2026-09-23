@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use axum::{
     extract::{State, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
@@ -20,6 +20,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/settings",
             get(settings_handler).put(update_settings_handler),
         )
+        .route("/api/auth/token", post(update_token_handler))
 }
 
 async fn version_handler() -> Json<serde_json::Value> {
@@ -87,7 +88,10 @@ pub(crate) struct UpdateTokenBody {
 }
 
 /// Update the server-side Bearer token in the database.
-/// Requires the current valid token (passed via auth middleware).
+///
+/// Protected by the bearer-auth middleware, so the caller must already hold
+/// the current valid token. A forgotten token can only be reset from the
+/// desktop Settings page (which writes through Tauri IPC, not this endpoint).
 pub(crate) async fn update_token_handler(
     State(mut state): State<ApiState>,
     body: Json<UpdateTokenBody>,
