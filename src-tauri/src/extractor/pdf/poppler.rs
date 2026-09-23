@@ -7,43 +7,24 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-/// Locate a poppler binary (`pdftoppm` or `pdfimages`).
-/// Searches PATH first, then the bundled/dev `poppler-bin/` dir, then next
-/// to the executable, then platform install prefixes — the Tauri app may
-/// not inherit the terminal PATH.
+/// Whether a poppler binary (`pdftoppm` / `pdfimages` / …) is installed: just
+/// run it once and see if it resolves.
+///
+/// On Windows the process PATH is refreshed from the registry at startup and
+/// after package installs (see [`crate::process::refresh_path`]), so a
+/// winget/choco/scoop install is picked up with no directory enumeration. On
+/// macOS/Linux a GUI app may not inherit the shell PATH, so the common install
+/// prefixes remain as a fallback.
 fn find_poppler_binary(name: &str) -> Option<PathBuf> {
     // poppler 的 pdftoppm/pdftotext 用 `-v`（非 `--version`），后者会报
     // "Couldn't open file '--version'"。统一用 `-v` 探测。
     const VERSION_FLAG: &str = "-v";
-    // On Windows, probe with the .exe name first; the bare-name PATH probe
-    // can still match via PATHEXT, but CreateProcess needs the real file.
     if crate::process::probe_ok(name, &[VERSION_FLAG]) {
         return Some(PathBuf::from(name));
     }
-    // Dev mode: look relative to project root
-    let dev_name = crate::process::windows_exe_name(name);
-    let dev_path = PathBuf::from("poppler-bin").join(&dev_name);
-    if dev_path.exists() && crate::process::probe_ok(&dev_path, &[VERSION_FLAG]) {
-        return Some(dev_path);
-    }
-    // Release mode: look next to the executable
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            let bundle_path = dir.join(&dev_name);
-            if bundle_path.exists() && crate::process::probe_ok(&bundle_path, &[VERSION_FLAG]) {
-                return Some(bundle_path);
-            }
-        }
-    #[cfg(target_os = "windows")]
-    for prefix in ["C:\\Program Files\\poppler\\Library\\bin", "C:\\poppler\\Library\\bin", "C:\\Program Files\\poppler\\bin"] {
-        let candidate = PathBuf::from(prefix).join(&dev_name);
-        if candidate.exists() && crate::process::probe_ok(&candidate, &[VERSION_FLAG]) {
-            return Some(candidate);
-        }
-    }
     #[cfg(not(target_os = "windows"))]
-    for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        let candidate = PathBuf::from(prefix).join(&dev_name);
+    for prefix in crate::process::UNIX_BIN_PREFIXES {
+        let candidate = PathBuf::from(prefix).join(name);
         if candidate.exists() && crate::process::probe_ok(&candidate, &[VERSION_FLAG]) {
             return Some(candidate);
         }
@@ -51,27 +32,36 @@ fn find_poppler_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-static PDFTOPPM_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-static PDFIMAGES_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// Caches only *positive* results: a "not found" is re-probed on the next call,
+/// so installing poppler while the app is running flips the status to ready
+/// without a restart.
+fn cached(lock: &'static OnceLock<PathBuf>, name: &str) -> Option<&'static Path> {
+    if let Some(p) = lock.get() {
+        return Some(p.as_path());
+    }
+    let found = find_poppler_binary(name)?;
+    Some(lock.get_or_init(|| found).as_path())
+}
+
+static PDFTOPPM_PATH: OnceLock<PathBuf> = OnceLock::new();
+static PDFIMAGES_PATH: OnceLock<PathBuf> = OnceLock::new();
+static PDFTOTEXT_PATH: OnceLock<PathBuf> = OnceLock::new();
+static PDFINFO_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 pub(super) fn pdftoppm_path() -> Option<&'static Path> {
-    PDFTOPPM_PATH.get_or_init(|| find_poppler_binary("pdftoppm")).as_deref()
+    cached(&PDFTOPPM_PATH, "pdftoppm")
 }
 
 pub(super) fn pdfimages_path() -> Option<&'static Path> {
-    PDFIMAGES_PATH.get_or_init(|| find_poppler_binary("pdfimages")).as_deref()
+    cached(&PDFIMAGES_PATH, "pdfimages")
 }
-
-static PDFTOTEXT_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 pub(super) fn pdftotext_path() -> Option<&'static Path> {
-    PDFTOTEXT_PATH.get_or_init(|| find_poppler_binary("pdftotext")).as_deref()
+    cached(&PDFTOTEXT_PATH, "pdftotext")
 }
 
-static PDFINFO_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
-
 pub(super) fn pdfinfo_path() -> Option<&'static Path> {
-    PDFINFO_PATH.get_or_init(|| find_poppler_binary("pdfinfo")).as_deref()
+    cached(&PDFINFO_PATH, "pdfinfo")
 }
 
 /// Get the number of pages in a PDF. Uses pdfinfo first (tolerant of

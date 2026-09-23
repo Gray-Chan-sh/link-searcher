@@ -95,6 +95,9 @@ windows = { version = "0.61", features = [
     "Storage",
     "Storage_Streams",
 ] }
+# Re-read user+machine PATH from the registry so tools installed (e.g. by
+# winget) after the app started become visible without a restart.
+winreg = "0.55"
 
 [dev-dependencies]
 dirs = "5"

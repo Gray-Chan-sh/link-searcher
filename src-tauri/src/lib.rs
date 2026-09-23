@@ -204,6 +204,9 @@ get_dir_children,
             restart_app,
         ])
         .setup(|app| {
+            // Pick up tools installed (e.g. by winget) since this process
+            // started: a running process keeps its launch-time PATH.
+            crate::process::refresh_path();
             log::info!("data directory: {:?}", data_dir);
             if let Err(e) = std::fs::create_dir_all(&data_dir) {
                 eprintln!("[FATAL] failed to create data directory {:?}: {}", data_dir, e);

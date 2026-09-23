@@ -78,6 +78,13 @@ pub fn install_dep(
         } else {
             download::install_dep(&def, &data_dir, &CANCEL, &on_progress)
         };
+        // winget/brew/apt update PATH (winget: the registry; macOS:
+        // path_helper). A running process keeps its launch-time PATH, so
+        // re-read it before the frontend's post-install refresh — otherwise
+        // the tool stays "not found".
+        if res.is_ok() {
+            crate::process::refresh_path();
+        }
         let cancelled = CANCEL.load(Ordering::SeqCst);
         let result = match res {
             Ok(()) => DepInstallResult {

@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-24：修复 winget 安装 ffmpeg/poppler 后状态仍显示未安装（✗）
+
+- **根因**：`find_ffmpeg_binary` / `find_poppler_binary` 靠枚举硬编码目录找二进制，未覆盖 winget 的落点（`%LOCALAPPDATA%\Microsoft\WinGet\Packages\oschwartz10612.Poppler_*\poppler-*\Library\bin`），且结果被 `OnceLock<Option<PathBuf>>` 缓存，安装后同一会话不重算。winget 实际只把路径写进注册表 PATH，运行中的进程仍用启动时的旧 PATH 快照，故「安装完成」后一直 ✗。
+- **修复**：
+  - 探测改为「只调用一次命令」：`ffmpeg -version` / `pdftoppm -v` 能跑即视为已安装，删除全部硬编码系统目录枚举（`extractor/audio.rs`、`extractor/pdf/poppler.rs`）；macOS/Linux 保留固定前缀兜底（GUI 程序不继承 shell PATH），前缀统一到 `process::UNIX_BIN_PREFIXES`（Homebrew `/opt/homebrew/bin`、`/usr/local/bin`、MacPorts `/opt/local/bin`、snap `/snap/bin`、`/usr/bin`）。
+  - 缓存改为只缓存「找到」的路径，未找到则下次调用重新探测 —— 安装后无需重启即可翻转为 ✓。
+  - 新增跨平台 `process::refresh_path()`：Windows 从 `HKCU\Environment` + `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Environment` 重读并展开 `%VAR%` 后写回进程 PATH（`winreg`）；macOS 执行 `/usr/libexec/path_helper -s` 按 `/etc/paths`、`/etc/paths.d` 重建 PATH；Linux 为 no-op。在启动时（`lib.rs` setup）与系统包安装成功后（`deps/commands.rs`）各调用一次。
+- **验证**：`cargo check --all-targets` 0 错误（无新增告警）；`cargo test --lib` **425 passed / 1 ignored**。
+- **涉及文件**：`src-tauri/Cargo.toml`、`src-tauri/src/process.rs`、`src-tauri/src/extractor/audio.rs`、`src-tauri/src/extractor/pdf/poppler.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/deps/commands.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-23：全量文档同步 —— 修正与代码漂移（结构树 / 页面数 / CLI / RAG 描述 / 模型说明）
 
 - **背景**：近期模块拆分（`commands/ai`、`commands/index`、`db/tracker`、`extractor/pdf`）与功能迭代后，多篇文档与代码脱节，做一次全仓审计并同步（共 34 篇 Markdown）。

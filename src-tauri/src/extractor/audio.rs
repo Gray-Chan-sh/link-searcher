@@ -3,50 +3,19 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
-/// Locate `ffmpeg`. Searches PATH first, then the bundled/dev
-/// `ffmpeg-bin/` dir, then next to the executable, then common
-/// Homebrew prefixes — the Tauri app may not inherit the terminal PATH.
+/// Whether `ffmpeg` is installed: just run `ffmpeg -version` once and see if it
+/// resolves. On Windows the process PATH is refreshed from the registry at
+/// startup and after package installs (see [`crate::process::refresh_path`]),
+/// so a winget/choco/scoop install is picked up with no directory enumeration.
+/// On macOS/Linux a GUI app may not inherit the shell PATH, so the common
+/// install prefixes remain as a fallback.
 fn find_ffmpeg_binary() -> Option<PathBuf> {
     if crate::process::probe_ok("ffmpeg", &["-version"]) {
         return Some(PathBuf::from("ffmpeg"));
     }
-    let dev_name = crate::process::windows_exe_name("ffmpeg");
-    let dev_path = PathBuf::from("ffmpeg-bin").join(&dev_name);
-    if dev_path.exists() && crate::process::probe_ok(&dev_path, &["-version"]) {
-        return Some(dev_path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            let bundle_path = dir.join(&dev_name);
-            if bundle_path.exists() && crate::process::probe_ok(&bundle_path, &["-version"]) {
-                return Some(bundle_path);
-            }
-        }
-    #[cfg(target_os = "windows")]
-    {
-        // 经 setup 脚本/winget 安装后 GUI 程序常不继承 shell PATH，需
-        // 显式枚举 winget Links shim、chocolatey、scoop 的固定落点。
-        let mut prefixes: Vec<PathBuf> = vec![
-            PathBuf::from("C:\\ffmpeg\\bin"),
-            PathBuf::from("C:\\Program Files\\ffmpeg\\bin"),
-            PathBuf::from("C:\\ProgramData\\chocolatey\\bin"),
-        ];
-        if let Ok(local) = std::env::var("LOCALAPPDATA") {
-            prefixes.push(PathBuf::from(local).join("Microsoft\\WinGet\\Links"));
-        }
-        if let Ok(profile) = std::env::var("USERPROFILE") {
-            prefixes.push(PathBuf::from(profile).join("scoop\\apps\\ffmpeg\\current\\bin"));
-        }
-        for prefix in &prefixes {
-            let candidate = prefix.join(&dev_name);
-            if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
-                return Some(candidate);
-            }
-        }
-    }
     #[cfg(not(target_os = "windows"))]
-    for prefix in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"] {
-        let candidate = PathBuf::from(prefix).join(&dev_name);
+    for prefix in crate::process::UNIX_BIN_PREFIXES {
+        let candidate = PathBuf::from(prefix).join("ffmpeg");
         if candidate.exists() && crate::process::probe_ok(&candidate, &["-version"]) {
             return Some(candidate);
         }
@@ -54,10 +23,17 @@ fn find_ffmpeg_binary() -> Option<PathBuf> {
     None
 }
 
-static FFMPEG_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// Caches only *positive* results: a "not found" is re-probed on the next call,
+/// so installing ffmpeg while the app is running flips the status to ready
+/// without a restart.
+static FFMPEG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fn ffmpeg_path() -> Option<&'static Path> {
-    FFMPEG_PATH.get_or_init(find_ffmpeg_binary).as_deref()
+    if let Some(p) = FFMPEG_PATH.get() {
+        return Some(p.as_path());
+    }
+    let found = find_ffmpeg_binary()?;
+    Some(FFMPEG_PATH.get_or_init(|| found).as_path())
 }
 
 /// Public check used by startup dependency detection and `check_dependencies`.
