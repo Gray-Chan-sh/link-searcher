@@ -333,44 +333,46 @@ pub async fn migrate_data(
         std::fs::create_dir_all(&tmp).map_err(|e| format!("无法创建临时目录: {e}"))?;
 
         // SQLite via online Backup API — WAL-safe, unlike fs::copy of a live DB.
-        emit("db", 15);
+        // `data.db-wal`/`-shm` are skipped (the snapshot already holds their
+        // committed contents).
+        emit("db", 5);
         let old_db = old.join("data.db");
         if old_db.exists()
             && let Err(e) = backup_db(&old_db, &tmp.join("data.db")) {
                 cleanup_tmp();
                 return Err(e);
             }
-        emit("db", 30);
+        emit("db", 15);
 
-        let old_index = old.join(INDEX_DIR_NAME);
-        if old_index.exists()
-            && let Err(e) = copy_dir_recursive(&old_index, &tmp.join(INDEX_DIR_NAME)) {
-                cleanup_tmp();
-                return Err(e);
-            }
-        emit("index", 55);
-
-        let old_log = old.join("app.log");
-        if old_log.exists() {
-            let _ = std::fs::copy(&old_log, tmp.join("app.log"));
+        // Copy everything else in the data dir verbatim — local models
+        // (`models/`, often >1 GB), chat history, backups, TLS certs, the
+        // Tantivy index, app.log. Byte-based progress because of the models.
+        let total = tree_bytes(old, true);
+        let mut copied = 0u64;
+        emit("files", 20);
+        if let Err(e) = copy_tree(old, &tmp, true, total, &mut copied, &emit) {
+            cleanup_tmp();
+            return Err(e);
         }
-        emit("log", 75);
+        emit("files", 80);
 
         // fsync everything so the rename publishes durable data.
         if let Err(e) = fsync_tree(&tmp) {
             cleanup_tmp();
             return Err(format!("数据落盘失败: {e}"));
         }
+        emit("fsync", 85);
 
         // Atomic rename — tmp lives inside the target dir, so same filesystem.
         std::fs::create_dir_all(new).map_err(|e| format!("无法创建目标目录: {e}"))?;
-        for name in ["data.db", INDEX_DIR_NAME, "app.log"] {
-            let src = tmp.join(name);
-            if src.exists()
-                && let Err(e) = std::fs::rename(&src, new.join(name)) {
-                    cleanup_tmp();
-                    return Err(format!("移动 {name} 失败: {e}"));
-                }
+        let entries = std::fs::read_dir(&tmp).map_err(|e| format!("读取临时目录失败: {e}"))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("遍历临时目录失败: {e}"))?;
+            let name = entry.file_name();
+            if let Err(e) = std::fs::rename(entry.path(), new.join(&name)) {
+                cleanup_tmp();
+                return Err(format!("移动 {name:?} 失败: {e}"));
+            }
         }
         let _ = std::fs::remove_dir_all(&tmp);
         emit("cleanup", 90);
@@ -447,26 +449,79 @@ fn fsync_tree(root: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+/// 迁移时跳过的顶层条目：DB 旁路文件（备份 API 已含其内容）与纯可再生的
+/// 会话日志、Vision 预热缓存。
+fn is_migration_skipped(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_string_lossy().as_ref(),
+        "data.db" | "data.db-wal" | "data.db-shm" | "logs" | ".vision_warmup.png"
+    )
+}
+
+/// 统计迁移需要复制的总字节数（用于进度上报），跳过 [`is_migration_skipped`]。
+fn tree_bytes(dir: &std::path::Path, top: bool) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut total = 0u64;
+    for entry in entries.flatten() {
+        if top && is_migration_skipped(&entry.file_name()) {
+            continue;
+        }
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => total += tree_bytes(&entry.path(), false),
+            Ok(ft) if ft.is_file() => {
+                if let Ok(meta) = entry.metadata() {
+                    total += meta.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    total
+}
+
+/// 递归复制 `src` 到 `dst`，跳过顶层 [`is_migration_skipped`] 条目，并按已复制
+/// 字节数在 20..80 区间上报进度。
+fn copy_tree(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    top: bool,
+    total: u64,
+    copied: &mut u64,
+    emit: &dyn Fn(&str, u32),
+) -> Result<(), String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("创建目录 {dst:?} 失败: {e}"))?;
     for entry in std::fs::read_dir(src).map_err(|e| format!("读取目录 {src:?} 失败: {e}"))? {
         let entry = entry.map_err(|e| format!("遍历 {src:?} 失败: {e}"))?;
+        let name = entry.file_name();
+        if top && is_migration_skipped(&name) {
+            continue;
+        }
         let file_type = entry.file_type().map_err(|e| format!("获取类型 {src:?} 失败: {e}"))?;
         let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
+        let dst_path = dst.join(&name);
         if file_type.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
+            copy_tree(&src_path, &dst_path, false, total, copied, emit)?;
         } else {
             // Windows 上 Tantivy 索引文件被 reader mmap 锁定、
             // meta.lock 被独占锁定，fs::copy 返回 PermissionDenied。
             // 这些文件是临时性的（锁文件/可重建的段文件），
             // 新位置重新打开索引时自动重建，跳过即可。
-            if let Err(e) = std::fs::copy(&src_path, &dst_path) {
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    log::warn!("[MIGRATE] 跳过被锁定的文件 {src_path:?}: {e}");
-                    continue;
+            match std::fs::copy(&src_path, &dst_path) {
+                Ok(bytes) => {
+                    *copied += bytes;
+                    if total > 0 {
+                        let p = 20 + ((*copied).min(total) * 60 / total) as u32;
+                        emit("files", p);
+                    }
                 }
-                return Err(format!("复制 {src_path:?} -> {dst_path:?} 失败: {e}"));
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    log::warn!("[MIGRATE] 跳过被锁定的文件 {src_path:?}: {e}");
+                }
+                Err(e) => {
+                    return Err(format!("复制 {src_path:?} -> {dst_path:?} 失败: {e}"));
+                }
             }
         }
     }
@@ -476,4 +531,64 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
     app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_base(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("ls_migrate_{tag}_{}", uuid::Uuid::new_v4()))
+    }
+
+    #[test]
+    fn copy_tree_migrates_models_and_chat_but_skips_db_sidecars() {
+        let base = tmp_base("copy");
+        let src = base.join("old");
+        let dst = base.join("tmp");
+
+        // 本地模型（BGE / FunASR）与聊天历史都必须迁移。
+        std::fs::create_dir_all(src.join("models").join("bge-small-zh-v1.5")).unwrap();
+        std::fs::write(src.join("models").join("bge-small-zh-v1.5").join("model.onnx"), b"onnx").unwrap();
+        std::fs::create_dir_all(src.join("models").join("funasr")).unwrap();
+        std::fs::write(src.join("models").join("funasr").join("llm.int8.onnx"), b"asr").unwrap();
+        std::fs::write(src.join("chat_history.json"), b"[]").unwrap();
+        std::fs::write(src.join("app.log"), b"log").unwrap();
+        // DB 与旁路文件、可再生目录应被跳过。
+        std::fs::write(src.join("data.db"), b"db").unwrap();
+        std::fs::write(src.join("data.db-wal"), b"wal").unwrap();
+        std::fs::write(src.join("data.db-shm"), b"shm").unwrap();
+        std::fs::create_dir_all(src.join("logs")).unwrap();
+        std::fs::write(src.join("logs").join("scan.log"), b"x").unwrap();
+
+        let total = tree_bytes(&src, true);
+        let mut copied = 0u64;
+        let emit = |_: &str, _: u32| {};
+        copy_tree(&src, &dst, true, total, &mut copied, &emit).unwrap();
+
+        assert!(dst.join("models/bge-small-zh-v1.5/model.onnx").is_file(), "BGE model must migrate");
+        assert!(dst.join("models/funasr/llm.int8.onnx").is_file(), "FunASR model must migrate");
+        assert!(dst.join("chat_history.json").is_file(), "chat history must migrate");
+        assert!(dst.join("app.log").is_file(), "app.log must migrate");
+        assert!(!dst.join("data.db-wal").exists(), "WAL sidecar must be skipped");
+        assert!(!dst.join("data.db-shm").exists(), "SHM sidecar must be skipped");
+        assert!(!dst.join("data.db").exists(), "DB is copied via backup API, not copy_tree");
+        assert!(!dst.join("logs").exists(), "regenerable logs dir must be skipped");
+        assert_eq!(copied, total, "progress bytes must match counted total");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tree_bytes_ignores_skipped_entries() {
+        let base = tmp_base("bytes");
+        let src = base.join("old");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("models.onnx"), vec![0u8; 100]).unwrap();
+        std::fs::write(src.join("data.db"), vec![0u8; 999]).unwrap();
+        std::fs::write(src.join("data.db-wal"), vec![0u8; 999]).unwrap();
+
+        assert_eq!(tree_bytes(&src, true), 100, "only non-skipped files counted");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

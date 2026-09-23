@@ -1,6 +1,15 @@
 # Link-Searcher 变更日志
 
-> 2026年7月30日 — 9月23日。v1.1.2：运行依赖按需安装 + 首启向导 + 发布版瘦身 + RAG 检索质量治理 + Web API 安全加固
+> 2026年7月30日 — 9月24日。v1.1.3：数据目录迁移修复（模型/聊天历史等全量拷贝 + 旧目录延迟清理）
+
+---
+
+## 2026-09-24：数据迁移遗漏 models/ 等目录，导致 BGE / FunASR 迁移后「消失」（v1.1.3）
+
+- **根因**：`migrate_data` 只硬编码拷贝 `data.db`、`.ls-index`、`app.log` 三项（`commands/config.rs`），而数据目录下还有 `models/`（BGE、FunASR 本地模型）、`chat_history.json`、`backups/`、`tls/` 等。迁移后配置指向新目录，新目录缺少这些内容，故 BGE / FunASR 显示未安装、聊天历史丢失。叠加本版新增的「启动自动清理旧目录」，未拷贝的模型会被旧目录清理一并删除，变成永久丢失。
+- **修复**：迁移改为「拷贝整个数据目录内容」——`data.db` 仍走 WAL 安全的 SQLite Backup API，`data.db-wal`/`-shm` 跳过；其余条目（含 `models/`、`chat_history.json`、`backups/`、`tls/`、`.ls-index`、`app.log`）用新的 `copy_tree` 递归原样拷贝。纯可再生的 `logs/`、`.vision_warmup.png` 跳过。因本地模型可能 >1 GB，进度改为按已复制字节数在 20..80 区间上报；完成后逐项 `rename` 进目标目录。删除旧用的 `copy_dir_recursive`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib config::` 新增 `copy_tree_migrates_models_and_chat_but_skips_db_sidecars`、`tree_bytes_ignores_skipped_entries` 通过；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/config.rs`、`CHANGELOG.md`
 
 ---
 
