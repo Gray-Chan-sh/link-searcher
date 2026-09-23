@@ -41,6 +41,11 @@ semgrep scan \
   --severity ERROR
 ```
 
+> **Windows 运行注意**（本机已装 semgrep 1.177 / Python 3.12，`semgrep.exe` 在
+> `%LOCALAPPDATA%\Programs\Python\Python312\Scripts`）：
+> - Python 在 Windows 默认用 GBK 读文件，会因 `.semgrep/custom.yml` 含 UTF-8 中文而崩溃 → 必须先设 `$env:PYTHONUTF8='1'`（已写入用户环境变量，新终端生效）。
+> - 若 `semgrep` 不在 PATH：`$env:Path += ";$env:LOCALAPPDATA\Programs\Python\Python312\Scripts"`。
+
 | 级别 | 含义 | 包含规则 |
 |:---:|------|------|
 | **ERROR** | 🔴 阻塞提交，必须修复 | OWASP Top 10、密钥泄露、RwLock/Mutex 锁中毒 |
