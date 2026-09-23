@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-23：`extractor/pdf.rs` 拆分（1917 → 1073 行 + 4 子模块）
+
+- 抽出内聚逻辑到 `extractor/pdf/`，用 `pub` / `pub(crate)` / `pub(super)` 重导出保持既有路径不变（`PdfExtractor`、`get_pdf_page_count`、`poppler_available`、`is_pdftoppm_available`、`ocr_pdf_via_pdfimages` 等外部调用零改动）：
+  - `extractor/pdf/poppler.rs`（140）：poppler 二进制发现 + 带超时的子进程执行
+  - `extractor/pdf/scan.rs`（102）：`/MediaBox` 页面尺寸 + 整页图像扫描件判定
+  - `extractor/pdf/quality.rs`（205）：乱码 / 稀疏 / 水印 / 重复等文本层质量启发式
+  - `extractor/pdf/ocr.rs`（451）：扫描件 OCR 管线（pdfimages/pdftoppm 快速路径 + 逐页 OCR 时间预算）
+- **验证**：`cargo check --all-targets` 0 错误（无新增告警）；`cargo test --lib` **425 passed / 0 failed**；`cargo test --test test_pdf_ocr` 2 passed。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/pdf/{poppler,scan,quality,ocr}.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-23：`commands/index.rs` 拆分（2201 → 1539 行 + 3 子模块）
 
 - 抽出内聚核心逻辑到 `commands/index/`，命令仍留在 `index.rs` 薄包装，`pub use` / `pub(crate) use` 保持 `crate::commands::index::X` 路径不变：
