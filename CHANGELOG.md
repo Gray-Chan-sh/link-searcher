@@ -4,6 +4,13 @@
 
 ---
 
+## 2026-09-23：收尾 —— `.gitignore` 忽略 Tauri 平台 schema 与本机 `.npmrc`
+
+- 将 Tauri 构建生成的 `src-tauri/gen/schemas/*-schema.json`（保留已入库的 `desktop-schema.json`）与本机 npm 镜像配置 `.npmrc` 加入 `.gitignore`，避免构建产物/本机配置污染工作区；恢复 `desktop-schema.json`（仅换行差异、无内容变更）（`.gitignore`）
+- **涉及文件**：`.gitignore`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-23：`db/tracker.rs` 拆分（1774 → 1304 行 + 2 子模块）
 
 - 抽出内聚存储层到 `db/tracker/`，`pub use` 重导出保持 `crate::db::tracker::X` 路径不变：

@@ -30,6 +30,12 @@ src-tauri/*.log
 src-tauri/index/
 # 本机 Cargo 环境变量（如 sherpa-onnx 预编译库路径）— 勿入库，避免平台绑定
 src-tauri/.cargo/config.toml
+# Tauri 生成的平台 schema（desktop-schema.json 已入库，其余随构建平台变化）
+src-tauri/gen/schemas/*-schema.json
+!src-tauri/gen/schemas/desktop-schema.json
+
+# 本机 npm 镜像配置（setup-dev 生成）
+.npmrc
 
 # Local session data
 .omo/
