@@ -11,7 +11,7 @@ Link-Searcher 的所有数据存储在本地：
 | 平台 | 数据目录 |
 |------|---------|
 | macOS | `~/Library/Application Support/link-searcher/` |
-| Windows | `%APPDATA%\link-searcher\` |
+| Windows | `%LOCALAPPDATA%\link-searcher\` |
 | Linux | `~/.local/share/link-searcher/` |
 
 目录内容：

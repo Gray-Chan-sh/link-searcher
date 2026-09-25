@@ -183,8 +183,14 @@ fn config_dir() -> PathBuf {
         .join(CONFIG_DIR)
 }
 
+/// Default data directory (`data.db`, `.ls-index`, `models/`, …).
+///
+/// Uses the *local* per-user data dir rather than the roaming one: on Windows
+/// this is `%LOCALAPPDATA%`, so the multi-GB model files are not synced by
+/// domain roaming profiles. macOS/Linux resolve to the same path as
+/// `data_dir()`.
 fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
+    dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("link-searcher")
 }

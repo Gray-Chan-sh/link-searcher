@@ -23,6 +23,18 @@
 
 ---
 
+## 2026-09-24：Windows 默认数据目录改为 Local AppData（不再随漫游同步）
+
+- **背景**：默认数据目录用 `dirs::data_dir()`，Windows 上是 **Roaming** AppData（`%APPDATA%`）。模型文件可达 GB 级（BGE-large 1.2GB、FunASR 850MB 等），在企业域漫游环境下会被同步、拖慢登录。
+- **改动**：`config.rs::default_data_dir()` 改用 `dirs::data_local_dir()` → Windows 落到 `%LOCALAPPDATA%\link-searcher`；macOS/Linux 路径不变（仍解析为 `~/Library/Application Support` / `~/.local/share`）。
+- **兼容**：`data_dir` 会持久化到 `config.json`，**存量用户保持原路径不变**（仅新装/未持久化 data_dir 的用户走新默认）；仍可用 `LINK_SEARCHER_DATA_DIR`、CLI 首参或设置页「迁移数据目录」覆盖。
+- **配置目录不变**：`config.json` 仍在 `dirs::config_dir()`（Windows `%APPDATA%\.link-searcher`，体积小，无需迁移）。
+- **文档**：`docs/09-backup-migrate.md` 平台表 Windows 路径更新。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` 431 通过。
+- **涉及文件**：`src-tauri/src/config.rs`、`docs/09-backup-migrate.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：数据迁移遗漏 models/ 等目录，导致 BGE / FunASR 迁移后「消失」（v1.1.3）
 
 - **根因**：`migrate_data` 只硬编码拷贝 `data.db`、`.ls-index`、`app.log` 三项（`commands/config.rs`），而数据目录下还有 `models/`（BGE、FunASR 本地模型）、`chat_history.json`、`backups/`、`tls/` 等。迁移后配置指向新目录，新目录缺少这些内容，故 BGE / FunASR 显示未安装、聊天历史丢失。叠加本版新增的「启动自动清理旧目录」，未拷贝的模型会被旧目录清理一并删除，变成永久丢失。
