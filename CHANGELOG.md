@@ -35,6 +35,22 @@
 
 ---
 
+## 2026-09-24：删除离线 QA 对检索通道（无净收益）
+
+- **背景**：离线 QA 对（`doc_qa_pairs`）通道在 88 题 A/B（见本文件 2026-09-19 条目）中 semantic +6.07pp、合同 0→2/6，但 twin −20pp、multi_hop −12.5pp，**总体 −1.14pp**；且需全量 LLM 生成才可能转正、换 embedding 模型后须全部重生成。权衡后整功能删除。
+- **删除**：
+  - CLI 子命令 `index-qa`（`cli.rs`）；
+  - QA 检索通道与 `LINK_SEARCHER_QA_SCAN` 开关（`commands/ai/prompt.rs`）；
+  - `ai::qa_vector_scan_with_query_emb`（`ai/mod.rs`）；
+  - db 层 QA CRUD：`upsert_qa_pair` / `get_all_qa_vectors` / `delete_qa_for_file` / `count_qa_pairs`（`db/tracker/embeddings.rs`、`db/tracker.rs`）；
+  - `doc_qa_pairs` 建表/索引；schema 迁移新增一次性 `DROP TABLE IF EXISTS doc_qa_pairs`（回收旧库空间），`SCHEMA_VERSION` 5→6（`db/mod.rs`）。
+- **连带调整**：`RebuildEmbeddingsReport` 去掉 `cleared_qa`（`commands/index/vector_health.rs`、`src/api/index.ts`）；维度一致性检查不再统计 `doc_qa_pairs`。
+- **文档**：README、`docs/10-cli.md`（删「生成 QA 对」章节）、`docs/USER_MANUAL.md`、`ROADMAP.md` 移除 `index-qa`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` 通过；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/cli.rs`、`src-tauri/src/commands/ai/prompt.rs`、`src-tauri/src/ai/mod.rs`、`src-tauri/src/db/tracker/embeddings.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/index/vector_health.rs`、`src/api/index.ts`、`README.md`、`docs/10-cli.md`、`docs/USER_MANUAL.md`、`ROADMAP.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：数据迁移遗漏 models/ 等目录，导致 BGE / FunASR 迁移后「消失」（v1.1.3）
 
 - **根因**：`migrate_data` 只硬编码拷贝 `data.db`、`.ls-index`、`app.log` 三项（`commands/config.rs`），而数据目录下还有 `models/`（BGE、FunASR 本地模型）、`chat_history.json`、`backups/`、`tls/` 等。迁移后配置指向新目录，新目录缺少这些内容，故 BGE / FunASR 显示未安装、聊天历史丢失。叠加本版新增的「启动自动清理旧目录」，未拷贝的模型会被旧目录清理一并删除，变成永久丢失。

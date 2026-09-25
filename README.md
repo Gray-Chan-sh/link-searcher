@@ -141,7 +141,6 @@
 | **索引健康检查** | `link-searcher health` |
 | **命令行 AI 问答** | `link-searcher chat "问题"`（支持 `--scope` / `--no-llm` / `--dry-run` 等） |
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
-| **QA 生成** | `link-searcher index-qa` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
 | **远程 WebUI / API** | 可选 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），默认关闭，设置页开启并可切换 localhost / LAN；Token 轮换需已认证，忘记 Token 只能从桌面端重置 |
@@ -232,7 +231,7 @@ link-searcher/
 │   │   ├── lib.rs             # Tauri 初始化 + 启动流程 + 命令注册
 │   │   ├── boot.rs            # 启动引导（依赖自检等）
 │   │   ├── process.rs         # 子进程辅助
-│   │   ├── cli.rs             # 命令行接口（index/scan/watch/health/chat/quality/index-qa）
+│   │   ├── cli.rs             # 命令行接口（index/scan/watch/health/chat/quality）
 │   │   ├── config.rs          # 配置文件管理
 │   │   ├── state.rs           # AppState（全局状态）
 │   │   ├── indexer.rs         # 索引服务（batch_index、流式 MD5、自动 commit）

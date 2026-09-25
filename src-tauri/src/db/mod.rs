@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -88,6 +88,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // P6 removal: migrate existing databases that still carry the legacy
     // `private` column on dir_config.
     drop_dir_config_private_column(&tx)?;
+
+    // Retired feature: the offline QA-pair retrieval channel was removed.
+    // Drop its table to reclaim space (idempotent — no-op on fresh DBs).
+    tx.execute_batch("DROP TABLE IF EXISTS doc_qa_pairs;")
+        .context("failed to drop retired doc_qa_pairs table")?;
 
     // One-time normalization of dir_config.path rows stored before
     // normalize-on-write (Windows backslashes / \\?\ verbatim prefixes);
@@ -355,16 +360,6 @@ const CREATE_TABLES_SQL: &str = "
         updated_at  INTEGER NOT NULL,
         PRIMARY KEY (md5, chunk_index)
     );
-
-    CREATE TABLE IF NOT EXISTS doc_qa_pairs (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        file_id     TEXT NOT NULL,
-        question    TEXT NOT NULL,
-        dim         INTEGER NOT NULL,
-        vector      BLOB NOT NULL,
-        updated_at  INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_qa_file_id ON doc_qa_pairs(file_id);
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any
@@ -582,8 +577,8 @@ mod tests {
                 [],
                 |row| row.get(0),
             )
-            .unwrap();
-        assert_eq!(version, "5");
+                .unwrap();
+        assert_eq!(version, "6");
     }
 
     #[test]

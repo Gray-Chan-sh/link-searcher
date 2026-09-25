@@ -77,7 +77,7 @@
 - [x] **安全的远程 WebUI 与 API**：可选的 HTTPS 守护进程（axum + rustls，非 Tauri 插件），暴露 70 个 RESTful 路由（搜索/浏览/文件预览/索引状态/扫描/AI 问答/会话 CRUD/备份/日志/事件等），Bearer Token 认证 + 自签名 TLS 证书，默认关闭需显式启用，绑定地址可选 localhost/LAN，设置页可配置端口/Token/绑定地址
 - [x] **监控目录热重载**：已实现——update_dir 后自动触发增量扫描 + 重启 watcher（2026-08-25 核实）
 - [x] **多语言界面**：中/英/日/韩 UI 完整覆盖，设置页切换（i18n/{zh,en,ja,ko}.ts；2026-08-25 核实）
-- [x] **CLI 增强**：已有 `index`(别名 search)、`scan [dir]`、`watch dir`、`health`、`chat`、`quality backfill|audit|reextract`、`index-qa` 子命令与全局 `--data-dir`，无 GUI 可用（2026-09-23 核实）
+- [x] **CLI 增强**：已有 `index`(别名 search)、`scan [dir]`、`watch dir`、`health`、`chat`、`quality backfill|audit|reextract` 子命令与全局 `--data-dir`，无 GUI 可用（2026-09-23 核实）
 - [x] **RAG 内容分析**：摘要（AI 摘要按钮）、跨文件关联（askDocuments/聊天）、主题聚类（索引状态页 `ai_topic_clusters`，2026-08-25）
 
 ---

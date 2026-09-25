@@ -58,7 +58,7 @@
 
 ### [第十章：命令行](10-cli.md)
 
-link-searcher index（别名 search）/ scan / watch / health / chat / quality / index-qa。
+link-searcher index（别名 search）/ scan / watch / health / chat / quality。
 
 ---
 

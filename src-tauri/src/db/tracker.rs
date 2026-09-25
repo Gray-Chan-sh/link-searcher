@@ -655,9 +655,9 @@ pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExt
 
 mod embeddings;
 pub use embeddings::{
-    count_chunk_embeddings, count_qa_pairs, delete_chunk_embeddings, delete_embedding,
-    delete_qa_for_file, get_all_chunk_embeddings, get_all_embeddings, get_all_qa_vectors,
-    get_chunk_embeddings_by_md5s, upsert_chunk_embedding, upsert_embedding, upsert_qa_pair,
+    count_chunk_embeddings, delete_chunk_embeddings, delete_embedding,
+    get_all_chunk_embeddings, get_all_embeddings,
+    get_chunk_embeddings_by_md5s, upsert_chunk_embedding, upsert_embedding,
 };
 
 /// All active file ids sharing a content md5 (dedup duplicates).

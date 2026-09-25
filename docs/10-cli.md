@@ -116,14 +116,6 @@ link-searcher quality audit      # 列出低质量文件与评分分布
 link-searcher quality reextract  # 重新提取低质量文件（批量需 --yes）
 ```
 
-## 步骤 7：生成 QA 对
-
-```bash
-link-searcher index-qa --count 5 --min-chars 500 --max-chars 10000
-```
-
-为文档离线生成问答对（用于语义检索），`--limit 0` 表示处理全部。
-
 ## 注意事项
 
 - CLI 与 GUI 共用同一数据目录；全局 `--data-dir <目录>` 可指定数据目录，例如 `link-searcher --data-dir /data/ls index "关键词"`

@@ -449,32 +449,6 @@ pub fn vector_scan_with_query_emb(
     Ok(results)
 }
 
-/// Brute-force cosine scan over ALL stored QA-pair embeddings.
-/// Returns (file_id, similarity) sorted descending, capped at `top_k`.
-/// QA pairs are pre-generated natural-language questions whose embedding
-/// bridges the vocabulary gap between user's everyday language and the
-/// document's formal terminology.
-pub fn qa_vector_scan_with_query_emb(
-    conn: &rusqlite::Connection,
-    query_emb: &[f32],
-    threshold: f32,
-    top_k: usize,
-) -> Result<Vec<(String, f32)>, String> {
-    let all = crate::db::tracker::get_all_qa_vectors(conn).map_err(|e| e.to_string())?;
-    let all_count = all.len();
-    let mut results: Vec<(String, f32)> = all
-        .into_iter()
-        .filter_map(|(fid, vec)| {
-            let sim = cosine(query_emb, &vec);
-            if sim >= threshold { Some((fid, sim)) } else { None }
-        })
-        .collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    results.truncate(top_k);
-    log::info!("[AI]   qa_vector: {} qa pairs, {} above {:.2}", all_count, results.len(), threshold);
-    Ok(results)
-}
-
 /// Brute-force cosine scan over ALL stored chunk embeddings.
 /// Returns (md5, chunk_index, similarity) sorted descending, capped at
 /// `top_k` so long documents with many chunks can't flood the caller.

@@ -67,21 +67,6 @@ pub enum Cli {
         #[command(subcommand)]
         cmd: QualityCmd,
     },
-    /// Generate QA pairs for documents (offline indexing for semantic retrieval)
-    IndexQa {
-        /// Max documents to process (0 = all)
-        #[arg(short, long, default_value = "0")]
-        limit: usize,
-        /// Min char count (skip tiny docs)
-        #[arg(long, default_value = "500")]
-        min_chars: usize,
-        /// Max char count (skip huge docs, use chunks instead)
-        #[arg(long, default_value = "10000")]
-        max_chars: usize,
-        /// Questions per document
-        #[arg(short, long, default_value = "5")]
-        count: usize,
-    },
 }
 
 #[derive(Subcommand)]
@@ -617,99 +602,6 @@ pub fn run_cli() -> Result<()> {
                 }
             }
         },
-        Cli::IndexQa { limit, min_chars, max_chars, count } => {
-            let data_dir = config::load_config().data_dir;
-            let bootstrap = boot::bootstrap_core(&data_dir).context("failed to bootstrap core")?;
-            let conn = bootstrap.pool.get().context("failed to get DB connection")?;
-
-            let limit_clause = if limit == 0 { String::new() } else { format!("LIMIT {limit}") };
-            let sql = format!(
-                "SELECT ft.id, ci.md5, ci.text_content, ci.char_count
-                 FROM content_index ci
-                 JOIN file_tracking ft ON ft.md5 = ci.md5
-                 WHERE ci.char_count BETWEEN ?1 AND ?2
-                   AND ft.status = 'active'
-                 ORDER BY ci.char_count ASC
-                 {limit_clause}"
-            );
-            let mut stmt = conn.prepare(&sql).context("failed to prepare query")?;
-            let rows = stmt
-                .query_map(rusqlite::params![min_chars as i64, max_chars as i64], |row| {
-                    let file_id: String = row.get(0)?;
-                    let md5: String = row.get(1)?;
-                    let text: String = row.get(2)?;
-                    let char_count: i64 = row.get(3)?;
-                    Ok((file_id, md5, text, char_count))
-                })
-                .context("failed to query docs")?;
-            let mut docs: Vec<(String, String, String, i64)> = Vec::new();
-            for row in rows {
-                docs.push(row.context("failed to read row")?);
-            }
-            drop(stmt);
-
-            let total = docs.len();
-            if total == 0 {
-                println!("No documents matching char_count {min_chars}..{max_chars} found.");
-                return Ok(());
-            }
-            println!("[QA] {total} documents to process (count={count}, max_chars={max_chars})");
-
-            let mut total_qa = 0usize;
-            for (i, (file_id, _md5, text, char_count)) in docs.iter().enumerate() {
-                let truncated = if text.chars().count() > max_chars {
-                    text.chars().take(max_chars).collect::<String>()
-                } else {
-                    text.clone()
-                };
-                let system = format!(
-                    "你是一个法律文档分析专家。阅读以下文档内容，生成{count}个该文档能回答的具体问题。要求：1）用自然口语提问，不要用正式法律术语；2）每个问题只问一个事实；3）每行一个问题，不要编号。只输出问题，不要解释。"
-                );
-                // Retry with backoff: remote API may rate-limit rapid calls.
-                let mut reply_opt = None;
-                for attempt in 1..=3 {
-                    if attempt > 1 {
-                        std::thread::sleep(std::time::Duration::from_secs(3 * attempt as u64));
-                    }
-                    if let Some(r) = crate::ai::chat(&system, &truncated) {
-                        reply_opt = Some(r);
-                        break;
-                    }
-                    eprintln!("[QA] {}/{total} {file_id} attempt {attempt}/3 failed", i + 1);
-                }
-                let Some(reply) = reply_opt else {
-                    eprintln!("[QA] {}/{total} {file_id} → LLM call failed after 3 retries, skipping", i + 1);
-                    continue;
-                };
-                // Pace: avoid overwhelming the remote API.
-                std::thread::sleep(std::time::Duration::from_millis(500));
-                let questions: Vec<&str> = reply
-                    .lines()
-                    .map(|l| l.trim())
-                    .filter(|l| !l.is_empty())
-                    .take(count)
-                    .collect();
-                let mut n = 0usize;
-                for q in &questions {
-                    if let Some(emb) = crate::ai::cached_embed(q) {
-                        let bytes: Vec<u8> = emb
-                            .iter()
-                            .flat_map(|f| f.to_le_bytes())
-                            .collect();
-                        if let Err(e) = db::tracker::upsert_qa_pair(
-                            &conn, file_id, q, emb.len(), &bytes,
-                        ) {
-                            eprintln!("[QA] upsert_qa_pair failed for {file_id}: {e}");
-                            continue;
-                        }
-                        n += 1;
-                    }
-                }
-                total_qa += n;
-                println!("[QA] {}/{total} {file_id} (chars={char_count}) → {n} questions", i + 1);
-            }
-            println!("[QA] done: {total} documents, {total_qa} QA pairs stored");
-        }
         Cli::Health => {
             let data_dir = config::load_config().data_dir;
             let index_dir = data_dir.join(crate::config::INDEX_DIR_NAME);

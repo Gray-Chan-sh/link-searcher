@@ -588,29 +588,6 @@ pub(crate) async fn prepare_conversation_prompt(
                     }
                 }
             }
-            // QA pair vector channel: pre-generated questions match user query
-            // by semantic similarity, bridging the vocabulary gap between user's
-            // everyday language and document's formal terminology.
-            let qa_scan_enabled = std::env::var("LINK_SEARCHER_QA_SCAN")
-                .map(|v| !v.eq_ignore_ascii_case("off"))
-                .unwrap_or(false);
-            if qa_scan_enabled {
-                if let Some(qe) = &query_emb {
-                    if let Ok(qa_hits) = crate::ai::qa_vector_scan_with_query_emb(&c, qe, vector_threshold, 50) {
-                        log::info!("[AI]   qa_vector_scan returned {} hits", qa_hits.len());
-                        for (rank, (fid, sim)) in qa_hits.into_iter().enumerate() {
-                            rrf_add(&mut rrf_acc, &fid, rank, 1.0);
-                            if all_seen.insert(fid.clone()) {
-                                all_hits.push(ScoredHit {
-                                    file_id: fid, path: String::new(), bm25_score: None,
-                                    semantic_score: Some(sim as f64), rrf_score: None,
-                                    from_history: false, from_chunk: false, hit_chunks: Vec::new(),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
             emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
         }
         let c = state.db.get().map_err(|e| format!("db error: {e}"))?;

@@ -1,5 +1,5 @@
-//! Embedding storage: document vectors, chunk vectors and QA-pair vectors
-//! (little-endian f32 blobs).
+//! Embedding storage: document vectors and chunk vectors (little-endian
+//! f32 blobs).
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -51,68 +51,6 @@ pub fn delete_embedding(conn: &Connection, file_id: &str) -> Result<()> {
         rusqlite::params![file_id],
     )?;
     Ok(())
-}
-
-// -- doc_qa_pairs --
-
-/// Store a QA pair (question + its embedding vector) for a document.
-/// Each question is a new row — no upsert, since one document can have
-/// multiple distinct questions.
-pub fn upsert_qa_pair(
-    conn: &Connection,
-    file_id: &str,
-    question: &str,
-    dim: usize,
-    vector: &[u8],
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO doc_qa_pairs (file_id, question, dim, vector, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![file_id, question, dim as i64, vector, chrono::Utc::now().timestamp()],
-    )?;
-    Ok(())
-}
-
-/// Load every stored QA pair as `(file_id, Vec<f32>)`. Used by the
-/// QA semantic-retrieval channel to brute-force cosine over all questions.
-pub fn get_all_qa_vectors(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
-    let mut s = conn.prepare(
-        "SELECT file_id, dim, vector FROM doc_qa_pairs",
-    )?;
-    let rows = s.query_map([], |row| {
-        let file_id: String = row.get(0)?;
-        let dim: usize = row.get(1)?;
-        let blob: Vec<u8> = row.get(2)?;
-        let mut v = Vec::with_capacity(dim);
-        for chunk in blob.chunks_exact(4) {
-            v.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        Ok((file_id, v))
-    })?;
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row?);
-    }
-    Ok(result)
-}
-
-/// Remove all QA pairs for a document (e.g. when the file is deleted or re-indexed).
-pub fn delete_qa_for_file(conn: &Connection, file_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM doc_qa_pairs WHERE file_id = ?1",
-        rusqlite::params![file_id],
-    )?;
-    Ok(())
-}
-
-/// Count total QA pairs stored.
-pub fn count_qa_pairs(conn: &Connection) -> Result<i64> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM doc_qa_pairs",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(count)
 }
 
 /// Store (or replace) a chunk embedding as a little-endian f32 blob, keyed by
