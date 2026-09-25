@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-26：索引慢修复跟进 —— 大卷宗 pdfimages 超时按页数缩放 + SQLite 连接池扩容
+
+- **背景**：09-25 修复落地后整库重建复测，暴露两个新问题：
+  1. **整篇 `pdfimages` 的 120s 超时对大卷宗太短**：`卷七十八.pdf`（217 页 / 90MB）单次 `pdfimages -j -p` 要写出约 200MB 图片，>120s 超时 → 退化为慢的逐页 OCR 循环。复测日志 `pdfimages timed out after 120s` **37 次**、`per-page OCR loop` **92 次**（逐页 30s 超时已为 **0**，主病灶已除）。
+  2. **SQLite 连接池被 OCR 长期占用**：Phase-1 提取在**整个提取（含数分钟 OCR）期间持有连接**（`indexer.rs:425`），而池 `max_size=12` 恰等于 Phase-1 并发 12，扫描器/文件监听/嵌入回填/UI 再取连接即 10s 超时；复测日志 `DB conn: timed out waiting for connection` **702 次**，其中一批 250 文件 **0 成功 250 失败**，DB 内 `failed=350`。
+- **修复**：
+  - `extractor/pdf/ocr.rs`：`PDFIMAGES_DOC_TIMEOUT` 常量改为函数 `pdfimages_doc_timeout(page_count)`，预算 `clamp(30 + 页数×1.5, 120s..600s)`（217 页 ≈ 355s，1000 页封顶 600s）；`run_pdfimages_doc` 改为接收 `timeout` 参数，`-j` / `-png` 两次调用共用同一预算。
+  - `db/mod.rs`：连接池 `max_size` **12 → 24**（为 Phase-1 的 12 并发留 2× 余量）、`connection_timeout` **10s → 30s**。
+- **测试**：新增 `pdfimages_doc_timeout_scales_with_pages_and_clamps` 单测；`cargo test --lib extractor::pdf` **44 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/db/mod.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-25：索引慢定位与修复 —— PDF OCR 兜底链（大文件 / 非扫描件）
 
 - **现象**：扫描 `D:/Syncthing/XC 小城` 7791 个文件时，含 OCR 的批次仅 **0.4–1.1 文件/s**（无 OCR 批次 35–156 文件/s），全量预计 1–2 小时；墙钟被少数大 PDF 的 OCR 兜底链独占。

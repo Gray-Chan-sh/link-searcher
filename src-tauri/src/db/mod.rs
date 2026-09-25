@@ -44,8 +44,13 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     }
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
-        .max_size(12)
-        .connection_timeout(std::time::Duration::from_secs(10))
+        // Phase-1 batch extraction holds a connection for the whole extraction
+        // (including minutes of OCR), and its concurrency is 12 — so 12 alone
+        // leaves no headroom for the scanner, watcher, embedding backfill, or
+        // UI queries, which then fail with "timed out waiting for connection".
+        // Keep a 2× margin.
+        .max_size(24)
+        .connection_timeout(std::time::Duration::from_secs(30))
         .connection_customizer(Box::new(PragmaCustomizer))
         .build(manager)
         .context("failed to create connection pool")?;

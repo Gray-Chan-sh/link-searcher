@@ -112,11 +112,24 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 > 全库 7791 文件的整轮墙钟待用第 4 节方法重跑后回填。
 
+## 5.1 二次复测（2026-09-26）：暴露并修复两个新问题
+
+用同一批数据整库重建复测，`pdfimages page N timed out after 30s` 已 **236 → 0**、逐页 OCR 均值 **2.29s → ~0.5s**、`pdftoppm timed out` **10 → 0**（主病灶已除）。但复测又暴露两处：
+
+| 问题 | 证据（复测日志/DB） | 根因 | 修复 |
+|---|---|---|---|
+| 整篇 `pdfimages` 120s 超时对**大卷宗**太短 | `pdfimages timed out after 120s` **37 次** → `per-page OCR loop` **92 次**（如 `卷七十八.pdf` 217 页 / 90MB，导出约 200MB 图片 >120s） | 常量 `PDFIMAGES_DOC_TIMEOUT=120s` 未随页数增长 | `pdfimages_doc_timeout(page_count)=clamp(30+页数×1.5, 120s..600s)`；217 页 ≈ **355s** |
+| **SQLite 连接池**被 OCR 长期占用而耗尽 | `DB conn: timed out waiting for connection` **702 次**；一批 250 文件 **0 成功 250 失败**；DB `failed=350` | Phase-1 在**整个提取（含数分钟 OCR）期间持有连接**（`indexer.rs:425`），池 `max_size=12` == Phase-1 并发 12，扫描器/监听/回填/UI 无余量 → 10s 超时 | `db/mod.rs` 池 `max_size 12→24`、`connection_timeout 10s→30s` |
+
+> 二次修复的验证：`cargo test --lib extractor::pdf` **44 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。整库墙钟需重启后重跑回填。
+> 遗留可选项：C2 逐页预算 600s→120s；C3 逐页连续 3 页失败即中止。
+
 ## 6. 相关代码 / 常量
 
+- 常量：`MIN_PAGE_IMAGE_AREA=100_000`、`pdfimages_doc_timeout(page_count)`（`clamp(30+页数×1.5, 120s..600s)`，2026-09-26 由 `PDFIMAGES_DOC_TIMEOUT=120s` 常量改来）、`LARGE_SCAN_OCR_BUDGET=600s`、`LARGE_SCAN_PAGE_THRESHOLD=20`
+- 连接池：`db/mod.rs` `max_size=24`、`connection_timeout=30s`（2026-09-26 由 12 / 10s 调大）
 - `extractor/pdf/scan.rs`：`image_list_info()`、`is_image_based_scan()`、`full_page_image_pages()`
 - `extractor/pdf/poppler.rs`：`pdf_longest_side_pt()`
 - `extractor/pdf/ocr.rs`：`run_pdf_ocr_pipeline()`、`try_ocr_fallback(.., allow_whole_doc_pdftoppm)`、`ocr_pdf_via_pdfimages()`、`run_pdfimages_doc()`、`group_images_by_page()`
 - `extractor/pdf.rs`：`extract_with_lang()`（扫描分支先试 `pdftotext`）
-- 常量：`MIN_PAGE_IMAGE_AREA=100_000`、`PDFIMAGES_DOC_TIMEOUT=120s`、`LARGE_SCAN_OCR_BUDGET=600s`、`LARGE_SCAN_PAGE_THRESHOLD=20`
 - 尚未做（后续可选）：C2 逐页预算 600s→120s；C3 逐页连续 3 页失败即中止

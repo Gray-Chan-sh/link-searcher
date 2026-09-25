@@ -28,8 +28,11 @@ const MIN_RENDER_LONGEST_SIDE: u32 = 1000;
 const MIN_PAGE_IMAGE_AREA: u64 = 100_000;
 
 /// Timeout for the single whole-document `pdfimages` extraction. One pass over a
-/// 40-page 80MB scan is ~0.1–2s; the timeout only guards pathological files.
-const PDFIMAGES_DOC_TIMEOUT: Duration = Duration::from_secs(120);
+/// 40-page 80MB scan is ~0.1–2s, but a 200+ page volume writes hundreds of MB,
+/// so the budget scales with page count (clamped to 2–10 min).
+fn pdfimages_doc_timeout(page_count: usize) -> Duration {
+    Duration::from_secs((30 + page_count as u64 * 3 / 2).clamp(120, 600))
+}
 
 /// Target longest-side pixels for rendering at `dpi`, clamped so a giant page
 /// can't explode. Falls back to the cap when the page size is unknown.
@@ -400,11 +403,12 @@ pub fn ocr_pdf_via_pdfimages(
     let tmp = TempDir::new("ls_pdfimg")?;
     let prefix = tmp.path().join("img");
     let primary = if all_jpeg { "-j" } else { "-png" };
-    run_pdfimages_doc(path, primary, &prefix)?;
+    let timeout = pdfimages_doc_timeout(page_count);
+    run_pdfimages_doc(path, primary, &prefix, timeout)?;
     let mut per_page = group_images_by_page(tmp.path(), page_count)?;
     if per_page.iter().all(Option::is_none) && primary == "-j" {
         // `-j` skips non-JPEG encodings (CCITT/JBIG2/…): retry with PNG.
-        run_pdfimages_doc(path, "-png", &prefix)?;
+        run_pdfimages_doc(path, "-png", &prefix, timeout)?;
         per_page = group_images_by_page(tmp.path(), page_count)?;
     }
 
@@ -460,7 +464,7 @@ pub fn ocr_pdf_via_pdfimages(
 /// Run one whole-document `pdfimages <fmt> -p` pass into `prefix`. `-p` embeds
 /// the 1-based page number in each output filename (`prefix-<page>-<n>.<ext>`),
 /// so every page's images can be grouped and OCR'd without re-parsing the PDF.
-fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path) -> Result<()> {
+fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path, timeout: Duration) -> Result<()> {
     let bin = pdfimages_path()
         .ok_or_else(|| anyhow::anyhow!("pdfimages not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
@@ -468,7 +472,7 @@ fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path) -> Result<()> {
     cmd.stderr(Stdio::null());
 
     let mut child = cmd.spawn().context("failed to spawn pdfimages")?;
-    let deadline = Instant::now() + PDFIMAGES_DOC_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
@@ -476,7 +480,7 @@ fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path) -> Result<()> {
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(anyhow::anyhow!("pdfimages timed out after {PDFIMAGES_DOC_TIMEOUT:?}"));
+                return Err(anyhow::anyhow!("pdfimages timed out after {timeout:?}"));
             }
             Err(e) => return Err(anyhow::anyhow!("pdfimages failed: {e}")),
         }
@@ -538,6 +542,15 @@ mod tests {
 
     fn write_png(path: &Path, w: u32, h: u32) {
         image::RgbImage::new(w, h).save(path).unwrap();
+    }
+
+    #[test]
+    fn pdfimages_doc_timeout_scales_with_pages_and_clamps() {
+        assert_eq!(pdfimages_doc_timeout(1), Duration::from_secs(120));
+        assert_eq!(pdfimages_doc_timeout(40), Duration::from_secs(120));
+        assert_eq!(pdfimages_doc_timeout(100), Duration::from_secs(180));
+        assert_eq!(pdfimages_doc_timeout(217), Duration::from_secs(355));
+        assert_eq!(pdfimages_doc_timeout(1000), Duration::from_secs(600));
     }
 
     #[test]
