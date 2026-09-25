@@ -14,8 +14,38 @@ const TOKENIZER_FILE: &str = "tokenizer.json";
 /// (model_name, display_name, dim)
 const LOCAL_MODELS: &[(&str, &str, u32)] = &[
     ("bge-large-zh-v1.5", "BGE-Large (1024维)", 1024),
+    ("bge-base-zh-v1.5", "BGE-Base (768维)", 768),
     ("bge-small-zh-v1.5", "BGE-Small (512维, 快)", 512),
 ];
+
+/// Output dimension of a known built-in local model, or `None` when unknown.
+/// Used by the embedding-consistency check to detect stale vectors after a
+/// model switch.
+pub fn local_model_dim(model_name: &str) -> Option<u32> {
+    LOCAL_MODELS
+        .iter()
+        .find(|(name, _, _)| *name == model_name)
+        .map(|(_, _, dim)| *dim)
+}
+
+/// Remove every built-in BGE model directory except `keep`, so at most one
+/// dimension lives on disk. Best-effort: a locked/in-use directory is logged
+/// and skipped rather than failing the caller.
+pub fn prune_local_models_except(data_dir: &Path, keep: &str) {
+    for &(name, _, _) in LOCAL_MODELS {
+        if name == keep {
+            continue;
+        }
+        let dir = data_dir.join("models").join(name);
+        if !dir.exists() {
+            continue;
+        }
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => log::info!("[BGE] 已删除其它维度模型: {}", dir.display()),
+            Err(e) => log::warn!("[BGE] 删除模型目录失败 {}: {e}", dir.display()),
+        }
+    }
+}
 
 fn remote_bases(model_name: &str) -> Vec<String> {
     vec![
@@ -37,6 +67,9 @@ pub struct BgeStatus {
     pub installed: bool,
     pub model_dir: String,
     pub model_name: String,
+    /// Local model directory name (e.g. `bge-large-zh-v1.5`) — the argument
+    /// `install_bge` expects and the suffix of `local:<model_id>`.
+    pub model_id: String,
 }
 
 #[tauri::command]
@@ -54,12 +87,18 @@ pub fn install_bge(state: State<'_, AppState>, app: AppHandle, model_name: Optio
     let model_dir = state.data_dir.join("models").join(&name);
     std::fs::create_dir_all(&model_dir).map_err(|e| format!("创建目录失败: {e}"))?;
 
-    std::thread::spawn(move || run_download(model_dir, name, app));
+    let data_dir = state.data_dir.clone();
+    std::thread::spawn(move || run_download(model_dir, name, data_dir, app));
     Ok(())
 }
 
-fn run_download(model_dir: PathBuf, model_name: String, app: AppHandle) {
+fn run_download(model_dir: PathBuf, model_name: String, data_dir: PathBuf, app: AppHandle) {
     let result = download_inner(&model_dir, &model_name);
+    // A successful install prunes every other dimension so only one local
+    // model is kept (the settings UI is a 3-way choice).
+    if result.success {
+        prune_local_models_except(&data_dir, &model_name);
+    }
     INSTALLING.store(false, Ordering::SeqCst);
     let _ = app.emit("bge-install-done", &result);
 }
@@ -73,6 +112,7 @@ pub fn check_bge_installed(state: State<'_, AppState>) -> Result<Vec<BgeStatus>,
             installed: bge_model_ready(&model_dir),
             model_dir: model_dir.display().to_string(),
             model_name: display.to_string(),
+            model_id: name.to_string(),
         });
     }
     Ok(statuses)

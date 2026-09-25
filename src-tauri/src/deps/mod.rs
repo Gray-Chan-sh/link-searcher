@@ -27,7 +27,7 @@ use crate::state::AppState;
 /// can install. `available` means "ready to use right now on this machine".
 #[derive(Debug, Clone, Serialize)]
 pub struct DepStatus {
-    /// Stable id: `paddleocr` / `bge-small` / `funasr` / `ffmpeg` / `poppler` / `tesseract`.
+    /// Stable id: `paddleocr` / `bge-large` / `funasr` / `ffmpeg` / `poppler` / `tesseract`.
     pub id: String,
     pub name: String,
     pub available: bool,
@@ -58,9 +58,20 @@ pub fn current_status(state: &AppState) -> SetupStatus {
     let mut deps = Vec::new();
     let mut all_recommended_ready = true;
 
-    for def in catalog::all() {
-        let available = catalog::is_ready(&def, &data_dir);
-        if def.recommended && !available {
+    // The three BGE models are a single-choice group (see the dependency
+    // center's dimension dropdown): any installed dimension satisfies the
+    // recommended BGE requirement, so a user who picked 512 isn't nagged to
+    // also install the 1024 default.
+    const BGE_IDS: [&str; 3] = ["bge-small", "bge-base", "bge-large"];
+    let all_defs = catalog::all();
+    let any_bge_ready = all_defs
+        .iter()
+        .any(|d| BGE_IDS.contains(&d.id) && catalog::is_ready(d, &data_dir));
+
+    for def in &all_defs {
+        let available = catalog::is_ready(def, &data_dir);
+        let bge_satisfied = BGE_IDS.contains(&def.id) && any_bge_ready;
+        if def.recommended && !available && !bge_satisfied {
             all_recommended_ready = false;
         }
         deps.push(DepStatus {

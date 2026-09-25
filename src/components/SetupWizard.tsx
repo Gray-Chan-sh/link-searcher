@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useI18n } from '../i18n'
 import { useSetup, type ProgressState } from '../hooks/useSetup'
@@ -49,11 +49,14 @@ export default function SetupWizard({ onDone }: SetupWizardProps) {
   const setup = useSetup()
   const [step, setStep] = useState(0)
 
-  const recommended = useMemo(
-    () => (setup.status?.deps ?? []).filter(d => d.recommended),
-    [setup.status],
-  )
-  const missing = useMemo(() => recommended.filter(d => !d.available), [recommended])
+  // The three BGE models are one single-choice group: if any dimension is
+  // installed, the recommended BGE requirement is satisfied.
+  const BGE_IDS = ['bge-small', 'bge-base', 'bge-large']
+  const deps = setup.status?.deps ?? []
+  const anyBge = deps.some(d => BGE_IDS.includes(d.id) && d.available)
+  const isAvailable = (d: DepStatus) => d.available || (BGE_IDS.includes(d.id) && anyBge)
+  const recommended = deps.filter(d => d.recommended)
+  const missing = recommended.filter(d => !isAvailable(d))
   const installingDep = setup.activeDep
   const doneCount = recommended.length - missing.length
   const depsReady = !setup.loading && recommended.length > 0 && missing.length === 0
@@ -114,17 +117,18 @@ export default function SetupWizard({ onDone }: SetupWizardProps) {
               {recommended.map(dep => {
                 const installing = installingDep === dep.id
                 const pct = progressPct(setup.progress, dep)
+                const ok = isAvailable(dep)
                 return (
                   <div
                     key={dep.id}
                     className={`flex items-start gap-3 p-3 rounded-lg border ${
-                      dep.available
+                      ok
                         ? 'border-green-200 dark:border-green-900 bg-green-50/60 dark:bg-green-900/10'
                         : 'border-gray-200 dark:border-gray-700'
                     }`}
                   >
                     <div className="mt-0.5 text-lg">
-                      {dep.available ? (
+                      {ok ? (
                         <span className="text-green-600 dark:text-green-400">✓</span>
                       ) : installing ? (
                         <LoadingSpinner className="size-5 text-blue-500" />
@@ -148,13 +152,13 @@ export default function SetupWizard({ onDone }: SetupWizardProps) {
                           </p>
                         </div>
                       )}
-                      {!dep.available && setup.lastResult?.dep === dep.id && (
+                      {!ok && setup.lastResult?.dep === dep.id && (
                         <p className={`text-xs mt-1 ${setup.lastResult.success ? 'text-green-600' : 'text-red-500'}`}>
                           {setup.lastResult.message}
                         </p>
                       )}
                     </div>
-                    {!dep.available && (
+                    {!ok && (
                       <button
                         onClick={() => void setup.startInstall(dep.id)}
                         disabled={!!installingDep}

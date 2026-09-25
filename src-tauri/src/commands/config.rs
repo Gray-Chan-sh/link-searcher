@@ -227,16 +227,46 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
     let field = match kind.as_str() {
         "embedding" => &mut config.active_embedding_model_id,
         "llm" => &mut config.active_llm_model_id,
+        "reranker" => &mut config.active_reranker_model_id,
         _ => return Err(format!("unknown kind: {kind}")),
     };
+    let previous = field.clone();
     if !model_id.is_empty() && !model_id.starts_with("local:")
         && let Some((pid, mid)) = model_id.split_once(':')
             && let Some(p) = config.providers.iter_mut().find(|p| p.id == pid)
                 && let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
                     m.enabled = true;
                 }
-    *field = model_id;
-    save_config(&config)
+    *field = model_id.clone();
+    save_config(&config)?;
+    if kind == "embedding" {
+        // Switching the embedding model invalidates the loaded local embedder
+        // (wrong dimension if the new model differs) and any cached query vectors.
+        if previous != model_id {
+            crate::ai::local_embed::reset_local_embedder();
+            crate::ai::clear_query_embed_cache();
+        }
+        // Local models are a 3-way choice: keep only the selected dimension on
+        // disk. Remote selections leave local models untouched. Only prune when
+        // the selected model is actually present, so a stale UI selection can't
+        // delete the working model.
+        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(&model_id) {
+            if crate::ai::local_embed::bge_model_ready(&config.data_dir, keep) {
+                crate::commands::bge::prune_local_models_except(&config.data_dir, keep);
+            }
+        }
+    } else if kind == "reranker" {
+        // Local rerankers are a single choice too: keep only the selected one.
+        if previous != model_id {
+            crate::ai::local_rerank::reset_local_reranker();
+        }
+        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(&model_id) {
+            if crate::ai::local_rerank::rerank_model_ready(&config.data_dir, keep) {
+                crate::ai::local_rerank::prune_local_rerank_models_except(&config.data_dir, keep);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Test a provider's connectivity (GET /models). Returns ok + detail.

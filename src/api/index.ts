@@ -34,6 +34,29 @@ export async function backfillEmbeddings(): Promise<BackfillReport> {
   return client.invoke<BackfillReport>('backfill_embeddings')
 }
 
+export interface EmbeddingConsistency {
+  active_model: string
+  expected_dim: number | null
+  stored_dims: number[]
+  consistent: boolean
+}
+
+export async function checkEmbeddingConsistency(): Promise<EmbeddingConsistency> {
+  return client.invoke<EmbeddingConsistency>('check_embedding_consistency')
+}
+
+export interface RebuildEmbeddingsReport {
+  cleared_docs: number
+  cleared_chunks: number
+  embedded_docs: number
+  embedded_chunks: number
+  failed: number
+}
+
+export async function rebuildEmbeddings(): Promise<RebuildEmbeddingsReport> {
+  return client.invoke<RebuildEmbeddingsReport>('rebuild_embeddings')
+}
+
 export interface VerifyReport {
   checked: number
   recovered: number

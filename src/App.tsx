@@ -141,9 +141,14 @@ export default function App() {
     if (!isTauri()) return
     getSetupStatus()
       .then(s => {
-        const missing = s.deps.filter(d => d.recommended && !d.available).length
+        // `all_recommended_ready` already treats the single-choice BGE group as
+        // satisfied if any dimension is installed — don't recompute the gate
+        // from per-dep availability or a chosen 512/768 would be nagged for 1024.
+        const missing = s.all_recommended_ready
+          ? 0
+          : s.deps.filter(d => d.recommended && !d.available).length
         setDepsMissingCount(missing)
-        if (missing > 0 && sessionStorage.getItem('setup_prompt_skipped') !== '1') {
+        if (!s.all_recommended_ready && sessionStorage.getItem('setup_prompt_skipped') !== '1') {
           setSetupPending(true)
         }
       })

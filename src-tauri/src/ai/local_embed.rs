@@ -4,7 +4,7 @@
 //! privacy-first text embeddings without any remote API dependency.
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use tract_onnx::prelude::*;
 
@@ -16,7 +16,11 @@ struct LocalEmbedder {
     tokenizer: Mutex<tokenizers::Tokenizer>,
 }
 
-static INSTANCE: OnceLock<LocalEmbedder> = OnceLock::new();
+static INSTANCE: OnceLock<RwLock<Option<LocalEmbedder>>> = OnceLock::new();
+
+fn instance() -> &'static RwLock<Option<LocalEmbedder>> {
+    INSTANCE.get_or_init(|| RwLock::new(None))
+}
 
 /// Extract the local model directory name from `active_embedding_model_id`.
 /// e.g. `"local:bge-small-zh-v1.5"` → `"bge-small-zh-v1.5"`.
@@ -31,14 +35,30 @@ pub fn bge_model_ready(data_dir: &Path, model_name: &str) -> bool {
 }
 
 /// Load the BGE model and tokenizer into the global singleton.
-/// Idempotent — subsequent calls are no-ops.
+/// Idempotent — once loaded, subsequent calls with the *same or different*
+/// model are no-ops until [`reset_local_embedder`] is called.
 pub fn init_local_embedder(data_dir: &Path, model_name: &str) -> Result<(), String> {
-    if INSTANCE.get().is_some() {
-        return Ok(());
+    {
+        let guard = instance().read().unwrap_or_else(|p| p.into_inner());
+        if guard.is_some() {
+            return Ok(());
+        }
     }
     let embedder = build(data_dir, model_name)?;
-    let _ = INSTANCE.set(embedder);
+    let mut guard = instance().write().unwrap_or_else(|p| p.into_inner());
+    if guard.is_none() {
+        *guard = Some(embedder);
+    }
     Ok(())
+}
+
+/// Drop the loaded model so the next [`init_local_embedder`] reloads it. Called
+/// when the active embedding model changes at runtime — otherwise the stale
+/// singleton would keep embedding with the previous model (wrong dimension).
+/// Blocks until any in-flight inference releases the read lock.
+pub fn reset_local_embedder() {
+    let mut guard = instance().write().unwrap_or_else(|p| p.into_inner());
+    *guard = None;
 }
 
 fn build(data_dir: &Path, model_name: &str) -> Result<LocalEmbedder, String> {
@@ -79,12 +99,15 @@ fn build(data_dir: &Path, model_name: &str) -> Result<LocalEmbedder, String> {
 /// Embed a batch of texts in passage mode (no instruction prefix).
 /// Returns `None` per text when the model is not loaded or inference fails.
 pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
-    let Some(e) = INSTANCE.get() else {
-        return vec![None; texts.len()];
-    };
     if texts.is_empty() {
         return vec![];
     }
+    // Hold the read lock for the whole call so a concurrent `reset` can't pull
+    // the model out from under us mid-inference; reset (write lock) waits.
+    let guard = instance().read().unwrap_or_else(|p| p.into_inner());
+    let Some(e) = guard.as_ref() else {
+        return vec![None; texts.len()];
+    };
 
     let token_data = {
         let tok = e.tokenizer.lock().unwrap_or_else(|p| p.into_inner());

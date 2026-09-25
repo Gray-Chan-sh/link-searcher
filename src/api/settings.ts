@@ -64,6 +64,8 @@ export interface BgeStatus {
     installed: boolean
     model_dir: string
     model_name: string
+    /** Local model directory name, e.g. `bge-large-zh-v1.5`. */
+    model_id: string
 }
 
 export async function installBge(modelName?: string): Promise<void> {
@@ -72,6 +74,17 @@ export async function installBge(modelName?: string): Promise<void> {
 
 export async function checkBgeInstalled(): Promise<BgeStatus[]> {
     return client.invoke<BgeStatus[]>('check_bge_installed')
+}
+
+export interface RerankStatus {
+    installed: boolean
+    model_name: string
+    /** Local model directory name, i.e. suffix of `local:<model_id>`. */
+    model_id: string
+}
+
+export async function checkRerankInstalled(): Promise<RerankStatus[]> {
+    return client.invoke<RerankStatus[]>('check_rerank_installed')
 }
 
 // ── Dependency center / first-run setup ──

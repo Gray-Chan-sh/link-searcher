@@ -7,7 +7,7 @@ import { useTheme } from '../theme'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { getConfig, migrateData, restartApp, updateConfig, type ConfigInfo, type MigrationProgress } from '../api/config'
-import { checkBgeInstalled, getVersion, installBge, updateSettings } from '../api/settings'
+import { checkBgeInstalled, checkRerankInstalled, getVersion, updateSettings } from '../api/settings'
 import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
 import { useSettingsOcr } from '../hooks/useSettingsOcr'
@@ -24,13 +24,13 @@ export default function Settings() {
   const [migrationProgress, setMigrationProgress] = useState(0)
   const [localError, setLocalError] = useState<string | null>(null)
   const [version, setVersion] = useState<{ hash: string; time: string } | null>(null)
-  const [bgeInstalling, setBgeInstalling] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingSettingsRef = useRef<Record<string, string>>({})
 
   const ocr = useSettingsOcr()
   const backup = useSettingsBackup()
   const providers = useSettingsProviders(appConfig, setAppConfig)
+  const { setBgeStatus, setRerankStatus } = ocr
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => {})
@@ -40,23 +40,29 @@ export default function Settings() {
     getConfig().then(setAppConfig).catch(() => {})
   }, [])
 
+  // Refresh the installed local-model lists after a dependency install so the
+  // AI-tab dropdowns never keep offering a model that was just pruned.
+  useEffect(() => {
+    const un = listen<{ success: boolean }>('dep-install-done', payload => {
+      if (!payload.success) return
+      checkBgeInstalled().then(setBgeStatus).catch(() => {})
+      checkRerankInstalled().then(setRerankStatus).catch(() => {})
+    })
+    return () => {
+      un.then(f => f())
+    }
+  }, [setBgeStatus, setRerankStatus])
+
   useEffect(() => {
     const unlisteners: (() => void)[] = []
     listen<MigrationProgress>('migration-progress', payload => {
       setMigrationProgress(payload.progress)
       setMigrationStage(payload.stage)
     }).then(u => unlisteners.push(u))
-    listen<{ success: boolean; message: string }>('bge-install-done', async payload => {
-      setBgeInstalling(false)
-      checkBgeInstalled().then(ocr.setBgeStatus).catch(() => {})
-      if (payload.message) {
-        await alert(payload.message, 'BGE')
-      }
-    }).then(u => unlisteners.push(u))
     return () => {
       unlisteners.forEach(u => u())
     }
-  }, [ocr])
+  }, [])
 
   useEffect(() => {
     return () => {
@@ -218,8 +224,6 @@ export default function Settings() {
             setAppConfig={setAppConfig}
             caps={providers.caps}
             aiWarn={providers.aiWarn}
-            bgeStatus={ocr.bgeStatus}
-            bgeInstalling={bgeInstalling}
             editingId={providers.editingId}
             editDraft={providers.editDraft}
             savingId={providers.savingId}
@@ -244,16 +248,9 @@ export default function Settings() {
             onToggleEnabled={providers.handleToggleEnabled}
             onAddProvider={providers.handleAddProvider}
             onTestAi={providers.testAi}
-            onInstallBge={() => {
-              setBgeInstalling(true)
-              installBge().catch(e => {
-                setBgeInstalling(false)
-                setLocalError(e instanceof Error ? e.message : String(e))
-              })
-            }}
             providerInUse={providers.providerInUse}
             modelInUse={providers.modelInUse}
-            modelOptions={kind => providers.modelOptions(kind, ocr.bgeStatus)}
+            modelOptions={kind => providers.modelOptions(kind, ocr.bgeStatus, ocr.rerankStatus)}
             setEditingId={providers.setEditingId}
             setEditDraft={providers.setEditDraft}
             setAdding={providers.setAdding}

@@ -22,12 +22,13 @@ use crate::commands::ai::{ai_capabilities, ai_topic_clusters, ask_documents, can
 use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
-use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, trigger_scan, verify_index_content};
+use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
 use crate::commands::performance::{detect_hardware, auto_optimize, get_performance_profile};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
+use crate::commands::rerank::check_rerank_installed;
 use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
 use crate::deps::commands::{cancel_dep_install, dep_install_status, get_setup_status, install_dep};
@@ -177,6 +178,8 @@ get_dir_children,
             restore_files,
             backfill_embeddings,
             backfill_chunk_embeddings,
+            check_embedding_consistency,
+            rebuild_embeddings,
             backfill_quality,
             get_logs,
             list_session_logs,
@@ -188,6 +191,7 @@ get_dir_children,
             install_funasr,
             install_bge,
             check_bge_installed,
+            check_rerank_installed,
             get_setup_status,
             install_dep,
             cancel_dep_install,

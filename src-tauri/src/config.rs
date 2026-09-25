@@ -13,6 +13,10 @@ static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 /// 索引子目录名（Tantivy 数据）。用点开头避免与用户 data_dir 名为 "index" 时撞车。
 pub const INDEX_DIR_NAME: &str = ".ls-index";
 
+/// Default built-in embedding model: BGE-large-zh-v1.5 (1024-dim). Seeded as
+/// the active embedding model once its ONNX files are present in the data dir.
+pub const DEFAULT_LOCAL_EMBEDDING_MODEL: &str = "bge-large-zh-v1.5";
+
 /// Model role. Classified by name heuristics on pull; user can override.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 pub enum ModelType {
@@ -250,6 +254,9 @@ pub fn load_config() -> AppConfig {
                 let _ = write_config_file(&config);
             }
             reconcile_enabled_active(&mut config);
+            if seed_default_embedding_model(&mut config) {
+                let _ = write_config_file(&config);
+            }
             return config;
         }
     let config = AppConfig::default();
@@ -268,6 +275,33 @@ fn reconcile_enabled_active(config: &mut AppConfig) {
                     m.enabled = true;
                 }
     }
+}
+
+/// Seed the built-in BGE-large embedding model as the active embedding model
+/// for a fresh install (or any config with no embedding selected) once its
+/// files exist on disk. Only fills an *empty* selection, so an explicit remote
+/// gateway choice is never overwritten. Returns true when it wrote a change.
+fn seed_default_embedding_model(config: &mut AppConfig) -> bool {
+    // Skip under the test backdoor: tests point LS_CONFIG_DIR at a temp dir but
+    // keep the real data_dir, so a locally-installed model would leak in.
+    if std::env::var("LS_CONFIG_DIR").is_ok() {
+        return false;
+    }
+    if !config.active_embedding_model_id.is_empty() {
+        return false;
+    }
+    let ready = config
+        .data_dir
+        .join("models")
+        .join(DEFAULT_LOCAL_EMBEDDING_MODEL)
+        .join("model.onnx")
+        .is_file();
+    if !ready {
+        return false;
+    }
+    config.active_embedding_model_id = format!("local:{DEFAULT_LOCAL_EMBEDDING_MODEL}");
+    log::info!("[AI] 默认内置嵌入模型已启用: {}", config.active_embedding_model_id);
+    true
 }
 
 /// Seed `providers` from legacy `embedding_*/llm_*` field pairs and point the

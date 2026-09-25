@@ -1,8 +1,7 @@
 import { useI18n } from '../../i18n'
-import { LoadingSpinner, PlusIcon } from '../../icons'
+import { PlusIcon } from '../../icons'
 import type { ConfigInfo, ModelType, ProviderInfo } from '../../api/config'
 import type { AiCapabilities } from '../../api/files'
-import type { BgeStatus } from '../../api/settings'
 import { Section, UsageSelect, RowAction, maskApiKey } from './SettingsFields'
 
 interface AiTabProps {
@@ -10,8 +9,6 @@ interface AiTabProps {
   setAppConfig: (c: ConfigInfo | null | ((prev: ConfigInfo | null) => ConfigInfo | null)) => void
   caps: AiCapabilities | null
   aiWarn: string | null
-  bgeStatus: BgeStatus[] | null
-  bgeInstalling: boolean
   editingId: string | null
   editDraft: { name: string; baseUrl: string; apiKey: string; keyTouched: boolean; reveal: boolean } | null
   savingId: string | null
@@ -36,7 +33,6 @@ interface AiTabProps {
   onToggleEnabled: (p: ProviderInfo, modelId: string, enabled: boolean) => void
   onAddProvider: () => void
   onTestAi: () => void
-  onInstallBge: () => void
   providerInUse: (p: ProviderInfo) => boolean
   modelInUse: (p: ProviderInfo, modelId: string) => boolean
   modelOptions: (kind: 'embedding' | 'llm' | 'reranker') => { value: string; label: string }[]
@@ -49,11 +45,11 @@ interface AiTabProps {
 }
 
 export function AiTab({
-  appConfig, setAppConfig, caps, aiWarn, bgeStatus, bgeInstalling,
+  appConfig, setAppConfig, caps, aiWarn,
   editingId, editDraft, savingId, testingId, testOutcome, refreshingId, refreshMsg,
   adding, newProv, modelFilter, expandedGroups, aiTest, aiTestLoading,
   onSaveSemanticWeight, onActiveModel, onTestProvider, onRefreshProvider, onDeleteProvider,
-  onOpenEdit, onSaveEdit, onModelType, onToggleEnabled, onAddProvider, onTestAi, onInstallBge,
+  onOpenEdit, onSaveEdit, onModelType, onToggleEnabled, onAddProvider, onTestAi,
   providerInUse, modelInUse, modelOptions,
   setEditingId, setEditDraft, setAdding, setNewProv, setModelFilter, setExpandedGroups,
 }: AiTabProps) {
@@ -107,16 +103,6 @@ export function AiTab({
             availableLabel={t('ai_available')}
             notConfiguredLabel={t('ai_not_configured')}
           />
-          {bgeStatus && !bgeStatus.some(s => s.installed) && (
-            <button
-              onClick={onInstallBge}
-              disabled={bgeInstalling}
-              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/30 rounded-lg hover:bg-emerald-100 dark:hover:bg-emerald-900/50 disabled:opacity-50 transition-colors"
-            >
-              {bgeInstalling && <LoadingSpinner className="size-3" />}
-              {bgeInstalling ? t('bge_downloading') : t('bge_download')}
-            </button>
-          )}
           <UsageSelect
             label={t('llm_model')}
             value={appConfig?.active_llm_model_id ?? ''}

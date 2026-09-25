@@ -2,6 +2,7 @@ import { useState, useCallback } from 'react'
 import { useI18n } from '../i18n'
 import { confirm } from '../utils/platform'
 import { addProvider, deleteProvider, getConfig, refreshProviderModels, setActiveModel, testProvider, updateConfig, type ConfigInfo, type ModelType, type ProviderInfo } from '../api/config'
+import { checkEmbeddingConsistency, rebuildEmbeddings } from '../api/index'
 import { aiCapabilities, type AiCapabilities } from '../api/files'
 import { maskApiKey } from '../components/settings/SettingsFields'
 
@@ -48,7 +49,11 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     (appConfig?.active_llm_model_id ?? '').startsWith(`${p.id}:`) ||
     (appConfig?.active_reranker_model_id ?? '').startsWith(`${p.id}:`)
 
-  const modelOptions = (kind: 'embedding' | 'llm' | 'reranker', bgeStatus: { installed: boolean; model_dir: string; model_name: string }[] | null): { value: string; label: string }[] => {
+  const modelOptions = (
+    kind: 'embedding' | 'llm' | 'reranker',
+    bgeStatus: { installed: boolean; model_dir: string; model_name: string; model_id: string }[] | null,
+    rerankStatus: { installed: boolean; model_name: string; model_id: string }[] | null,
+  ): { value: string; label: string }[] => {
     const typeMap: Record<'embedding' | 'llm' | 'reranker', ModelType> = {
       embedding: 'Embedding',
       llm: 'Llm',
@@ -63,7 +68,13 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     if (kind === 'embedding' && bgeStatus) {
       const localOpts = bgeStatus
         .filter(s => s.installed)
-        .map(s => ({ value: `local:${s.model_dir.split('/').pop()}`, label: s.model_name }))
+        .map(s => ({ value: `local:${s.model_id}`, label: s.model_name }))
+      return [...localOpts, ...remote]
+    }
+    if (kind === 'reranker' && rerankStatus) {
+      const localOpts = rerankStatus
+        .filter(s => s.installed)
+        .map(s => ({ value: `local:${s.model_id}`, label: s.model_name }))
       return [...localOpts, ...remote]
     }
     return remote
@@ -84,6 +95,20 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     )
   }
 
+  const promptRebuildEmbeddings = async () => {
+    const c = await checkEmbeddingConsistency().catch(() => null)
+    if (!c || c.stored_dims.length === 0) return
+    const ok = await confirm(
+      t('embed_rebuild_confirm', { model: c.active_model, stored: c.stored_dims.join('/') }),
+      t('embed_rebuild_title'),
+    )
+    if (!ok) return
+    setAiWarn(t('embed_rebuild_started'))
+    // Fire-and-forget: the rebuild can take hours; the IndexStatus page shows
+    // progress via the `rebuild-embeddings` task id.
+    void rebuildEmbeddings().catch(e => setAiWarn(e instanceof Error ? e.message : String(e)))
+  }
+
   const handleActiveModel = async (kind: 'embedding' | 'llm' | 'reranker', modelId: string) => {
     if (!appConfig) return
     const keyMap: Record<'embedding' | 'llm' | 'reranker', 'active_embedding_model_id' | 'active_llm_model_id' | 'active_reranker_model_id'> = {
@@ -98,6 +123,11 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     try {
       await setActiveModel(kind, modelId)
       aiCapabilities().then(setCaps).catch(() => {})
+      // Switching the embedding model invalidates every stored vector (their
+      // vector space changes). Offer a one-click rebuild.
+      if (kind === 'embedding' && modelId && modelId !== prev) {
+        await promptRebuildEmbeddings()
+      }
     } catch (e) {
       setAppConfig((c: ConfigInfo | null) => (c ? { ...c, [key]: prev } : c))
       setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))

@@ -660,6 +660,9 @@ pub use embeddings::{
     schedule_backfill_embeddings, BackfillReport,
 };
 use embeddings::{run_backfill_chunk_embeddings, run_backfill_embeddings};
+
+mod vector_health;
+pub use vector_health::{check_embedding_consistency, rebuild_embeddings, EmbeddingConsistency, RebuildEmbeddingsReport};
 #[cfg(test)]
 use embeddings::{existing_chunk_indexes, missing_chunk_embedding_md5s, missing_embedding_rows};
 

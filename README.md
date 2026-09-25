@@ -192,7 +192,7 @@ npm run tauri build
 - **Windows** → `.msi` / `.exe`（NSIS）
 - **Linux** → `.deb` / `.AppImage`
 
-> **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE（~95MB）/FunASR（~850MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从 GitHub Releases 经国内加速镜像链下载（ghfast.top → gh-proxy.com → GitHub 直连兜底）到数据目录（`~/Library/Application Support/link-searcher/models` 等），可跳过、可稍后在设置页「依赖中心」补装。
+> **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE-large（~1.2GB）/FunASR（~850MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等）：PaddleOCR / FunASR 走 GitHub Releases 加速镜像链（ghfast.top → gh-proxy.com → GitHub 直连兜底），BGE-large 走 hf-mirror.com（ModelScope 兜底）。可跳过、可稍后在设置页「依赖中心」补装。
 
 ---
 

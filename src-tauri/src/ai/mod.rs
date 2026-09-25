@@ -5,6 +5,7 @@
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
 pub mod local_embed;
+pub mod local_rerank;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -342,15 +343,26 @@ pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         .collect()
 }
 
-/// Rerank `passages` against `query` via the gateway's `/rerank` endpoint.
-/// Returns one score per passage **in input order**. `None` on any failure
-/// (no reranker configured, gateway down, malformed response) — caller keeps
-/// the original ordering.
+/// Rerank `passages` against `query`. Returns one score per passage **in input
+/// order**. A `local:<model>` reranker runs the bundled cross-encoder; otherwise
+/// the gateway's `/rerank` endpoint is used. `None` on any failure (no reranker
+/// configured, model/gateway unavailable, malformed response) — caller keeps the
+/// original ordering.
 pub fn rerank(query: &str, passages: &[String]) -> Option<Vec<f32>> {
-    let cfg = crate::config::load_config();
     if passages.is_empty() {
         return None;
     }
+    let cfg = crate::config::load_config();
+
+    // Bundled local cross-encoder.
+    if let Some(model_name) = local_embed::local_model_dir_name(&cfg.active_reranker_model_id) {
+        if local_rerank::rerank_model_ready(&cfg.data_dir, model_name) {
+            let _ = local_rerank::init_local_reranker(&cfg.data_dir, model_name);
+            return local_rerank::rerank_local(query, passages);
+        }
+        return None;
+    }
+
     let ep = resolve_active_endpoint(&cfg, ModelType::Reranker)?;
     let url = format!("{}/rerank", ep.base_url.trim_end_matches('/'));
 

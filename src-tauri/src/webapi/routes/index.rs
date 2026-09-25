@@ -38,6 +38,14 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             post(backfill_chunk_embeddings_handler),
         )
         .route("/api/index/heal", post(heal_index_handler))
+        .route(
+            "/api/index/embedding-consistency",
+            get(embedding_consistency_handler),
+        )
+        .route(
+            "/api/index/rebuild-embeddings",
+            post(rebuild_embeddings_handler),
+        )
 }
 
 /// OS thread, not tokio::spawn: the command futures borrow an AppState owned
@@ -411,6 +419,35 @@ async fn backfill_handler(
             tauri::async_runtime::block_on(crate::commands::index::backfill_embeddings(st))
         {
             log::error!("[WEBAPI] backfill-embeddings failed: {e}");
+        }
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started" })),
+    ))
+}
+
+/// 检查存储向量维度是否与当前嵌入模型一致（不一致则语义检索静默失效）。
+async fn embedding_consistency_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<crate::commands::index::EmbeddingConsistency>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::check_embedding_consistency(app_state)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
+}
+
+/// 清空并重嵌全部语义向量（切换嵌入模型后使用；可能耗时，detach 202）。
+async fn rebuild_embeddings_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    detach_task(move || {
+        let st = app.state::<AppState>();
+        if let Err(e) =
+            tauri::async_runtime::block_on(crate::commands::index::rebuild_embeddings(st))
+        {
+            log::error!("[WEBAPI] rebuild-embeddings failed: {e}");
         }
     });
     Ok((

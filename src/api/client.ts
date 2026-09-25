@@ -105,6 +105,8 @@ const MAPPINGS: Record<string, Mapping> = {
   check_index_integrity: { method: 'GET', path: '/api/index/integrity' },
   backfill_embeddings: { method: 'POST', path: '/api/index/backfill-embeddings' },
   backfill_chunk_embeddings: { method: 'POST', path: '/api/index/backfill-chunk-embeddings' },
+  check_embedding_consistency: { method: 'GET', path: '/api/index/embedding-consistency' },
+  rebuild_embeddings: { method: 'POST', path: '/api/index/rebuild-embeddings' },
   heal_index_integrity: { method: 'POST', path: '/api/index/heal' },
 
   // ── Dirs ──

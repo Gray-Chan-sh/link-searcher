@@ -35,6 +35,35 @@
 
 ---
 
+## 2026-09-24：内置本地重排（Reranker）模型 —— cross-encoder 离线精排
+
+- **背景**：此前重排只能走远程网关 `/v1/rerank`（`active_reranker_model_id` 为 `provider:model`），无本地推理；且 `set_active_model` 不支持 `kind="reranker"`（AI 设置页选重排会报 unknown kind）。本版加入两个内置 cross-encoder，离线可用。
+- **本地引擎**：新增 `ai/local_rerank.rs`（tract-onnx + tokenizers，复用 BGE 的纯 Rust 栈）。pair 分词（特殊标记由 tokenizer 后处理器生成），按 ONNX 输入数自适应 2/3 输入（XLM-R vs BERT），输出 logit 经 sigmoid；单例可重置（切模型重载）。
+- **接入检索**：`ai::rerank` 新增本地分支——`active_reranker_model_id` 以 `local:` 开头则走本机 cross-encoder，否则远程；保持 fail-open（任何失败返回 None → 原序不变）。默认仍关闭。
+- **依赖中心**：新增「重排模型」单选下拉组（`bge-reranker-base` 中英 ~1.1GB / `ms-marco-MiniLM-L-6-v2` 英文 ~90MB），hf-mirror + ModelScope + SHA-256 + 进度条；安装完成自动设 `active_reranker_model_id=local:<id>` 并删其它重排模型。二者均非推荐（可选，不影响首启门禁）。
+- **配置**：`set_active_model` 支持 `kind="reranker"`；本地重排选中时重置单例 + prune 其它。
+- **设置页**：重排模型下拉新增已安装的内置本地模型（`check_rerank_installed`）；文案提示 CPU 较慢、建议按需启用。
+- **切换加固（防误删/防残留）**：`set_active_model` 仅在所选本地模型**确实已安装**时才 prune（避免 AI 页下拉列表过期、选到已被删除的模型 → 误删真正可用的模型）；Settings 在依赖安装完成（`dep-install-done`）后刷新 `bgeStatus`/`rerankStatus`，下拉不再残留已删模型。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` 431 通过；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/ai/local_rerank.rs`、`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/rerank.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/commands/mod.rs`、`src-tauri/src/deps/catalog.rs`、`src-tauri/src/lib.rs`、`src/api/settings.ts`、`src/hooks/useSettingsOcr.ts`、`src/hooks/useSettingsProviders.ts`、`src/components/settings/DepsTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/06-settings.md`、`CHANGELOG.md`
+
+---
+
+## 2026-09-24：本地 BGE 语义模型改为三选一（512/768/1024）——依赖中心下拉框 + 切换即删其它维度 + 一键重嵌
+
+- **背景**：512 维快但精度低、1024 维精度高但 CPU 慢，新增中档 768 维（`bge-base`）；且本地模型应互斥，避免同时留存多个维度占用磁盘。
+- **依赖中心三选一（`DepsTab`）**：`bge-small`/`bge-base`/`bge-large` 三个依赖合并为**一行**，行内一个**单选下拉框**选维度，点「立即安装」安装所选维度（沿用依赖下载的 SHA-256 校验与进度条）；安装成功后自动 `set_active_model('embedding','local:<id>')`，即设为当前模型并删除其它维度。
+- **按维度就绪**：`deps::current_status` 中推荐的 BGE 只要**任一维度已安装**即视为满足（`all_recommended_ready`）；`App`/`SetupWizard` 改用该标志判定，避免选了 512/768 仍被向导反复要求装 1024。
+- **互斥删除**：新增 `commands::bge::prune_local_models_except(data_dir, keep)`；`set_active_model`（选中 `local:<id>` 时）与 `install_bge`（下载成功后）都会删除其它维度的模型目录（best-effort，文件被占用仅告警）。选远程网关**不**删本地模型。
+- **向导**：仍推荐 `bge-large`（默认 1024），不强制使用下拉。
+- **移除**：上一轮加在 AI 标签页的三选一组（与依赖中心重复）；AI 页的「Embedding 模型」下拉继续列已安装模型 + 远程网关。
+- **顺带修复**：`BgeStatus` 增加 `model_id` 字段，前端不再用 `model_dir.split('/')` 解析模型名（Windows 反斜杠路径下会失效）。
+- **切换后一键重嵌**：设置页切换 embedding 模型后，若库中已有向量，弹确认框提示「旧向量与新模型不可比、语义搜索会失效，是否立即重建」，确认则**后台**触发 `rebuild_embeddings`（不阻塞设置页，进度见索引状态页），取消则不重建（索引页告警横幅仍在）。见 `useSettingsProviders.handleActiveModel`；依赖中心安装后由索引状态页横幅提示重建。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` 431 通过；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/bge.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/deps/catalog.rs`、`src-tauri/src/deps/mod.rs`、`src/components/settings/DepsTab.tsx`、`src/components/SetupWizard.tsx`、`src/App.tsx`、`src/api/settings.ts`、`src/hooks/useSettingsProviders.ts`、`src/components/settings/AiTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/01-install.md`、`docs/06-settings.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：删除离线 QA 对检索通道（无净收益）
 
 - **背景**：离线 QA 对（`doc_qa_pairs`）通道在 88 题 A/B（见本文件 2026-09-19 条目）中 semantic +6.07pp、合同 0→2/6，但 twin −20pp、multi_hop −12.5pp，**总体 −1.14pp**；且需全量 LLM 生成才可能转正、换 embedding 模型后须全部重生成。权衡后整功能删除。
@@ -48,6 +77,19 @@
 - **文档**：README、`docs/10-cli.md`（删「生成 QA 对」章节）、`docs/USER_MANUAL.md`、`ROADMAP.md` 移除 `index-qa`。
 - **验证**：`cargo check` 0 错误；`cargo test --lib` 通过；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
 - **涉及文件**：`src-tauri/src/cli.rs`、`src-tauri/src/commands/ai/prompt.rs`、`src-tauri/src/ai/mod.rs`、`src-tauri/src/db/tracker/embeddings.rs`、`src-tauri/src/db/tracker.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/index/vector_health.rs`、`src/api/index.ts`、`README.md`、`docs/10-cli.md`、`docs/USER_MANUAL.md`、`ROADMAP.md`、`CHANGELOG.md`
+
+---
+
+## 2026-09-24：内置默认嵌入模型改为 1024 维 BGE-large（含维度检测与一键重嵌）
+
+- **背景**：内置默认语义模型为 `bge-small-zh-v1.5`（512 维）。实测三模型微基准（同库同题）bge-small 9/20、bge-large 13/20、bge-m3 16/20 —— 512 维小模型区分度不足。本版把内置默认改为 `bge-large-zh-v1.5`（1024 维）。
+- **首启向导默认下载**：`deps/catalog.rs` 的 `bge-small()` 依赖改为 `bge_large()`（id `bge-large`，安装目录 `models/bge-large-zh-v1.5`，约 1.2GB）。下载源从 GitHub Releases 改为 **hf-mirror.com（`Xenova/bge-large-zh-v1.5`，ModelScope 兜底）**，`model.onnx` / `tokenizer.json` 均带 SHA-256 校验（前者取自 HF LFS oid，后者实测镜像字节）。`install_dir` 与 `install_dir_layout_is_expected` 同步。bge-small 不再是向导推荐项，仍可在设置页用 `install_bge` 下载。
+- **新装默认选中**：`config.rs` 新增 `seed_default_embedding_model()`，在 `active_embedding_model_id` 为空且 `models/bge-large-zh-v1.5/model.onnx` 就绪时写入 `local:bge-large-zh-v1.5`（只填空、不覆盖用户已配置的远端网关）。
+- **设置页文案**：i18n `bge_install` 四语种由 `bge-small-zh-v1.5` 改为 `bge-large-zh-v1.5`。
+- **维度检测 + 一键重嵌**：新增 Tauri 命令 `check_embedding_consistency`（统计 `doc_embeddings`/`chunk_embeddings` 的 distinct `dim`，与当前本地模型的期望维度比对）与 `rebuild_embeddings`（清空两张向量表后用当前模型重嵌，复用 cached `content_index`，不重新提取/OCR）。索引页在维度不一致时显示告警横幅与「重建语义向量」按钮（`commands/index/vector_health.rs`、`lib.rs`、`webapi/routes/index.rs`、`src/api/index.ts`、`src/api/client.ts`、`src/pages/IndexStatus.tsx`）。→ 换模型后语义检索本会因 `cosine()` 维度不符静默返回 0，此告警避免用户无感知失效。
+- **修复运行时切模型不生效**：`ai/local_embed.rs` 原用 `OnceLock` 单例，`init_local_embedder` 一旦加载即 no-op，运行中切到另一本地模型仍用旧模型推理（维度错）。改为 `OnceLock<RwLock<Option<..>>>`，新增 `reset_local_embedder()`；`set_active_model` 在 embedding 模型变化时重置单例并清查询向量缓存（`commands/config.rs`）。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` 431 通过（含 `vector_health` 新增 2 例、catalog 布局测试）；`npx tsc -b` / `oxlint` 0 问题；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/deps/catalog.rs`、`src-tauri/src/deps/mod.rs`、`src-tauri/src/config.rs`、`src-tauri/src/ai/local_embed.rs`、`src-tauri/src/commands/bge.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/commands/index/vector_health.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/webapi/routes/index.rs`、`src/api/index.ts`、`src/api/client.ts`、`src/pages/IndexStatus.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`README.md`、`docs/01-install.md`、`docs/06-settings.md`、`docs/07-index-manage.md`
 
 ---
 

@@ -6,11 +6,16 @@
 //!
 //! ## Download source
 //!
-//! Link-Searcher publishes its model assets as **GitHub Releases** on the
+//! Most model assets are published as **GitHub Releases** on the
 //! `Gray-Chan-sh/link-searcher-models` repo (flat asset names, see
 //! [`gh_base`]). For China-network friendliness the *app* prefers mirrors of
 //! github.com (e.g. `ghproxy`-style) at runtime; the catalog keeps GitHub as
 //! the canonical base and the download layer can rewrite it.
+//!
+//! The BGE embedding model is the exception: its ~1.2GB fp32 ONNX is served
+//! from the Xenova HuggingFace conversion via `hf-mirror.com` (with
+//! ModelScope as fallback) instead of the GitHub release. Non-GitHub sources
+//! are used verbatim (no ghproxy prefix).
 
 use std::path::Path;
 
@@ -60,13 +65,17 @@ pub struct DepDef {
 
 /// All catalog entries (fresh copy each call; cheap, pure).
 pub fn all() -> Vec<DepDef> {
-    vec![
+    let mut defs = vec![
         paddleocr(),
+        bge_large(),
+        bge_base(),
         bge_small(),
-        funasr(),
-        ffmpeg(),
-        poppler(),
-    ]
+    ];
+    defs.extend(rerank_defs());
+    defs.push(funasr());
+    defs.push(ffmpeg());
+    defs.push(poppler());
+    defs
 }
 
 /// GitHub owner/repo + release tag hosting Link-Searcher's model assets.
@@ -111,24 +120,138 @@ fn paddleocr() -> DepDef {
     }
 }
 
-/// BGE-small-zh-v1.5 (512-dim) — offline semantic embeddings.
+/// BGE-large-zh-v1.5 (1024-dim) — offline semantic embeddings.
+///
+/// Served from the Xenova ONNX conversion on HuggingFace (via hf-mirror) and
+/// ModelScope — the ~1.2GB fp32 asset is NOT published to the GitHub release.
+/// Both sources are non-GitHub, so `download.rs` uses their URLs as-is without
+/// prepending a ghproxy prefix. SHA-256 of `model.onnx` is the HF LFS oid;
+/// the tokenizer digest was measured from the mirrored bytes.
+fn bge_large() -> DepDef {
+    DepDef {
+        id: "bge-large",
+        name: "BGE-large 本地语义模型（1024维，离线向量）",
+        recommended: true,
+        size_bytes: 1_298_815_581,
+        hint: "离线语义搜索 / embedding（1024 维，约 1.2GB）",
+        files: &[
+            FileSpec { remote: "onnx/model.onnx", local: "model.onnx", sha256: "8a78f0b748a6746a0a2ebe0563fddb311762e260abcadaa2b9f19c6964b745fe" },
+            FileSpec { remote: "tokenizer.json", local: "tokenizer.json", sha256: "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839" },
+        ],
+        sources: vec![
+            Source {
+                label: "HF Mirror",
+                base_url: "https://hf-mirror.com/Xenova/bge-large-zh-v1.5/resolve/main".to_string(),
+            },
+            Source {
+                label: "ModelScope",
+                base_url: "https://modelscope.cn/models/Xenova/bge-large-zh-v1.5/resolve/master".to_string(),
+            },
+        ],
+        system_package: None,
+    }
+}
+
+/// BGE-base-zh-v1.5 (768-dim) — optional offline semantic embeddings. Part of
+/// the single-choice BGE group (the dependency center shows a dimension
+/// dropdown); `bge-large` is the recommended default.
+fn bge_base() -> DepDef {
+    DepDef {
+        id: "bge-base",
+        name: "BGE-base 本地语义模型（768维，离线向量）",
+        recommended: false,
+        size_bytes: 407_392_295, // model.onnx + tokenizer.json
+        hint: "离线语义搜索 / embedding（768 维，约 407MB）",
+        files: &[
+            FileSpec { remote: "onnx/model.onnx", local: "model.onnx", sha256: "5e5619f7cca7380b824d329c157dba10bee7cc00d0c139e82fdb7906051b8e4f" },
+            FileSpec { remote: "tokenizer.json", local: "tokenizer.json", sha256: "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839" },
+        ],
+        sources: vec![
+            Source {
+                label: "HF Mirror",
+                base_url: "https://hf-mirror.com/Xenova/bge-base-zh-v1.5/resolve/main".to_string(),
+            },
+            Source {
+                label: "ModelScope",
+                base_url: "https://modelscope.cn/models/Xenova/bge-base-zh-v1.5/resolve/master".to_string(),
+            },
+        ],
+        system_package: None,
+    }
+}
+
+/// BGE-small-zh-v1.5 (512-dim) — optional lightweight offline embeddings.
+/// Part of the single-choice BGE group.
 fn bge_small() -> DepDef {
     DepDef {
         id: "bge-small",
-        name: "BGE-small 本地语义模型（离线向量）",
-        recommended: true,
-        size_bytes: 95 * 1024 * 1024,
-        hint: "离线语义搜索 / embedding（约 95MB）",
+        name: "BGE-small 本地语义模型（512维，离线向量）",
+        recommended: false,
+        size_bytes: 95_291_002, // model.onnx + tokenizer.json
+        hint: "离线语义搜索 / embedding（512 维，约 95MB）",
         files: &[
-            FileSpec { remote: "bge-small-model.onnx", local: "model.onnx", sha256: "69a0b846f4f116b5e6aabf9546ea6754d02264f3211a13a1bd69b31b8040749a" },
-            FileSpec { remote: "bge-small-tokenizer.json", local: "tokenizer.json", sha256: "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26" },
+            FileSpec { remote: "onnx/model.onnx", local: "model.onnx", sha256: "69a0b846f4f116b5e6aabf9546ea6754d02264f3211a13a1bd69b31b8040749a" },
+            FileSpec { remote: "tokenizer.json", local: "tokenizer.json", sha256: "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26" },
         ],
-        sources: vec![Source {
-            label: "GitHub Releases",
-            base_url: gh_base(),
-        }],
+        sources: vec![
+            Source {
+                label: "HF Mirror",
+                base_url: "https://hf-mirror.com/Xenova/bge-small-zh-v1.5/resolve/main".to_string(),
+            },
+            Source {
+                label: "ModelScope",
+                base_url: "https://modelscope.cn/models/Xenova/bge-small-zh-v1.5/resolve/master".to_string(),
+            },
+        ],
         system_package: None,
     }
+}
+
+/// Built-in local rerankers (cross-encoders). Not recommended — reranking is
+/// opt-in. The dependency center renders them as a single-choice dropdown, and
+/// the dep id **is** the model directory name so `local:<id>` resolves directly.
+fn rerank_defs() -> Vec<DepDef> {
+    vec![
+        DepDef {
+            id: "bge-reranker-base",
+            name: "BGE-Reranker-Base 本地重排模型（中英）",
+            recommended: false,
+            size_bytes: 1_129_557_667, // model.onnx 1,112,459,588 + tokenizer 17,098,079
+            hint: "对检索结果二次精排（cross-encoder，中英，约 1.1GB）",
+            files: &[
+                FileSpec { remote: "onnx/model.onnx", local: "model.onnx", sha256: "15b9a8c3da82eddf263df571281166e00e9308fe19d077084b642ebfcaf06d2b" },
+                FileSpec { remote: "tokenizer.json", local: "tokenizer.json", sha256: "48564c5c7d3fa64d85d95e65414a542385f88b0f128fd8d4163fd7a57f2be05c" },
+            ],
+            sources: rerank_sources("bge-reranker-base"),
+            system_package: None,
+        },
+        DepDef {
+            id: "ms-marco-MiniLM-L-6-v2",
+            name: "MS-Marco MiniLM-L6 本地重排模型（英文，快）",
+            recommended: false,
+            size_bytes: 91_703_511, // model.onnx 90,992,115 + tokenizer 711,396
+            hint: "对检索结果二次精排（cross-encoder，英文，约 90MB）",
+            files: &[
+                FileSpec { remote: "onnx/model.onnx", local: "model.onnx", sha256: "c623d0bcb99f4622beb413eaef00cfbe5db20df9f1dd982da4b4f26022881870" },
+                FileSpec { remote: "tokenizer.json", local: "tokenizer.json", sha256: "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66" },
+            ],
+            sources: rerank_sources("ms-marco-MiniLM-L-6-v2"),
+            system_package: None,
+        },
+    ]
+}
+
+fn rerank_sources(repo: &str) -> Vec<Source> {
+    vec![
+        Source {
+            label: "HF Mirror",
+            base_url: format!("https://hf-mirror.com/Xenova/{repo}/resolve/main"),
+        },
+        Source {
+            label: "ModelScope",
+            base_url: format!("https://modelscope.cn/models/Xenova/{repo}/resolve/master"),
+        },
+    ]
 }
 
 /// FunASR-Nano (sherpa-onnx int8) — offline audio transcription (~850MB).
@@ -194,6 +317,8 @@ fn poppler() -> DepDef {
 pub fn install_dir(def: &DepDef, data_dir: &Path) -> std::path::PathBuf {
     let sub = match def.id {
         "paddleocr" => "ppocrv5",
+        "bge-large" => "bge-large-zh-v1.5",
+        "bge-base" => "bge-base-zh-v1.5",
         "bge-small" => "bge-small-zh-v1.5",
         "funasr" => "funasr",
         other => other,
@@ -341,6 +466,8 @@ mod tests {
             let dir = install_dir(&def, &data);
             let expected = match def.id {
                 "paddleocr" => "ppocrv5",
+                "bge-large" => "bge-large-zh-v1.5",
+                "bge-base" => "bge-base-zh-v1.5",
                 "bge-small" => "bge-small-zh-v1.5",
                 "funasr" => "funasr",
                 other => other,
