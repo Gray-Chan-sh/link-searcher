@@ -560,6 +560,8 @@ const ja: Record<string, string> = {
     backfill_quality_noop: '補完不要 — 全ファイルに既にスコアがあります',
     ocr_pdf_dpi: 'PDF OCR レンダリング DPI',
     ocr_pdf_dpi_hint: '300を推奨（小さな文字や薄い文字向け）。値が高いほど画質が向上しますが、速度が低下しメモリ消費が増加します。',
+    ocr_stall_timeout: 'OCR ストールタイムアウト（秒）',
+    ocr_stall_timeout_hint: '進捗ウォッチドッグ：進捗がある限り継続し、この秒数だけ全く進まない場合のみハングと判定します。0 で無効。低速なマシンでは大きめに（120 推奨）。',
 
     quality_page_title: '品質',
     quality_show_flagged: '問題ファイルのみ',

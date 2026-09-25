@@ -560,6 +560,8 @@ const ko: Record<string, string> = {
     backfill_quality_noop: '보충 불필요 — 모든 파일에 이미 점수가 있습니다',
     ocr_pdf_dpi: 'PDF OCR 렌더링 DPI',
     ocr_pdf_dpi_hint: '300 권장(작거나 흐린 텍스트용). 값이 높을수록 화질이 좋아지지만 속도가 느려지고 메모리 사용량이 증가합니다.',
+    ocr_stall_timeout: 'OCR 정지 타임아웃(초)',
+    ocr_stall_timeout_hint: '진행 감시: 진행이 있는 한 계속 실행하며, 이 시간(초) 동안 전혀 진행이 없을 때만 멈춤으로 간주합니다. 0이면 비활성화. 느린 PC에서는 값을 늘리세요(120 권장).',
 
     quality_page_title: '품질',
     quality_show_flagged: '문제 파일만',

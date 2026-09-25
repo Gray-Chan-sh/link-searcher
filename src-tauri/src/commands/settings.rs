@@ -9,6 +9,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "ocr_engine",
     "ocr_lang",
     "ocr_pdf_dpi",
+    "ocr_stall_timeout_secs",
     "max_results",
     "exclude_patterns",
     "scan_time",

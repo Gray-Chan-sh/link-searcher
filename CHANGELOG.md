@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-26（续）：OCR 超时改为「进度看门狗」——与机器速度解耦
+
+- **背景**：上一版按 `30 + 页数×1.5s` 缩放超时，是从**一次带负载的实测**推的（那次整篇 `pdfimages` 与 11 路 OCR 并发抢 CPU/IO），换台更慢的机器（弱 CPU / HDD / USB 盘）系数全变；方向偏紧会**误杀**并回退到慢的逐页路径，正是要消除的问题。超时的语义应是"卡死看门狗"，不是"性能 SLA"。
+- **修复（改为进度判断）**：
+  - `extractor/pdf/ocr.rs`：`run_pdfimages_doc(.., stall: Option<Duration>)` 轮询子进程时统计输出目录 `img*` 的 **(文件数, 总字节)**；只要还在增长就续期，**连续 `stall` 秒零进展**才 kill 报 `pdfimages stalled`。`None` 关闭看门狗。新增 `output_progress()` / `clear_dir()`；`-j` 失败回退 `-png` 前先清空临时目录。
+  - 逐页 OCR 循环：删除固定总预算 `LARGE_SCAN_OCR_BUDGET=600s`，改为**逐页看门狗**——每页返回（有/无文本）都算进展，仅当**单页耗时 ≥ `stall`** 才判卡死停机；保留"前 5 页全无文本即停"。日志 `budget_hit` → `stalled`。
+  - `extractor/pdf.rs`：删除 `LARGE_SCAN_OCR_BUDGET`，新增 `DEFAULT_OCR_STALL_TIMEOUT=120s` 与 `global_ocr_stall_timeout()`；优先级 **环境变量 `LINK_SEARCHER_OCR_STALL_SECS` > 设置 `ocr_stall_timeout_secs` > 默认 120**，**`0` = 关闭**；解析坏值回退默认。
+- **可配置**：新增设置项 `ocr_stall_timeout_secs`（默认 120，0=关闭）——`db/mod.rs` 播种默认、`commands/settings.rs` 白名单、设置页「索引」标签新增数值输入（秒，步进 30），i18n 四语言（zh/en/ja/ko）。
+- **测试**：新增 `test_parse_stall_secs`、`output_progress_counts_and_sums_matching_files`、`clear_dir_removes_files_only`；移除被替代的 `pdfimages_doc_timeout_*` 单测。`cargo test --lib extractor::pdf` **46 passed**；`cargo check` 0 错误；`npx tsc` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/settings.rs`、`src/components/settings/IndexTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26：索引慢修复跟进 —— 大卷宗 pdfimages 超时按页数缩放 + SQLite 连接池扩容
 
 - **背景**：09-25 修复落地后整库重建复测，暴露两个新问题：

@@ -558,6 +558,8 @@ const en: Record<string, string> = {
     backfill_quality_noop: 'Nothing to backfill — all files already scored',
     ocr_pdf_dpi: 'PDF OCR DPI',
     ocr_pdf_dpi_hint: '300 is recommended for small or faint text. Higher values produce sharper images but are slower and use more memory.',
+    ocr_stall_timeout: 'OCR stall timeout (seconds)',
+    ocr_stall_timeout_hint: 'Progress watchdog: a stage runs as long as it keeps making progress; only this many seconds with no progress is treated as a hang. 0 disables it. Increase on slower machines; 120 is recommended.',
 
     quality_page_title: 'Quality',
     quality_show_flagged: 'Flagged Only',

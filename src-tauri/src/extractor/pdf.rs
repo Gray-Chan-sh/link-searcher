@@ -8,7 +8,10 @@ use anyhow::Result;
 use super::Extractor;
 
 pub const LARGE_SCAN_PAGE_THRESHOLD: usize = 20;
-pub const LARGE_SCAN_OCR_BUDGET: Duration = Duration::from_secs(600);
+
+/// Default stall watchdog for OCR subprocesses / per-page loops. See
+/// [`global_ocr_stall_timeout`] for the semantics.
+pub const DEFAULT_OCR_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub fn should_ocr_pages_individually(page_count: usize, whole_doc_failed: bool) -> bool {
     whole_doc_failed || page_count > LARGE_SCAN_PAGE_THRESHOLD
@@ -422,9 +425,73 @@ pub fn global_pdf_dpi() -> u32 {
     normalize_pdf_dpi(raw.as_deref())
 }
 
+/// Parse a stall-timeout setting value into `Some(None)` for `0` (disabled),
+/// `Some(Some(d))` for a positive number of seconds, and `None` for
+/// empty/invalid input (caller then falls back to the default).
+fn parse_stall_secs(raw: &str) -> Option<Option<Duration>> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let n = t.parse::<u64>().ok()?;
+    Some(if n == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(n))
+    })
+}
+
+/// Resolve the OCR stall watchdog timeout. Semantics: a stage may run for as long
+/// as it keeps making progress (output files growing / pages completing); only
+/// `timeout` seconds of *zero* progress is treated as a hang. This decouples the
+/// guard from machine speed — a slow machine is fine, a wedged process is not.
+///
+/// Precedence: `LINK_SEARCHER_OCR_STALL_SECS` env var > `ocr_stall_timeout_secs`
+/// setting > [`DEFAULT_OCR_STALL_TIMEOUT`]. `0` disables the watchdog.
+pub fn global_ocr_stall_timeout() -> Option<Duration> {
+    if let Ok(raw) = std::env::var("LINK_SEARCHER_OCR_STALL_SECS") {
+        if let Some(v) = parse_stall_secs(&raw) {
+            return v;
+        }
+    }
+    static POOL: OnceLock<Option<r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>> =
+        OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let data_dir = crate::config::load_config().data_dir;
+        let db_path = data_dir.join("data.db");
+        crate::db::get_pool(&db_path.to_string_lossy()).ok()
+    });
+    let raw = match pool {
+        Some(pool) => pool.get().ok().and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM app_settings WHERE key = 'ocr_stall_timeout_secs'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        }),
+        None => None,
+    };
+    match parse_stall_secs(raw.as_deref().unwrap_or("")) {
+        Some(v) => v,
+        None => Some(DEFAULT_OCR_STALL_TIMEOUT),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_stall_secs() {
+        assert_eq!(parse_stall_secs(""), None);
+        assert_eq!(parse_stall_secs("  "), None);
+        assert_eq!(parse_stall_secs("abc"), None);
+        assert_eq!(parse_stall_secs("0"), Some(None));
+        assert_eq!(parse_stall_secs(" 0 "), Some(None));
+        assert_eq!(parse_stall_secs("45"), Some(Some(Duration::from_secs(45))));
+        assert_eq!(parse_stall_secs("600"), Some(Some(Duration::from_secs(600))));
+    }
 
     /// Manual end-to-end extraction benchmark on a real PDF
     /// (`LS_TEST_PDF=<path> cargo test --lib tmp_e2e_extract_pdf -- --ignored --nocapture`).

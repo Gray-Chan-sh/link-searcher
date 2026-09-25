@@ -1,5 +1,5 @@
 //! Scanned-PDF OCR pipeline: whole-doc fast path (pdfimages / pdftoppm) and
-//! per-page OCR with a time budget.
+//! per-page OCR guarded by a progress-based stall watchdog.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use crate::scanner::helpers::TempDir;
 use super::poppler::{pdf_longest_side_pt, pdfimages_path, pdftoppm_path};
 use super::quality::{is_garbled_text, is_repetitive, is_sparse_text_layer};
 use super::{
-    get_pdf_page_count, global_pdf_dpi, should_ocr_pages_individually, LARGE_SCAN_OCR_BUDGET,
+    get_pdf_page_count, global_ocr_stall_timeout, global_pdf_dpi, should_ocr_pages_individually,
     LARGE_SCAN_PAGE_THRESHOLD,
 };
 
@@ -26,13 +26,6 @@ const MIN_RENDER_LONGEST_SIDE: u32 = 1000;
 
 /// The largest image on a page smaller than this is an icon/logo, not a scan.
 const MIN_PAGE_IMAGE_AREA: u64 = 100_000;
-
-/// Timeout for the single whole-document `pdfimages` extraction. One pass over a
-/// 40-page 80MB scan is ~0.1–2s, but a 200+ page volume writes hundreds of MB,
-/// so the budget scales with page count (clamped to 2–10 min).
-fn pdfimages_doc_timeout(page_count: usize) -> Duration {
-    Duration::from_secs((30 + page_count as u64 * 3 / 2).clamp(120, 600))
-}
 
 /// Target longest-side pixels for rendering at `dpi`, clamped so a giant page
 /// can't explode. Falls back to the cap when the page size is unknown.
@@ -74,26 +67,19 @@ pub(super) fn run_pdf_ocr_pipeline(
 
     if should_ocr_pages_individually(page_count, true) {
         log::info!(
-            "[PDF] {:?}: running per-page OCR loop for {} pages with budget {:?}",
-            path.file_name(), page_count, LARGE_SCAN_OCR_BUDGET
+            "[PDF] {:?}: running per-page OCR loop for {} pages (stall watchdog {:?})",
+            path.file_name(), page_count, global_ocr_stall_timeout()
         );
         let dpi = global_pdf_dpi();
         let mut ocr_pages = HashMap::new();
-        let start_time = Instant::now();
+        let stall = global_ocr_stall_timeout();
         let mut pages_attempted = 0usize;
-        let mut budget_hit = false;
+        let mut stalled = false;
 
         for page_num in 1..=page_count {
-            if start_time.elapsed() >= LARGE_SCAN_OCR_BUDGET {
-                budget_hit = true;
-                log::warn!(
-                    "[PDF] {:?}: per-page OCR reached time budget {:?}, stopping early at page {}/{}",
-                    path.file_name(), LARGE_SCAN_OCR_BUDGET, page_num, page_count
-                );
-                break;
-            }
             pages_attempted += 1;
             let page_idx = page_num - 1;
+            let page_started = Instant::now();
             match ocr_single_pdf_page(path, page_num as u32, dpi, lang, engine) {
                 Some(p_text) => {
                     ocr_pages.insert(page_idx, p_text);
@@ -111,11 +97,24 @@ pub(super) fn run_pdf_ocr_pipeline(
                     }
                 }
             }
+            // Progress watchdog: every page that returns advances the loop, so a
+            // slow-but-working machine is fine. Only a single page that blows the
+            // stall budget is treated as stuck. `None` disables the guard.
+            if let Some(stall) = stall {
+                if page_started.elapsed() >= stall {
+                    stalled = true;
+                    log::warn!(
+                        "[PDF] {:?}: per-page OCR stalled — page {page_num} took {:?} (>= {:?}), stopping at {}/{}",
+                        path.file_name(), page_started.elapsed(), stall, page_num, page_count
+                    );
+                    break;
+                }
+            }
         }
 
         log::info!(
-            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, budget_hit={}",
-            path.file_name(), pages_attempted, page_count, ocr_pages.len(), budget_hit
+            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, stalled={}",
+            path.file_name(), pages_attempted, page_count, ocr_pages.len(), stalled
         );
 
         if !ocr_pages.is_empty() {
@@ -403,12 +402,15 @@ pub fn ocr_pdf_via_pdfimages(
     let tmp = TempDir::new("ls_pdfimg")?;
     let prefix = tmp.path().join("img");
     let primary = if all_jpeg { "-j" } else { "-png" };
-    let timeout = pdfimages_doc_timeout(page_count);
-    run_pdfimages_doc(path, primary, &prefix, timeout)?;
+    let stall = global_ocr_stall_timeout();
+    run_pdfimages_doc(path, primary, &prefix, stall)?;
     let mut per_page = group_images_by_page(tmp.path(), page_count)?;
     if per_page.iter().all(Option::is_none) && primary == "-j" {
-        // `-j` skips non-JPEG encodings (CCITT/JBIG2/…): retry with PNG.
-        run_pdfimages_doc(path, "-png", &prefix, timeout)?;
+        // `-j` skips non-JPEG encodings (CCITT/JBIG2/…): retry with PNG. Clear
+        // any partial output first so the retry's progress check and page
+        // grouping only see the PNG run.
+        clear_dir(tmp.path());
+        run_pdfimages_doc(path, "-png", &prefix, stall)?;
         per_page = group_images_by_page(tmp.path(), page_count)?;
     }
 
@@ -461,26 +463,82 @@ pub fn ocr_pdf_via_pdfimages(
     Ok(full_text)
 }
 
+/// Snapshot of `pdfimages` output used by the stall watchdog: (file count, total
+/// bytes) for entries whose stem starts with `stem`. Growth means progress.
+fn output_progress(dir: &Path, stem: &str) -> (u64, u64) {
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let matches = p
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|n| n.starts_with(stem))
+                .unwrap_or(false);
+            if matches {
+                count += 1;
+                bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    (count, bytes)
+}
+
+/// Remove every regular file directly under `dir` (best-effort).
+fn clear_dir(dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for e in entries.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Run one whole-document `pdfimages <fmt> -p` pass into `prefix`. `-p` embeds
 /// the 1-based page number in each output filename (`prefix-<page>-<n>.<ext>`),
 /// so every page's images can be grouped and OCR'd without re-parsing the PDF.
-fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path, timeout: Duration) -> Result<()> {
+///
+/// `stall` is a progress watchdog, not a wall-clock budget: the process may run
+/// as long as it needs, and is only killed after `stall` elapses with **no new
+/// output** (a wedged/corrupt file). `None` disables the watchdog.
+fn run_pdfimages_doc(
+    pdf_path: &Path,
+    fmt: &str,
+    prefix: &Path,
+    stall: Option<Duration>,
+) -> Result<()> {
     let bin = pdfimages_path()
         .ok_or_else(|| anyhow::anyhow!("pdfimages not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
     cmd.args([fmt, "-p"]).arg(pdf_path).arg(prefix);
     cmd.stderr(Stdio::null());
 
+    let dir = prefix
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("bad pdfimages output prefix"))?;
+    let stem = prefix.file_name().and_then(|s| s.to_str()).unwrap_or("img");
+
     let mut child = cmd.spawn().context("failed to spawn pdfimages")?;
-    let deadline = Instant::now() + timeout;
+    let mut last_progress = Instant::now();
+    let mut last = output_progress(dir, stem);
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(anyhow::anyhow!("pdfimages timed out after {timeout:?}"));
+                let now = output_progress(dir, stem);
+                if now != last {
+                    last = now;
+                    last_progress = Instant::now();
+                } else if let Some(stall) = stall {
+                    if last_progress.elapsed() >= stall {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(anyhow::anyhow!(
+                            "pdfimages stalled: no output progress for {stall:?}"
+                        ));
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(200));
             }
             Err(e) => return Err(anyhow::anyhow!("pdfimages failed: {e}")),
         }
@@ -545,12 +603,24 @@ mod tests {
     }
 
     #[test]
-    fn pdfimages_doc_timeout_scales_with_pages_and_clamps() {
-        assert_eq!(pdfimages_doc_timeout(1), Duration::from_secs(120));
-        assert_eq!(pdfimages_doc_timeout(40), Duration::from_secs(120));
-        assert_eq!(pdfimages_doc_timeout(100), Duration::from_secs(180));
-        assert_eq!(pdfimages_doc_timeout(217), Duration::from_secs(355));
-        assert_eq!(pdfimages_doc_timeout(1000), Duration::from_secs(600));
+    fn output_progress_counts_and_sums_matching_files() {
+        let tmp = TempDir::new("ls_progress_test").unwrap();
+        assert_eq!(output_progress(tmp.path(), "img"), (0, 0));
+        std::fs::write(tmp.path().join("img-001-000.png"), b"abcd").unwrap();
+        std::fs::write(tmp.path().join("img-002-000.png"), b"abcdefgh").unwrap();
+        // Non-matching entries are ignored.
+        std::fs::write(tmp.path().join("other.txt"), b"xxxxxxxxxx").unwrap();
+        assert_eq!(output_progress(tmp.path(), "img"), (2, 12));
+    }
+
+    #[test]
+    fn clear_dir_removes_files_only() {
+        let tmp = TempDir::new("ls_clear_test").unwrap();
+        std::fs::write(tmp.path().join("img-001-000.png"), b"x").unwrap();
+        std::fs::create_dir(tmp.path().join("sub")).unwrap();
+        clear_dir(tmp.path());
+        assert_eq!(output_progress(tmp.path(), "img"), (0, 0));
+        assert!(tmp.path().join("sub").is_dir());
     }
 
     #[test]

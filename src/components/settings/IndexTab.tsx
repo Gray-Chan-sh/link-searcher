@@ -1,7 +1,7 @@
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import type { OcrEngineStatus, OcrTestResult } from '../../api/settings'
-import { Section, SelectField, filterGuide } from './SettingsFields'
+import { Section, SelectField, NumberField, filterGuide } from './SettingsFields'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -24,13 +24,15 @@ interface IndexTabProps {
   selectedEngine: OcrEngineStatus | undefined
   ocrLang: string
   ocrPdfDpi: string
+  ocrStallTimeout: string
   onTestOcr: () => void
   onChangeOcrEngine: (engineType: string) => void
   onChangeOcrLang: (lang: string) => void
   onChangeOcrPdfDpi: (dpi: string) => void
+  onChangeOcrStallTimeout: (seconds: string) => void
 }
 
-export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, ocrPdfDpi, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onChangeOcrPdfDpi }: IndexTabProps) {
+export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, ocrPdfDpi, ocrStallTimeout, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onChangeOcrPdfDpi, onChangeOcrStallTimeout }: IndexTabProps) {
   const { t } = useI18n()
 
   return (
@@ -112,6 +114,20 @@ export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, oc
         />
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {t('ocr_pdf_dpi_hint')}
+        </p>
+      </Section>
+
+      <Section title={t('ocr_stall_timeout')}>
+        <NumberField
+          label={t('ocr_stall_timeout')}
+          value={Number.parseInt(ocrStallTimeout, 10) || 0}
+          onChange={v => onChangeOcrStallTimeout(String(v))}
+          min={0}
+          max={3600}
+          step={30}
+        />
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          {t('ocr_stall_timeout_hint')}
         </p>
       </Section>
     </div>

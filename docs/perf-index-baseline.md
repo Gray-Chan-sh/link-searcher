@@ -65,7 +65,7 @@
 | **B** | **整篇一次 `pdfimages -j -p` 替代逐页一个进程**（`-p` 把页号写入文件名，按页取最大图再并行 OCR） | `ocr_pdf_via_pdfimages` + `group_images_by_page` | ✅ 本次实现 |
 | C1 | 大文档（`page_count > 20`）**跳过整篇 `pdftoppm`**，直接进逐页循环 | `try_ocr_fallback(.., allow_whole_doc_pdftoppm)` | ✅ 本次实现 |
 | E | `is_image_based_scan` 分支**先试 `pdftotext`**，质量门通过即用文本层（防 PPT 类数字 PDF 被误 OCR） | `extract_with_lang`（`pdf.rs`） | ✅ 本次实现 |
-| C2 | 大文件逐页 OCR 预算 600s → 120s | `LARGE_SCAN_OCR_BUDGET` | ⬜ 未做（当前仍 600s） |
+| C2 | ~~大文件逐页 OCR 预算 600s → 120s~~ | `LARGE_SCAN_OCR_BUDGET` | ❌ 作废（2026-09-26）：总预算改为 §5.2 进度看门狗 |
 | C3 | 逐页循环连续 3 页失败即中止 | `run_pdf_ocr_pipeline` | ⬜ 未做 |
 
 **对"两次误判"的更正（实测）**：此前把 `诉讼材料.pdf` 判为"纯矢量 PDF / 0 张内嵌图"是**号错**——
@@ -118,18 +118,34 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 | 问题 | 证据（复测日志/DB） | 根因 | 修复 |
 |---|---|---|---|
-| 整篇 `pdfimages` 120s 超时对**大卷宗**太短 | `pdfimages timed out after 120s` **37 次** → `per-page OCR loop` **92 次**（如 `卷七十八.pdf` 217 页 / 90MB，导出约 200MB 图片 >120s） | 常量 `PDFIMAGES_DOC_TIMEOUT=120s` 未随页数增长 | `pdfimages_doc_timeout(page_count)=clamp(30+页数×1.5, 120s..600s)`；217 页 ≈ **355s** |
+| 整篇 `pdfimages` 120s 超时对**大卷宗**太短 | `pdfimages timed out after 120s` **37 次** → `per-page OCR loop` **92 次**（如 `卷七十八.pdf` 217 页 / 90MB，导出约 200MB 图片 >120s） | 固定 120s 未随工作量增长 | 见 §5.2：改为**进度看门狗**（不再用固定/缩放墙钟） |
 | **SQLite 连接池**被 OCR 长期占用而耗尽 | `DB conn: timed out waiting for connection` **702 次**；一批 250 文件 **0 成功 250 失败**；DB `failed=350` | Phase-1 在**整个提取（含数分钟 OCR）期间持有连接**（`indexer.rs:425`），池 `max_size=12` == Phase-1 并发 12，扫描器/监听/回填/UI 无余量 → 10s 超时 | `db/mod.rs` 池 `max_size 12→24`、`connection_timeout 10s→30s` |
 
-> 二次修复的验证：`cargo test --lib extractor::pdf` **44 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。整库墙钟需重启后重跑回填。
-> 遗留可选项：C2 逐页预算 600s→120s；C3 逐页连续 3 页失败即中止。
+> 连接池修复的验证：`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。整库墙钟需重启后重跑回填。
+
+## 5.2 超时改为进度看门狗（2026-09-26 定稿，机器无关）
+
+**动机**：`clamp(30+页数×1.5s, …)` 这类公式是从**一次带负载的实测**推的（整篇 `pdfimages` 与 11 路 OCR 并发抢 CPU/IO），换台更慢的机器系数全变；方向偏紧会**误杀**并回退到慢的逐页路径。超时语义应是"卡死看门狗"，不是"性能 SLA"。
+
+**新机制**：
+
+| 阶段 | 进度定义 | 判定卡死 |
+|---|---|---|
+| 整篇 `pdfimages` | 输出目录 `img*` 的 (文件数, 总字节) 增长 | 连续 `stall` 秒零增长 → kill |
+| 逐页 OCR 循环 | 每页返回（有/无文本）即算进展 | 单页耗时 ≥ `stall` → 停机 |
+
+- `stall` 来源：环境变量 `LINK_SEARCHER_OCR_STALL_SECS` > 设置 `ocr_stall_timeout_secs` > 默认 **120s**；**`0` = 关闭看门狗**。
+- 不再有总时长上限 → 慢机器只要持续推进就能跑完；慢 ≠ 卡死。
+- 设置页「索引」标签可调（秒，步进 30，0=关闭）；i18n 四语言。
+- 验证：`cargo test --lib extractor::pdf` **46 passed**；`cargo check` 0 错误；`npx tsc` 0 错误；`semgrep --severity ERROR` 0 findings。
 
 ## 6. 相关代码 / 常量
 
-- 常量：`MIN_PAGE_IMAGE_AREA=100_000`、`pdfimages_doc_timeout(page_count)`（`clamp(30+页数×1.5, 120s..600s)`，2026-09-26 由 `PDFIMAGES_DOC_TIMEOUT=120s` 常量改来）、`LARGE_SCAN_OCR_BUDGET=600s`、`LARGE_SCAN_PAGE_THRESHOLD=20`
+- 常量：`MIN_PAGE_IMAGE_AREA=100_000`、`LARGE_SCAN_PAGE_THRESHOLD=20`
+- 看门狗：`DEFAULT_OCR_STALL_TIMEOUT=120s` + `global_ocr_stall_timeout()`（`extractor/pdf.rs`）；`output_progress()` / `clear_dir()` / `run_pdfimages_doc(.., stall)` / 逐页循环（`extractor/pdf/ocr.rs`）；设置 `ocr_stall_timeout_secs`
 - 连接池：`db/mod.rs` `max_size=24`、`connection_timeout=30s`（2026-09-26 由 12 / 10s 调大）
 - `extractor/pdf/scan.rs`：`image_list_info()`、`is_image_based_scan()`、`full_page_image_pages()`
 - `extractor/pdf/poppler.rs`：`pdf_longest_side_pt()`
 - `extractor/pdf/ocr.rs`：`run_pdf_ocr_pipeline()`、`try_ocr_fallback(.., allow_whole_doc_pdftoppm)`、`ocr_pdf_via_pdfimages()`、`run_pdfimages_doc()`、`group_images_by_page()`
 - `extractor/pdf.rs`：`extract_with_lang()`（扫描分支先试 `pdftotext`）
-- 尚未做（后续可选）：C2 逐页预算 600s→120s；C3 逐页连续 3 页失败即中止
+- 尚未做（后续可选）：C3 逐页连续 3 页失败即中止（C2「逐页预算 600s→120s」作废：总预算已被 §5.2 进度看门狗取代）

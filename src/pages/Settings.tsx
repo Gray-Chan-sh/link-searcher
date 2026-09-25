@@ -211,10 +211,12 @@ export default function Settings() {
             selectedEngine={selectedEngine}
             ocrLang={settings['ocr_lang'] ?? 'eng'}
             ocrPdfDpi={settings['ocr_pdf_dpi'] ?? '300'}
+            ocrStallTimeout={settings['ocr_stall_timeout_secs'] ?? '120'}
             onTestOcr={() => ocr.handleTestOcr(settings['ocr_engine'] ?? 'PaddleOCR')}
             onChangeOcrEngine={engineType => handleFieldChange('ocr_engine', engineType)}
             onChangeOcrLang={v => handleFieldChange('ocr_lang', v)}
             onChangeOcrPdfDpi={v => handleFieldChange('ocr_pdf_dpi', v)}
+            onChangeOcrStallTimeout={v => handleFieldChange('ocr_stall_timeout_secs', v)}
           />
         )}
 

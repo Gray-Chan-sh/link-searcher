@@ -558,6 +558,8 @@ const zh: Record<string, string> = {
     backfill_quality_noop: '无需补齐，所有文件已有评分',
     ocr_pdf_dpi: 'PDF OCR 渲染 DPI',
     ocr_pdf_dpi_hint: '建议 300，适合小字/模糊文字。数值越高图像越清晰，但速度更慢、内存占用更大。',
+    ocr_stall_timeout: 'OCR 卡死超时（秒）',
+    ocr_stall_timeout_hint: '进度看门狗：只要仍在产出就不会超时，仅当连续该秒数无任何进展才判定卡死；0 = 关闭。慢机器可调大，建议 120。',
 
     quality_page_title: '质量',
     quality_show_flagged: '仅问题文件',
