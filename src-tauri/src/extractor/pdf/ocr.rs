@@ -10,12 +10,35 @@ use anyhow::{Context, Result};
 
 use crate::scanner::helpers::TempDir;
 
-use super::poppler::{pdfimages_path, pdftoppm_path};
+use super::poppler::{pdf_longest_side_pt, pdfimages_path, pdftoppm_path};
 use super::quality::{is_garbled_text, is_repetitive, is_sparse_text_layer};
 use super::{
     get_pdf_page_count, global_pdf_dpi, should_ocr_pages_individually, LARGE_SCAN_OCR_BUDGET,
     LARGE_SCAN_PAGE_THRESHOLD,
 };
+
+/// Upper bound on the longest side (px) of a rendered page. Oversized pages
+/// (e.g. a 3000×4000pt scan) would otherwise rasterize to >200 Mpx — slow and
+/// above the OCR engine's image-decode limit. 2500px ≈ 214 DPI for A4, and the
+/// OCR preprocessor normalizes the longest side to ~1000px anyway.
+const MAX_RENDER_LONGEST_SIDE: u32 = 2500;
+const MIN_RENDER_LONGEST_SIDE: u32 = 1000;
+
+/// The largest image on a page smaller than this is an icon/logo, not a scan.
+const MIN_PAGE_IMAGE_AREA: u64 = 100_000;
+
+/// Timeout for the single whole-document `pdfimages` extraction. One pass over a
+/// 40-page 80MB scan is ~0.1–2s; the timeout only guards pathological files.
+const PDFIMAGES_DOC_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Target longest-side pixels for rendering at `dpi`, clamped so a giant page
+/// can't explode. Falls back to the cap when the page size is unknown.
+fn render_longest_side(path: &Path, dpi: u32) -> u32 {
+    let target = pdf_longest_side_pt(path)
+        .map(|pt| (dpi as f64 / 72.0 * pt).round() as u32)
+        .unwrap_or(MAX_RENDER_LONGEST_SIDE);
+    target.clamp(MIN_RENDER_LONGEST_SIDE, MAX_RENDER_LONGEST_SIDE)
+}
 pub(super) fn run_pdf_ocr_pipeline(
     path: &Path,
     page_count: usize,
@@ -30,7 +53,7 @@ pub(super) fn run_pdf_ocr_pipeline(
     };
 
     if !should_ocr_pages_individually(page_count, false) {
-        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine) {
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, true) {
             return Some(ocr_text);
         }
     } else {
@@ -38,7 +61,10 @@ pub(super) fn run_pdf_ocr_pipeline(
             "[PDF] {:?}: large scanned PDF ({} pages > {}), attempting fast-path whole-doc OCR first",
             path.file_name(), page_count, LARGE_SCAN_PAGE_THRESHOLD
         );
-        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine) {
+        // Skip whole-doc pdftoppm for large docs: rendering every page at once
+        // takes minutes and reliably trips the 120s timeout, after which the
+        // per-page loop below redoes the same work in parallel anyway.
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, false) {
             return Some(ocr_text);
         }
     }
@@ -65,8 +91,22 @@ pub(super) fn run_pdf_ocr_pipeline(
             }
             pages_attempted += 1;
             let page_idx = page_num - 1;
-            if let Some(p_text) = ocr_single_pdf_page(path, page_num as u32, dpi, lang, engine) {
-                ocr_pages.insert(page_idx, p_text);
+            match ocr_single_pdf_page(path, page_num as u32, dpi, lang, engine) {
+                Some(p_text) => {
+                    ocr_pages.insert(page_idx, p_text);
+                }
+                None => {
+                    // Give up only if the first few pages all fail to render —
+                    // avoids aborting a scan that has blank/failed pages before
+                    // real content.
+                    if ocr_pages.is_empty() && pages_attempted >= 5 {
+                        log::warn!(
+                            "[PDF] {:?}: aborting per-page OCR — first {pages_attempted} pages yielded no text",
+                            path.file_name()
+                        );
+                        break;
+                    }
+                }
             }
         }
 
@@ -86,8 +126,15 @@ pub(super) fn run_pdf_ocr_pipeline(
     None
 }
 
-/// Try OCR via pdfimages → pdftoppm, returning the first non-empty result.
-fn try_ocr_fallback(path: &Path, lang: &str, engine: &crate::extractor::ocr::OcrEngineType) -> Option<String> {
+/// Try OCR via pdfimages → (optionally) pdftoppm, returning the first usable
+/// result. `allow_whole_doc_pdftoppm` is false for large documents, where the
+/// all-pages render is abandoned in favour of the budgeted per-page loop.
+fn try_ocr_fallback(
+    path: &Path,
+    lang: &str,
+    engine: &crate::extractor::ocr::OcrEngineType,
+    allow_whole_doc_pdftoppm: bool,
+) -> Option<String> {
     if pdfimages_path().is_some() {
         match ocr_pdf_via_pdfimages(path, lang, engine) {
             Ok(ocr_text) if ocr_text.len() > 100 => {
@@ -102,7 +149,7 @@ fn try_ocr_fallback(path: &Path, lang: &str, engine: &crate::extractor::ocr::Ocr
             Err(e) => log::warn!("[PDF] pdfimages OCR failed for {:?}: {e}", path.file_name()),
         }
     }
-    if pdftoppm_path().is_some() {
+    if allow_whole_doc_pdftoppm && pdftoppm_path().is_some() {
         match ocr_pdf_via_pdftoppm(path, lang, engine) {
             Ok(ocr_text) if !ocr_text.is_empty() => {
                 log::info!(
@@ -154,11 +201,12 @@ pub(super) fn ocr_single_pdf_page(
     let tmp_dir = TempDir::new("ls_pdf_page_ocr").ok()?;
     let output_prefix = tmp_dir.path().join("page");
 
+    let scale = render_longest_side(path, dpi).to_string();
     let mut cmd = crate::process::new(bin);
     cmd.args([
         "-png",
-        "-r",
-        &dpi.to_string(),
+        "-scale-to",
+        &scale,
         "-f",
         &page_number.to_string(),
         "-l",
@@ -216,7 +264,8 @@ pub fn ocr_pdf_via_pdftoppm(
         .ok_or_else(|| anyhow::anyhow!("pdftoppm not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
     let dpi = global_pdf_dpi();
-    cmd.args(["-png", "-r", &dpi.to_string()]).arg(path).arg(&output_prefix);
+    let scale = render_longest_side(path, dpi).to_string();
+    cmd.args(["-png", "-scale-to", &scale]).arg(path).arg(&output_prefix);
     cmd.stderr(Stdio::null());
     let mut child = cmd.spawn()
         .map_err(|e| anyhow::anyhow!("pdftoppm not available: {e}. Install poppler-utils."))?;
@@ -296,6 +345,12 @@ pub fn ocr_pdf_via_pdftoppm(
 /// Render scanned PDF pages via pdfimages (extracts only the image layer,
 /// not overlays/annotations/watermarks). Returns the OCR'd text with far
 /// less watermark contamination than pdftoppm-based rendering.
+///
+/// A single whole-document `pdfimages` pass extracts every page image at once
+/// (`-p` encodes the page number in each filename). The previous per-page
+/// approach re-parsed the whole PDF once per page — on 40-page/80MB scans that
+/// meant 40 process spawns racing a 30s timeout each (measured: whole-doc pass
+/// ~0.1s, per-page frequently timed out under load).
 pub fn ocr_pdf_via_pdfimages(
     path: &Path,
     lang: &str,
@@ -303,11 +358,25 @@ pub fn ocr_pdf_via_pdfimages(
 ) -> Result<String> {
     log::info!("[PDF] pdfimages: extracting {:?}", path.file_name());
 
-    let page_count = get_pdf_page_count(path)?;
+    let page_count = get_pdf_page_count(path)? as usize;
     if page_count == 0 {
         return Ok(String::new());
     }
-    let pages: Vec<u32> = (1..=page_count).collect();
+
+    // One `pdfimages -list` (0.1–0.2s) gives both the scan-coverage pre-check
+    // and the per-page image encoding, so JPEGs can be extracted natively.
+    let info = super::scan::image_list_info(path);
+
+    // A digital/vector PDF with few (or zero) page images is NOT a scan — the
+    // image pass would recover nothing. Only run it when most pages carry one.
+    if let Some(ref i) = info {
+        if i.pages_with_image == 0 || (i.total_pages > 2 && i.pages_with_image * 2 < i.total_pages) {
+            return Err(anyhow::anyhow!(
+                "pdfimages: only {}/{} pages have images — not a scanned PDF",
+                i.pages_with_image, i.total_pages
+            ));
+        }
+    }
 
     log::info!(
         "[PDF] {:?}: {} pages, extracting images via pdfimages",
@@ -315,137 +384,180 @@ pub fn ocr_pdf_via_pdfimages(
         page_count,
     );
 
+    // JPEGs are copied out natively (`-j`, ~0.1s/page) instead of decoded and
+    // re-encoded to PNG (~26s/page on a 12 MP scan). Use the native path only
+    // when every listed image is JPEG; any other encoding needs `-png`.
+    let all_jpeg = match &info {
+        Some(i) => {
+            !i.enc_by_page.is_empty()
+                && i.enc_by_page
+                    .values()
+                    .all(|e| e.eq_ignore_ascii_case("jpeg"))
+        }
+        None => true,
+    };
+
+    let tmp = TempDir::new("ls_pdfimg")?;
+    let prefix = tmp.path().join("img");
+    let primary = if all_jpeg { "-j" } else { "-png" };
+    run_pdfimages_doc(path, primary, &prefix)?;
+    let mut per_page = group_images_by_page(tmp.path(), page_count)?;
+    if per_page.iter().all(Option::is_none) && primary == "-j" {
+        // `-j` skips non-JPEG encodings (CCITT/JBIG2/…): retry with PNG.
+        run_pdfimages_doc(path, "-png", &prefix)?;
+        per_page = group_images_by_page(tmp.path(), page_count)?;
+    }
+
+    // Count pages with an extracted image (NOT pages that OCR'd to text) — a
+    // scan whose OCR yields little must not be misclassified as "not a scan".
+    let pages_with_image = per_page.iter().filter(|p| p.is_some()).count();
+    if page_count > 2 && pages_with_image * 2 < page_count {
+        return Err(anyhow::anyhow!(
+            "pdfimages: only {pages_with_image}/{page_count} pages had images — not a scanned PDF"
+        ));
+    }
+
     use rayon::prelude::*;
-    let page_texts: Vec<Option<String>> = pages
+    let pages: Vec<u32> = (1..=page_count as u32).collect();
+    let results: Vec<Option<String>> = pages
         .par_iter()
-        .map(|page_num| {
-            let page_no = page_num.to_string();
+        .map(|&page_num| {
+            let page_idx = (page_num - 1) as usize;
+            let (best_path, best_area) = per_page.get(page_idx)?.as_ref()?;
+            if *best_area < MIN_PAGE_IMAGE_AREA {
+                return None;
+            }
             let started = std::time::Instant::now();
-            match extract_and_ocr_page_via_pdfimages(path, *page_num, lang, engine) {
-                Ok(text) if !text.trim().is_empty() => {
+            match crate::extractor::ocr::ocr_image_with_regions(best_path, engine, lang) {
+                Ok((text, _regions)) => {
                     log::info!(
-                        "[PDF] pdfimages page {page_no}: {} chars in {:.1}s",
+                        "[PDF] pdfimages page {page_num}: {} chars in {:.1}s",
                         text.len(),
                         started.elapsed().as_secs_f64(),
                     );
-                    Some(text)
-                }
-                Ok(_) => {
-                    log::warn!("[PDF] pdfimages page {page_no}: empty OCR result");
-                    None
+                    let trimmed = text.trim().to_owned();
+                    if trimmed.is_empty() { None } else { Some(trimmed) }
                 }
                 Err(e) => {
-                    log::warn!("[PDF] pdfimages page {page_no}: {e}");
+                    log::warn!("[PDF] pdfimages page {page_num}: {e}");
                     None
                 }
             }
         })
         .collect();
 
-    let pages_with_text = page_texts.iter().filter(|t| t.is_some()).count();
-    if pages.len() > 2 && pages_with_text * 2 < pages.len() {
-        return Err(anyhow::anyhow!(
-            "pdfimages: only {pages_with_text}/{len} pages had images — not a scanned PDF",
-            len = pages.len(),
-        ));
-    }
-
     let mut full_text = String::new();
-    for text in page_texts.into_iter().flatten() {
+    for text in results.into_iter().flatten() {
         if !full_text.is_empty() {
             full_text.push('\n');
         }
-        full_text.push_str(text.trim());
+        full_text.push_str(&text);
     }
 
     Ok(full_text)
 }
 
-/// Extract images from a single PDF page using pdfimages, pick the largest
-/// (the scanned page image), and OCR it.
-fn extract_and_ocr_page_via_pdfimages(
-    pdf_path: &Path,
-    page_num: u32,
-    lang: &str,
-    engine: &crate::extractor::ocr::OcrEngineType,
-) -> Result<String> {
-    let tmp = TempDir::new("ls_pdfimg")?;
-    let prefix = tmp.path().join("img");
-
+/// Run one whole-document `pdfimages <fmt> -p` pass into `prefix`. `-p` embeds
+/// the 1-based page number in each output filename (`prefix-<page>-<n>.<ext>`),
+/// so every page's images can be grouped and OCR'd without re-parsing the PDF.
+fn run_pdfimages_doc(pdf_path: &Path, fmt: &str, prefix: &Path) -> Result<()> {
     let bin = pdfimages_path()
         .ok_or_else(|| anyhow::anyhow!("pdfimages not available. Install poppler-utils."))?;
     let mut cmd = crate::process::new(bin);
-    cmd.args([
-        "-png",
-        "-f",
-        &page_num.to_string(),
-        "-l",
-        &page_num.to_string(),
-    ])
-    .arg(pdf_path)
-    .arg(&prefix);
+    cmd.args([fmt, "-p"]).arg(pdf_path).arg(prefix);
     cmd.stderr(Stdio::null());
 
-    let mut child = cmd
-        .spawn()
-        .context("failed to spawn pdfimages")?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut child = cmd.spawn().context("failed to spawn pdfimages")?;
+    let deadline = Instant::now() + PDFIMAGES_DOC_TIMEOUT;
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
-            Ok(None) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(100)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(anyhow::anyhow!("pdfimages page {page_num} timed out after 30s"));
+                return Err(anyhow::anyhow!("pdfimages timed out after {PDFIMAGES_DOC_TIMEOUT:?}"));
             }
-            Err(e) => return Err(anyhow::anyhow!("pdfimages page {page_num}: {e}")),
+            Err(e) => return Err(anyhow::anyhow!("pdfimages failed: {e}")),
         }
     };
     if !status.success() {
-        return Err(anyhow::anyhow!("pdfimages page {page_num} failed"));
+        return Err(anyhow::anyhow!("pdfimages failed"));
     }
+    Ok(())
+}
 
-    let mut best_path: Option<PathBuf> = None;
-    let mut best_area: u64 = 0;
-    for entry in std::fs::read_dir(tmp.path())
-        .with_context(|| format!("failed to read pdfimages output dir for page {page_num}"))?
-    {
-        let entry = entry?;
-        let img_path = entry.path();
-        if img_path.extension().is_some_and(|e| e == "png") {
-            match image::open(&img_path) {
-                Ok(img) => {
-                    let area = (img.width() as u64) * (img.height() as u64);
-                    if area > best_area {
-                        best_area = area;
-                        best_path = Some(img_path);
-                    }
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[PDF] page {page_num}: failed to open image {:?}: {e}",
-                        img_path.file_name()
-                    );
-                }
-            }
+/// Image extensions `image::open` may be asked to decode across pdfimages'
+/// output formats.
+const IMAGE_EXTS: &[&str] = &[
+    "jpg", "jpeg", "jpe", "png", "ppm", "pgm", "pbm", "pam", "jp2", "j2k", "tif", "tiff", "bmp",
+];
+
+/// Group `pdfimages -p` output by page, keeping the largest decodable image on
+/// each 1-based page as `(path, area_px)`. Pages without a usable image are
+/// `None`.
+fn group_images_by_page(dir: &Path, page_count: usize) -> Result<Vec<Option<(PathBuf, u64)>>> {
+    let mut best: Vec<Option<(PathBuf, u64)>> = vec![None; page_count];
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let p = entry.path();
+        let is_img = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| IMAGE_EXTS.contains(&e.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+        if !is_img {
+            continue;
+        }
+        let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        // `img-<page>-<n>` → rsplitn yields [n, page, head].
+        let mut parts = stem.rsplitn(3, '-');
+        let _n = parts.next();
+        let Some(page) = parts.next().and_then(|s| s.parse::<usize>().ok()) else {
+            continue;
+        };
+        if page == 0 || page > page_count {
+            continue;
+        }
+        let Ok((w, h)) = image::image_dimensions(&p) else {
+            continue;
+        };
+        let area = w as u64 * h as u64;
+        let slot = &mut best[page - 1];
+        if slot.as_ref().map(|(_, a)| area > *a).unwrap_or(true) {
+            *slot = Some((p, area));
         }
     }
+    Ok(best)
+}
 
-    let best_path = best_path
-        .ok_or_else(|| anyhow::anyhow!("pdfimages page {page_num}: no valid images found"))?;
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    const MIN_PAGE_IMAGE_AREA: u64 = 100_000;
-    if best_area < MIN_PAGE_IMAGE_AREA {
-        return Err(anyhow::anyhow!(
-            "pdfimages page {page_num}: largest image too small ({best_area} px²) — not a scanned page"
-        ));
+    fn write_png(path: &Path, w: u32, h: u32) {
+        image::RgbImage::new(w, h).save(path).unwrap();
     }
 
-    let (text, _regions) =
-        crate::extractor::ocr::ocr_image_with_regions(&best_path, engine, lang)?;
-    Ok(text)
+    #[test]
+    fn group_images_by_page_picks_largest_and_ignores_out_of_range() {
+        let tmp = TempDir::new("ls_group_test").unwrap();
+        // Page 1 carries two images — the larger must win.
+        write_png(&tmp.path().join("img-001-000.png"), 50, 50);
+        write_png(&tmp.path().join("img-001-001.png"), 400, 300);
+        // Page 2 has no image (only a non-image file).
+        std::fs::write(tmp.path().join("img-002-000.txt"), b"x").unwrap();
+        // Page 3 has one image.
+        write_png(&tmp.path().join("img-003-000.png"), 200, 200);
+        // Out-of-range page must be ignored.
+        write_png(&tmp.path().join("img-009-000.png"), 100, 100);
+
+        let grouped = group_images_by_page(tmp.path(), 3).unwrap();
+        assert_eq!(grouped.len(), 3);
+        assert_eq!(grouped[0].as_ref().map(|(_, a)| *a), Some(400 * 300));
+        assert!(grouped[1].is_none());
+        assert_eq!(grouped[2].as_ref().map(|(_, a)| *a), Some(200 * 200));
+    }
 }
 

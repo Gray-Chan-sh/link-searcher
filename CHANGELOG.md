@@ -4,6 +4,25 @@
 
 ---
 
+## 2026-09-25：索引慢定位与修复 —— PDF OCR 兜底链（大文件 / 非扫描件）
+
+- **现象**：扫描 `D:/Syncthing/XC 小城` 7791 个文件时，含 OCR 的批次仅 **0.4–1.1 文件/s**（无 OCR 批次 35–156 文件/s），全量预计 1–2 小时；墙钟被少数大 PDF 的 OCR 兜底链独占。
+- **日志证据**（`D:\index\app.log`）：`pdfimages page N timed out after 30s` **236 次**；`pdftoppm timed out after 120s` **10 次**；`pdfimages OCR failed … not a scanned PDF` 后仍继续整篇/逐页 OCR；单文件 `年底启动绩效考核、关键走好这几步.pdf`（15 页 PowerPoint）实测 `pdftotext` **0.0s 得到 3437 字干净文本**，却因被判为"图像型扫描"进入 OCR，白耗 4 分钟直到退出。
+- **根因**：
+  1. `ocr_pdf_via_pdfimages` **逐页** spawn `pdfimages -f p -l p`；poppler 即使指定单页仍会重新解析整个 PDF，40 页文件 = 40 次解析，并发时频繁触发 30s 超时（实测整篇一次 `pdfimages -j -p` 仅 0.1–2s）。
+  2. `try_ocr_fallback` 对**大文档**也先做整篇 `pdftoppm` 渲染（单页 3000×4000 扫描实测 ~14s），整篇必超 120s 才放弃，之后逐页循环又重做一遍。
+  3. `extract_with_lang` 的 `is_image_based_scan` 分支**直接 OCR、跳过 `pdftotext`**，带全页背景图但文本层完好的数字 PDF（如 PPT 导出）被误当扫描件。
+- **修复**（`src-tauri/src/extractor/pdf/{ocr.rs,pdf.rs}`）：
+  - **逐页 → 整篇一次提取**：`ocr_pdf_via_pdfimages` 改为一次 `pdfimages <fmt> -p`（`-p` 将页号写入文件名 `img-<page>-<n>.<ext>`），`group_images_by_page` 按页取最大图后并行 OCR；消除逐页进程风暴与 30s 超时。非 JPEG 编码（CCITT/JBIG2…）自动整体回退 `-png`。
+  - **大文档跳过整篇 pdftoppm**：`run_pdf_ocr_pipeline` 对 `page_count > 20` 传 `allow_whole_doc_pdftoppm=false`，只做 `pdfimages` 快路径，失败即进逐页循环（并行 + 预算），不再空等 120s。
+  - **扫描分支先试文本层**：`is_image_based_scan` 为真时先 `try_pdftotext_extract`，通过 `prefer_recovered_text` 质量门（非乱码 / 非稀疏 / 密度正常）即用文本层（`ocr_used=false`），否则照旧 OCR。
+- **实测（本机 WindowsOcr / chi_sim / 300dpi）**：`诉讼材料.pdf`（40 页纯扫描，81.6MB）OCR **10.3s、15290 字**（改前应用内逐页超时、数分钟）；`年底启动绩效考核…pdf`（15 页 PPT）**0.7s、3418 字、`ocr_used=false`**（改前 >4 分钟）。
+- **测试**：新增 `group_images_by_page` 单测（按页取最大图 + 忽略越界页）；`cargo test --lib extractor::pdf` **43 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **基线文档**：新增 `docs/perf-index-baseline.md`（根因 + Before 数据 + 复测方法 + After 对照），供同一批数据重跑比对。
+- **涉及文件**：`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/pdf/scan.rs`、`src-tauri/src/extractor/pdf/poppler.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-24：数据迁移遗漏 models/ 等目录，导致 BGE / FunASR 迁移后「消失」（v1.1.3）
 
 - **根因**：`migrate_data` 只硬编码拷贝 `data.db`、`.ls-index`、`app.log` 三项（`commands/config.rs`），而数据目录下还有 `models/`（BGE、FunASR 本地模型）、`chat_history.json`、`backups/`、`tls/` 等。迁移后配置指向新目录，新目录缺少这些内容，故 BGE / FunASR 显示未安装、聊天历史丢失。叠加本版新增的「启动自动清理旧目录」，未拷贝的模型会被旧目录清理一并删除，变成永久丢失。

@@ -144,16 +144,28 @@ impl PdfExtractor {
         }
 
         // Scans carry a synthetic, mis-ordered text layer that neither lopdf nor
-        // poppler can reconstruct; OCR the page images instead.
-        if is_image_based_scan(path, &doc)
-            && let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine)
-        {
-            log::info!(
-                "[PDF] {:?}: image-based scan — OCR bypassed text layer ({} chars)",
-                path.file_name(),
-                ocr_text.chars().count()
-            );
-            return Ok((ocr_text, true));
+        // poppler can reconstruct; OCR the page images instead. Some digital
+        // PDFs (e.g. PowerPoint exports) also carry full-page background images
+        // yet have a clean text layer — those must not pay for OCR.
+        if is_image_based_scan(path, &doc) {
+            if let Some(text) = try_pdftotext_extract(path)
+                && prefer_recovered_text("", &text, pages.len())
+            {
+                log::info!(
+                    "[PDF] {:?}: image-based scan but pdftotext layer is clean — using text layer ({} chars)",
+                    path.file_name(),
+                    text.chars().count()
+                );
+                return Ok((text, false));
+            }
+            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine) {
+                log::info!(
+                    "[PDF] {:?}: image-based scan — OCR bypassed text layer ({} chars)",
+                    path.file_name(),
+                    ocr_text.chars().count()
+                );
+                return Ok((ocr_text, true));
+            }
         }
 
         // lopdf silently drops characters on fonts lacking a Name-valued
@@ -413,6 +425,28 @@ pub fn global_pdf_dpi() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Manual end-to-end extraction benchmark on a real PDF
+    /// (`LS_TEST_PDF=<path> cargo test --lib tmp_e2e_extract_pdf -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn tmp_e2e_extract_pdf() {
+        let Ok(p) = std::env::var("LS_TEST_PDF") else {
+            return;
+        };
+        let engine = crate::extractor::ocr::OcrEngineType::PaddleOCR;
+        let t = std::time::Instant::now();
+        let extractor = PdfExtractor::new();
+        match extractor.extract_with_lang(std::path::Path::new(&p), "chi_sim", Some(engine)) {
+            Ok((text, ocr_used)) => eprintln!(
+                "E2E: {} chars, ocr_used={}, {:.1}s",
+                text.chars().count(),
+                ocr_used,
+                t.elapsed().as_secs_f64()
+            ),
+            Err(e) => eprintln!("E2E ERR: {e} after {:.1}s", t.elapsed().as_secs_f64()),
+        }
+    }
     use lopdf::{Dictionary, Document, Object, Stream};
 
     /// 大小写与空白不敏感的子串匹配（OCR 识别可能存在大小写/空格误差）

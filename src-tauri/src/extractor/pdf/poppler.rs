@@ -87,6 +87,34 @@ pub(crate) fn get_pdf_page_count(path: &Path) -> Result<u32> {
     Ok(doc.get_pages().len() as u32)
 }
 
+/// Longest page side in points from `pdfinfo` ("Page size: W x H pts"), so the
+/// renderer can pick a DPI without exploding on oversized pages. `None` when
+/// pdfinfo is unavailable or the page size is missing.
+pub(super) fn pdf_longest_side_pt(path: &Path) -> Option<f64> {
+    let bin = pdfinfo_path()?;
+    let mut cmd = crate::process::new(bin);
+    cmd.arg(path);
+    let (Some(status), stdout) = run_with_timeout(cmd, Duration::from_secs(60)).ok()? else {
+        return None;
+    };
+    if !status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&stdout);
+    for line in s.lines() {
+        if let Some(v) = line.strip_prefix("Page size:") {
+            let nums: Vec<f64> = v
+                .split_whitespace()
+                .filter_map(|t| t.parse::<f64>().ok())
+                .collect();
+            if nums.len() >= 2 {
+                return Some(nums[0].max(nums[1]));
+            }
+        }
+    }
+    None
+}
+
 /// Run a command with a timeout, capturing stdout. A broken/crafted PDF can
 /// hang poppler forever; the timeout lets the scan worker move on. A timeout
 /// yields `Ok((None, vec![]))` so callers can fall back.
