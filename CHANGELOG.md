@@ -12,6 +12,7 @@
   - `commands/index.rs`：交换前先 `indexer.reset_writer()`（丢弃 `IndexWriter`），并在 `index_manager` 写锁内用 `IndexManager::create_in_ram()` 占位顶掉指向 tmp/旧目录的 `Arc<Index>`+Reader → **释放所有句柄**后再 `rename`；成功后 `open_or_create(.ls-index)` 装回并 `reset_writer()`。失败则回滚旧目录 + **删除孤儿 tmp 目录**（此前是 `let _` 丢弃）。日志补 `failed to move old index aside`。
   - `lib.rs`：启动时清理残留 `index.tmp-*` 与 `index.old`（启动时不可能有重建在跑，必为孤儿）。
 - **冷启动复跑数据**（16:02 会话，`rebuild_index`）：`7791 files, 7733 indexed, 58 errors in 7107262ms`（**≈1h58m**，全量真提取无去重）。`pdfimages timed out/stalled` **0**、`pdftoppm timed out` **0**、`stalled=true`（看门狗误杀）**0**、`DB conn: timed out` **0**；失败 58 均真损坏（坏 JPEG、非 OLE2 `.doc`、加密/无文本文档）。详见 `docs/perf-index-baseline.md` §7.1。
+- **修复验证**（21:04 再次重建）：`7791 files, 7733 indexed, 58 errors in 6835774ms`（≈1h53m）；slog 结尾 `[SCAN] 索引重建完成`，**无 `failed to swap index dir`**；`.ls-index` 更新、**无 `index.tmp-*` / `index.old` 残留**。
 - **测试**：`cargo test --lib` **435 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
 - **涉及文件**：`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
 
