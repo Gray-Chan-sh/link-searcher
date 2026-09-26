@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-09-26（六）：修复本地嵌入模型的并发首载竞态（重复加载）
+
+- **现象**：日志 `[BGE] 本地嵌入引擎就绪` 出现**两次**——doc 回填与 chunk 回填并发首次调用 `init_local_embedder`，因"先检查后构建"在锁外，两者各加载一份 bge-large（~16s + ~GB）后丢弃其一。
+- **修复**（`ai/local_embed.rs`）：`init_local_embedder` 增加静态 `INIT_LOCK: Mutex<()>`，把"检查 → 构建 → 装入"串行化；等待期间再次快速检查，避免重复加载。
+- **测试**：新增 `init_missing_model_errors_without_loading`（失败构建不留半状态）。`cargo test --lib` **439 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **附带实测结论**（写入 `docs/perf-index-baseline.md` §8）：本库文本 p50=710 字符（多被截到 512 token），故 #1 动态 padding 对长文档为主的库约 **6–7×**（非短文本的 23×）；反推吞吐 ≈350 GFLOPS 级，tract 很可能已在 batch 内用多核 → **#4 多副本并行收益低，不做**；提速优先选 **#2 换小模型**。
+- **涉及文件**：`src-tauri/src/ai/local_embed.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26（五）：本地嵌入提速 #3 —— doc 回填按 md5 去重
 
 - **背景**：doc 向量回填按 `file_tracking.id` 逐文件嵌入，但**内容相同的文件（同 md5）会得到完全相同的向量**。本库 7733 个已索引文件只有 **6963** 个唯一 md5，即有 **770 个（~10%）重复**被重复推理。

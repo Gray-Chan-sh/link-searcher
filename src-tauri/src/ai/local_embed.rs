@@ -38,11 +38,17 @@ pub fn bge_model_ready(data_dir: &Path, model_name: &str) -> bool {
 /// Idempotent — once loaded, subsequent calls with the *same or different*
 /// model are no-ops until [`reset_local_embedder`] is called.
 pub fn init_local_embedder(data_dir: &Path, model_name: &str) -> Result<(), String> {
-    {
-        let guard = instance().read().unwrap_or_else(|p| p.into_inner());
-        if guard.is_some() {
-            return Ok(());
-        }
+    if instance().read().unwrap_or_else(|p| p.into_inner()).is_some() {
+        return Ok(());
+    }
+    // Serialize the initial build. Without this, two threads that race here
+    // (e.g. the doc and chunk backfill starting together) each load a full
+    // model copy (~16s + ~GB) only to discard all but one.
+    static INIT_LOCK: Mutex<()> = Mutex::new(());
+    let _init = INIT_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    // Another thread may have finished building while we waited on the lock.
+    if instance().read().unwrap_or_else(|p| p.into_inner()).is_some() {
+        return Ok(());
     }
     let embedder = build(data_dir, model_name)?;
     let mut guard = instance().write().unwrap_or_else(|p| p.into_inner());
@@ -221,5 +227,14 @@ mod tests {
         assert_eq!(batch_seq_len(&[3, 7, 5]), 7);
         assert_eq!(batch_seq_len(&[10_000]), MAX_SEQ_LEN);
         assert_eq!(batch_seq_len(&[0]), 1);
+    }
+
+    #[test]
+    fn init_missing_model_errors_without_loading() {
+        reset_local_embedder();
+        let dir = std::env::temp_dir().join("ls_embed_missing_model_test");
+        assert!(init_local_embedder(&dir, "no-such-model").is_err());
+        // Failed build must leave the singleton unloaded (not a poisoned half-state).
+        assert!(instance().read().unwrap_or_else(|p| p.into_inner()).is_none());
     }
 }
