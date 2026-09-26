@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-26（三）：修复重建索引后目录交换失败（Windows 句柄占用）+ 冷启动复跑
+
+- **现象**：冷启动全量重建（`rebuild_index`）后日志报 `failed to swap index dir: 拒绝访问 (os error 5)`；`D:\index` 残留 3 个 `index.tmp-*`，`.ls-index` 仍是旧索引 → 重启后**重建成果丢失**（SQLite 侧 `content_index`/向量已是新的）。
+- **根因**（`commands/index.rs`）：第 3 步已把内存 `IndexManager` 指向 `tmp_dir`，Tantivy 的 `Index`/`IndexReader` 在 Windows 上对 `tmp_dir` 持有打开的句柄 → `fs::rename(tmp_dir → .ls-index)` 被拒；旧目录移动用 `let _` 吞错。该 bug 一直存在（每次重建残留一个 tmp 目录）。
+- **修复**：
+  - `commands/index.rs`：交换前先 `indexer.reset_writer()`（丢弃 `IndexWriter`），并在 `index_manager` 写锁内用 `IndexManager::create_in_ram()` 占位顶掉指向 tmp/旧目录的 `Arc<Index>`+Reader → **释放所有句柄**后再 `rename`；成功后 `open_or_create(.ls-index)` 装回并 `reset_writer()`。失败则回滚旧目录 + **删除孤儿 tmp 目录**（此前是 `let _` 丢弃）。日志补 `failed to move old index aside`。
+  - `lib.rs`：启动时清理残留 `index.tmp-*` 与 `index.old`（启动时不可能有重建在跑，必为孤儿）。
+- **冷启动复跑数据**（16:02 会话，`rebuild_index`）：`7791 files, 7733 indexed, 58 errors in 7107262ms`（**≈1h58m**，全量真提取无去重）。`pdfimages timed out/stalled` **0**、`pdftoppm timed out` **0**、`stalled=true`（看门狗误杀）**0**、`DB conn: timed out` **0**；失败 58 均真损坏（坏 JPEG、非 OLE2 `.doc`、加密/无文本文档）。详见 `docs/perf-index-baseline.md` §7.1。
+- **测试**：`cargo test --lib` **435 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/index.rs`、`src-tauri/src/lib.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26（续）：OCR 超时改为「进度看门狗」——与机器速度解耦
 
 - **背景**：上一版按 `30 + 页数×1.5s` 缩放超时，是从**一次带负载的实测**推的（那次整篇 `pdfimages` 与 11 路 OCR 并发抢 CPU/IO），换台更慢的机器（弱 CPU / HDD / USB 盘）系数全变；方向偏紧会**误杀**并回退到慢的逐页路径，正是要消除的问题。超时的语义应是"卡死看门狗"，不是"性能 SLA"。

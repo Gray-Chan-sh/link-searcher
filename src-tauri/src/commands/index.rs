@@ -444,23 +444,49 @@ pub async fn rebuild_index(
             log::error!("[SCAN] failed to commit tmp index: {e}");
         }
 
-        // 7. 原子替换磁盘目录：旧索引 → backup，tmp → index_dir
+        // 7. 原子替换磁盘目录：旧索引 → backup，tmp → index_dir。
+        //
+        // Windows 上只要 Tantivy 仍持有 `tmp_dir` 内的打开句柄，`fs::rename`
+        // 就会被拒（os error 5），因此交换前必须先释放所有句柄：
+        //   commit → reset_writer（丢弃 IndexWriter）
+        //          → 用内存占位 IndexManager 顶掉指向 tmp/旧目录的 Arc<Index>+Reader
+        // 整个交换在 `index_manager` 写锁内完成，期间搜索会短暂命中空的内存索引。
+        indexer.reset_writer();
         let backup = index_dir.with_file_name("index.old");
-        if index_dir.exists() {
-            let _ = std::fs::remove_dir_all(&backup);
-            let _ = std::fs::rename(&index_dir, &backup);
-        }
-        match std::fs::rename(&tmp_dir, &index_dir) {
-            Ok(()) => {
+        {
+            let mut mgr = index_manager.write().unwrap_or_else(|e| e.into_inner());
+            *mgr = IndexManager::create_in_ram();
+
+            if index_dir.exists() {
                 let _ = std::fs::remove_dir_all(&backup);
+                if let Err(e) = std::fs::rename(&index_dir, &backup) {
+                    log::error!("[SCAN] failed to move old index aside: {e}");
+                }
             }
-            Err(e) => {
-                log::error!("[SCAN] failed to swap index dir: {e}");
-                if backup.exists() {
-                    let _ = std::fs::rename(&backup, &index_dir);
+            match std::fs::rename(&tmp_dir, &index_dir) {
+                Ok(()) => {
+                    match IndexManager::open_or_create(&index_dir) {
+                        Ok(m) => *mgr = m,
+                        Err(e) => log::error!("[SCAN] failed to reopen index after swap: {e}"),
+                    }
+                    let _ = std::fs::remove_dir_all(&backup);
+                }
+                Err(e) => {
+                    log::error!("[SCAN] failed to swap index dir: {e}");
+                    if backup.exists() {
+                        let _ = std::fs::rename(&backup, &index_dir);
+                    }
+                    match IndexManager::open_or_create(&index_dir) {
+                        Ok(m) => *mgr = m,
+                        Err(e) => log::error!("[SCAN] failed to reopen old index: {e}"),
+                    }
+                    // Orphaned tmp index is unusable — don't let it accumulate.
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
                 }
             }
         }
+        // Next write opens a writer on whichever index is now installed.
+        indexer.reset_writer();
 
         {
             let mut delta = scan_delta.lock().unwrap_or_else(|e| e.into_inner());

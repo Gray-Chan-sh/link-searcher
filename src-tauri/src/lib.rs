@@ -273,6 +273,22 @@ get_dir_children,
                 log::info!("[STARTUP] 索引目录迁移: index -> {}", config::INDEX_DIR_NAME);
             }
 
+            // Clean up leftovers from an interrupted or failed index rebuild:
+            // `index.tmp-*` build dirs and the `index.old` pre-swap backup. No
+            // rebuild can be running at startup, so these are always orphaned.
+            if let Ok(entries) = std::fs::read_dir(&data_dir) {
+                for e in entries.flatten() {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    if (name == "index.old" || name.starts_with("index.tmp-"))
+                        && e.path().is_dir()
+                    {
+                        let _ = std::fs::remove_dir_all(e.path());
+                        log::info!("[STARTUP] 清理残留索引目录: {name}");
+                    }
+                }
+            }
+
             // Shared core: DB pool + index manager + indexer + scanner
             // (also used by the CLI via `boot::bootstrap_core`).
             let boot::Bootstrap {

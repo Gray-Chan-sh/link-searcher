@@ -203,5 +203,6 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 - 磁盘残留 3 个 `index.tmp-*`（含本次 118 分钟重建的成果），`.ls-index` 仍是**旧索引**。
 - 根因：`commands/index.rs:447-463`，第 3 步已把内存 `IndexManager` 指向 `tmp_dir`，Tantivy 的 `Index`/`IndexReader` 在 Windows 上对 `tmp_dir` 持有打开的句柄 → `fs::rename(tmp_dir → .ls-index)` 被拒；旧目录→`index.old` 的 rename 亦用 `let _` 吞错。回滚后仍用旧索引，重启后本次重建的搜索索引丢失（SQLite 侧 `content_index`/向量是新的）。
 - 影响：**重启后搜索结果回退到旧索引**；需释放句柄后再交换（见 CHANGELOG）。
+- **修复（2026-09-26 三）**：交换前 `indexer.reset_writer()` + 用 `IndexManager::create_in_ram()` 占位顶掉指向 tmp/旧目录的 `Index`/Reader（释放 Windows 句柄）→ 再 rename；成功后 `open_or_create(.ls-index)` 装回。失败回滚旧目录并**清理孤儿 tmp 目录**；启动时清理残留 `index.tmp-*` / `index.old`（`lib.rs`）。
 
 
