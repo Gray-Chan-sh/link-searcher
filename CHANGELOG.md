@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-09-27（日）：性能页——三档性能模式（同档按硬件自动缩放）+ 磁盘检测更稳更准
+
+- **三档性能模式**（原只有"一键优化"自动判定，无法手动选档）：`commands/performance.rs` 新增 `set_performance_tier` 命令与 `scale_params` / `recommend_tier` / `parse_tier`。用户可选 **保守 / 均衡 / 激进**；**档位只表达取向，具体值按本机硬件缩放**——并行度 = `clamp(核心数 × 档位倍率 × 磁盘系数, floor, ceil)`（保守 0.5/[1,8]、均衡 1.0/[2,16]、激进 1.5/[4,24]；磁盘系数 NVMe 1.0 / SSD 0.75 / HDD 0.35 / 未知 0.5），提交间隔 500/1000/2000，写缓冲 100/200/300MB。同一档位在不同机器上得到不同参数。
+- **磁盘检测更稳**（原 2MB 单次、读命中页缓存、写 `temp_dir` 与实际盘不符 → 每次数值都不同）：改为在 **数据目录** 写 **32MB**、预热 1 次后 **3 次取中位数**；**不再测读**（写后读命中页缓存，测的是内存带宽而非磁盘），`disk_speed_mbps` 取写吞吐；`classify_disk` 改按吞吐阈值（<150 HDD / <800 SSD / 否则 NVMe）。
+- **持久化/兼容**：新增 `perf_tier` 键（`settings.rs` 白名单 + `get_performance_profile` 优先读取；旧 `high` 作为 `aggressive` 别名；无 `perf_tier` 的旧库按参数反推）。`lib.rs` 注册 `set_performance_tier`；`boot.rs` 启动读取逻辑不变。
+- **UI**：`PerformanceTab.tsx` 加三档分段选择器与档位说明，磁盘速度标 `≈` 并附"估算值"提示；`api/settings.ts` 加 `setPerformanceTier`；i18n zh/en/ja/ko 新增档位与提示文案（原 `perf_tier_high` → `perf_tier_aggressive`，中文改"激进"）。文档 `docs/06-settings.md`、`README.md` 同步。
+- **测试**：`cargo test --lib` **443 passed, 2 ignored**（新增 `test_scale_*` / `test_parse_tier` / `test_recommend_tier` / `test_derive_tier` / `test_classify_disk_unknown`）；`cargo check` 0 错误；`npx tsc -b` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/performance.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/lib.rs`、`src/api/settings.ts`、`src/components/settings/PerformanceTab.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/06-settings.md`、`README.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26（六）：修复本地嵌入模型的并发首载竞态（重复加载）
 
 - **现象**：日志 `[BGE] 本地嵌入引擎就绪` 出现**两次**——doc 回填与 chunk 回填并发首次调用 `init_local_embedder`，因"先检查后构建"在锁外，两者各加载一份 bge-large（~16s + ~GB）后丢弃其一。

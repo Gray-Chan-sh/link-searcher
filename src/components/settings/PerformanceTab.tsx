@@ -1,15 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
-import { detectHardware, autoOptimize, getPerformanceProfile, type HardwareInfo, type PerformanceProfile } from '../../api/settings'
+import { detectHardware, autoOptimize, getPerformanceProfile, setPerformanceTier, type HardwareInfo, type PerformanceProfile } from '../../api/settings'
 import { Section } from './SettingsFields'
 
-const TIER_LABELS: Record<string, string> = { high: '⚡', balanced: '⚖️', conservative: '🐢' }
+const TIER_LABELS: Record<string, string> = { aggressive: '⚡', balanced: '⚖️', conservative: '🐢' }
 const TIER_COLORS: Record<string, string> = {
-  high: 'text-green-600 dark:text-green-400',
+  aggressive: 'text-green-600 dark:text-green-400',
   balanced: 'text-blue-600 dark:text-blue-400',
   conservative: 'text-amber-600 dark:text-amber-400',
 }
+const TIERS = ['conservative', 'balanced', 'aggressive'] as const
 
 export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string, value: string) => void }) {
   const { t } = useI18n()
@@ -17,6 +18,7 @@ export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string,
   const [profile, setProfile] = useState<PerformanceProfile | null>(null)
   const [detecting, setDetecting] = useState(false)
   const [optimizing, setOptimizing] = useState(false)
+  const [settingTier, setSettingTier] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = () => {
@@ -30,19 +32,36 @@ export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string,
 
   useEffect(() => { refresh() }, [])
 
+  const applyProfile = (p: PerformanceProfile) => {
+    setProfile(p)
+    onFieldChange('perf_tier', p.tier)
+    onFieldChange('perf_batch_io_concurrency', String(p.batch_io_concurrency))
+    onFieldChange('perf_commit_interval', String(p.commit_interval))
+    onFieldChange('perf_writer_buffer_mb', String(p.writer_buffer_mb))
+  }
+
   const handleAutoOptimize = async () => {
     setOptimizing(true)
     setError(null)
     try {
-      const p = await autoOptimize()
-      setProfile(p)
-      onFieldChange('perf_batch_io_concurrency', String(p.batch_io_concurrency))
-      onFieldChange('perf_commit_interval', String(p.commit_interval))
-      onFieldChange('perf_writer_buffer_mb', String(p.writer_buffer_mb))
+      applyProfile(await autoOptimize())
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setOptimizing(false)
+    }
+  }
+
+  const handleSelectTier = async (tier: string) => {
+    if (profile?.tier === tier) return
+    setSettingTier(tier)
+    setError(null)
+    try {
+      applyProfile(await setPerformanceTier(tier))
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSettingTier(null)
     }
   }
 
@@ -55,36 +74,68 @@ export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string,
             {t('perf_detecting')}
           </div>
         ) : hw ? (
-          <div className="grid grid-cols-2 gap-3 text-sm">
-            <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-              <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_cpu_cores')}</div>
-              <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.cpu_cores}</div>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_cpu_cores')}</div>
+                <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.cpu_cores}</div>
+              </div>
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_disk_type')}</div>
+                <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.disk_type.toUpperCase()}</div>
+              </div>
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_disk_speed')}</div>
+                <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+                  {hw.disk_speed_mbps > 0 ? `≈ ${hw.disk_speed_mbps.toFixed(0)} MB/s` : '—'}
+                </div>
+              </div>
+              <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_platform')}</div>
+                <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.platform}</div>
+              </div>
             </div>
-            <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-              <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_disk_type')}</div>
-              <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.disk_type.toUpperCase()}</div>
-            </div>
-            <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-              <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_disk_speed')}</div>
-              <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.disk_speed_mbps.toFixed(0)} MB/s</div>
-            </div>
-            <div className="p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
-              <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_platform')}</div>
-              <div className="text-lg font-semibold text-gray-900 dark:text-gray-100">{hw.platform}</div>
-            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400">{t('perf_estimate_note')}</p>
           </div>
         ) : null}
       </Section>
 
       <Section title={t('perf_current_profile')}>
         {profile ? (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div className="flex items-center gap-2">
               <span className="text-2xl">{TIER_LABELS[profile.tier] ?? '⚙️'}</span>
               <span className={`font-semibold ${TIER_COLORS[profile.tier] ?? ''}`}>
                 {t(`perf_tier_${profile.tier}`)}
               </span>
             </div>
+
+            <div>
+              <div className="text-gray-500 dark:text-gray-400 text-xs mb-2">{t('perf_tier_select')}</div>
+              <div className="grid grid-cols-3 gap-2">
+                {TIERS.map(tier => {
+                  const active = profile.tier === tier
+                  const busy = settingTier === tier
+                  return (
+                    <button
+                      key={tier}
+                      onClick={() => handleSelectTier(tier)}
+                      disabled={settingTier !== null}
+                      className={`flex items-center justify-center gap-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors disabled:opacity-50 ${
+                        active
+                          ? 'bg-blue-600 dark:bg-blue-500 text-white border-blue-600 dark:border-blue-500'
+                          : 'bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700'
+                      }`}
+                    >
+                      {busy && <LoadingSpinner className="size-3.5" />}
+                      {TIER_LABELS[tier]} {t(`perf_tier_${tier}`)}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">{t(`perf_tier_desc_${profile.tier}`)}</p>
+            </div>
+
             <div className="grid grid-cols-3 gap-2 text-sm">
               <div className="p-2 bg-gray-50 dark:bg-gray-800 rounded text-center">
                 <div className="text-gray-500 dark:text-gray-400 text-xs">{t('perf_concurrency')}</div>

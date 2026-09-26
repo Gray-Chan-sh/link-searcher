@@ -154,3 +154,7 @@ export async function autoOptimize(): Promise<PerformanceProfile> {
 export async function getPerformanceProfile(): Promise<PerformanceProfile> {
     return client.invoke<PerformanceProfile>('get_performance_profile')
 }
+
+export async function setPerformanceTier(tier: string): Promise<PerformanceProfile> {
+    return client.invoke<PerformanceProfile>('set_performance_tier', { tier })
+}
