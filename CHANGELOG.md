@@ -13,6 +13,7 @@
   - `extractor/pdf.rs`：删除 `LARGE_SCAN_OCR_BUDGET`，新增 `DEFAULT_OCR_STALL_TIMEOUT=120s` 与 `global_ocr_stall_timeout()`；优先级 **环境变量 `LINK_SEARCHER_OCR_STALL_SECS` > 设置 `ocr_stall_timeout_secs` > 默认 120**，**`0` = 关闭**；解析坏值回退默认。
 - **可配置**：新增设置项 `ocr_stall_timeout_secs`（默认 120，0=关闭）——`db/mod.rs` 播种默认、`commands/settings.rs` 白名单、设置页「索引」标签新增数值输入（秒，步进 30），i18n 四语言（zh/en/ja/ko）。
 - **测试**：新增 `test_parse_stall_secs`、`output_progress_counts_and_sums_matching_files`、`clear_dir_removes_files_only`；移除被替代的 `pdfimages_doc_timeout_*` 单测。`cargo test --lib extractor::pdf` **46 passed**；`cargo check` 0 错误；`npx tsc` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **整库复跑验证**（15:06 会话，含 1659 次去重）：扫描 `7791 files, 786 indexed, 7 errors in 672186ms`（≈11.2 min）。`DB conn: timed out` **702 → 0**、单批最差 **0/250 失败 → 248/250 成功**、`pdfimages timed out/stalled` **0**、`stalled=true` **0**（看门狗未误杀）；剩余 7 个失败均为**真损坏文件**（malformed FIB、invalid PDF trailer、加密文档、ToUnicode CMap 解析失败）。详见 `docs/perf-index-baseline.md` §7。
 - **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/commands/settings.rs`、`src/components/settings/IndexTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
 
 ---

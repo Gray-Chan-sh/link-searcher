@@ -149,3 +149,26 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 - `extractor/pdf/ocr.rs`：`run_pdf_ocr_pipeline()`、`try_ocr_fallback(.., allow_whole_doc_pdftoppm)`、`ocr_pdf_via_pdfimages()`、`run_pdfimages_doc()`、`group_images_by_page()`
 - `extractor/pdf.rs`：`extract_with_lang()`（扫描分支先试 `pdftotext`）
 - 尚未做（后续可选）：C3 逐页连续 3 页失败即中止（C2「逐页预算 600s→120s」作废：总预算已被 §5.2 进度看门狗取代）
+
+## 7. 整库重跑结果（2026-09-26 15:06 会话，新二进制）
+
+会话：`15:06:30 [STARTUP] 启动扫描` → `15:17:51 [STARTUP] 启动扫描完成`。
+
+扫描汇总（日志原文）：`7791 files, 786 indexed, 0 moved, 7 errors in 672186ms`。
+
+> ⚠️ 说明：本轮**绝大部分文件是去重命中**（`[INDEX] 去重 … 复用 md5` 共 **1659** 次，沿用上一轮已提取内容），因此本轮墙钟不代表"冷启动全量提取"；巨型卷宗本轮多被去重跳过，未再触发整篇 `pdfimages`。指标用于验证**新机制不再误杀/不再耗尽连接**。
+
+| 指标 | Before（09-25 基线） | 复测（09-26 旧超时版） | **After（09-26 看门狗版）** |
+|---|---|---|---|
+| 整轮墙钟 | 1–2 h（预计） | 7.5k 秒到 7200/7791 | **672s（≈11.2 min）**（含 1659 去重） |
+| `pdfimages page N timed out after 30s` | 236 | 0 | **0** |
+| `pdfimages timed out after 120s` / `stalled` | 0 | 37 | **0** |
+| `pdftoppm timed out after 120s` | 10 | 0 | **2**（小文档整篇渲染，属正常兜底） |
+| `per-page OCR loop` | 34 | 92 | **9**（`stalled=true` **0**，看门狗未误杀） |
+| `DB conn: timed out waiting for connection` | — | **702** | **0** |
+| 单批最差（250 文件） | — | **0 成功 / 250 失败** | **248 成功 / 2 失败** |
+| 本轮失败文件 | — | 350 | **7**（均真损坏：malformed FIB、invalid PDF trailer、加密文档、ToUnicode CMap 解析失败） |
+| 单页 OCR 耗时（抽样） | 均值 2.29s | ~0.52s | **1.5–2.5s**（pdftoppm 逐页，小文件） |
+
+**结论**：进度看门狗（不再有墙钟误杀，`stalled=true`=0）+ 连接池扩容（`DB conn: timed out` 702→0）两项修复在整库跑通；剩余 7 个失败为**真实损坏文件**，非工程缺陷。冷启动全量（清空 `data.db` 重跑）的墙钟仍待按 §4 方法补测。
+
