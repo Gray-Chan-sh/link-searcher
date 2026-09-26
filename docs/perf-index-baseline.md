@@ -170,5 +170,38 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 | 本轮失败文件 | — | 350 | **7**（均真损坏：malformed FIB、invalid PDF trailer、加密文档、ToUnicode CMap 解析失败） |
 | 单页 OCR 耗时（抽样） | 均值 2.29s | ~0.52s | **1.5–2.5s**（pdftoppm 逐页，小文件） |
 
-**结论**：进度看门狗（不再有墙钟误杀，`stalled=true`=0）+ 连接池扩容（`DB conn: timed out` 702→0）两项修复在整库跑通；剩余 7 个失败为**真实损坏文件**，非工程缺陷。冷启动全量（清空 `data.db` 重跑）的墙钟仍待按 §4 方法补测。
+**结论**：进度看门狗（不再有墙钟误杀，`stalled=true`=0）+ 连接池扩容（`DB conn: timed out` 702→0）两项修复在整库跑通；剩余 7 个失败为**真实损坏文件**，非工程缺陷。
+
+## 7.1 冷启动全量重跑（2026-09-26 16:02 会话）
+
+用 App「索引状态 → 重建索引」（`rebuild_index`，内部 `clear_index_tables` 清空 `file_tracking/content_index/doc_embeddings/doc_summaries/chunk_embeddings` 后全量重扫，**不动设置/模型**）。
+
+会话：`16:02:15 [SCAN] 开始扫描` → `18:00:42 [SCAN] 扫描完成`。
+
+扫描汇总（日志原文）：`7791 files, 7733 indexed, 58 errors in 7107262ms`。
+
+| 指标 | 冷启动全量（After 定稿） |
+|---|---|
+| 提取阶段墙钟 | **7107s ≈ 1h58m**（7791 文件全量真提取，无去重） |
+| `pdfimages page N timed out after 30s` | **0** |
+| `pdfimages timed out(120s)` / `stalled` | **0** |
+| `pdftoppm timed out` | **0** |
+| `stalled=true`（看门狗误杀） | **0**（`per-page OCR loop` **60** 次全部正常完成） |
+| `DB conn: timed out waiting for connection` | **0** |
+| 结果 | `7733 indexed / 58 errors`（失败均真损坏：坏 JPEG、非 OLE2 `.doc`、加密/无文本文档） |
+| 大卷宗 | `卷七十七.pdf`（98~217 页级）走整篇 `pdfimages` 成功，OCR 21515 字，无超时 |
+
+> 嵌入回填随后进行（`[AI] 回填开始: 6770 文件缺嵌入`），属另一阶段，不计入提取墙钟。
+
+**冷启动结论**：看门狗 + 连接池两项修复在**全量冷启动**下零超时、零误杀、零连接耗尽；相对 09-25「1–2 小时且需多轮」的基线，本轮**一次跑完**。
+
+### 7.1.1 已知问题：重建后索引目录交换失败（Windows，待修）
+
+```
+18:00:42 ERROR [index] [SCAN] failed to swap index dir: 拒绝访问 (os error 5)
+```
+- 磁盘残留 3 个 `index.tmp-*`（含本次 118 分钟重建的成果），`.ls-index` 仍是**旧索引**。
+- 根因：`commands/index.rs:447-463`，第 3 步已把内存 `IndexManager` 指向 `tmp_dir`，Tantivy 的 `Index`/`IndexReader` 在 Windows 上对 `tmp_dir` 持有打开的句柄 → `fs::rename(tmp_dir → .ls-index)` 被拒；旧目录→`index.old` 的 rename 亦用 `let _` 吞错。回滚后仍用旧索引，重启后本次重建的搜索索引丢失（SQLite 侧 `content_index`/向量是新的）。
+- 影响：**重启后搜索结果回退到旧索引**；需释放句柄后再交换（见 CHANGELOG）。
+
 
