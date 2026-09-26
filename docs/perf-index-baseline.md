@@ -227,19 +227,23 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 内容相同的文件（同 md5）向量相同，却逐文件重复推理。本库 7733 文件仅 **6963** 唯一 md5 → **770（~10%）可省**。`embeddings.rs` 新增 `group_by_md5()`：唯一内容只嵌一次，向量写给该 md5 下所有 file_id；`missing_embedding_rows` 增返 `md5`。日志改为 `N 文件（M 唯一内容）`。
 
-### 8.4 实测（2026-09-26 04:03 重启后，新代码）与结论
+### 8.4 实测与结论（2026-09-27 更正）
 
 - 文本长度：p25=**367**、p50=**710**、p75=2352 字符 → `truncate_for_embed` 截到 2000 字符，多数文档本就被截到 **512 token**。
-- 回填速率：**~0.9–1.1 文件/s**（每 ~60s 一个 64 批），doc 回填 7733 约 **~2h**；对比改动前（与 OCR 并发时的 ~0.15/s）约 **6–7×**。
-- 反推吞吐 ≈ **350 GFLOPS 级**（64×512 token/批 ≈ 60s）→ **tract 很可能已在 batch 内用多核**，故 **#4（多副本并行）收益低，不做**。
-- 结论：`#1` 对短文本 ~23×、对**长文档为主的库 ~6–7×**；进一步提速优先 **#2 换 bge-base/small**；`#3` 再省 ~10%。
-- 并发首载竞态已修：doc 与 chunk 回填并发首调 `init_local_embedder` 曾各加载一份模型（日志出现两次"引擎就绪"），已加 `INIT_LOCK` 串行化。
+- **更正**：进程实测 **只用约 1 个 CPU 核**（`CPU delta ≈ 19.7s/20s`，tract 单线程）。早前据错误算力估算得出"tract 已多核、#4 收益低"**不成立**。
+- 真实速率：剩余多为长文时约 **0.2 文件/s**（一批 64 篇 >5 分钟）；doc 与 chunk 回填并发还会互相拖慢。
+- 并发首载竞态已修：doc 与 chunk 并发首调 `init_local_embedder` 曾各加载一份模型（日志两次"引擎就绪"），已加 `INIT_LOCK`。
+- **结论**：提速方向 = **#4 多副本并行**（当时已实施，见 §8.5）+ #1/#3；`#2`（换小模型）**已决定永久不做**。
 
-### 8.5 后续可选项
+### 8.5 已实施：#4 并行副本 + 进度 + 串行（2026-09-27）
 
-- **#3 按 md5 去重**：本库 7733 个已索引文件仅 **6963** 个唯一 md5（**约 10%** 重复可省）。
-- **#2 换更小模型**：`bge-base`(≈2×) / `bge-small`(≈4–6×)，换维会再全量回填。
-- **#4 并行推理**：当前 `model`/`tokenizer` 各一把全局 Mutex，同刻仅一个 batch；多实例并行需内存。
+- **并行副本**：`ai/local_embed.rs` 改为模型副本池，`ai::embed_batched` 本地路径按批并行（`embed_batched_local`）；并行度 = env `LINK_SEARCHER_EMBED_PARALLELISM` > 设置 `embed_parallelism`（0=自动 ≈cores/2，clamp 1..4）。每副本约 1GB 内存。
+- **进度**：回填 256/批推进，日志带速率/ETA；`get_index_status.task_progress` + 索引状态页进度条。
+- **串行**：doc/chunk 回填共用 `BACKFILL_LOCK`；启动单线程顺序执行。
+- 待重启后实测新的整轮墙钟并回填本表。
+
+### 8.6 其他可选项（未做）
+
 - **#5 远程/GPU**：`active_embedding_model_id` 指向远程 `/embeddings` 即可（代码已支持）；或 tract → ONNX Runtime + DirectML。
 
 

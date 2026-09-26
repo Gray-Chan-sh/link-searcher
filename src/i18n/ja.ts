@@ -628,6 +628,10 @@ const ja: Record<string, string> = {
     perf_writer_buffer: 'ライターバッファ',
     perf_auto_optimize: '自動最適化',
     perf_auto_optimize_desc: 'ハードウェアを検出し、最適なインデックス設定を自動的に適用します。',
+    embed_parallelism: '埋め込み並列度',
+    embed_parallelism_hint: 'ベクトル補完時に並列実行するモデルレプリカ数（1 つ約 1GB メモリ）。0 = 自動（CPU コア数の約半分、最大 4）。CPU 単コアでは埋め込みが遅いため、増やすと高速化します。メモリが厳しい場合は小さく。',
+    task_backfill: 'ベクトル補完（文書）',
+    task_backfill_chunks: 'ベクトル補完（チャンク）',
     perf_one_click_optimize: 'ワンクリック最適化',
 }
 export default ja

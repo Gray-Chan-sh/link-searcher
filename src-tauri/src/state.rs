@@ -24,6 +24,47 @@ pub struct TaskBrief {
     pub completed_at: i64,
 }
 
+/// Live progress of a running task, surfaced to the UI while it runs.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskProgress {
+    pub task: String,
+    pub current: u64,
+    pub total: u64,
+    pub detail: String,
+}
+
+fn task_progress_registry() -> &'static Mutex<std::collections::HashMap<String, TaskProgress>> {
+    static P: OnceLock<Mutex<std::collections::HashMap<String, TaskProgress>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record/update a running task's progress (visible via `get_index_status`).
+pub fn set_task_progress(task: &str, current: u64, total: u64, detail: impl Into<String>) {
+    if let Ok(mut m) = task_progress_registry().lock() {
+        m.insert(
+            task.to_string(),
+            TaskProgress { task: task.to_string(), current, total, detail: detail.into() },
+        );
+    }
+}
+
+pub fn clear_task_progress(task: &str) {
+    if let Ok(mut m) = task_progress_registry().lock() {
+        m.remove(task);
+    }
+}
+
+pub fn task_progress_snapshot() -> Vec<TaskProgress> {
+    match task_progress_registry().lock() {
+        Ok(m) => {
+            let mut v: Vec<TaskProgress> = m.values().cloned().collect();
+            v.sort_by(|a, b| a.task.cmp(&b.task));
+            v
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Global registry of long-running tasks. The frontend reads it via
 /// `get_index_status` so buttons stay disabled across page switches
 /// (this is the single source of truth for task liveness).
@@ -61,6 +102,7 @@ impl TaskGuard {
 impl Drop for TaskGuard {
     fn drop(&mut self) {
         untrack_task(&self.task);
+        clear_task_progress(&self.task);
     }
 }
 

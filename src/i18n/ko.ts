@@ -628,6 +628,10 @@ const ko: Record<string, string> = {
     perf_writer_buffer: '라이터 버퍼',
     perf_auto_optimize: '자동 최적화',
     perf_auto_optimize_desc: '하드웨어를 감지하고 최적의 인덱싱 설정을 자동으로 적용합니다.',
+    embed_parallelism: '임베딩 병렬도',
+    embed_parallelism_hint: '벡터 백필 시 병렬로 실행할 모델 복제본 수(각 약 1GB 메모리). 0 = 자동(CPU 코어의 약 절반, 최대 4). CPU 단일 코어에서는 임베딩이 느리므로 늘리면 빨라집니다. 메모리가 부족하면 줄이세요.',
+    task_backfill: '벡터 백필(문서)',
+    task_backfill_chunks: '벡터 백필(청크)',
     perf_one_click_optimize: '원클릭 최적화',
 }
 export default ko

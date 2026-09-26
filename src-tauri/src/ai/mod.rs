@@ -264,8 +264,21 @@ pub fn truncate_for_embed(s: &str) -> String {
 }
 
 /// Embed texts in `batch_size` chunks; failed texts map to `None`.
+///
+/// Local models run batches in parallel across a replica pool (see
+/// `local_embed::embed_batched_local`); remote gateways use sequential batches.
 pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>>> {
     let batch_size = batch_size.max(1);
+    let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id)
+            .unwrap_or("bge-large-zh-v1.5");
+        if local_embed::bge_model_ready(&cfg.data_dir, model_name) {
+            let _ = local_embed::init_local_embedder(&cfg.data_dir, model_name);
+            return local_embed::embed_batched_local(texts, batch_size);
+        }
+        return vec![None; texts.len()];
+    }
     let mut out = Vec::with_capacity(texts.len());
     for chunk in texts.chunks(batch_size) {
         let chunk: Vec<String> = chunk.iter().map(|t| truncate_for_embed(t)).collect();

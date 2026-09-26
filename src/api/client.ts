@@ -89,6 +89,7 @@ const MAPPINGS: Record<string, Mapping> = {
       scan_delta: undefined,
       running_tasks: [],
       briefs: [],
+      task_progress: [],
     };
   }},
   check_index_health: { method: 'GET', path: '/api/index/health' },

@@ -366,6 +366,28 @@ export default function IndexStatus() {
         </div>
       </div>
 
+      {status?.task_progress && status.task_progress.length > 0 && (
+        <div className="mb-6 p-4 space-y-3 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg">
+          {status.task_progress.map(tp => {
+            const pct = tp.total > 0 ? Math.floor((tp.current / tp.total) * 100) : 0
+            return (
+              <div key={tp.task}>
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-medium text-gray-500 dark:text-gray-400">{t(`task_${tp.task}`)}</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">{tp.detail || `${tp.current}/${tp.total}`}</span>
+                </div>
+                <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-purple-600 rounded-full transition-all duration-500"
+                    style={{ width: `${Math.max(2, pct)}%` }}
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
       {backfillMsg && (
         <div className="mb-4 px-4 py-3 text-sm text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800 rounded-lg">
           {backfillMsg}

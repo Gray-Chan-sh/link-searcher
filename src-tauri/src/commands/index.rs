@@ -48,6 +48,8 @@ pub struct IndexStatus {
     /// finished-task briefs, newest first (frontend shows these as the
     /// "task report" notification source).
     pub briefs: Vec<crate::state::TaskBrief>,
+    /// live progress of running tasks (e.g. vector backfill), for UI bars.
+    pub task_progress: Vec<crate::state::TaskProgress>,
 }
 
 #[derive(Clone, Serialize)]
@@ -87,6 +89,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         scan_delta: Some({ let d = state.scan_delta.lock().unwrap_or_else(|e| e.into_inner()); d.clone() }),
         running_tasks: crate::state::running_task_ids(),
         briefs: crate::state::task_brief_snapshot(),
+        task_progress: crate::state::task_progress_snapshot(),
     })
 }
 

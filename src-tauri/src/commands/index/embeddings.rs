@@ -3,19 +3,35 @@
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::Context;
 use serde::Serialize;
 
 use crate::db::tracker;
+
+/// Serializes doc- and chunk-level embedding backfills. Both use the same local
+/// model pool, so running them at once just makes each other slower and makes
+/// progress hard to read. Whichever starts first runs to completion; the other
+/// waits. (Chunk *building* in `db::chunks` isn't gated — it does no inference.)
+static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
+
+fn backfill_guard() -> MutexGuard<'static, ()> {
+    BACKFILL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 pub(super) fn run_backfill_embeddings(
     db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
 ) -> Result<BackfillReport, String> {
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    let _serial = backfill_guard();
     let _guard = crate::state::TaskGuard::new("backfill");
     const BATCH: usize = 64;
+    // Unique texts embedded per progress step. A multiple of BATCH so the
+    // engine can parallelize across batches.
+    const SUPER: usize = 256;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
     let rows = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
@@ -28,20 +44,22 @@ pub(super) fn run_backfill_embeddings(
     // vectors — embed each unique md5 once and write the vector to all of its
     // file_ids. In this library ~10% of files are duplicates.
     let mut unique = group_by_md5(rows);
-    // Sort by text length so every 64-batch is length-homogeneous and the
+    // Sort by text length so every batch is length-homogeneous and the
     // engine's `BatchLongest` padding stays short (attention is O(L²)).
     unique.sort_by_key(|(t, _)| t.chars().count());
 
     log::info!(
-        "[AI] 向量回填开始: {total} 个文件缺向量（{} 个唯一内容）",
-        unique.len()
+        "[AI] 向量回填开始: {total} 个文件缺向量（{} 个唯一内容，并行度 {}）",
+        unique.len(),
+        crate::ai::local_embed::parallelism(),
     );
     let mut processed = 0usize;
     let mut failed = 0usize;
-    for chunk in unique.chunks(BATCH) {
-        let texts: Vec<String> = chunk.iter().map(|(t, _)| t.clone()).collect();
+    let started = std::time::Instant::now();
+    for group in unique.chunks(SUPER) {
+        let texts: Vec<String> = group.iter().map(|(t, _)| t.clone()).collect();
         let vecs = crate::ai::embed_batched(&texts, BATCH);
-        for ((_, ids), v) in chunk.iter().zip(vecs) {
+        for ((_, ids), v) in group.iter().zip(vecs) {
             match v {
                 Some(vec) => {
                     for id in ids {
@@ -54,8 +72,8 @@ pub(super) fn run_backfill_embeddings(
                 None => failed += ids.len(),
             }
         }
-        processed += chunk.iter().map(|(_, ids)| ids.len()).sum::<usize>();
-        log::info!("[AI] 回填进度: {processed}/{total} (失败 {failed})");
+        processed += group.iter().map(|(_, ids)| ids.len()).sum::<usize>();
+        report_progress("backfill", processed, total, failed, started);
     }
     log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
     crate::state::push_task_brief(
@@ -67,6 +85,22 @@ pub(super) fn run_backfill_embeddings(
         pending: (total - processed) as u64,
         failed: failed as u64,
     })
+}
+
+/// Log a progress line (with rate + ETA) and publish it to the UI registry.
+fn report_progress(task: &str, processed: usize, total: usize, failed: usize, started: std::time::Instant) {
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let rate = processed as f64 / elapsed;
+    let eta_min = ((total.saturating_sub(processed)) as f64 / rate.max(0.001) / 60.0) as u64;
+    log::info!(
+        "[AI] 回填进度: {processed}/{total} (失败 {failed}, {rate:.1}/s, ETA {eta_min}m)"
+    );
+    crate::state::set_task_progress(
+        task,
+        processed as u64,
+        total as u64,
+        format!("{processed}/{total} · {rate:.1}/s · ETA {eta_min}m"),
+    );
 }
 
 /// Background-caller wrapper (mirrors [`run_backfill_chunk_embeddings_public`]).
@@ -192,78 +226,97 @@ pub(super) fn existing_chunk_indexes(conn: &rusqlite::Connection, md5: &str) -> 
 
 /// Backfill chunk-level embeddings for long documents: every `doc_chunks`
 /// text (≤1500 chars) gets its own vector, so semantic retrieval can hit
-/// detail-level content that a whole-file vector dilutes. Idempotent —
-/// repeated runs converge (only md5s with zero chunk embeddings are picked).
+/// detail-level content that a whole-file vector dilutes. Idempotent — a doc
+/// interrupted mid-run resumes without re-embedding finished chunks.
+///
+/// Chunks from all selected docs are flattened and embedded in bulk so the
+/// engine's replica pool can parallelize across batches.
 pub(super) fn run_backfill_chunk_embeddings(
     db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
 ) -> Result<BackfillReport, String> {
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    let _serial = backfill_guard();
     let _guard = crate::state::TaskGuard::new("backfill_chunks");
-    const MAX_PER_RUN: usize = 500;
+    const MAX_DOCS_PER_RUN: usize = 500;
+    /// Cap chunks per run so a run stays bounded and progress is visible.
+    const MAX_CHUNKS_PER_RUN: usize = 4096;
     const BATCH: usize = 64;
+    const SUPER: usize = 256;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-    let md5s = missing_chunk_embedding_md5s(&conn, MAX_PER_RUN).map_err(|e| e.to_string())?;
-    let total = md5s.len();
-    if total == 0 {
+    let md5s = missing_chunk_embedding_md5s(&conn, MAX_DOCS_PER_RUN).map_err(|e| e.to_string())?;
+    let docs = md5s.len();
+    if docs == 0 {
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
     }
 
-    log::info!("[AI] chunk 向量回填开始: {total} 个长文档缺块向量");
-    let mut processed = 0usize;
-    let mut failed = 0usize;
+    // Flatten the missing chunks of the selected docs, capped per run.
+    // `(md5, chunk_index, text)`; only missing ones so interrupted runs resume.
+    let mut tasks: Vec<(String, i64, String)> = Vec::new();
     for md5 in &md5s {
         let chunks = match crate::db::chunks::get_chunks(&conn, md5) {
             Ok(c) => c,
             Err(e) => {
                 log::warn!("[AI] get_chunks failed for {md5}: {e}");
-                failed += 1;
                 continue;
             }
         };
-        if chunks.is_empty() {
-            continue;
-        }
-        // 只嵌缺失的块：中断后恢复不重复嵌已完成的块（P1-B 增量收敛）。
         let existing = match existing_chunk_indexes(&conn, md5) {
             Ok(s) => s,
             Err(e) => {
                 log::warn!("[AI] existing_chunk_indexes failed for {md5}: {e}");
-                failed += 1;
                 continue;
             }
         };
-        let mut missing: Vec<&crate::db::chunks::DocChunk> = chunks
-            .iter()
-            .filter(|c| !existing.contains(&c.chunk_index))
-            .collect();
-        if missing.is_empty() {
-            continue;
-        }
-        // Length-sort each batch so `BatchLongest` padding stays short.
-        missing.sort_by_key(|c| c.text.chars().count());
-        for batch in missing.chunks(BATCH) {
-            let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
-            let vecs = crate::ai::embed_batched(&texts, BATCH);
-            for (chunk, v) in batch.iter().zip(vecs) {
-                match v {
-                    Some(vec) => {
-                        if let Err(e) = crate::db::tracker::upsert_chunk_embedding(
-                            &conn, md5, chunk.chunk_index, &vec,
-                        ) {
-                            log::warn!("[AI] upsert_chunk_embedding failed {md5}#{}: {e}", chunk.chunk_index);
-                            failed += 1;
-                        }
-                    }
-                    None => failed += 1,
+        for c in &chunks {
+            if !existing.contains(&c.chunk_index) {
+                tasks.push((md5.clone(), c.chunk_index, c.text.clone()));
+                if tasks.len() >= MAX_CHUNKS_PER_RUN {
+                    break;
                 }
             }
         }
-        processed += 1;
+        if tasks.len() >= MAX_CHUNKS_PER_RUN {
+            break;
+        }
     }
-    log::info!("[AI] chunk 向量回填完成: {processed} 文档, {failed} 失败");
+
+    let total = tasks.len();
+    if total == 0 {
+        return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
+    }
+    // Length-sort so `BatchLongest` padding stays short.
+    tasks.sort_by_key(|(_, _, t)| t.chars().count());
+
+    log::info!(
+        "[AI] chunk 向量回填开始: {total} 个块（{docs} 个长文档，并行度 {}）",
+        crate::ai::local_embed::parallelism(),
+    );
+    let mut processed = 0usize;
+    let mut failed = 0usize;
+    let started = std::time::Instant::now();
+    for group in tasks.chunks(SUPER) {
+        let texts: Vec<String> = group.iter().map(|(_, _, t)| t.clone()).collect();
+        let vecs = crate::ai::embed_batched(&texts, BATCH);
+        for ((md5, idx, _), v) in group.iter().zip(vecs) {
+            match v {
+                Some(vec) => {
+                    if let Err(e) =
+                        crate::db::tracker::upsert_chunk_embedding(&conn, md5, *idx, &vec)
+                    {
+                        log::warn!("[AI] upsert_chunk_embedding failed {md5}#{idx}: {e}");
+                        failed += 1;
+                    }
+                }
+                None => failed += 1,
+            }
+        }
+        processed += group.len();
+        report_progress("backfill_chunks", processed, total, failed, started);
+    }
+    log::info!("[AI] chunk 向量回填完成: {processed} 块, {failed} 失败");
     crate::state::push_task_brief(
         "backfill_chunks",
         format!("chunk 向量回填完成: {processed} 补齐, {failed} 失败"),

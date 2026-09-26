@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-27（日·续 3）：向量回填提速 A+B+C —— 并行副本 / 细进度+UI / doc-chunk 串行
+
+- **背景（实测）**：本地嵌入推理**只用约 1 个 CPU 核**（tract 单线程，实测 19.7s/20s）。剩余待嵌多为长文（最短的 64 篇也 >324 字符），单核约 **0.2 文件/s**；且 doc 与 chunk 回填**并发抢同一个模型**，UI 又无进度 → 表现为"卡住"。（更正：此前基于错误算力估算得出"#4 收益低"的结论不成立。）
+- **A｜并行副本**（`ai/local_embed.rs`、`ai/mod.rs`）：单例改为**模型副本池** `LocalEmbedPool`（惰性构建，`acquire/release` 借用）。`embed_batched` 本地路径改走 `embed_batched_local()`：按 `batch_size` 分批，用 `K` 个工作线程并发跑各自副本，结果按序写回。并行度 = env `LINK_SEARCHER_EMBED_PARALLELISM` > 设置 `embed_parallelism`（`0`=自动 ≈ `cores/2`，clamp 1..4）> clamp(1..16)。查询仍走单副本。
+- **B｜细进度 + UI**（`commands/index/embeddings.rs`、`state.rs`、`commands/index.rs`、前端）：回填按 **256 超批**推进，日志带 **速率/ETA**（`回填进度: x/y (失败 n, a/s, ETA m)`）；新增 `state::task_progress`（`set/clear/snapshot`，`TaskGuard` 退出自动清理），`get_index_status` 返回 `task_progress`，**索引状态页显示紫色进度条**；i18n 增 `task_backfill` / `task_backfill_chunks`。
+- **C｜串行**：doc 与 chunk 回填共用 `BACKFILL_LOCK` 串行；`lib.rs` 启动改为**单线程顺序**：建 chunk → 嵌 chunk → 嵌 doc，不再互相拖慢。
+- **UI/设置**：性能页新增「**嵌入并行度**」数值项（0=自动；每副本约 1GB 内存）。`settings.rs` 白名单 + `db/mod.rs` 播种默认 `embed_parallelism=0`。
+- **测试**：`cargo test --lib` **445 passed**；`cargo check` 0 错误；`npx tsc -b` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **说明**：D（换更小模型）**永久不做**。
+- **涉及文件**：`src-tauri/src/ai/local_embed.rs`、`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/index/embeddings.rs`、`src-tauri/src/commands/index.rs`、`src-tauri/src/state.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/db/mod.rs`、`src/components/settings/PerformanceTab.tsx`、`src/pages/Settings.tsx`、`src/pages/IndexStatus.tsx`、`src/api/index.ts`、`src/api/client.ts`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-27（日·续 2）：日志时间戳补全日期
 
 - **背景**：`app.log` 时间戳只有 `HH:MM:SS`，跨天多次会话混在一起，排查时容易误读（当天已因此误判一次"05:42 的批处理"）。

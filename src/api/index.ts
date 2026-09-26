@@ -6,6 +6,13 @@ export interface TaskBrief {
   completed_at: number
 }
 
+export interface TaskProgress {
+  task: string
+  current: number
+  total: number
+  detail: string
+}
+
 export interface IndexStatus {
   total_files: number
   indexed: number
@@ -18,6 +25,7 @@ export interface IndexStatus {
   scan_delta?: { added: number; deleted: number; modified: number; errors: number }
   running_tasks: string[]
   briefs: TaskBrief[]
+  task_progress: TaskProgress[]
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {

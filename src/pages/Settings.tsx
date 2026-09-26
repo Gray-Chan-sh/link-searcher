@@ -283,6 +283,8 @@ export default function Settings() {
         {activeTab === 'perf' && (
           <PerformanceTab
             onFieldChange={handleFieldChange}
+            embedParallelism={settings['embed_parallelism'] ?? '0'}
+            onChangeEmbedParallelism={v => handleFieldChange('embed_parallelism', v)}
           />
         )}
 

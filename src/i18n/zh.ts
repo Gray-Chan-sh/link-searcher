@@ -626,6 +626,10 @@ const zh: Record<string, string> = {
     perf_writer_buffer: '写入缓冲区',
     perf_auto_optimize: '自动优化',
     perf_auto_optimize_desc: '检测本机硬件，自动配置最佳索引参数。',
+    embed_parallelism: '嵌入并行度',
+    embed_parallelism_hint: '向量回填时并行的模型副本数（每个约 1GB 内存）。0 = 自动（≈CPU 核数一半，最多 4）。CPU 单核跑嵌入较慢，多开可显著加速；内存紧张时调小。',
+    task_backfill: '向量回填（文档）',
+    task_backfill_chunks: '向量回填（分块）',
     perf_one_click_optimize: '一键优化',
 }
 export default zh

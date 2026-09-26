@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import { detectHardware, autoOptimize, getPerformanceProfile, setPerformanceTier, type HardwareInfo, type PerformanceProfile } from '../../api/settings'
-import { Section } from './SettingsFields'
+import { Section, NumberField } from './SettingsFields'
 
 const TIER_LABELS: Record<string, string> = { aggressive: '⚡', balanced: '⚖️', conservative: '🐢' }
 const TIER_COLORS: Record<string, string> = {
@@ -12,7 +12,11 @@ const TIER_COLORS: Record<string, string> = {
 }
 const TIERS = ['conservative', 'balanced', 'aggressive'] as const
 
-export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string, value: string) => void }) {
+export function PerformanceTab({ onFieldChange, embedParallelism, onChangeEmbedParallelism }: {
+  onFieldChange: (key: string, value: string) => void
+  embedParallelism: string
+  onChangeEmbedParallelism: (v: string) => void
+}) {
   const { t } = useI18n()
   const [hw, setHw] = useState<HardwareInfo | null>(null)
   const [profile, setProfile] = useState<PerformanceProfile | null>(null)
@@ -152,6 +156,18 @@ export function PerformanceTab({ onFieldChange }: { onFieldChange: (key: string,
             </div>
           </div>
         ) : null}
+      </Section>
+
+      <Section title={t('embed_parallelism')}>
+        <NumberField
+          label={t('embed_parallelism')}
+          value={Number.parseInt(embedParallelism, 10) || 0}
+          onChange={v => onChangeEmbedParallelism(String(v))}
+          min={0}
+          max={16}
+          step={1}
+        />
+        <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">{t('embed_parallelism_hint')}</p>
       </Section>
 
       <Section title={t('perf_auto_optimize')}>

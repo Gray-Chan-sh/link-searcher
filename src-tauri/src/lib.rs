@@ -557,30 +557,16 @@ get_dir_children,
                     log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold=100 MiB)");
                 }
 
-                // Backfill doc_chunks for long documents indexed before
-                // chunking existed (idempotent, capped per run).
+                // Chunk building + chunk/doc embedding backfills run
+                // sequentially on one background thread: they share the local
+                // model pool, so stacking them only makes each other slower.
+                // Order: build chunks → embed chunks → embed docs.
                 {
-                    let pool_c = db_ref.clone();
+                    let pool_bg = db_ref.clone();
                     std::thread::spawn(move || {
-                        let _ = crate::db::chunks::run_backfill_chunks(&pool_c);
-                    });
-                }
-
-                // Backfill chunk-level embeddings for long documents (also
-                // idempotent; runs after chunks so chunk sets are stable).
-                {
-                    let pool_c = db_ref.clone();
-                    std::thread::spawn(move || {
-                        let _ = crate::commands::index::run_backfill_chunk_embeddings_public(&pool_c);
-                    });
-                }
-
-                // Backfill doc-level embeddings (idempotent; also refreshes
-                // vectors whose content was re-extracted).
-                {
-                    let pool_e = db_ref.clone();
-                    std::thread::spawn(move || {
-                        let _ = crate::commands::index::run_backfill_embeddings_public(&pool_e);
+                        let _ = crate::db::chunks::run_backfill_chunks(&pool_bg);
+                        let _ = crate::commands::index::run_backfill_chunk_embeddings_public(&pool_bg);
+                        let _ = crate::commands::index::run_backfill_embeddings_public(&pool_bg);
                     });
                 }
 

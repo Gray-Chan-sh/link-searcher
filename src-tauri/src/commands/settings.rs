@@ -25,6 +25,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "perf_batch_io_concurrency",
     "perf_commit_interval",
     "perf_writer_buffer_mb",
+    "embed_parallelism",
 ];
 
 #[tauri::command]

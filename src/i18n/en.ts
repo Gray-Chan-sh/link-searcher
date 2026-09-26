@@ -626,6 +626,10 @@ const en: Record<string, string> = {
     perf_writer_buffer: 'Writer Buffer',
     perf_auto_optimize: 'Auto Optimize',
     perf_auto_optimize_desc: 'Detect your hardware and automatically configure optimal indexing settings.',
+    embed_parallelism: 'Embedding parallelism',
+    embed_parallelism_hint: 'Number of model replicas used in parallel during vector backfill (~1 GB RAM each). 0 = auto (≈ half the CPU cores, max 4). Embedding is slow on a single core; more replicas speed it up. Lower it when memory is tight.',
+    task_backfill: 'Vector backfill (documents)',
+    task_backfill_chunks: 'Vector backfill (chunks)',
     perf_one_click_optimize: 'One-Click Optimize',
 }
 export default en
