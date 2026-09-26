@@ -256,7 +256,7 @@ get_dir_children,
             .target(env_logger::Target::Pipe(log_file))
             .format(|buf, record| {
                 use std::io::Write;
-                let ts = chrono::Local::now().format("%H:%M:%S");
+                let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                 let module = record.module_path().unwrap_or("?");
                 let short = module.rsplit("::").next().unwrap_or(module);
                 writeln!(buf, "{} {:<5} [{}] {}", ts, record.level(), short, record.args())

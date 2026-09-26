@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-09-27（日·续 2）：日志时间戳补全日期
+
+- **背景**：`app.log` 时间戳只有 `HH:MM:SS`，跨天多次会话混在一起，排查时容易误读（当天已因此误判一次"05:42 的批处理"）。
+- **改动**：`lib.rs` 日志格式 `%H:%M:%S` → `%Y-%m-%d %H:%M:%S`，所有日志行带完整日期。
+- **验证**：`cargo check` 0 错误。
+- **涉及文件**：`src-tauri/src/lib.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-27（日·续）：性能档位接通写入缓冲区 + 运行时应用可见
 
 - **背景（修前）**：三档里的 **写入缓冲区是死设置**——`indexer.rs` 硬编码 `.writer(150_000_000)`，`get_writer_buffer_mb_from_db()` 定义了却无人调用；`apply_profile` 只应用 concurrency + commit_interval；`get_performance_profile` 只读 DB，无法反映"运行时到底应用了什么"。
