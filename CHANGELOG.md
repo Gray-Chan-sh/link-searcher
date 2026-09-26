@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-27（日·续）：性能档位接通写入缓冲区 + 运行时应用可见
+
+- **背景（修前）**：三档里的 **写入缓冲区是死设置**——`indexer.rs` 硬编码 `.writer(150_000_000)`，`get_writer_buffer_mb_from_db()` 定义了却无人调用；`apply_profile` 只应用 concurrency + commit_interval；`get_performance_profile` 只读 DB，无法反映"运行时到底应用了什么"。
+- **修复**：
+  - `indexer.rs`：新增 `writer_buffer_mb: AtomicUsize`（默认 `DEFAULT_WRITER_BUFFER_MB=150`）及 `set_writer_buffer_mb()` / `writer_buffer_mb()`；`lock_writer()` 改用该值作为 Tantivy writer 内存预算；补 `batch_io_concurrency()` / `commit_interval()` getter（暴露运行时实际值）。
+  - `boot.rs`：启动时读取并 `set_writer_buffer_mb()`，日志加 `writer_buffer=…MB`。
+  - `commands/performance.rs`：`apply_profile` 应用 writer buffer，**空闲时 `reset_writer()` 立即生效**（扫描中则下次扫描生效，避免丢未提交文档），并输出 `[PERF] Applied runtime: concurrency=…, commit_interval=…, writer_buffer=…MB, writer_reset=…`；`get_performance_profile` 数值改为**回读运行中的 indexer**（tier 仍取持久化设置），UI 显示即"已应用值"。
+- **测试**：`indexer::tests::perf_params_set_and_get_roundtrip`、`performance::tests::test_scale_sets_commit_and_buffer`；`cargo test --lib` **445 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/indexer.rs`、`src-tauri/src/boot.rs`、`src-tauri/src/commands/performance.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-27（日）：性能页——三档性能模式（同档按硬件自动缩放）+ 磁盘检测更稳更准
 
 - **三档性能模式**（原只有"一键优化"自动判定，无法手动选档）：`commands/performance.rs` 新增 `set_performance_tier` 命令与 `scale_params` / `recommend_tier` / `parse_tier`。用户可选 **保守 / 均衡 / 激进**；**档位只表达取向，具体值按本机硬件缩放**——并行度 = `clamp(核心数 × 档位倍率 × 磁盘系数, floor, ceil)`（保守 0.5/[1,8]、均衡 1.0/[2,16]、激进 1.5/[4,24]；磁盘系数 NVMe 1.0 / SSD 0.75 / HDD 0.35 / 未知 0.5），提交间隔 500/1000/2000，写缓冲 100/200/300MB。同一档位在不同机器上得到不同参数。

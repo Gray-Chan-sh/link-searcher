@@ -1,6 +1,7 @@
 //! Hardware detection and auto-optimization for indexing performance.
 
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use serde::Serialize;
 use tauri::State;
@@ -80,9 +81,15 @@ pub async fn set_performance_tier(
     Ok(profile)
 }
 
-/// Get the current performance profile (from DB settings or defaults).
+/// Get the current performance profile. The numeric params are read back from
+/// the running indexer (the values actually in effect), while the tier label
+/// comes from the persisted setting (falling back to deriving it).
 #[tauri::command]
 pub fn get_performance_profile(state: State<'_, AppState>) -> Result<PerformanceProfile, String> {
+    let concurrency = state.indexer.batch_io_concurrency();
+    let commit_interval = state.indexer.commit_interval();
+    let writer_buffer_mb = state.indexer.writer_buffer_mb();
+
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let get_val = |key: &str| -> Option<String> {
         conn.query_row(
@@ -95,18 +102,9 @@ pub fn get_performance_profile(state: State<'_, AppState>) -> Result<Performance
 
     let stored_tier = get_val("perf_tier");
     let has_values = get_val("perf_batch_io_concurrency").is_some();
-    let concurrency = get_val("perf_batch_io_concurrency")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8);
-    let commit_interval = get_val("perf_commit_interval")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100);
-    let buffer_mb = get_val("perf_writer_buffer_mb")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(150);
 
-    // Prefer the persisted tier; fall back to deriving it from stored values
-    // (pre-tier installs), or "balanced" when nothing was ever configured.
+    // Prefer the persisted tier; fall back to deriving it from the applied
+    // values (pre-tier installs), or "balanced" when nothing was ever set.
     let tier = match stored_tier.as_deref() {
         Some(raw) => parse_tier(raw)
             .unwrap_or_else(|| derive_tier(concurrency, commit_interval))
@@ -118,7 +116,7 @@ pub fn get_performance_profile(state: State<'_, AppState>) -> Result<Performance
     Ok(PerformanceProfile {
         batch_io_concurrency: concurrency,
         commit_interval,
-        writer_buffer_mb: buffer_mb,
+        writer_buffer_mb,
         tier,
     })
 }
@@ -332,6 +330,24 @@ fn persist_profile(state: &State<'_, AppState>, profile: &PerformanceProfile) ->
 fn apply_profile(state: &State<'_, AppState>, profile: &PerformanceProfile) {
     state.indexer.set_batch_io_concurrency(profile.batch_io_concurrency);
     state.indexer.set_commit_interval(profile.commit_interval);
+    state.indexer.set_writer_buffer_mb(profile.writer_buffer_mb);
+
+    // The writer memory budget only applies when a writer is (re)created. If no
+    // scan is running, reset now so the new budget takes effect immediately;
+    // otherwise the next scan picks it up.
+    let idle = !state.is_scanning.load(Ordering::SeqCst);
+    if idle {
+        state.indexer.reset_writer();
+    }
+
+    // Log the values actually stored on the live indexer, so "applied" is
+    // observable at runtime (not just inferred from the DB).
+    log::info!(
+        "[PERF] Applied runtime: concurrency={}, commit_interval={}, writer_buffer={}MB, writer_reset={idle}",
+        state.indexer.batch_io_concurrency(),
+        state.indexer.commit_interval(),
+        state.indexer.writer_buffer_mb(),
+    );
 }
 
 #[cfg(test)]
@@ -387,6 +403,16 @@ mod tests {
         // HDD 上激进档也必须压住并行度，避免寻道抖动。
         let p = scale_params("aggressive", 4, "hdd");
         assert_eq!(p.batch_io_concurrency, 4);
+    }
+
+    #[test]
+    fn test_scale_sets_commit_and_buffer() {
+        let c = scale_params("conservative", 16, "nvme");
+        assert_eq!((c.commit_interval, c.writer_buffer_mb), (500, 100));
+        let b = scale_params("balanced", 16, "nvme");
+        assert_eq!((b.commit_interval, b.writer_buffer_mb), (1000, 200));
+        let a = scale_params("aggressive", 16, "nvme");
+        assert_eq!((a.commit_interval, a.writer_buffer_mb), (2000, 300));
     }
 
     #[test]

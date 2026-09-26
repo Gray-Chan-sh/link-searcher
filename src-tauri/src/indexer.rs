@@ -33,6 +33,7 @@ pub struct IndexerService {
     commit_counter: AtomicU64,
     commit_interval: AtomicU64,
     batch_io_concurrency: AtomicUsize,
+    writer_buffer_mb: AtomicUsize,
     cancel_scan: Arc<AtomicBool>,
 }
 
@@ -57,6 +58,9 @@ pub struct BatchResult {
 /// Default cap on Phase-1 concurrent file reads in [`batch_index`]
 /// (read + MD5 + extraction + per-file SQLite `mark_extracted` writes).
 const DEFAULT_BATCH_IO_CONCURRENCY: usize = 8;
+
+/// Default Tantivy writer memory budget (MB) when no setting is present.
+const DEFAULT_WRITER_BUFFER_MB: usize = 150;
 
 /// Process-wide cache of dedicated Rayon pools for Phase-1 batch reads,
 /// keyed by concurrency cap. The global Rayon pool is unbounded
@@ -373,6 +377,7 @@ impl IndexerService {
             commit_counter: AtomicU64::new(0),
             commit_interval: AtomicU64::new(100),
             batch_io_concurrency: AtomicUsize::new(DEFAULT_BATCH_IO_CONCURRENCY),
+            writer_buffer_mb: AtomicUsize::new(DEFAULT_WRITER_BUFFER_MB),
             cancel_scan,
         }
     }
@@ -757,6 +762,27 @@ impl IndexerService {
         self.batch_io_concurrency.store(n, Ordering::Relaxed);
     }
 
+    /// Current Phase-1 concurrency cap (the value actually in effect).
+    pub fn batch_io_concurrency(&self) -> usize {
+        self.batch_io_concurrency.load(Ordering::Relaxed)
+    }
+
+    /// Current commit interval (files between automatic Tantivy commits).
+    pub fn commit_interval(&self) -> usize {
+        self.commit_interval.load(Ordering::Relaxed) as usize
+    }
+
+    /// Set the Tantivy writer memory budget (MB). Takes effect on the next
+    /// writer (re)creation — call [`Self::reset_writer`] to force it now.
+    pub fn set_writer_buffer_mb(&self, mb: usize) {
+        self.writer_buffer_mb.store(mb, Ordering::Relaxed);
+    }
+
+    /// Current Tantivy writer memory budget (MB).
+    pub fn writer_buffer_mb(&self) -> usize {
+        self.writer_buffer_mb.load(Ordering::Relaxed)
+    }
+
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
@@ -776,7 +802,7 @@ impl IndexerService {
                 .read()
                 .map_err(|e| anyhow::anyhow!("index manager lock poisoned: {e}"))?;
             let new_w = mgr
-                .writer(150_000_000)
+                .writer(self.writer_buffer_mb.load(Ordering::Relaxed).max(1) * 1_048_576)
                 .map_err(|e| anyhow::anyhow!("failed to create index writer: {e}"))?;
             *guard = Some(new_w);
         }
@@ -877,6 +903,23 @@ mod tests {
         let c = svc.db.get().unwrap();
         let fid = crate::db::tracker::upsert_file(&c, "/tmp/test.txt", "d1", 1000, 42, None).unwrap();
         (svc, fid)
+    }
+
+    #[test]
+    fn perf_params_set_and_get_roundtrip() {
+        let (svc, _) = setup();
+        assert_eq!(svc.batch_io_concurrency(), DEFAULT_BATCH_IO_CONCURRENCY);
+        assert_eq!(svc.writer_buffer_mb(), DEFAULT_WRITER_BUFFER_MB);
+        assert_eq!(svc.commit_interval(), 100);
+
+        svc.set_batch_io_concurrency(14);
+        svc.set_commit_interval(2000);
+        svc.set_writer_buffer_mb(300);
+
+        // Getters must reflect what a tier change would actually apply.
+        assert_eq!(svc.batch_io_concurrency(), 14);
+        assert_eq!(svc.commit_interval(), 2000);
+        assert_eq!(svc.writer_buffer_mb(), 300);
     }
 
     fn tmp_file(name: &str, content: &str) -> std::path::PathBuf {
