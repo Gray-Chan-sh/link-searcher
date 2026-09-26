@@ -223,7 +223,11 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 | 单次短查询推理（`bench_local_embed_latency`，bge-large） | **7.52s / 7.33s** | **0.328s / 0.306s** | **≈23×** |
 | 结果向量 | — | 不变（padding 位被 attention mask 屏蔽） | 等价 |
 
-### 8.3 后续可选项
+### 8.3 修复 #3（2026-09-26）：doc 回填按 md5 去重
+
+内容相同的文件（同 md5）向量相同，却逐文件重复推理。本库 7733 文件仅 **6963** 唯一 md5 → **770（~10%）可省**。`embeddings.rs` 新增 `group_by_md5()`：唯一内容只嵌一次，向量写给该 md5 下所有 file_id；`missing_embedding_rows` 增返 `md5`。日志改为 `N 文件（M 唯一内容）`。
+
+### 8.4 后续可选项
 
 - **#3 按 md5 去重**：本库 7733 个已索引文件仅 **6963** 个唯一 md5（**约 10%** 重复可省）。
 - **#2 换更小模型**：`bge-base`(≈2×) / `bge-small`(≈4–6×)，换维会再全量回填。

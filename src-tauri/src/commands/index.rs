@@ -1192,7 +1192,8 @@ mod tests {
         let rows = missing_embedding_rows(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, id_a);
-        assert_eq!(rows[0].1, "content a");
+        assert_eq!(rows[0].1, "md5a");
+        assert_eq!(rows[0].2, "content a");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Embedding backfill: document-level and chunk-level vector generation,
 //! plus the debounced post-index scheduler.
 
+use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Context;
@@ -17,33 +18,43 @@ pub(super) fn run_backfill_embeddings(
     const BATCH: usize = 64;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-    let mut pending = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
-    // Sort by text length so every 64-batch is length-homogeneous and the
-    // engine's `BatchLongest` padding stays short (attention is O(L²)).
-    pending.sort_by_key(|(_, t)| t.chars().count());
-    let total = pending.len();
+    let rows = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
+    let total = rows.len();
     if total == 0 {
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
     }
 
-    log::info!("[AI] 向量回填开始: {total} 个文件缺向量");
+    // Duplicate files share content (same md5) and would yield identical
+    // vectors — embed each unique md5 once and write the vector to all of its
+    // file_ids. In this library ~10% of files are duplicates.
+    let mut unique = group_by_md5(rows);
+    // Sort by text length so every 64-batch is length-homogeneous and the
+    // engine's `BatchLongest` padding stays short (attention is O(L²)).
+    unique.sort_by_key(|(t, _)| t.chars().count());
+
+    log::info!(
+        "[AI] 向量回填开始: {total} 个文件缺向量（{} 个唯一内容）",
+        unique.len()
+    );
     let mut processed = 0usize;
     let mut failed = 0usize;
-    for chunk in pending.chunks(BATCH) {
-        let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
+    for chunk in unique.chunks(BATCH) {
+        let texts: Vec<String> = chunk.iter().map(|(t, _)| t.clone()).collect();
         let vecs = crate::ai::embed_batched(&texts, BATCH);
-        for ((id, _), v) in chunk.iter().zip(vecs) {
+        for ((_, ids), v) in chunk.iter().zip(vecs) {
             match v {
                 Some(vec) => {
-                    if let Err(e) = tracker::upsert_embedding(&conn, id, &vec) {
-                        log::warn!("[AI] upsert_embedding failed {}: {e}", id);
-                        failed += 1;
+                    for id in ids {
+                        if let Err(e) = tracker::upsert_embedding(&conn, id, &vec) {
+                            log::warn!("[AI] upsert_embedding failed {id}: {e}");
+                            failed += 1;
+                        }
                     }
                 }
-                None => failed += 1,
+                None => failed += ids.len(),
             }
         }
-        processed += chunk.len();
+        processed += chunk.iter().map(|(_, ids)| ids.len()).sum::<usize>();
         log::info!("[AI] 回填进度: {processed}/{total} (失败 {failed})");
     }
     log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
@@ -91,12 +102,15 @@ pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectio
 /// text (joined via `content_index` by md5 — no re-extraction needed).
 /// `e.updated_at < ci.indexed_at` marks content re-extracted after the
 /// embedding was written; both columns are unix seconds.
+///
+/// Returns `(file_id, md5, text)`; callers should collapse duplicates by md5
+/// (see [`group_by_md5`]) because files sharing content share their vector.
 pub(super) fn missing_embedding_rows(
     conn: &rusqlite::Connection,
-) -> anyhow::Result<Vec<(String, String)>> {
+) -> anyhow::Result<Vec<(String, String, String)>> {
     let mut stmt = conn
         .prepare(
-            "SELECT ft.id, ci.text_content
+            "SELECT ft.id, ft.md5, ci.text_content
              FROM file_tracking ft
              JOIN content_index ci ON ft.md5 = ci.md5
              LEFT JOIN doc_embeddings e ON e.file_id = ft.id
@@ -106,10 +120,30 @@ pub(super) fn missing_embedding_rows(
         .context("prepare missing-embedding query")?;
     let rows = stmt
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .context("query missing-embedding rows")?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-embedding rows")
+}
+
+/// Collapse `(file_id, md5, text)` rows by md5: duplicate files (same content)
+/// become one `(text, file_ids)` entry so the text is embedded once and the
+/// resulting vector is written to every file_id.
+pub(super) fn group_by_md5(rows: Vec<(String, String, String)>) -> Vec<(String, Vec<String>)> {
+    let mut map: HashMap<String, (String, Vec<String>)> = HashMap::new();
+    for (file_id, md5, text) in rows {
+        match map.entry(md5) {
+            Entry::Occupied(mut e) => e.get_mut().1.push(file_id),
+            Entry::Vacant(e) => {
+                e.insert((text, vec![file_id]));
+            }
+        }
+    }
+    map.into_values().collect()
 }
 
 /// Long documents (md5s that have `doc_chunks` rows) that have at least one
@@ -254,4 +288,30 @@ pub struct BackfillReport {
     pub processed: u64,
     pub pending: u64,
     pub failed: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_by_md5;
+
+    #[test]
+    fn group_by_md5_collapses_duplicate_files() {
+        let rows = vec![
+            ("f1".to_string(), "m1".to_string(), "hello".to_string()),
+            ("f2".to_string(), "m1".to_string(), "hello".to_string()),
+            ("f3".to_string(), "m2".to_string(), "world".to_string()),
+        ];
+        let mut grouped = group_by_md5(rows);
+        grouped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(grouped.len(), 2, "two unique md5s");
+        assert_eq!(grouped[0].0, "hello");
+        assert_eq!(grouped[0].1, vec!["f1", "f2"]);
+        assert_eq!(grouped[1].0, "world");
+        assert_eq!(grouped[1].1, vec!["f3"]);
+    }
+
+    #[test]
+    fn group_by_md5_empty_input() {
+        assert!(group_by_md5(vec![]).is_empty());
+    }
 }

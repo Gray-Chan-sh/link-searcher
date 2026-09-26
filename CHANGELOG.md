@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-09-26（五）：本地嵌入提速 #3 —— doc 回填按 md5 去重
+
+- **背景**：doc 向量回填按 `file_tracking.id` 逐文件嵌入，但**内容相同的文件（同 md5）会得到完全相同的向量**。本库 7733 个已索引文件只有 **6963** 个唯一 md5，即有 **770 个（~10%）重复**被重复推理。
+- **修复**（`commands/index/embeddings.rs`）：
+  - `missing_embedding_rows` 返回值由 `(file_id, text)` 改为 `(file_id, md5, text)`（SQL 加 `ft.md5`）。
+  - 新增 `group_by_md5()`：把同 md5 的行折叠成 `(text, file_ids)`；每个唯一内容只嵌入一次，再把向量 `upsert_embedding` 写到该 md5 下**所有** file_id。
+  - 回填日志改为 `N 个文件缺向量（M 个唯一内容）`；`processed` 仍按文件计数。
+- **测试**：新增 `group_by_md5_collapses_duplicate_files`、`group_by_md5_empty_input`；更新 `missing_embedding_rows` 相关断言。`cargo test --lib` **438 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/index/embeddings.rs`、`src-tauri/src/commands/index.rs`、`docs/perf-index-baseline.md`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26（四）：本地嵌入提速 #1 —— 动态 padding + 按长度分批（≈23× 短文本）
 
 - **背景**：向量回填慢（7733 文件、~0.15 文件/s）。根因在 `ai/local_embed.rs`：tokenizer 用 `PaddingStrategy::Fixed(MAX_SEQ_LEN=512)`，**不论文本多长都补齐到 512 token**；Transformer 注意力 O(L²)，一篇 100 token 的文档也要按 512 算。且 `missing_embedding_rows` 按 DB 顺序取行，长短混批 → 批内最长 512 拖累整批。
