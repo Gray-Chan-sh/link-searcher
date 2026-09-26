@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-26（四）：本地嵌入提速 #1 —— 动态 padding + 按长度分批（≈23× 短文本）
+
+- **背景**：向量回填慢（7733 文件、~0.15 文件/s）。根因在 `ai/local_embed.rs`：tokenizer 用 `PaddingStrategy::Fixed(MAX_SEQ_LEN=512)`，**不论文本多长都补齐到 512 token**；Transformer 注意力 O(L²)，一篇 100 token 的文档也要按 512 算。且 `missing_embedding_rows` 按 DB 顺序取行，长短混批 → 批内最长 512 拖累整批。
+- **修复**：
+  - `ai/local_embed.rs`：padding 改为 `PaddingStrategy::BatchLongest`（每批补到该批最长）；`embed_batch_local` 按实际 batch 最长（clamp `[1,512]`）分配张量，替代硬编码 `MAX_SEQ_LEN`；新增 `batch_seq_len()` 与其单测。
+  - `commands/index/embeddings.rs`：doc 回填 `pending` 与 chunk 回填 `missing` 均**按文本字符数排序**后再切批，使每批长度同质、padding 尽可能短。
+- **实测**（同机 bge-large-zh-v1.5，短查询）：`bench_local_embed_latency` 单次推理 **7.34–7.52s → 0.306–0.328s（≈23×）**。结果向量不变（padding 位本就被 attention mask 屏蔽）。
+- **测试**：新增 `batch_seq_len_uses_longest_and_clamps`；`cargo test --lib` **436 passed**；`cargo check` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **后续（逐步实现中）**：#3 按 md5 去重（本库 7733 文件仅 6963 唯一 md5，约 10% 可省）；#2/#4 视需要再做。
+- **涉及文件**：`src-tauri/src/ai/local_embed.rs`、`src-tauri/src/commands/index/embeddings.rs`、`CHANGELOG.md`
+
+---
+
 ## 2026-09-26（三）：修复重建索引后目录交换失败（Windows 句柄占用）+ 冷启动复跑
 
 - **现象**：冷启动全量重建（`rebuild_index`）后日志报 `failed to swap index dir: 拒绝访问 (os error 5)`；`D:\index` 残留 3 个 `index.tmp-*`，`.ls-index` 仍是旧索引 → 重启后**重建成果丢失**（SQLite 侧 `content_index`/向量已是新的）。

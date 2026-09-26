@@ -17,7 +17,10 @@ pub(super) fn run_backfill_embeddings(
     const BATCH: usize = 64;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-    let pending = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
+    let mut pending = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
+    // Sort by text length so every 64-batch is length-homogeneous and the
+    // engine's `BatchLongest` padding stays short (attention is O(L²)).
+    pending.sort_by_key(|(_, t)| t.chars().count());
     let total = pending.len();
     if total == 0 {
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
@@ -198,13 +201,15 @@ pub(super) fn run_backfill_chunk_embeddings(
                 continue;
             }
         };
-        let missing: Vec<&crate::db::chunks::DocChunk> = chunks
+        let mut missing: Vec<&crate::db::chunks::DocChunk> = chunks
             .iter()
             .filter(|c| !existing.contains(&c.chunk_index))
             .collect();
         if missing.is_empty() {
             continue;
         }
+        // Length-sort each batch so `BatchLongest` padding stays short.
+        missing.sort_by_key(|c| c.text.chars().count());
         for batch in missing.chunks(BATCH) {
             let texts: Vec<String> = batch.iter().map(|c| c.text.clone()).collect();
             let vecs = crate::ai::embed_batched(&texts, BATCH);

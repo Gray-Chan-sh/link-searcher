@@ -81,7 +81,7 @@ fn build(data_dir: &Path, model_name: &str) -> Result<LocalEmbedder, String> {
     let mut tokenizer = tokenizers::Tokenizer::from_file(&tok_path)
         .map_err(|e| format!("加载 BGE tokenizer: {e}"))?;
     let _ = tokenizer.with_padding(Some(tokenizers::PaddingParams {
-        strategy: tokenizers::PaddingStrategy::Fixed(MAX_SEQ_LEN),
+        strategy: tokenizers::PaddingStrategy::BatchLongest,
         ..Default::default()
     }));
     let _ = tokenizer.with_truncation(Some(tokenizers::TruncationParams {
@@ -131,13 +131,18 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     };
 
     let n = texts.len();
-    let mut ids_buf = vec![0i64; n * MAX_SEQ_LEN];
-    let mut mask_buf = vec![0i64; n * MAX_SEQ_LEN];
-    let mut type_buf = vec![0i64; n * MAX_SEQ_LEN];
+    // Dynamic padding: `BatchLongest` pads every sequence to the *batch's*
+    // longest (≤ MAX_SEQ_LEN), so a batch of short docs costs far less than a
+    // fixed 512-token forward. Attention is O(L²), so this is the main lever.
+    let lens: Vec<usize> = token_data.iter().map(|(ids, _, _)| ids.len()).collect();
+    let seq_len = batch_seq_len(&lens);
+    let mut ids_buf = vec![0i64; n * seq_len];
+    let mut mask_buf = vec![0i64; n * seq_len];
+    let mut type_buf = vec![0i64; n * seq_len];
 
     for (i, (ids, mask, types)) in token_data.iter().enumerate() {
-        let off = i * MAX_SEQ_LEN;
-        let len = ids.len().min(MAX_SEQ_LEN);
+        let off = i * seq_len;
+        let len = ids.len().min(seq_len);
         for j in 0..len {
             ids_buf[off + j] = ids[j] as i64;
             mask_buf[off + j] = mask[j] as i64;
@@ -145,15 +150,15 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
         }
     }
 
-    let ids_t = match Tensor::from_shape(&[n, MAX_SEQ_LEN], &ids_buf) {
+    let ids_t = match Tensor::from_shape(&[n, seq_len], &ids_buf) {
         Ok(t) => t,
         Err(_) => return vec![None; texts.len()],
     };
-    let mask_t = match Tensor::from_shape(&[n, MAX_SEQ_LEN], &mask_buf) {
+    let mask_t = match Tensor::from_shape(&[n, seq_len], &mask_buf) {
         Ok(t) => t,
         Err(_) => return vec![None; texts.len()],
     };
-    let type_t = match Tensor::from_shape(&[n, MAX_SEQ_LEN], &type_buf) {
+    let type_t = match Tensor::from_shape(&[n, seq_len], &type_buf) {
         Ok(t) => t,
         Err(_) => return vec![None; texts.len()],
     };
@@ -197,5 +202,24 @@ fn l2_normalize(v: &mut [f32]) {
         for x in v.iter_mut() {
             *x *= inv;
         }
+    }
+}
+
+/// Batch tensor sequence length: the longest encoded length, clamped to
+/// `[1, MAX_SEQ_LEN]`. Drives dynamic padding (see [`embed_batch_local`]).
+fn batch_seq_len(lens: &[usize]) -> usize {
+    lens.iter().copied().max().unwrap_or(1).clamp(1, MAX_SEQ_LEN)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_seq_len_uses_longest_and_clamps() {
+        assert_eq!(batch_seq_len(&[]), 1);
+        assert_eq!(batch_seq_len(&[3, 7, 5]), 7);
+        assert_eq!(batch_seq_len(&[10_000]), MAX_SEQ_LEN);
+        assert_eq!(batch_seq_len(&[0]), 1);
     }
 }

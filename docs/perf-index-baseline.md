@@ -195,7 +195,7 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 **冷启动结论**：看门狗 + 连接池两项修复在**全量冷启动**下零超时、零误杀、零连接耗尽；相对 09-25「1–2 小时且需多轮」的基线，本轮**一次跑完**。
 
-### 7.1.1 已知问题：重建后索引目录交换失败（Windows，待修）
+### 7.1.1 已知问题：重建后索引目录交换失败（Windows，已修）
 
 ```
 18:00:42 ERROR [index] [SCAN] failed to swap index dir: 拒绝访问 (os error 5)
@@ -205,5 +205,30 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 - 影响：**重启后搜索结果回退到旧索引**；需释放句柄后再交换（见 CHANGELOG）。
 - **修复（2026-09-26 三）**：交换前 `indexer.reset_writer()` + 用 `IndexManager::create_in_ram()` 占位顶掉指向 tmp/旧目录的 `Index`/Reader（释放 Windows 句柄）→ 再 rename；成功后 `open_or_create(.ls-index)` 装回。失败回滚旧目录并**清理孤儿 tmp 目录**；启动时清理残留 `index.tmp-*` / `index.old`（`lib.rs`）。
 - **修复验证（2026-09-26 21:04，再次重建）**：`7791 files, 7733 indexed, 58 errors in 6835774ms`；slog 结尾 `[SCAN] 索引重建完成`，**无 `failed to swap` / `failed to move old index`**；`.ls-index` 于 21:04:59 更新，`D:\index` **无 `index.tmp-*` / `index.old` 残留**。交换修复生效。
+
+## 8. 本地嵌入（向量回填）性能
+
+> 提取与嵌入是两阶段：本节只讲**向量生成**，与 §1–§7 的 PDF/OCR 提取无关。
+
+### 8.1 基线问题：固定 padding 到 512
+
+`ai/local_embed.rs` 用 `PaddingStrategy::Fixed(MAX_SEQ_LEN=512)`——**不论文本多长都补到 512 token**；Transformer 注意力 O(L²)，短文档白烧数倍算力。且回填按 DB 行序取数（长短混批），批内最长 512 拖累整批。
+
+### 8.2 修复 #1（2026-09-26）：动态 padding + 按长度分批
+
+- padding → `BatchLongest`（每批补到该批最长，clamp `[1,512]`）；`embeddings.rs` 回填前按文本字符数排序后再切批。
+
+| 指标 | Before（Fixed 512） | After（BatchLongest） | 变化 |
+|---|---|---|---|
+| 单次短查询推理（`bench_local_embed_latency`，bge-large） | **7.52s / 7.33s** | **0.328s / 0.306s** | **≈23×** |
+| 结果向量 | — | 不变（padding 位被 attention mask 屏蔽） | 等价 |
+
+### 8.3 后续可选项
+
+- **#3 按 md5 去重**：本库 7733 个已索引文件仅 **6963** 个唯一 md5（**约 10%** 重复可省）。
+- **#2 换更小模型**：`bge-base`(≈2×) / `bge-small`(≈4–6×)，换维会再全量回填。
+- **#4 并行推理**：当前 `model`/`tokenizer` 各一把全局 Mutex，同刻仅一个 batch；多实例并行需内存。
+- **#5 远程/GPU**：`active_embedding_model_id` 指向远程 `/embeddings` 即可（代码已支持）；或 tract → ONNX Runtime + DirectML。
+
 
 
