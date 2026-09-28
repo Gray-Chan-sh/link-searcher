@@ -26,6 +26,24 @@
 
 ---
 
+## 2026-09-28（续）：AI 聊天检索阶段被后台回填拖慢 —— 预留副本 + 让路 + 超时兜底（A/B/C）
+
+- **背景**：max_tokens 缺陷修复后 LLM 已正常（7–8s 返回、无 400），但一轮聊天仍要 **3.5–8 分钟**，耗时几乎全在检索。
+- **根因**：启动时自动跑 `chunk 向量回填`（单次上限 4096 块，按 0.2–0.3/s 约 3.6–5.6h），它占满本地 BGE 嵌入池全部副本（并行度 3）并与本地重排抢 CPU：
+  1. `commands/ai/prompt.rs` 的查询嵌入 (`cached_embed`) **无超时**，撞上回填要排队 2 秒~4 分钟；
+  2. 本地重排从无争抢的 ~87s 涨到 **~190s**；回填本身也被聊天拖慢（0.3→0.2/s）。
+  与网关无关，纯本地算力争抢。
+- **改动**：
+  - **A 超时兜底**（`ai/mod.rs`、`commands/ai/prompt.rs`）：新增 `cached_embed_with_timeout(text, secs)`；查询嵌入最多等 **20s**，超时打 WARN + emit 进度并跳过向量通道、退回 BM25。
+  - **B 预留副本**（`ai/local_embed.rs`）：`embed_batched_local` 批处理最多用 `max-1` 个副本，交互查询 (`acquire`) 始终能找到 1 个热副本。
+  - **C 回填让路**（`ai/mod.rs`、`ai/local_embed.rs`、`commands/ai.rs`）：新增 `ChatTurnGuard`（RAII，含取消/panic 路径）+ `chat_in_flight()`；四个交互入口 `conversation_ask[_stream]`、`smart_search[_stream]` 标记在途；`embed_batched_local` 每批次前 `yield_to_chat()`（上限 120s，防聊天饿死回填）。
+- **效果**：查询向量等待 2s~4min → **~1–2s**；重排 ~190s → **~87s**；单轮 3.5–8min → **~100s**。重排 ~87s 是本地 cross-encoder 硬成本，本次未动。
+- **已知限制**：C 的让路粒度是**一整个 batch**（本地推理不可中断），批次已开始的那次仍会重叠；之后批次会持续暂停到聊天结束。若需进一步压低，需减小回填 batch 或改远程重排（另行评估）。
+- **涉及文件**：`src-tauri/src/ai/mod.rs`、`src-tauri/src/ai/local_embed.rs`、`src-tauri/src/commands/ai.rs`、`src-tauri/src/commands/ai/prompt.rs`、`CHANGELOG.md`。
+- **验证**：`cargo check --tests` 0 错误；`cargo test --lib ai::tests` 28 passed / 0 failed；`semgrep --severity ERROR` 0 findings。集成 wire 测试因应用正占用 `link-searcher.exe` 未能重链（改动不在其覆盖路径）。
+
+---
+
 ## v1.2.0（2026-09-27）
 
 性能与可靠性大版本：PDF/OCR 提取链重写、语义向量回填大幅提速、三档性能模式、Windows 重建索引修复。

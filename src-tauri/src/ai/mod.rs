@@ -64,6 +64,51 @@ pub fn clear_query_embed_cache() {
     }
 }
 
+/// [`cached_embed`] with a wall-clock cap. Interactive retrieval must never
+/// block for minutes on a saturated local embed pool, so on timeout this
+/// returns `None` and the caller falls back to lexical (BM25) retrieval.
+/// The worker thread is left running: if it later obtains a replica it still
+/// fills the cache, which only helps subsequent queries.
+pub fn cached_embed_with_timeout(text: &str, timeout_secs: u64) -> Option<Vec<f32>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let owned = text.to_string();
+    std::thread::spawn(move || {
+        let _ = tx.send(cached_embed(&owned));
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(timeout_secs))
+        .ok()
+        .flatten()
+}
+
+/// Number of interactive chat turns currently in flight. Background embedding
+/// backfill yields to these so interactive retrieval keeps the local model
+/// pool (and CPU) while the user waits.
+static ACTIVE_CHAT_TURNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// RAII marker for an interactive chat turn. Decrements on every exit path,
+/// including early returns, cancellation and panics.
+pub struct ChatTurnGuard;
+
+impl ChatTurnGuard {
+    /// Mark a chat turn as started. Keep the returned guard alive for the whole
+    /// turn (retrieval + LLM); it releases automatically when dropped.
+    pub fn begin() -> Self {
+        ACTIVE_CHAT_TURNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ChatTurnGuard {
+    fn drop(&mut self) {
+        ACTIVE_CHAT_TURNS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// True while at least one interactive chat turn is running.
+pub fn chat_in_flight() -> bool {
+    ACTIVE_CHAT_TURNS.load(std::sync::atomic::Ordering::SeqCst) > 0
+}
+
 /// Resolved endpoint for a model role: the provider + model id in use.
 #[derive(Debug, Clone)]
 pub struct ActiveEndpoint {
@@ -1691,6 +1736,18 @@ mod tests {
         };
         let body = serde_json::to_string(&req).unwrap();
         assert!(!body.contains("max_tokens"), "None must be omitted, got {body}");
+    }
+
+    #[test]
+    fn chat_turn_guard_tracks_in_flight_and_releases_on_drop() {
+        assert!(!chat_in_flight(), "baseline should be idle");
+        {
+            let _a = ChatTurnGuard::begin();
+            assert!(chat_in_flight());
+            let _b = ChatTurnGuard::begin();
+            assert!(chat_in_flight());
+        }
+        assert!(!chat_in_flight(), "guard must release on drop");
     }
 
     #[test]

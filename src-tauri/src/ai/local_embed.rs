@@ -247,9 +247,33 @@ pub fn embed_batch_local(texts: &[String]) -> Vec<Option<Vec<f32>>> {
     }
 }
 
+/// Pause background batch embedding while an interactive chat turn is in
+/// flight, freeing CPU (and the reserved replica) for the user's retrieval.
+///
+/// Bounded so a chatty user can't starve indexing forever. Granularity is one
+/// batch: inference already running can't be interrupted, so the *first* turn
+/// that starts mid-batch may still overlap it; once that batch finishes, the
+/// backfill stays parked for as long as turns keep arriving.
+fn yield_to_chat() {
+    use std::time::{Duration, Instant};
+    const MAX_YIELD: Duration = Duration::from_secs(120);
+    if !crate::ai::chat_in_flight() {
+        return;
+    }
+    let start = Instant::now();
+    while crate::ai::chat_in_flight() && start.elapsed() < MAX_YIELD {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Embed many texts by slicing into `batch_size` batches and running up to
 /// [`parallelism`] batches concurrently (one replica each). Output order matches
 /// the input.
+///
+/// One replica is **reserved for interactive queries**: batch work runs on at
+/// most `max - 1` replicas, so a chat turn always finds a warm replica even
+/// while a long backfill is running (interactive embedding uses `acquire`,
+/// which may take the reserved one).
 pub fn embed_batched_local(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>>> {
     let n = texts.len();
     if n == 0 {
@@ -265,7 +289,12 @@ pub fn embed_batched_local(texts: &[String], batch_size: usize) -> Vec<Option<Ve
     let chunk_count = texts.len().div_ceil(batch_size);
     let out: Mutex<Vec<Option<Vec<f32>>>> = Mutex::new(vec![None; n]);
     let next = AtomicUsize::new(0);
-    let workers = pool.max.min(chunk_count).max(1);
+    const RESERVED_FOR_QUERIES: usize = 1;
+    let workers = pool
+        .max
+        .saturating_sub(RESERVED_FOR_QUERIES)
+        .max(1)
+        .min(chunk_count);
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -274,6 +303,8 @@ pub fn embed_batched_local(texts: &[String], batch_size: usize) -> Vec<Option<Ve
                 if i >= chunk_count {
                     break;
                 }
+                // Yield to an in-flight chat turn before starting this batch.
+                yield_to_chat();
                 let base = i * batch_size;
                 let end = (base + batch_size).min(texts.len());
                 let chunk = &texts[base..end];

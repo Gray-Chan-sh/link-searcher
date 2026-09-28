@@ -370,6 +370,9 @@ pub async fn smart_search(
     }
     log::info!("[AI] smart_search: query={}", query);
     crate::ai::reset_ai_cancel();
+    // Mark this turn interactive so the embedding backfill yields the local
+    // model pool/CPU to us (dropped on every exit path).
+    let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
         prepare_smart_prompt(&state, &query)?;
@@ -415,6 +418,7 @@ pub async fn smart_search_stream(
     }
     log::info!("[AI] smart_search_stream: query={}", query);
     crate::ai::reset_ai_cancel();
+    let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
         prepare_smart_prompt(&state, &query)?;
@@ -522,6 +526,7 @@ pub async fn conversation_ask(
         source_ids.len()
     );
     crate::ai::reset_ai_cancel();
+    let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, clarify_blocking, .. } =
         prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "", clarify_reply.as_ref()).await?;
@@ -588,6 +593,7 @@ pub async fn conversation_ask_stream(
     crate::ai::reset_ai_cancel();
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
+    let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let prepared = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref()).await;
     match &prepared {
