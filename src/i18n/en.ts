@@ -628,6 +628,8 @@ const en: Record<string, string> = {
     perf_auto_optimize_desc: 'Detect your hardware and automatically configure optimal indexing settings.',
     embed_parallelism: 'Embedding parallelism',
     embed_parallelism_hint: 'Number of model replicas used in parallel during vector backfill (~1 GB RAM each). 0 = auto (≈ half the CPU cores, max 4). Embedding is slow on a single core; more replicas speed it up. Lower it when memory is tight.',
+    embed_adaptive: 'Adaptive remote embedding',
+    embed_adaptive_hint: 'For a remote embedding gateway, enable adaptive concurrency: start small and grow batch/concurrency until throughput plateaus, back off on errors, and remember the best point per endpoint+model. Only applies to remote models; off = plain sequential batches.',
     task_backfill: 'Vector backfill (documents)',
     task_backfill_chunks: 'Vector backfill (chunks)',
     perf_one_click_optimize: 'One-Click Optimize',

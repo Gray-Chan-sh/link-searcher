@@ -4,6 +4,23 @@
 
 ---
 
+## 2026-09-29：远程嵌入「并发 + 自适应」——小批起步/逐步加档/波动回退 + 按端点记忆最优点
+
+- **背景**：把嵌入/重排外接到局域网网关（oMLX / Infinity 等）后，旧代码对远程网关是**固定单并发、逐批串行**（`ai::embed_batched` 内 `for chunk { embed_batch }`）。而多数嵌入网关（TEI / Infinity / vLLM）靠**跨请求动态批处理**提吞吐——客户端串行就吃不到；同时远程请求**读超时写死 1 小时**，卡住会干等。
+- **改动**（`src-tauri/src/ai/mod.rs`）：
+  1. **并发执行**：远程 `embed_batched` 改为 `std::thread::scope` 工作池，按计划的 `conc` 并发发送、按输入顺序回填结果；失败分块填 `None`（不整体失败）。
+  2. **自适应调优**：新增纯函数 `next_embed_plan(prev, sample)`（AIMD 风格）——小批起步；吞吐提升（>3%）则先加批（上限 512）、批满再加并发（上限 8）；**真正回退**（<90%）才降一档；**平台期保持**（避免震荡）；**出错即回退**。响应解析新增 `usage.total_tokens` 作为吞吐度量（网关不返回时用字符数兜底）。
+  3. **自适应超时 + 重试**：每请求读超时 `clamp(batch×3, 60s, 900s)` 取代固定 1 小时；失败指数退避重试 2 次。
+  4. **记忆最优点**：计划按 `"<base_url>|<model_id>"` 持久化到 `config.json` 的 `embed_plans`（`config::load/save_embed_plan`），下次从最优点附近起步；`config.rs` 新增 `EmbedPlan` 结构。
+  5. **开关**：新增设置 `embed_adaptive`（默认开，`settings` 白名单 + `db` 播种），环境变量 `LINK_SEARCHER_EMBED_ADAPTIVE=0` 可临时关闭；关闭时退回固定单并发。
+- **可观测**：索引状态页回填日志追加当前计划（`模型 batch=… 并发=… 峰值=…tok/s`，`ai::embed_plan_summary()`）。
+- **UI**：设置页「性能」标签新增「远程嵌入自适应并发」开关（`PerformanceTab`，i18n 中/英/日/韩）。
+- **不影响**：本地内置模型路径不变（仍走副本池）；查询嵌入路径不变。
+- **涉及文件**：`src-tauri/src/ai/mod.rs`、`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/commands/index/embeddings.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/db/mod.rs`、`src/components/settings/PerformanceTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`README.md`、`docs/06-settings.md`、`docs/perf-index-baseline.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **458 passed / 0 failed / 2 ignored**（新增 6 个 tuner 单测）；`npx tsc --noEmit` 0 错误；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-09-28：AI 聊天无回复（同一 max_tokens 缺陷第三次复发）——未知即省略 + 截断检测 + 400 分类
 
 - **根因（完整链）**：

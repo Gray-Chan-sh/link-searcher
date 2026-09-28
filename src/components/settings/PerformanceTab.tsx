@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import { detectHardware, autoOptimize, getPerformanceProfile, setPerformanceTier, type HardwareInfo, type PerformanceProfile } from '../../api/settings'
-import { Section, NumberField } from './SettingsFields'
+import { Section, NumberField, ToggleField } from './SettingsFields'
 
 const TIER_LABELS: Record<string, string> = { aggressive: '⚡', balanced: '⚖️', conservative: '🐢' }
 const TIER_COLORS: Record<string, string> = {
@@ -12,10 +12,12 @@ const TIER_COLORS: Record<string, string> = {
 }
 const TIERS = ['conservative', 'balanced', 'aggressive'] as const
 
-export function PerformanceTab({ onFieldChange, embedParallelism, onChangeEmbedParallelism }: {
+export function PerformanceTab({ onFieldChange, embedParallelism, onChangeEmbedParallelism, embedAdaptive, onChangeEmbedAdaptive }: {
   onFieldChange: (key: string, value: string) => void
   embedParallelism: string
   onChangeEmbedParallelism: (v: string) => void
+  embedAdaptive: string
+  onChangeEmbedAdaptive: (v: string) => void
 }) {
   const { t } = useI18n()
   const [hw, setHw] = useState<HardwareInfo | null>(null)
@@ -168,6 +170,15 @@ export function PerformanceTab({ onFieldChange, embedParallelism, onChangeEmbedP
           step={1}
         />
         <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">{t('embed_parallelism_hint')}</p>
+
+        <div className="mt-4 pt-4 border-t border-gray-200 dark:border-gray-800">
+          <ToggleField
+            label={t('embed_adaptive')}
+            checked={embedAdaptive !== '0'}
+            onChange={v => onChangeEmbedAdaptive(v ? '1' : '0')}
+          />
+          <p className="text-xs text-gray-500 dark:text-gray-400 mt-2">{t('embed_adaptive_hint')}</p>
+        </div>
       </Section>
 
       <Section title={t('perf_auto_optimize')}>

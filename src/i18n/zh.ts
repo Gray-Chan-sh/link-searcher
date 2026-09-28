@@ -628,6 +628,8 @@ const zh: Record<string, string> = {
     perf_auto_optimize_desc: '检测本机硬件，自动配置最佳索引参数。',
     embed_parallelism: '嵌入并行度',
     embed_parallelism_hint: '向量回填时并行的模型副本数（每个约 1GB 内存）。0 = 自动（≈CPU 核数一半，最多 4）。CPU 单核跑嵌入较慢，多开可显著加速；内存紧张时调小。',
+    embed_adaptive: '远程嵌入自适应并发',
+    embed_adaptive_hint: '对远程嵌入网关启用「并发 + 自适应批/并发度」：小批起步，逐步加大直到吞吐见顶，出错自动回退，并按「网关+模型」记住最优点。仅当嵌入模型是远程网关时生效；关闭则用固定单并发批次。',
     task_backfill: '向量回填（文档）',
     task_backfill_chunks: '向量回填（分块）',
     perf_one_click_optimize: '一键优化',

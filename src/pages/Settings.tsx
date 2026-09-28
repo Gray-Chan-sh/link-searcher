@@ -285,6 +285,8 @@ export default function Settings() {
             onFieldChange={handleFieldChange}
             embedParallelism={settings['embed_parallelism'] ?? '0'}
             onChangeEmbedParallelism={v => handleFieldChange('embed_parallelism', v)}
+            embedAdaptive={settings['embed_adaptive'] ?? '1'}
+            onChangeEmbedAdaptive={v => handleFieldChange('embed_adaptive', v)}
           />
         )}
 

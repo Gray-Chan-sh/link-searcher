@@ -91,6 +91,7 @@ pub fn update_config(
         semantic_weight: new_config.semantic_weight,
         active_reranker_model_id: new_config.active_reranker_model_id,
         pending_cleanup_dir: current.pending_cleanup_dir.clone(),
+        embed_plans: current.embed_plans.clone(),
     };
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.

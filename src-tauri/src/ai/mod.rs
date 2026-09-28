@@ -316,10 +316,15 @@ pub fn truncate_for_embed(s: &str) -> String {
     }
 }
 
-/// Embed texts in `batch_size` chunks; failed texts map to `None`.
+/// Embed texts; failed texts map to `None`.
 ///
 /// Local models run batches in parallel across a replica pool (see
-/// `local_embed::embed_batched_local`); remote gateways use sequential batches.
+/// `local_embed::embed_batched_local`). Remote gateways run an **adaptive,
+/// concurrent** path: batches are sent with a learned `(batch, concurrency)`
+/// plan that the tuner grows while throughput improves and backs off on errors
+/// (see [`next_embed_plan`]). Set `embed_adaptive=0` (or the env
+/// `LINK_SEARCHER_EMBED_ADAPTIVE=0`) to force plain sequential batches using
+/// `batch_size`.
 pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>>> {
     let batch_size = batch_size.max(1);
     let cfg = crate::config::load_config();
@@ -332,12 +337,304 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
         }
         return vec![None; texts.len()];
     }
-    let mut out = Vec::with_capacity(texts.len());
-    for chunk in texts.chunks(batch_size) {
-        let chunk: Vec<String> = chunk.iter().map(|t| truncate_for_embed(t)).collect();
-        out.extend(embed_batch(&chunk));
+    if texts.is_empty() {
+        return Vec::new();
     }
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
+        return vec![None; texts.len()];
+    };
+
+    let adaptive = embed_adaptive_enabled();
+    let key = embed_plan_key(&ep.base_url, &ep.model_id);
+    let plan = if adaptive {
+        crate::config::load_embed_plan(&key).unwrap_or_default()
+    } else {
+        crate::config::EmbedPlan { batch: batch_size, conc: 1, tok_per_s: 0.0, updated: 0 }
+    };
+
+    let (out, sample) = embed_batched_remote(&ep, texts, plan);
+    log::debug!(
+        "[AI] 远程嵌入: {} 项, {:.0} tok/s, 失败 {}",
+        sample.items,
+        sample.tok_per_s,
+        sample.errors
+    );
+
+    let effective = if adaptive { next_embed_plan(plan, sample) } else { plan };
+    if adaptive && effective != plan {
+        crate::config::save_embed_plan(&key, effective);
+    }
+    *last_plan().lock().unwrap_or_else(|e| e.into_inner()) = Some((key, effective));
     out
+}
+
+/// Observed result of one remote embedding pass (all chunks of one call).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EmbedSample {
+    /// Throughput over the pass (gateway tokens — or chars when the gateway
+    /// omits `usage` — per wall second).
+    pub tok_per_s: f32,
+    /// Items submitted.
+    pub items: usize,
+    /// Chunks that failed after retries.
+    pub errors: usize,
+}
+
+/// Bounds for the adaptive tuner.
+pub const EMBED_BATCH_MIN: usize = 16;
+pub const EMBED_BATCH_MAX: usize = 512;
+pub const EMBED_CONC_MIN: usize = 1;
+pub const EMBED_CONC_MAX: usize = 8;
+/// Growth/decay factors for the AIMD ramp.
+const GROW_RATIO: f32 = 1.5;
+const SHRINK_RATIO: f32 = 0.6;
+/// Throughput must beat the recorded best by this factor to count as progress.
+const IMPROVE_RATIO: f32 = 1.03;
+
+fn round_up_8(n: usize) -> usize {
+    n.div_ceil(8) * 8
+}
+
+/// Pure tuner step: given the previous plan and one sample, compute the next
+/// plan. Batch grows first until it caps, then concurrency grows; any error
+/// backs both off. Deterministic and side-effect free (unit-tested).
+pub fn next_embed_plan(
+    prev: crate::config::EmbedPlan,
+    sample: EmbedSample,
+) -> crate::config::EmbedPlan {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mut next = prev;
+
+    if sample.errors > 0 {
+        next.conc = (prev.conc / 2).max(EMBED_CONC_MIN);
+        let shrunk = round_up_8((prev.batch as f32 * SHRINK_RATIO) as usize).max(EMBED_BATCH_MIN);
+        next.batch = shrunk.min(prev.batch);
+        next.updated = now;
+        return next;
+    }
+    if sample.tok_per_s <= 0.0 {
+        return next; // no measurement (e.g. empty) — leave the plan untouched
+    }
+
+    if sample.tok_per_s > prev.tok_per_s * IMPROVE_RATIO {
+        if prev.batch < EMBED_BATCH_MAX {
+            next.batch =
+                round_up_8(((prev.batch as f32 * GROW_RATIO) as usize).min(EMBED_BATCH_MAX));
+        } else if prev.conc < EMBED_CONC_MAX {
+            next.conc = prev.conc + 1;
+        }
+        next.tok_per_s = sample.tok_per_s;
+    } else if sample.tok_per_s < prev.tok_per_s * 0.9 {
+        // Real regression: step back one notch — batch first, then concurrency.
+        if prev.batch > EMBED_BATCH_MIN {
+            let shrunk = round_up_8((prev.batch as f32 * SHRINK_RATIO) as usize).max(EMBED_BATCH_MIN);
+            next.batch = if shrunk < prev.batch { shrunk } else { prev.batch.saturating_sub(8).max(EMBED_BATCH_MIN) };
+        } else if prev.conc > EMBED_CONC_MIN {
+            next.conc = prev.conc - 1;
+        }
+        next.tok_per_s = (prev.tok_per_s * 0.97).max(sample.tok_per_s);
+    } else {
+        // Plateau (within ±10%): hold this point and decay the recorded best
+        // slightly, so a later probe can still register as an improvement
+        // instead of freezing the ramp forever.
+        next.tok_per_s = prev.tok_per_s * 0.97;
+    }
+    next.updated = now;
+    next
+}
+
+/// Stable key for a persisted plan: endpoint + model.
+fn embed_plan_key(base_url: &str, model_id: &str) -> String {
+    format!("{}|{}", base_url.trim_end_matches('/'), model_id)
+}
+
+/// Per-request read timeout, scaled with the request size.
+fn embed_read_timeout_secs(batch: usize) -> u64 {
+    (batch as u64 * 3).clamp(60, 900)
+}
+
+/// Whether the adaptive remote path is enabled. Precedence: env
+/// `LINK_SEARCHER_EMBED_ADAPTIVE` > setting `embed_adaptive` > default on.
+fn embed_adaptive_enabled() -> bool {
+    if let Ok(v) = std::env::var("LINK_SEARCHER_EMBED_ADAPTIVE") {
+        return !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off");
+    }
+    let data_dir = crate::config::load_config().data_dir;
+    let db_path = data_dir.join("data.db");
+    crate::db::get_pool(&db_path.to_string_lossy())
+        .ok()
+        .and_then(|pool| {
+            pool.get().ok().and_then(|conn| {
+                conn.query_row(
+                    "SELECT value FROM app_settings WHERE key = 'embed_adaptive'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+        })
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+        .unwrap_or(true)
+}
+
+/// Last plan used by the remote path, for the index-status progress line.
+static LAST_EMBED_PLAN: OnceLock<Mutex<Option<(String, crate::config::EmbedPlan)>>> =
+    OnceLock::new();
+
+fn last_plan() -> &'static Mutex<Option<(String, crate::config::EmbedPlan)>> {
+    LAST_EMBED_PLAN.get_or_init(|| Mutex::new(None))
+}
+
+/// One-line description of the last remote embedding plan (None when the
+/// active model is local or no remote pass has run yet).
+pub fn embed_plan_summary() -> Option<String> {
+    let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        return None;
+    }
+    let guard = last_plan().lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map(|(key, p)| {
+        let model = key.split('|').nth(1).unwrap_or(key.as_str());
+        format!("{model} batch={} 并发={} 峰值={:.0}tok/s", p.batch, p.conc, p.tok_per_s)
+    })
+}
+
+/// One HTTP embeddings request with retry/backoff. Returns vectors in input
+/// order plus the gateway-reported token count (0 when `usage` is absent).
+fn embed_one_remote(
+    ep: &ActiveEndpoint,
+    texts: &[String],
+    timeout_secs: u64,
+) -> Result<(Vec<Option<Vec<f32>>>, u64), String> {
+    #[derive(Serialize)]
+    struct Req<'a> {
+        model: &'a str,
+        input: Vec<String>,
+    }
+    #[derive(Deserialize)]
+    struct EmbeddingEntry {
+        index: usize,
+        embedding: Vec<f32>,
+    }
+    #[derive(Deserialize)]
+    struct Usage {
+        #[serde(default)]
+        total_tokens: u64,
+    }
+    #[derive(Deserialize)]
+    struct Resp {
+        data: Vec<EmbeddingEntry>,
+        #[serde(default)]
+        usage: Option<Usage>,
+    }
+
+    let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
+    let body = Req {
+        model: &ep.model_id,
+        input: texts.iter().map(|t| truncate_for_embed(t)).collect(),
+    };
+    let req_body = serde_json::to_string(&body).map_err(|e| e.to_string())?;
+
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let send = build_agent_with_read_timeout(timeout_secs)
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .set_auth(&ep.api_key)
+            .send_string(&req_body);
+        let parsed: Result<Resp, String> = send
+            .map_err(|e| e.to_string())
+            .and_then(|r| r.into_string().map_err(|e| e.to_string()))
+            .and_then(|body| serde_json::from_str::<Resp>(&body).map_err(|e| e.to_string()));
+        match parsed {
+            Ok(resp) => {
+                let mut by_index: HashMap<usize, Vec<f32>> =
+                    resp.data.into_iter().map(|e| (e.index, e.embedding)).collect();
+                let vecs = texts.iter().enumerate().map(|(i, _)| by_index.remove(&i)).collect();
+                let tokens = resp.usage.map(|u| u.total_tokens).unwrap_or(0);
+                return Ok((vecs, tokens));
+            }
+            Err(e) if attempt < 3 => {
+                let backoff = std::time::Duration::from_millis(400 * attempt as u64 * attempt as u64);
+                log::warn!("[AI] embeddings 请求失败(第 {attempt} 次): {e}; {backoff:?} 后重试");
+                std::thread::sleep(backoff);
+            }
+            Err(e) => return Err(format!("重试 {attempt} 次仍失败: {e}")),
+        }
+    }
+}
+
+/// Run `texts` through the gateway with `plan.conc` concurrent requests, each
+/// carrying `plan.batch` inputs. Results keep input order; failed chunks become
+/// `None`. Returns the vectors plus a throughput sample for the tuner.
+fn embed_batched_remote(
+    ep: &ActiveEndpoint,
+    texts: &[String],
+    plan: crate::config::EmbedPlan,
+) -> (Vec<Option<Vec<f32>>>, EmbedSample) {
+    let batch = plan.batch.clamp(EMBED_BATCH_MIN, EMBED_BATCH_MAX);
+    let conc = plan.conc.clamp(EMBED_CONC_MIN, EMBED_CONC_MAX);
+    let chunks: Vec<&[String]> = texts.chunks(batch).collect();
+    let n_chunks = chunks.len();
+    let timeout = embed_read_timeout_secs(batch);
+    let started = std::time::Instant::now();
+
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let errors = std::sync::atomic::AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<(Vec<Option<Vec<f32>>>, u64)>>> = Mutex::new(vec![None; n_chunks]);
+
+    let workers = conc.min(n_chunks).max(1);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if i >= n_chunks {
+                        break;
+                    }
+                    match embed_one_remote(ep, chunks[i], timeout) {
+                        Ok((vecs, tokens)) => {
+                            results
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())[i] = Some((vecs, tokens));
+                        }
+                        Err(e) => {
+                            log::warn!("[AI] embeddings 分块 {i} 失败: {e}");
+                            errors.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                }
+            });
+        }
+    });
+
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(texts.len());
+    let mut total_tokens: u64 = 0;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let slot = results.lock().unwrap_or_else(|e| e.into_inner())[i].take();
+        match slot {
+            Some((vecs, tokens)) => {
+                total_tokens += tokens;
+                out.extend(vecs);
+            }
+            None => out.extend(std::iter::repeat(None::<Vec<f32>>).take(chunk.len())),
+        }
+    }
+    out.truncate(texts.len());
+
+    let chars: usize = texts.iter().map(|t| t.chars().count()).sum();
+    let units = if total_tokens > 0 { total_tokens as f64 } else { chars as f64 };
+    let sample = EmbedSample {
+        tok_per_s: (units / elapsed) as f32,
+        items: texts.len(),
+        errors: errors.load(std::sync::atomic::Ordering::SeqCst),
+    };
+    (out, sample)
 }
 
 pub fn embed_batch(texts: &[String]) -> Vec<Option<Vec<f32>>> {
@@ -1557,6 +1854,67 @@ mod tests {
         let t = truncate_for_embed(&long);
         assert_eq!(t.chars().count(), EMBED_MAX_CHARS);
         assert!(long.starts_with(&t));
+    }
+
+    #[test]
+    fn tuner_grows_batch_then_concurrency() {
+        use crate::config::EmbedPlan;
+        let mut p = EmbedPlan { batch: 64, conc: 1, tok_per_s: 0.0, updated: 0 };
+        p = next_embed_plan(p, EmbedSample { tok_per_s: 100.0, items: 256, errors: 0 });
+        assert!(p.batch > 64, "batch should grow, got {}", p.batch);
+        assert_eq!(p.conc, 1, "concurrency stays 1 until the batch caps");
+        for _ in 0..12 {
+            let improved = p.tok_per_s * 2.0 + 1.0;
+            p = next_embed_plan(p, EmbedSample { tok_per_s: improved, items: 256, errors: 0 });
+        }
+        assert_eq!(p.batch, EMBED_BATCH_MAX, "batch should reach the cap");
+        assert!(p.conc > 1, "concurrency should grow after the batch caps, got {}", p.conc);
+    }
+
+    #[test]
+    fn tuner_backs_off_on_error() {
+        use crate::config::EmbedPlan;
+        let p = EmbedPlan { batch: 128, conc: 4, tok_per_s: 500.0, updated: 0 };
+        let n = next_embed_plan(p, EmbedSample { tok_per_s: 0.0, items: 256, errors: 1 });
+        assert!(n.batch < 128 && n.batch >= EMBED_BATCH_MIN, "batch {} out of range", n.batch);
+        assert!(n.conc <= 2 && n.conc >= EMBED_CONC_MIN, "conc {} out of range", n.conc);
+    }
+
+    #[test]
+    fn tuner_backs_off_on_regression_but_holds_on_plateau() {
+        use crate::config::EmbedPlan;
+        let p = EmbedPlan { batch: 256, conc: 2, tok_per_s: 400.0, updated: 0 };
+        // Plateau (within ±10%): hold position.
+        let held = next_embed_plan(p, EmbedSample { tok_per_s: 400.0, items: 256, errors: 0 });
+        assert_eq!(held.batch, 256);
+        assert_eq!(held.conc, 2);
+        // Clear regression: step back a notch.
+        let down = next_embed_plan(p, EmbedSample { tok_per_s: 200.0, items: 256, errors: 0 });
+        assert!(down.batch < 256, "regression should shrink the batch, got {}", down.batch);
+    }
+
+    #[test]
+    fn tuner_ignores_zero_sample() {
+        use crate::config::EmbedPlan;
+        let p = EmbedPlan { batch: 64, conc: 2, tok_per_s: 100.0, updated: 0 };
+        assert_eq!(next_embed_plan(p, EmbedSample::default()), p);
+    }
+
+    #[test]
+    fn tuner_respects_bounds() {
+        use crate::config::EmbedPlan;
+        let mut p = EmbedPlan { batch: EMBED_BATCH_MIN, conc: EMBED_CONC_MIN, tok_per_s: 0.0, updated: 0 };
+        for _ in 0..40 {
+            let improved = p.tok_per_s + 100.0;
+            p = next_embed_plan(p, EmbedSample { tok_per_s: improved, items: 256, errors: 0 });
+            assert!(p.batch >= EMBED_BATCH_MIN && p.batch <= EMBED_BATCH_MAX, "batch {}", p.batch);
+            assert!(p.conc >= EMBED_CONC_MIN && p.conc <= EMBED_CONC_MAX, "conc {}", p.conc);
+        }
+    }
+
+    #[test]
+    fn embed_plan_key_trims_trailing_slash() {
+        assert_eq!(embed_plan_key("http://h:1/v1/", "bge-m3"), "http://h:1/v1|bge-m3");
     }
 
     #[test]

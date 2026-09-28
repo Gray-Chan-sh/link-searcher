@@ -93,7 +93,10 @@ fn report_progress(task: &str, processed: usize, total: usize, failed: usize, st
     let rate = processed as f64 / elapsed;
     let eta_min = ((total.saturating_sub(processed)) as f64 / rate.max(0.001) / 60.0) as u64;
     log::info!(
-        "[AI] 回填进度: {processed}/{total} (失败 {failed}, {rate:.1}/s, ETA {eta_min}m)"
+        "[AI] 回填进度: {processed}/{total} (失败 {failed}, {rate:.1}/s, ETA {eta_min}m){}",
+        crate::ai::embed_plan_summary()
+            .map(|p| format!(" · {p}"))
+            .unwrap_or_default()
     );
     crate::state::set_task_progress(
         task,

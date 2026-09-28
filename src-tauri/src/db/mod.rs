@@ -445,6 +445,7 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("ocr_pdf_dpi", "300"),
         ("ocr_stall_timeout_secs", "120"),
         ("embed_parallelism", "0"),
+        ("embed_adaptive", "1"),
         ("scheduled_scan_time", "02:00"),
         ("max_results", "1000"),
         ("auto_backup", "1"),

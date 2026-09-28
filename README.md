@@ -156,7 +156,7 @@
 | 组件 | 内置（默认，离线） | 外接（可选） | 说明 |
 |------|:---:|:---:|------|
 | 文件扫描 / 解析 / MD5 去重 / 全文索引（Tantivy） | ✅ 唯一方式 | ❌ | 本地管线，离线的核心，**不做外置** |
-| 文本嵌入（语义搜索 / 向量） | ✅ 本地 BGE（CPU） | ✅ 远程 `/embeddings` | 把 `active_embedding_model_id` 指到网关即切远程，**无需改代码** |
+| 文本嵌入（语义搜索 / 向量） | ✅ 本地 BGE（CPU） | ✅ 远程 `/embeddings` | 把 `active_embedding_model_id` 指到网关即切远程，**无需改代码**；远程默认启用「**并发 + 自适应**」调优（`embed_adaptive`） |
 | 重排（cross-encoder） | ✅ 本地 | ✅ 远程 `/v1/rerank` | 同上，provider 模式 |
 | LLM（摘要 / RAG 问答 / 聊天） | ❌ | ✅ OpenAI 兼容 | 默认即外接；用本地 Ollama（127.0.0.1）则不出本机 |
 | OCR（图像 / 扫描件） | ✅ Windows OCR / Apple Vision / PaddleOCR / Tesseract | ⚠️ 无内建远程 | 接云 OCR 需自行开发，且要上传原文，**隐私代价大** |

@@ -630,6 +630,8 @@ const ja: Record<string, string> = {
     perf_auto_optimize_desc: 'ハードウェアを検出し、最適なインデックス設定を自動的に適用します。',
     embed_parallelism: '埋め込み並列度',
     embed_parallelism_hint: 'ベクトル補完時に並列実行するモデルレプリカ数（1 つ約 1GB メモリ）。0 = 自動（CPU コア数の約半分、最大 4）。CPU 単コアでは埋め込みが遅いため、増やすと高速化します。メモリが厳しい場合は小さく。',
+    embed_adaptive: 'リモート埋め込みの適応並列',
+    embed_adaptive_hint: 'リモート埋め込みゲートウェイで「並列＋適応バッチ/並列度」を有効化：小さく開始し、スループットが頭打ちになるまで拡大、エラー時は後退、最適点を「ゲートウェイ＋モデル」単位で記憶します。リモートモデル時のみ有効。オフ＝固定の逐次バッチ。',
     task_backfill: 'ベクトル補完（文書）',
     task_backfill_chunks: 'ベクトル補完（チャンク）',
     perf_one_click_optimize: 'ワンクリック最適化',

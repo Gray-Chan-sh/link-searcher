@@ -246,5 +246,17 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 - **#5 远程/GPU**：`active_embedding_model_id` 指向远程 `/embeddings` 即可（代码已支持）；或 tract → ONNX Runtime + DirectML。
 
+### 8.7 已实施：远程嵌入「并发 + 自适应」（2026-09-29）
+
+- **背景**：把嵌入外接到局域网网关（oMLX / Infinity）后，旧代码对远程是**固定单并发、逐批串行**（`for chunk { embed_batch }`），吃不到网关（TEI / Infinity / vLLM）的**跨请求动态批处理**；且远程读超时写死 1 小时，卡住会干等。
+- **改动**（`ai/mod.rs`）：远程 `embed_batched` 改为 `std::thread::scope` 线程池并发（按计划的 `conc` 并发、结果按输入顺序回填）；新增纯函数 `next_embed_plan`（AIMD：先加批→批满加并发→**真正回退**才降档→**平台期保持**→出错回退）；每请求读超时 `clamp(batch×3, 60, 900)` + 指数退避重试；最优计划按 `"<base_url>|<model_id>"` 持久化到 `config.json::embed_plans`；开关 `embed_adaptive`（默认开）。
+- **可观测**：回填进度日志追加 `模型 batch=… 并发=… 峰值=…tok/s`。
+- **实测（2026-09-29，Infinity `bge-m3` on M4，局域网）**：
+  - 串行单请求（batch=64）warmup 口径约 **0.9 条/s**；
+  - 并发自适应后吞吐随 `conc` 上升（确切数值以 `embed_plans` 与进度日志回填为准）；
+  - 同一库整轮重建：doc `7733/7733`（0 失败）+ chunk `4096`（单轮上限）；chunk 段约 **1.9–2.3 条/s**（旧本机 tract 单核约 0.2–0.3/s）。
+- **注意**：对**单线程串行执行**的网关（如 oMLX 的 MLX 全局单线程执行器）并发不会提升吞吐，个别实现还会因公平限流把批变小；自适应会自然收敛到 `并发=1`，属预期。
+
+
 
 

@@ -630,6 +630,8 @@ const ko: Record<string, string> = {
     perf_auto_optimize_desc: '하드웨어를 감지하고 최적의 인덱싱 설정을 자동으로 적용합니다.',
     embed_parallelism: '임베딩 병렬도',
     embed_parallelism_hint: '벡터 백필 시 병렬로 실행할 모델 복제본 수(각 약 1GB 메모리). 0 = 자동(CPU 코어의 약 절반, 최대 4). CPU 단일 코어에서는 임베딩이 느리므로 늘리면 빨라집니다. 메모리가 부족하면 줄이세요.',
+    embed_adaptive: '원격 임베딩 적응형 동시성',
+    embed_adaptive_hint: '원격 임베딩 게이트웨이에서 적응형 동시성을 사용합니다. 작게 시작해 처리량이 정체될 때까지 배치/동시성을 늘리고, 오류 시 물러서며, "게이트웨이+모델" 단위로 최적점을 기억합니다. 원격 모델에만 적용되며 끄면 고정 순차 배치입니다.',
     task_backfill: '벡터 백필(문서)',
     task_backfill_chunks: '벡터 백필(청크)',
     perf_one_click_optimize: '원클릭 최적화',

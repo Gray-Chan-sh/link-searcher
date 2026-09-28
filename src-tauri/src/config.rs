@@ -91,6 +91,30 @@ pub fn auto_enable_first_per_type(models: Vec<ModelConfig>) -> Vec<ModelConfig> 
         .collect()
 }
 
+/// Learned remote-embedding plan for one endpoint+model: how many inputs to
+/// send per request (`batch`) and how many requests to keep in flight
+/// (`conc`). Persisted so a later run starts near the best-known point; the
+/// tuner keeps probing at low frequency and backs off on errors.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct EmbedPlan {
+    /// Inputs per request.
+    pub batch: usize,
+    /// Concurrent in-flight requests.
+    pub conc: usize,
+    /// Best observed throughput (tokens/s) for this endpoint+model.
+    #[serde(default)]
+    pub tok_per_s: f32,
+    /// Unix seconds of the last update.
+    #[serde(default)]
+    pub updated: u64,
+}
+
+impl Default for EmbedPlan {
+    fn default() -> Self {
+        Self { batch: 64, conc: 1, tok_per_s: 0.0, updated: 0 }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
@@ -140,6 +164,10 @@ pub struct AppConfig {
     /// 删除成功后清空；仍失败则保留，下次启动重试。
     #[serde(default)]
     pub pending_cleanup_dir: Option<PathBuf>,
+    /// Learned remote-embedding plans, keyed by `"<base_url>|<model_id>"`.
+    /// Written by the adaptive tuner (`ai::embed_batched` remote path).
+    #[serde(default)]
+    pub embed_plans: std::collections::HashMap<String, EmbedPlan>,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -165,6 +193,7 @@ impl Default for AppConfig {
             active_llm_model_id: String::new(),
             semantic_weight: 0.3,
             pending_cleanup_dir: None,
+            embed_plans: std::collections::HashMap::new(),
         }
     }
 }
@@ -175,6 +204,27 @@ pub fn config_file_path() -> PathBuf {
 
 pub fn is_local_embedding_model(model_id: &str) -> bool {
     model_id.starts_with("local:")
+}
+
+/// Learned adaptive plan for a remote embedding endpoint, if one was persisted.
+pub fn load_embed_plan(key: &str) -> Option<EmbedPlan> {
+    load_config().embed_plans.get(key).copied()
+}
+
+/// Persist (or refresh) the learned plan for `key`. Full read-modify-write
+/// under [`CONFIG_LOCK`] so plan updates and provider CRUD serialize instead of
+/// clobbering each other. Best-effort — a failure only logs.
+pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = config_dir().join(CONFIG_FILE);
+    let mut cfg: AppConfig = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    cfg.embed_plans.insert(key.to_string(), plan);
+    if let Err(e) = write_config_file(&cfg) {
+        log::warn!("[AI] 保存嵌入调优计划失败: {e}");
+    }
 }
 
 fn config_dir() -> PathBuf {
