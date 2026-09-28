@@ -319,6 +319,47 @@ bash scripts/eval/run_rag_eval.sh <golden_dir> [data_dir]
 
 ---
 
+## 🔗 隐藏依赖：重排器使用 chunk 向量（2026-09-27）
+
+**结论：不得删除 chunk 向量。** 它同时服务两处，而 `CHUNK_TOP_K` 只能控制其一。
+
+### 两处用途
+
+| # | 用途 | 代码 | 受 `CHUNK_TOP_K` 控制 |
+|---|---|------|:---:|
+| A | 检索通道：RRF 排序 + `hit_chunks` 注入 | `commands/ai/prompt.rs:540-585`、`:957` | ✅（`=0` 关闭） |
+| B | **重排器段落选择**：分块文档喂给 cross-encoder 的段落 = chunk 向量余弦选出的**最相关块** | `commands/ai/prompt.rs:697-731` | ❌（直接读 `chunk_embeddings` 表） |
+
+用途 B 的兜底才是文档头：`truncate_for_embed(content)` 只取**前 2000 字**（正是上节「重排器文本片段过短」提到的问题）。删掉 chunk 向量 → 长文档重排退回只读前 2000 字。
+
+### 实测（真实库长文档深部探针，2026-09-27）
+
+方法：从 `D:\index` 中 >3 万字的长文档**深部**抽逐字引文（含长数字锚点）自动出题，跑 `chat --dry-run --dump-injected`，对比 chunk 通道 ON（`CHUNK_TOP_K=500`）/ OFF（`=0`）：
+
+| rerank | 指标 | ON | OFF |
+|---|---|:---:|:---:|
+| **off** | File-Recall@30 | 12/17 (71%) | 6/17 (35%) |
+| **off** | Span-Hit | 5/17 (29%) | 0/17 (0%) |
+| **on**（默认） | File-Recall@30 | 3/8 (38%) | 3/8 (38%) |
+| **on**（默认） | Span-Hit | 0/8 (0%) | 1/8 (12%) |
+
+- **rerank off**：用途 B 不生效，`CHUNK_TOP_K=0` 真正摘掉 chunk 向量 → 大幅退化。
+- **rerank on**：用途 B 仍在用 chunk 向量 → 两臂持平 —— 这是**混淆**，不是"chunk 无用"。
+
+### 对评测/门禁的含义
+
+⚠️ **用 `CHUNK_TOP_K=0` 无法评测"删除 chunk 向量"的效果**（只关用途 A）。若确要评测该改动，必须**真的移除 `chunk_embeddings` 行**，或让重排的 passage 选择也跳过 chunk 向量。
+
+> 局限性：探针为**带字面锚点**的查询（覆盖 rerank 路径与头部/深部注入差异），未覆盖"语义但不同词"的深部题；语料高度模板化（多为"律师函"系列近似文档）；样本 n=17/8。
+
+### 待修（独立问题）
+
+关重排时，长文档常只注入头部（如 `[0-2306]`），深部答案进不来 —— `chunks_for_packing` 的词法兜底未生效（`commands/ai/prompt.rs:1352-1362`）。
+
+工具：`scripts/eval/run_longdoc_span_probe.py`。
+
+---
+
 ## 变更记录
 
 | 日期 | 问句数 | Recall@10 | Success@10 | 说明 |
@@ -343,6 +384,7 @@ bash scripts/eval/run_rag_eval.sh <golden_dir> [data_dir]
 | 2026-09-19 | 88 | 68.04% (66/97) | **72.73% (64/88)** | **当前基线**：案例改归 `semantic` + 新增 **12 道法规/合同类条款查询题**（`semantic` 20→33，成为最大类别）。**指标下降 ≠ 退化**——原 80% 部分来自题面偏易（详见下节） |
 | 2026-09-19 | 88 | — | **87.50% (77/88)** | **可答率口径**（Answerable@10，LLM judge）：判据改为"top-10 里是否有任意一份**能回答**该问题"。同集旧口径 72.73% → **+14.77pp**，差异主要在 `semantic`（45.45%→78.79%）。⚠️ `long_doc` 40% 是 judge 只喂前 3000 字的假阴性，待改按 chunk 喂 |
 | 2026-09-21 | 35 (Golden v2) | — | — | **Golden v2 + 注入层修复**：35 题 **Span Hit 14/35 → 29/35（83%）**，File Recall@10 55.6% → 77.8%。⚠️ 指标为逐字引文 Span Hit，与上方 top-10 Recall/Success **不可直接比较**；对应改动为注入排序/预算对齐 + 关键词丢弃纯数字修复，详见 `docs/golden-v2-design.md` 与 2026-09-21 CHANGELOG |
+| 2026-09-27 | 17 长文档深部探针 | 71%→35% | Span-Hit 29%→0% | **确认重排器依赖 chunk 向量**（`CHUNK_TOP_K` A/B；rerank off 时 ON vs OFF）。开重排时两臂持平系**混淆**——`=0` 只关检索通道，关不掉重排 passage 选择（`commands/ai/prompt.rs:697-731`）。**勿砍 chunk 向量**；详见本节「隐藏依赖」 |
 
 > ⚠️ **作废记录**：同日先跑的 `mix 52.00% / rrf 56.00%` 两组数字**无效**——两组**并行**执行，CPU 争抢导致本地 BGE 嵌入超过 `semantic_fuse` 的 5 秒超时，静默退化为纯 BM25。实测语义题子集 并行 `3/20` vs 串行 `7/20`。**A/B 必须串行**（见 `scripts/eval/README.md` 的警告）。
 
