@@ -135,27 +135,35 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
 
 const DEFAULT_MAX_TOKENS: u32 = 1_000_000;
 
-/// Look up the active LLM model's `max_output_tokens` from the provider config
-/// (populated by `list_provider_models` from the gateway's `/v1/models` response).
-/// Falls back to [`DEFAULT_MAX_TOKENS`] when the value hasn't been detected yet.
-fn active_max_tokens() -> u32 {
+/// Trustworthy per-model output ceiling, from the gateway's `/v1/models`
+/// `capabilities.maxOutput` (cached on the model config).
+///
+/// `None` means the gateway does not report one. Callers MUST NOT substitute a
+/// guessed value in that case: routing/aggregator gateways (e.g. an alias like
+/// `coding`) may route each request to a different upstream model with a
+/// different ceiling, so any single cached/fallback number is either rejected
+/// with HTTP 400 or silently truncates. When `None`, omit `max_tokens` and let
+/// the upstream apply its own default.
+fn detected_max_tokens() -> Option<u32> {
     let cfg = crate::config::load_config();
-    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
-        log::debug!("[AI] max_tokens={DEFAULT_MAX_TOKENS} (source=no-endpoint)");
-        return DEFAULT_MAX_TOKENS;
-    };
     let (pid, mid) = cfg.active_llm_model_id.split_once(':').unwrap_or(("", &cfg.active_llm_model_id));
     let detected = cfg.providers.iter()
         .find(|p| p.id == pid)
         .and_then(|p| p.models.iter().find(|m| m.id == mid))
         .and_then(|m| m.max_output_tokens);
-    let val = detected.unwrap_or(DEFAULT_MAX_TOKENS);
-    if detected.is_some() {
-        log::debug!("[AI] max_tokens={val} (source=detected)");
-    } else {
-        log::debug!("[AI] max_tokens={val} (source=fallback)");
-    }
-    val
+    log::debug!(
+        "[AI] max_tokens={:?} (source={})",
+        detected,
+        if detected.is_some() { "detected" } else { "none->omit" }
+    );
+    detected
+}
+
+/// Display-only helper for the settings "测试连接" panel: the detected value,
+/// or [`DEFAULT_MAX_TOKENS`] as a human-readable fallback. Chat requests use
+/// [`detected_max_tokens`] instead and omit the field when it is `None`.
+fn active_max_tokens() -> u32 {
+    detected_max_tokens().unwrap_or(DEFAULT_MAX_TOKENS)
 }
 
 /// Classify a model id by name heuristics. Pure function, user-overridable.
@@ -568,6 +576,88 @@ fn max_tokens_limit_from_error(body: &str, current: u32) -> Option<u32> {
         .max()
 }
 
+/// Why a gateway rejected a chat request (HTTP 400). Only [`Self::OutputLimit`]
+/// is fixable by changing `max_tokens`; retrying the others with a smaller
+/// budget just burns attempts and hides the real error from the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlmErrorKind {
+    /// `max_tokens` / output budget exceeds the upstream model's ceiling.
+    OutputLimit,
+    /// The input (system prompt + retrieved context) exceeds the context window.
+    ContextLimit,
+    /// The model/provider behind an alias is not currently routable.
+    UpstreamUnavailable,
+    Other,
+}
+
+/// Classify a gateway error body. Deliberately heuristic: gateways phrase the
+/// same condition very differently, and aggregators pass each upstream's own
+/// wording straight through.
+fn classify_llm_error(body: &str) -> LlmErrorKind {
+    let lower = body.to_ascii_lowercase();
+    // Context first: such bodies frequently mention `max_tokens` as well, and
+    // shrinking `max_tokens` would never fix a too-long input.
+    const CTX: &[&str] = &[
+        "context length", "context_length", "context window", "maximum context",
+        "max context", "too many tokens", "prompt is too long", "prompt too long",
+        "reduce the length", "max_seq_len", "sequence length", "input is too long",
+        "exceeds the maximum number of tokens",
+    ];
+    if CTX.iter().any(|k| lower.contains(k)) {
+        return LlmErrorKind::ContextLimit;
+    }
+    const OUT: &[&str] = &[
+        "max_tokens", "max_output_tokens", "max output tokens", "maximum output tokens",
+        "max_completion_tokens", "completion tokens",
+    ];
+    if OUT.iter().any(|k| lower.contains(k)) {
+        return LlmErrorKind::OutputLimit;
+    }
+    const UP: &[&str] = &[
+        "no provider supported", "has no provider", "no available provider",
+        "model not found", "model_not_found", "no such model", "no healthy upstream",
+        "upstream", "bad gateway",
+    ];
+    if UP.iter().any(|k| lower.contains(k)) {
+        return LlmErrorKind::UpstreamUnavailable;
+    }
+    LlmErrorKind::Other
+}
+
+/// Conservative explicit value to try when even an *omitted* `max_tokens` was
+/// rejected with an output-limit error and the body named no ceiling.
+const OMITTED_REJECTED_FALLBACK: u32 = 4096;
+
+/// Choose the next `max_tokens` state after an output-limit rejection.
+/// Priority: stop guessing (omit) → the ceiling named in the body → half the
+/// previous value → a conservative constant. Any state already in `tried` is
+/// skipped, so the retry loop always terminates.
+fn next_max_tokens_after_limit(
+    body: &str,
+    current: Option<u32>,
+    tried: &[Option<u32>],
+) -> Option<Option<u32>> {
+    let mut candidates: Vec<Option<u32>> = Vec::new();
+    // Preferred remedy: let the (possibly different) upstream decide.
+    if current.is_some() {
+        candidates.push(None);
+    }
+    if let Some(limit) = max_tokens_limit_from_error(body, current.unwrap_or(u32::MAX)) {
+        candidates.push(Some(limit));
+    }
+    if let Some(v) = current
+        && v > MIN_MAX_TOKENS
+    {
+        candidates.push(Some((v / 2).max(MIN_MAX_TOKENS)));
+    }
+    if current.is_none() {
+        candidates.push(Some(OMITTED_REJECTED_FALLBACK));
+    }
+    candidates
+        .into_iter()
+        .find(|c| *c != current && !tried.contains(c))
+}
+
 /// [`chat`] with an explicit read timeout, so short utility calls (e.g. query
 /// keyword rewriting) can fail fast instead of hanging on a stalled gateway.
 pub fn chat_with_timeout(system: &str, user: &str, read_timeout_secs: u64) -> Option<String> {
@@ -585,11 +675,17 @@ pub fn chat_with_timeout(system: &str, user: &str, read_timeout_secs: u64) -> Op
         user.chars().count()
     );
 
-    // Some gateways reject an oversized max_tokens outright (agnes returns 400
-    // "max_tokens 不能超过 65536") instead of clamping; step down and retry.
-    let mut max_tokens = active_max_tokens();
+    // Gateways differ: some clamp an oversized max_tokens, some reject it with
+    // 400, and routing/aggregator aliases may not even have a stable ceiling.
+    // Strategy: send the detected ceiling when known, otherwise omit and let
+    // the upstream decide; on an output-limit 400 step through
+    // `next_max_tokens_after_limit` (which prefers omitting). Other error kinds
+    // are not retried on max_tokens, so the real cause reaches the caller.
+    let mut max_tokens = detected_max_tokens();
+    let mut tried: Vec<Option<u32>> = vec![max_tokens];
+    let mut upstream_retried = false;
     let mut parsed: Result<ChatResp, String> = Err("request not attempted".into());
-    for attempt in 0..5 {
+    for _attempt in 0..5 {
         let req = ChatReq {
             model: ep.model_id.clone(),
             messages: messages.clone(),
@@ -618,14 +714,38 @@ pub fn chat_with_timeout(system: &str, user: &str, read_timeout_secs: u64) -> Op
                     .and_then(|body| parse_chat_response(&body));
                 break;
             }
-            Err(ureq::Error::Status(400, resp)) => {
+            Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
-                let next = max_tokens_limit_from_error(&body, max_tokens)
-                    .or_else(|| (max_tokens > MIN_MAX_TOKENS).then(|| (max_tokens / 2).max(MIN_MAX_TOKENS)))
-                    .filter(|&v| v < max_tokens);
-                if attempt < 4 && let Some(next) = next {
-                    log::warn!("[AI] gateway rejected max_tokens={max_tokens}; retrying with {next}");
-                    max_tokens = next;
+                let kind = if (500..600).contains(&code) {
+                    LlmErrorKind::UpstreamUnavailable
+                } else {
+                    classify_llm_error(&body)
+                };
+                log::warn!(
+                    "[AI] chat request rejected (HTTP {code}, {kind:?}): {}",
+                    body.trim().chars().take(200).collect::<String>()
+                );
+                let mut retry = false;
+                match kind {
+                    LlmErrorKind::OutputLimit => {
+                        if let Some(next) = next_max_tokens_after_limit(&body, max_tokens, &tried) {
+                            log::warn!(
+                                "[AI] gateway rejected max_tokens={max_tokens:?}; retrying with {next:?}"
+                            );
+                            max_tokens = next;
+                            tried.push(next);
+                            retry = true;
+                        }
+                    }
+                    // Routing gateways may land on a healthy upstream on retry.
+                    LlmErrorKind::UpstreamUnavailable if !upstream_retried => {
+                        upstream_retried = true;
+                        log::warn!("[AI] upstream unavailable; retrying once");
+                        retry = true;
+                    }
+                    _ => {}
+                }
+                if retry {
                     continue;
                 }
                 parsed = Err(body);
@@ -640,7 +760,15 @@ pub fn chat_with_timeout(system: &str, user: &str, read_timeout_secs: u64) -> Op
 
     match parsed {
         Ok(resp) => {
-            let content = resp.choices.into_iter().next().and_then(|c| {
+            let choice = resp.choices.into_iter().next();
+            if choice
+                .as_ref()
+                .and_then(|c| c.finish_reason.as_deref())
+                .is_some_and(|f| f.eq_ignore_ascii_case("length"))
+            {
+                log::warn!("[AI] response truncated by output limit (finish_reason=length)");
+            }
+            let content = choice.and_then(|c| {
                 if !c.message.content.is_empty() {
                     Some(c.message.content)
                 } else {
@@ -714,6 +842,9 @@ pub struct ChatStreamOutcome {
     pub text: Option<String>,
     pub took_ms: u64,
     pub cancelled: bool,
+    /// Upstream stopped because it hit its output-token ceiling
+    /// (`finish_reason == "length"`), so `text` is incomplete.
+    pub truncated: bool,
 }
 
 /// Send a chat-completion prompt in streaming mode (`stream: true`), invoking
@@ -728,7 +859,7 @@ pub fn chat_stream(
 ) -> ChatStreamOutcome {
     use std::io::{BufRead, Read};
     let started = std::time::Instant::now();
-    let failed = ChatStreamOutcome { text: None, took_ms: 0, cancelled: false };
+    let failed = ChatStreamOutcome { text: None, took_ms: 0, cancelled: false, truncated: false };
     if !llm_enabled() {
         return failed;
     }
@@ -738,44 +869,93 @@ pub fn chat_stream(
     };
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
-    let req_body = match serde_json::to_string(&ChatReq {
-        model: ep.model_id.clone(),
-        messages: vec![
-            ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
-            ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
-        ],
-        temperature: 0.3,
-        max_tokens: active_max_tokens(),
-        stream: true,
-    }) {
-        Ok(b) => b,
-        Err(e) => {
-            log::warn!("[AI] chat stream build failed: {e}");
-            return failed;
-        }
-    };
-    log::info!(
-        "[AI] chat stream request: model={} user_chars={}",
-        ep.model_id,
-        user.chars().count()
-    );
+    // Build+send with the same adaptive policy as the non-streaming path. The
+    // retry loop runs only before any delta is emitted, so a retry can never
+    // duplicate streamed text.
+    let messages = vec![
+        ChatMsg { role: "system".into(), content: system.into(), reasoning: None, reasoning_content: None },
+        ChatMsg { role: "user".into(), content: user.into(), reasoning: None, reasoning_content: None },
+    ];
+    let mut max_tokens = detected_max_tokens();
+    let mut tried: Vec<Option<u32>> = vec![max_tokens];
+    let mut upstream_retried = false;
+    let mut reader = loop {
+        let req_body = match serde_json::to_string(&ChatReq {
+            model: ep.model_id.clone(),
+            messages: messages.clone(),
+            temperature: 0.3,
+            max_tokens,
+            stream: true,
+        }) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("[AI] chat stream build failed: {e}");
+                return failed;
+            }
+        };
+        log::info!(
+            "[AI] chat stream request: model={} user_chars={} max_tokens={max_tokens:?}",
+            ep.model_id,
+            user.chars().count()
+        );
 
-    let send_result = build_agent()
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .set_auth(&ep.api_key)
-        .send_string(&req_body);
-    let mut reader = match send_result {
-        Ok(r) if (200..300).contains(&r.status()) => r.into_reader(),
-        Ok(r) => {
-            let mut err = String::new();
-            let _ = r.into_string().map(|s| err = s);
-            log::warn!("[AI] chat stream HTTP error: {}", err.trim().chars().take(200).collect::<String>());
-            return failed;
-        }
-        Err(e) => {
-            log::warn!("[AI] chat stream failed: {e}");
-            return failed;
+        match build_agent()
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .set_auth(&ep.api_key)
+            .send_string(&req_body)
+        {
+            Ok(r) if (200..300).contains(&r.status()) => break r.into_reader(),
+            Ok(r) => {
+                // ureq normally maps non-2xx to Err(Status); kept for safety.
+                let code = r.status();
+                let mut body = String::new();
+                let _ = r.into_string().map(|s| body = s);
+                log::warn!(
+                    "[AI] chat stream HTTP {code}: {}",
+                    body.trim().chars().take(200).collect::<String>()
+                );
+                return failed;
+            }
+            Err(ureq::Error::Status(code, resp)) => {
+                let body = resp.into_string().unwrap_or_default();
+                let kind = if (500..600).contains(&code) {
+                    LlmErrorKind::UpstreamUnavailable
+                } else {
+                    classify_llm_error(&body)
+                };
+                log::warn!(
+                    "[AI] chat stream rejected (HTTP {code}, {kind:?}): {}",
+                    body.trim().chars().take(200).collect::<String>()
+                );
+                let mut retry = false;
+                match kind {
+                    LlmErrorKind::OutputLimit => {
+                        if let Some(next) = next_max_tokens_after_limit(&body, max_tokens, &tried) {
+                            log::warn!(
+                                "[AI] chat stream rejected max_tokens={max_tokens:?}; retrying with {next:?}"
+                            );
+                            max_tokens = next;
+                            tried.push(next);
+                            retry = true;
+                        }
+                    }
+                    LlmErrorKind::UpstreamUnavailable if !upstream_retried => {
+                        upstream_retried = true;
+                        log::warn!("[AI] chat stream upstream unavailable; retrying once");
+                        retry = true;
+                    }
+                    _ => {}
+                }
+                if retry {
+                    continue;
+                }
+                return failed;
+            }
+            Err(e) => {
+                log::warn!("[AI] chat stream failed: {e}");
+                return failed;
+            }
         }
     };
 
@@ -785,6 +965,8 @@ pub fn chat_stream(
     }
     #[derive(serde::Deserialize)]
     struct StreamChoice {
+        #[serde(default)]
+        finish_reason: Option<String>,
         delta: StreamDelta,
     }
     #[derive(serde::Deserialize)]
@@ -800,6 +982,7 @@ pub fn chat_stream(
     let mut full = String::new();
     let mut reasoning_buf = String::new();
     let mut cancelled = false;
+    let mut finish_reason: Option<String> = None;
     let mut first_line = true;
     let mut line = String::new();
     let mut buf_reader = std::io::BufReader::new(&mut reader);
@@ -826,8 +1009,15 @@ pub fn chat_stream(
                 let _ = buf_reader.read_to_string(&mut rest);
                 let mut body = line.clone();
                 body.push_str(&rest);
-                let text = parse_chat_response(&body)
-                    .ok()
+                let parsed = parse_chat_response(&body).ok();
+                if let Some(fr) = parsed
+                    .as_ref()
+                    .and_then(|r| r.choices.first())
+                    .and_then(|c| c.finish_reason.as_deref())
+                {
+                    finish_reason = Some(fr.to_string());
+                }
+                let text = parsed
                     .and_then(|r| r.choices.into_iter().next().and_then(|c| {
                         if !c.message.content.is_empty() {
                             Some(c.message.content)
@@ -850,6 +1040,9 @@ pub fn chat_stream(
                 break;
             }
             if let Ok(sr) = serde_json::from_str::<StreamResp>(p) {
+                if let Some(fr) = sr.choices.first().and_then(|c| c.finish_reason.as_deref()) {
+                    finish_reason = Some(fr.to_string());
+                }
                 if let Some(d) = sr.choices.first().and_then(|c| c.delta.content.as_ref()) {
                     if !d.is_empty() {
                         full.push_str(d);
@@ -879,15 +1072,27 @@ pub fn chat_stream(
         full = reasoning_buf;
     }
 
+    let truncated = finish_reason
+        .as_deref()
+        .is_some_and(|f| f.eq_ignore_ascii_case("length"));
+    if truncated {
+        log::warn!(
+            "[AI] chat stream truncated by output limit (finish_reason=length, chars={}): \
+             the upstream model's output budget was too small",
+            full.chars().count()
+        );
+    }
+
     let took_ms = started.elapsed().as_millis() as u64;
     if !cancelled {
         log::info!(
-            "[AI] chat stream response: ok, content_chars={} took_ms={}",
+            "[AI] chat stream response: ok, content_chars={} took_ms={} truncated={}",
             full.chars().count(),
-            took_ms
+            took_ms,
+            truncated
         );
     }
-    ChatStreamOutcome { text: Some(full), took_ms, cancelled }
+    ChatStreamOutcome { text: Some(full), took_ms, cancelled, truncated }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -905,7 +1110,11 @@ struct ChatReq {
     model: String,
     messages: Vec<ChatMsg>,
     temperature: f32,
-    max_tokens: u32,
+    /// Omitted entirely when the gateway doesn't report a ceiling — see
+    /// [`detected_max_tokens`]. Sending a guessed value is what caused HTTP 400
+    /// on gateways that validate (and on aggregators whose routed model varies).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     stream: bool,
 }
 
@@ -917,6 +1126,8 @@ struct ChatResp {
 #[derive(Deserialize)]
 struct ChatChoice {
     message: ChatMsg,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 /// Parse a chat-completions response. Some OpenAI-compatible gateways
@@ -1421,6 +1632,65 @@ mod tests {
     #[test]
     fn max_tokens_limit_never_exceeds_current() {
         assert_eq!(max_tokens_limit_from_error("max_tokens cannot exceed 65536", 4096), None);
+    }
+
+    #[test]
+    fn classify_error_identifies_each_kind() {
+        let agnes = r#"{"error":{"message":"max_tokens 不能超过 65536"}}"#;
+        assert_eq!(classify_llm_error(agnes), LlmErrorKind::OutputLimit);
+        let openai_ctx = "This model's maximum context length is 8192 tokens, however your messages resulted in 9000 tokens";
+        assert_eq!(classify_llm_error(openai_ctx), LlmErrorKind::ContextLimit);
+        let routing = "Model id : deepseek-ai/DeepSeek-V4-Flash , has no provider supported";
+        assert_eq!(classify_llm_error(routing), LlmErrorKind::UpstreamUnavailable);
+        assert_eq!(classify_llm_error("something odd"), LlmErrorKind::Other);
+    }
+
+    #[test]
+    fn classify_context_wins_over_incidental_max_tokens_mention() {
+        // Context-limit bodies often mention max_tokens too; shrinking the
+        // output budget would never fix them.
+        let body = "maximum context length exceeded: reduce the length of the messages (max_tokens was 4096)";
+        assert_eq!(classify_llm_error(body), LlmErrorKind::ContextLimit);
+    }
+
+    #[test]
+    fn next_max_tokens_prefers_omitting_after_rejection() {
+        // Detected 1_000_000 rejected → first remedy is to omit, not to guess.
+        let body = r#"{"error":{"message":"max_tokens 不能超过 65536"}}"#;
+        assert_eq!(
+            next_max_tokens_after_limit(body, Some(1_000_000), &[Some(1_000_000)]),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn next_max_tokens_uses_named_ceiling_when_omission_already_rejected() {
+        let body = r#"{"error":{"message":"max_tokens 不能超过 65536"}}"#;
+        let tried = [Some(1_000_000), None];
+        assert_eq!(
+            next_max_tokens_after_limit(body, None, &tried),
+            Some(Some(65536))
+        );
+    }
+
+    #[test]
+    fn next_max_tokens_terminates_when_all_candidates_tried() {
+        let body = r#"{"error":{"message":"max_tokens 不能超过 65536"}}"#;
+        let tried = [Some(1_000_000), None, Some(32768)];
+        assert_eq!(next_max_tokens_after_limit(body, Some(65536), &tried), None);
+    }
+
+    #[test]
+    fn chat_req_omits_max_tokens_when_none() {
+        let req = ChatReq {
+            model: "m".into(),
+            messages: vec![],
+            temperature: 0.3,
+            max_tokens: None,
+            stream: true,
+        };
+        let body = serde_json::to_string(&req).unwrap();
+        assert!(!body.contains("max_tokens"), "None must be omitted, got {body}");
     }
 
     #[test]

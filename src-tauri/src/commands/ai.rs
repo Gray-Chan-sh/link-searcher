@@ -663,7 +663,7 @@ pub async fn conversation_ask_stream(
     log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
     let result = if clarify_blocking {
         log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
-        crate::ai::ChatStreamOutcome { text: clarify_note.clone(), took_ms: 0, cancelled: false }
+        crate::ai::ChatStreamOutcome { text: clarify_note.clone(), took_ms: 0, cancelled: false, truncated: false }
     } else {
         tokio::task::spawn_blocking(move || {
             let mut emit = |d: &str, is_reasoning: bool| {
@@ -674,7 +674,7 @@ pub async fn conversation_ask_stream(
         .await
         .map_err(|e| format!("task panicked: {e}"))?
     };
-    log::info!("[AI]   chat_stream returned: chars={} cancelled={} took_ms={}", result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0), result.cancelled, result.took_ms);
+    log::info!("[AI]   chat_stream returned: chars={} cancelled={} took_ms={} truncated={}", result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0), result.cancelled, result.took_ms, result.truncated);
 
     log::info!(
         "[AI_TRACE] turn_end trace_id={trace_id} took_ms={} cancelled={} answer_chars={} sources={}",
@@ -688,6 +688,7 @@ pub async fn conversation_ask_stream(
         "answer_chars": result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
         "source_count": source_ids.len(),
         "evidence_count": evidence.len(),
+        "truncated": result.truncated,
     })));
     if let Ok(conn) = state.db.get() {
         for (i, (event_type, payload)) in events.iter().enumerate() {

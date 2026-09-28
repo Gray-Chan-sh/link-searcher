@@ -111,6 +111,31 @@ fn write_mock_config(dir: &std::path::Path, base_url: &str) {
         .expect("write config.json");
 }
 
+/// Like [`write_mock_config`] but with a cached `max_output_tokens` on the
+/// model, simulating a gateway that reported `capabilities.maxOutput`.
+fn write_mock_config_with_max(dir: &std::path::Path, base_url: &str, max: u32) {
+    std::fs::create_dir_all(dir).expect("create cfg dir");
+    let cfg = serde_json::json!({
+        "providers": [{
+            "id": "mock1",
+            "name": "mock",
+            "base_url": base_url,
+            "api_key": "test-key",
+            "models": [{
+                "id": "mock-llm",
+                "model_type": "Llm",
+                "enabled": true,
+                "max_output_tokens": max
+            }]
+        }],
+        "active_llm_model_id": "mock1:mock-llm",
+        "active_embedding_model_id": "",
+        "semantic_weight": 0.3
+    });
+    std::fs::write(dir.join("config.json"), serde_json::to_string_pretty(&cfg).unwrap())
+        .expect("write config.json");
+}
+
 fn sse_response(chunks: &[&str]) -> Vec<u8> {
     let mut body = String::new();
     for c in chunks {
@@ -288,6 +313,85 @@ fn chat_stream_sends_correct_request_payload() {
     assert_eq!(json["stream"], true);
     assert_eq!(json["messages"][0]["content"], "sys");
     assert_eq!(json["messages"][1]["content"], "user");
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// 网关未上报能力时，请求体必须省略 max_tokens（不猜）。
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_omits_max_tokens_when_not_detected() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|_| sse_response(&["data: [DONE]"]));
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let _ = chat_stream("sys", "user", &mut |_, _| {});
+    let body = gw.req_body(std::time::Duration::from_secs(5)).expect("request captured");
+    assert!(!body.contains("max_tokens"), "未检测到上限时应省略 max_tokens: {body}");
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// 网关拒绝超限 max_tokens（400）→ 重试时省略该字段并成功。
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_drops_max_tokens_after_gateway_rejects_it() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let gw = MockGateway::start(|req| {
+        if req.to_ascii_lowercase().contains("max_tokens") {
+            let err = r#"{"error":{"message":"max_tokens 不能超过 65536"}}"#;
+            let err = err.as_bytes();
+            let mut resp = format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                err.len()
+            ).into_bytes();
+            resp.extend_from_slice(err);
+            resp
+        } else {
+            sse_response(&[&format!("data: {}", sse_delta("ok")), "data: [DONE]"])
+        }
+    });
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config_with_max(&tmp, &gw.addr, 1_000_000);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let mut deltas = Vec::new();
+    let out = chat_stream("sys", "user", &mut |d: &str, r| { if !r { deltas.push(d.to_string()) } });
+    assert_eq!(out.text.as_deref(), Some("ok"), "省略 max_tokens 后重试应成功");
+
+    let first = gw.req_body(std::time::Duration::from_secs(5)).expect("first request");
+    let second = gw.req_body(std::time::Duration::from_secs(5)).expect("second request");
+    assert!(first.contains("max_tokens"), "首次应带 max_tokens: {first}");
+    assert!(!second.contains("max_tokens"), "重试应省略 max_tokens: {second}");
+
+    let _ = gw.handle.join();
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// ---------------------------------------------------------------------------
+// finish_reason=length → 标记 truncated（截断不再静默）。
+// ---------------------------------------------------------------------------
+#[test]
+fn chat_stream_flags_output_limit_truncation() {
+    let _g = CFG_LOCK.lock().unwrap();
+    let delta = sse_delta("部分内容");
+    let fin = serde_json::json!({"choices":[{"delta":{},"finish_reason":"length"}]}).to_string();
+    let gw = MockGateway::start(move |_| {
+        sse_response(&[&format!("data: {}", delta), &format!("data: {}", fin), "data: [DONE]"])
+    });
+    let tmp = std::env::temp_dir().join(format!("ls-cfg-{}", gw.port));
+    write_mock_config(&tmp, &gw.addr);
+    unsafe { std::env::set_var("LS_CONFIG_DIR", &tmp) };
+
+    let out = chat_stream("sys", "user", &mut |_, _| {});
+    assert_eq!(out.text.as_deref(), Some("部分内容"));
+    assert!(out.truncated, "finish_reason=length 应标记 truncated");
 
     let _ = gw.handle.join();
     let _ = std::fs::remove_dir_all(&tmp);

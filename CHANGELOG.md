@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-09-28：AI 聊天无回复（同一 max_tokens 缺陷第三次复发）——未知即省略 + 截断检测 + 400 分类
+
+- **根因（完整链）**：
+  1. `detected_max_tokens` 缺失时，旧 `active_max_tokens()` 回退 `DEFAULT_MAX_TOKENS=1_000_000` 并**照发**。
+  2. `2026-09-19` 的自适应降级只加在**非流式** `chat_with_timeout`（摘要/改写走它）；**AI 聊天用的 `chat_stream()` 从未接入**，仍以 1,000,000 硬发 → agnes 校验拒绝 → HTTP 400 → 空回复。
+  3. 配置层的手工补救（`agnes-3.0-flash` 的 `max_output_tokens`）会被 `refresh_provider_models` 用网关最新结果整体重建覆盖（agnes `/v1/models` 不返回 `capabilities.maxOutput` → 写回 `None`），再次回退到 1,000,000。
+  4. `coding` 是**聚合网关**，同一 id 每次可能路由到不同上游模型，其输出上限不是稳定属性 → "探测/缓存一个上限"这条路本身不可靠。
+  5. 流式错误分支用 ureq 默认的"非 2xx 即 Err"，只打 `{e}`、不读响应体，`max_tokens 不能超过 65536` 的真因被吞。
+- **修复**（治本三件套，`src-tauri/src/ai/mod.rs`）：
+  1. **不猜**：`ChatReq.max_tokens` 改 `Option<u32>`（`skip_serializing_if`）。仅在 `/v1/models` **可信探测**到 `capabilities.maxOutput` 时才发送；否则**省略该字段**，交给上游默认（对聚合网关尤其必要）。新增 `detected_max_tokens()`，`active_max_tokens()` 降级为设置页"测试连接"的显示用。
+  2. **错误分类**：新增 `classify_llm_error()`，把 400 分为 `OutputLimit` / `ContextLimit` / `UpstreamUnavailable` / `Other`。只有 `OutputLimit` 才动 `max_tokens`；`ContextLimit` 不再白转重试、直接暴露真因；`UpstreamUnavailable` 重试一次（聚合网关可能换到健康上游）。
+  3. **不猜第二遍**：新增 `next_max_tokens_after_limit()`——被拒后**优先改为省略**，其次才用错误信息里的上限 / 减半 / 保守常量 4096，并跳过已试过的状态保证终止。非流式与流式两条路径**共用同一策略**。
+  4. **截断检测**：流式/非流式均解析 `finish_reason`，为 `"length"` 时打 WARN 并在 `ChatStreamOutcome.truncated` / `turn_complete` 事件标记（省略 `max_tokens` 后上游默认过小时不再静默截断）。
+- **撤回**：不再把"学到的上限"持久化到 model id——聚合网关下该值不成立。
+- **涉及文件**：`src-tauri/src/ai/mod.rs`、`src-tauri/src/commands/ai.rs`、`tests/ai_chat_stream_wire.rs`、`AGENTS.md`。
+- **验证**：
+  - 新增单元测试 5 个（错误分类 ×2、下一步取值 ×3、省略序列化 ×1）；新增 wire 测试 3 个（未探测到→省略、400 后重试省略并成功、`finish_reason=length`→`truncated`）。
+  - `cargo check --tests` 0 错误；`cargo test --lib ai::tests` 27 passed / 0 failed；`cargo test --test ai_chat_stream_wire` 15 passed / 0 failed。
+  - `semgrep --severity ERROR` 0 findings。
+
+---
+
 ## v1.2.0（2026-09-27）
 
 性能与可靠性大版本：PDF/OCR 提取链重写、语义向量回填大幅提速、三档性能模式、Windows 重建索引修复。
@@ -34,6 +56,19 @@
 
 ### 文档
 - 日志时间戳补全日期；README 新增「内置 vs 外接 · 规模与硬件」章节；新增 `docs/perf-index-baseline.md`（Before/After 基线）。
+
+---
+
+## 2026-09-27（日·续 5）：确认重排器依赖 chunk 向量（勿砍）——A/B 开关存在混淆
+
+- **背景**：讨论「长文档是否 doc + chunk 双算」时，用 `CHUNK_TOP_K=0` 做 A/B，结果随 rerank 开关翻转，顺藤定位到一条隐藏依赖。
+- **发现**：重排阶段对分块文档，喂给 cross-encoder 的段落 = **chunk 向量选出的最相关块**，而非文档头 2000 字。见 `commands/ai/prompt.rs:697-731`：`get_chunk_embeddings_by_md5s` 直接读 `chunk_embeddings` 表 → 余弦挑 best chunk → 喂重排。该路径**不受 `CHUNK_TOP_K` 影响**。
+- **后果**：`CHUNK_TOP_K=0` 只关掉 chunk 的**检索通道**（RRF 排序 + `hit_chunks` 注入），关不掉重排所用的 chunk 向量。故"开重排时 A/B 两臂持平"是**混淆**，**不能**据此判定 chunk 无用。
+- **实测**（真实库 `D:\index` 长文档深部探针；从 >3 万字文档深部抽逐字引文自动出题，跑 `chat --dry-run --dump-injected`）：关重排时 chunk 通道 ON vs OFF = File-Recall@30 **71%→35%**、Span-Hit **29%→0%**（n=17）；开重排时两者持平（n=8）→ 印证价值被重排路径吸收。
+- **结论**：**不得删除 chunk 向量**。它同时服务 ①检索通道 ②重排器段落选择；删掉会让长文档重排退回"只读前 2000 字"。
+- **附｜新增评测脚本** `scripts/eval/run_longdoc_span_probe.py`：真实语料深部探针，输出 File-Recall@30 / Span-Hit，支持 chunk 通道开/关 A/B（Windows 注意：release 二进制是 `windows_subsystem="windows"`，须用文件重定向而非管道）。
+- **另一发现（待修，独立问题）**：关重排时，长文档常只注入头部（如 `[0-2306]`），深部答案进不来——`chunks_for_packing` 的词法兜底未生效（`commands/ai/prompt.rs:1352-1362`）。
+- **涉及文件**：`scripts/eval/run_longdoc_span_probe.py`、`docs/rag-eval-baseline.md`、`CHANGELOG.md`
 
 ---
 

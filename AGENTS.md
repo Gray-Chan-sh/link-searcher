@@ -119,3 +119,12 @@ semgrep scan \
 - **触发条件**：Rayon par_iter + SQLite 并行写
 - **修复人/时间**：2026-08-08
 - **Tags**: `indexer.rs`, `mark_extracted`, `Phase 1`, `let _`
+
+### 2. AI 聊天无回复（max_tokens 超限 → HTTP 400）
+- **现象**：发问后界面无回答；日志 `chat stream failed: ... status code 400` + `chat_stream returned: chars=0`
+- **根因**：把猜测的 `max_tokens`（未知时回退 1,000,000）发给校验型网关（agnes 上限 65,536）被 400 拒绝；且**修复只落在非流式路径**，`chat_stream()` 没有降级。**聚合网关**同一 id 每次路由不同上游，上限不稳定，"缓存一个值"也不可靠
+- **修复**（2026-09-28）：`max_tokens` 未知即**省略**（`Option` + `skip_serializing_if`）；400 按 `OutputLimit`/`ContextLimit`/`UpstreamUnavailable`/`Other` 分类；被拒后**优先省略**再尝试，流式与非流式共用；解析 `finish_reason`，`"length"` 标记 `truncated`。禁止再把推测值持久化为"学习到的上限"
+- **检查方法**：`grep "chat stream rejected\|max_tokens=" app.log`；或直接 `curl` 该网关用超大 `max_tokens` 复现 400
+- **触发条件**：网关不报 `capabilities.maxOutput`（agnes）、或聚合网关（如 `coding`）以超大 `max_tokens` 硬发时
+- **修复人/时间**：2026-09-28（第三次复发；前两次 `2026-09-19`、`2026-09-10` 均为非流式/局部修复）
+- **Tags**: `ai/mod.rs`, `chat_stream`, `max_tokens`, `LlmErrorKind`, `finish_reason`, `聚合网关`
