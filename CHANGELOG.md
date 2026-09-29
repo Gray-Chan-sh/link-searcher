@@ -18,6 +18,8 @@
 - **不影响**：本地内置模型路径不变（仍走副本池）；查询嵌入路径不变。
 - **涉及文件**：`src-tauri/src/ai/mod.rs`、`src-tauri/src/config.rs`、`src-tauri/src/commands/config.rs`、`src-tauri/src/commands/index/embeddings.rs`、`src-tauri/src/commands/settings.rs`、`src-tauri/src/db/mod.rs`、`src/components/settings/PerformanceTab.tsx`、`src/pages/Settings.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`README.md`、`docs/06-settings.md`、`docs/perf-index-baseline.md`、`CHANGELOG.md`。
 - **验证**：`cargo check` 0 错误；`cargo test --lib` **458 passed / 0 failed / 2 ignored**（新增 6 个 tuner 单测）；`npx tsc --noEmit` 0 错误；`semgrep --severity ERROR` **0 findings**。
+- **实测结论（Infinity `bge-m3` on M4，真实 chunk 回填 ≈1000 token/块）**：串行 2.6–2.7 条/s vs 自适应 2.5–3.2 条/s（batch 120→512、并发=3）——**基本持平**，因为该 GPU 已被单请求打满；调优器行为正确（加档→收敛、0 失败）。自适应的收益仅在网关仍有余量/多 worker 时显现。详见 `docs/perf-index-baseline.md` §8.7。
+- **附带**：新增忽略态基准 `src-tauri/tests/remote_embed_adaptive_bench.rs`（`cargo test --test remote_embed_adaptive_bench -- --ignored --nocapture`），用于在任意网关上复测串行 vs 自适应。
 
 ---
 
