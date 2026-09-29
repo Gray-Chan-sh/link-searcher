@@ -1,6 +1,6 @@
 [package]
 name = "link-searcher"
-version = "1.2.0"
+version = "1.2.1"
 description = "Cross-platform full-text search desktop application"
 authors = ["Link-Searcher"]
 edition = "2024"
