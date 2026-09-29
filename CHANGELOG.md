@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-09-29（续5）：删除最后一个会话被立即自动重建（「新会话删不掉」）
+
+- **现象**：列表里的空「新会话」怎么删都在——删掉后立刻又冒出一个相同的空会话。
+- **根因**：删除后 `setActiveId(null)`（`AiChat.tsx`）触发「ensure session」effect；此时会话列表已变空，effect 命中 `sessions.length === 0` 分支又 `create_chat_session()` 建了一个新的空会话。首进入自动建会话与这里是同一段逻辑，导致「零会话」状态永不成立，最后一个会话永远删不掉（删非最后一个时会正常切到下一个，故不易察觉）。
+- **修复**（`src/pages/AiChat.tsx`）：
+  - 新增 `suppressAutoCreateRef`：**用户主动删除**（单删/批删）后置位，`新建会话` / `从搜索跳聊天` 时清除；ensure effect 在列表为空且被抑制时**不再自动新建**。
+  - 主面板补「无会话」空态：LLM 可用但无活动会话时显示「暂无会话 + 新建会话」按钮（原误显示「AI 服务未配置」）。
+  - 首次进入自动建会话行为保持不变。
+- **涉及文件**：`src/pages/AiChat.tsx`、`AGENTS.md`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0 错误；`npx vitest run` 61 passed；`npm run lint` 0 错误；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-29（续4）：AI 聊天切页后内容丢失 / 停在空「新会话」——恢复活动会话 + streamStore 兜底落库
 
 - **现象**：聊天途中切到其它页面，会话丢失，回答不落库；聊天完成后侧栏仍停在空「新会话」，看不到聊天记录。用户反馈「之前修过又复发」。

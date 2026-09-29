@@ -138,4 +138,5 @@ semgrep scan \
 - **检查方法**：聊天途中切页→等回答完成→切回，确认侧栏高亮的是原会话、回答可见；再 grep `chat_history.json` 对应会话不含空 `assistant` 丢失；或看切回后是否新增空「新会话」条目
 - **触发条件**：任何「发送后切页 / 切回聊天页」；历史记录越大越必现
 - **修复人/时间**：2026-09-29（第二次修复；2026-09-20 仅修了"事件不丢"，未修"回到原会话"）
-- **Tags**: `AiChat.tsx`, `ChatPanel.tsx`, `ai/streamStore.ts`, `ai/applyDone.ts`, `sessionsLoaded`, `ls_active_chat_session`, `persisted`, 路由卸载
+- **联带修复（同日）**：删掉最后一个空会话会立刻被 ensure effect 自动重建（表现为「新会话删不掉」）→ 加 `suppressAutoCreateRef`：用户主动删除后不再自动建会话，主面板补「暂无会话 + 新建会话」空态
+- **Tags**: `AiChat.tsx`, `ChatPanel.tsx`, `ai/streamStore.ts`, `ai/applyDone.ts`, `sessionsLoaded`, `ls_active_chat_session`, `persisted`, `suppressAutoCreateRef`, 路由卸载

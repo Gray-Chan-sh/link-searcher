@@ -44,6 +44,10 @@ export default function AiChat() {
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
+  // 用户主动删除会话后置位：禁止 ensure effect 在列表为空时自动重建，
+  // 否则删掉最后一个空「新会话」会立刻被重建，表现为"删不掉"。
+  // 新建会话 / 从搜索跳聊天时清除。
+  const suppressAutoCreateRef = useRef(false)
   // 树状文件浏览器
   const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
   const [treeExpanded, setTreeExpanded] = useState(false)
@@ -127,6 +131,7 @@ export default function AiChat() {
       try { const q = JSON.parse(rawQuery); if (typeof q === 'string' && q.length > 0) pendingQuery = q } catch { /* ignore */ }
     }
 
+    suppressAutoCreateRef.current = false
     createChatSession().then(id => {
       const session: ChatSession = {
         id, title: '', created_at: 0, updated_at: 0,
@@ -245,6 +250,8 @@ export default function AiChat() {
       return
     }
     if (sessions.length === 0) {
+      // 用户主动删光了 → 保留空态，按需手动新建（详见 suppressAutoCreateRef）
+      if (suppressAutoCreateRef.current) return
       createChatSession().then(id => {
         setActiveId(id)
         setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
@@ -284,16 +291,18 @@ export default function AiChat() {
 
   const handleNewSession = useCallback(async () => {
     try {
+      suppressAutoCreateRef.current = false
       const id = await createChatSession()
-setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
-    setActiveId(id)
-    refreshList()
-  } catch { /* ignore */ }
+      setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
+      setActiveId(id)
+      refreshList()
+    } catch { /* ignore */ }
   }, [refreshList])
 
   const handleDelete = useCallback(async (id: string) => {
     const confirmed = await confirm(t('confirm_delete_session'), t('delete'))
     if (!confirmed) return
+    suppressAutoCreateRef.current = true
     try {
       await deleteChatSession(id)
       if (sessionStorage.getItem(ACTIVE_CHAT_KEY) === id) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
@@ -372,6 +381,7 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
       t('delete')
     )
     if (!confirmed) return
+    suppressAutoCreateRef.current = true
     const ids = [...selectedIds]
     for (const id of ids) {
       try { await deleteChatSession(id) } catch { /* ignore */ }
@@ -701,6 +711,16 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
               className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
             >
               {t('retry')}
+            </button>
+          </div>
+        ) : aiCap.llm ? (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">
+            <span>{t('no_sessions')}</span>
+            <button
+              onClick={handleNewSession}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded transition-colors"
+            >
+              {t('new_session')}
             </button>
           </div>
         ) : (
