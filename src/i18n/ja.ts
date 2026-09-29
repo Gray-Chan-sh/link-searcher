@@ -634,6 +634,9 @@ const ja: Record<string, string> = {
     embed_adaptive_hint: 'リモート埋め込みゲートウェイで「並列＋適応バッチ/並列度」を有効化：小さく開始し、スループットが頭打ちになるまで拡大、エラー時は後退、最適点を「ゲートウェイ＋モデル」単位で記憶します。リモートモデル時のみ有効。オフ＝固定の逐次バッチ。',
     task_backfill: 'ベクトル補完（文書）',
     task_backfill_chunks: 'ベクトル補完（チャンク）',
+    task_rate_now: '現在',
+    task_rate_avg: '平均',
+    task_eta: '残り',
     perf_one_click_optimize: 'ワンクリック最適化',
 }
 export default ja

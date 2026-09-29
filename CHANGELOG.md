@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-29（续3）：回填进度显示「实时速率」——窗口速率 + ETA，不再被历史卡顿拖累
+
+- **问题**：进度里的速率与 ETA 用的是 **从任务开始算起的累计平均**（`processed / elapsed`）。中途一旦卡顿（如网关故障期的长时间重试），这个数字会被**永久拖低**——实测切回 oMLX 后仍长期显示 `1.1/s`，而**即时速率约 1.6/s**，用户无法据此判断"现在到底快不快、正不正常"。
+- **修复**：
+  - `commands/index/embeddings.rs`：新增 `RateTracker`（保留最近 ≤4 个 `(时刻, 已处理)` 采样）。`report_progress` 现在同时给出**实时速率**（最近窗口，窗口跨度 = 最老采样 → 现在）与**平均速率**（累计），并把 **ETA 改由实时速率**推导。
+  - **上报粒度**：远程（自适应）网关时进度分组由 `256` 降到 `64`（UI 刷新从 ~2.5 分钟缩短到 ~40 秒）；**本地仍为 256**（保留副本池并行度）。
+  - `state.rs`：`TaskProgress` 增加 `rate_now` / `rate_avg` / `eta_secs`（新增 `set_task_progress_rates`；原 `set_task_progress` 保留为薄封装，向后兼容）。
+  - 前端 `pages/IndexStatus.tsx`：进度条旁显示 `已处理/总数 · 实时 x/s · 平均 y/s · 剩余 mm`（新增 `formatEta`：s/m/h）；`i18n` 新增 `task_rate_now` / `task_rate_avg` / `task_eta`（zh/en/ja/ko）。
+- **说明**：`ai` 侧的日志行同步改为 `实时 a/s, 平均 b/s, ETA mm`。
+- **涉及文件**：`src-tauri/src/state.rs`、`src-tauri/src/commands/index/embeddings.rs`、`src/api/index.ts`、`src/pages/IndexStatus.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/07-index-manage.md`、`CHANGELOG.md`。
+- **验证**：`cargo check --tests` 0 错误；`cargo test --lib` **461 passed / 0 failed / 2 ignored**（新增 2 个 `RateTracker` 单测）；`npx tsc --noEmit` 0 错误；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-09-29：远程嵌入「并发 + 自适应」——小批起步/逐步加档/波动回退 + 按端点记忆最优点
 
 - **背景**：把嵌入/重排外接到局域网网关（oMLX / Infinity 等）后，旧代码对远程网关是**固定单并发、逐批串行**（`ai::embed_batched` 内 `for chunk { embed_batch }`）。而多数嵌入网关（TEI / Infinity / vLLM）靠**跨请求动态批处理**提吞吐——客户端串行就吃不到；同时远程请求**读超时写死 1 小时**，卡住会干等。

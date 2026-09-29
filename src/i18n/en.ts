@@ -632,6 +632,9 @@ const en: Record<string, string> = {
     embed_adaptive_hint: 'For a remote embedding gateway, enable adaptive concurrency: start small and grow batch/concurrency until throughput plateaus, back off on errors, and remember the best point per endpoint+model. Only applies to remote models; off = plain sequential batches.',
     task_backfill: 'Vector backfill (documents)',
     task_backfill_chunks: 'Vector backfill (chunks)',
+    task_rate_now: 'now',
+    task_rate_avg: 'avg',
+    task_eta: 'ETA',
     perf_one_click_optimize: 'One-Click Optimize',
 }
 export default en

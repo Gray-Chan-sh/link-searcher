@@ -29,9 +29,6 @@ pub(super) fn run_backfill_embeddings(
     let _serial = backfill_guard();
     let _guard = crate::state::TaskGuard::new("backfill");
     const BATCH: usize = 64;
-    // Unique texts embedded per progress step. A multiple of BATCH so the
-    // engine can parallelize across batches.
-    const SUPER: usize = 256;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
     let rows = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
@@ -56,7 +53,8 @@ pub(super) fn run_backfill_embeddings(
     let mut processed = 0usize;
     let mut failed = 0usize;
     let started = std::time::Instant::now();
-    for group in unique.chunks(SUPER) {
+    let mut tracker = RateTracker::new(started);
+    for group in unique.chunks(super_group_size()) {
         let texts: Vec<String> = group.iter().map(|(t, _)| t.clone()).collect();
         let vecs = crate::ai::embed_batched(&texts, BATCH);
         for ((_, ids), v) in group.iter().zip(vecs) {
@@ -73,7 +71,7 @@ pub(super) fn run_backfill_embeddings(
             }
         }
         processed += group.iter().map(|(_, ids)| ids.len()).sum::<usize>();
-        report_progress("backfill", processed, total, failed, started);
+        report_progress("backfill", processed, total, failed, &mut tracker);
     }
     log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
     crate::state::push_task_brief(
@@ -87,22 +85,93 @@ pub(super) fn run_backfill_embeddings(
     })
 }
 
-/// Log a progress line (with rate + ETA) and publish it to the UI registry.
-fn report_progress(task: &str, processed: usize, total: usize, failed: usize, started: std::time::Instant) {
-    let elapsed = started.elapsed().as_secs_f64().max(0.001);
-    let rate = processed as f64 / elapsed;
-    let eta_min = ((total.saturating_sub(processed)) as f64 / rate.max(0.001) / 60.0) as u64;
+/// Rolling samples used to show a *recent* processing rate. The cumulative
+/// average is kept too, but any earlier stall (e.g. a gateway outage with long
+/// retries) drags it down for the rest of the run — so the live rate, and the
+/// ETA derived from it, must come from a short recent window instead.
+struct RateTracker {
+    started: std::time::Instant,
+    samples: std::collections::VecDeque<(std::time::Instant, usize)>,
+}
+
+impl RateTracker {
+    fn new(started: std::time::Instant) -> Self {
+        Self { started, samples: std::collections::VecDeque::new() }
+    }
+
+    /// Record a `(now, processed)` sample, keeping a small window.
+    fn record(&mut self, processed: usize) {
+        self.samples.push_back((std::time::Instant::now(), processed));
+        while self.samples.len() > 4 {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Cumulative items/second since the task started.
+    fn average(&self, processed: usize) -> f64 {
+        processed as f64 / self.started.elapsed().as_secs_f64().max(0.001)
+    }
+
+    /// Items/second over the retained window (oldest sample → now). `None` when
+    /// there are fewer than two samples or no progress in between.
+    fn recent(&self, processed: usize) -> Option<f64> {
+        if self.samples.len() < 2 {
+            return None;
+        }
+        let (t0, p0) = *self.samples.front()?;
+        let dt = t0.elapsed().as_secs_f64();
+        let dp = processed.saturating_sub(p0);
+        if dt < 1.0 || dp == 0 {
+            return None;
+        }
+        Some(dp as f64 / dt)
+    }
+}
+
+/// Progress/report group size. Remote (adaptive) gateways report per request,
+/// so a smaller group makes the UI update sooner; local replicas benefit from a
+/// larger group (more batches to spread across the pool).
+fn super_group_size() -> usize {
+    if crate::config::is_local_embedding_model(
+        &crate::config::load_config().active_embedding_model_id,
+    ) {
+        256
+    } else {
+        64
+    }
+}
+
+/// Log a progress line (with live rate + ETA) and publish it to the UI registry.
+fn report_progress(
+    task: &str,
+    processed: usize,
+    total: usize,
+    failed: usize,
+    tracker: &mut RateTracker,
+) {
+    tracker.record(processed);
+    let avg = tracker.average(processed);
+    let now = tracker.recent(processed).unwrap_or(avg);
+    let eta_secs = if now > 0.0 {
+        ((total.saturating_sub(processed)) as f64 / now) as u64
+    } else {
+        0
+    };
     log::info!(
-        "[AI] 回填进度: {processed}/{total} (失败 {failed}, {rate:.1}/s, ETA {eta_min}m){}",
+        "[AI] 回填进度: {processed}/{total} (失败 {failed}, 实时 {now:.1}/s, 平均 {avg:.1}/s, ETA {}m){}",
+        eta_secs / 60,
         crate::ai::embed_plan_summary()
             .map(|p| format!(" · {p}"))
             .unwrap_or_default()
     );
-    crate::state::set_task_progress(
+    crate::state::set_task_progress_rates(
         task,
         processed as u64,
         total as u64,
-        format!("{processed}/{total} · {rate:.1}/s · ETA {eta_min}m"),
+        format!("{processed}/{total}"),
+        now,
+        avg,
+        eta_secs,
     );
 }
 
@@ -248,7 +317,6 @@ pub(super) fn run_backfill_chunk_embeddings(
     /// Long documents examined per pass.
     const MAX_DOCS_PER_PASS: usize = 500;
     const BATCH: usize = 64;
-    const SUPER: usize = 256;
 
     let conn = db.get().map_err(|e| format!("db error: {e}"))?;
     let total_missing = count_missing_chunks(&conn).map_err(|e| e.to_string())?;
@@ -263,6 +331,7 @@ pub(super) fn run_backfill_chunk_embeddings(
     let mut processed = 0usize;
     let mut failed = 0usize;
     let started = std::time::Instant::now();
+    let mut tracker = RateTracker::new(started);
     loop {
         // Only the missing chunks, so every pass makes real progress and an
         // interrupted run resumes without redoing finished work.
@@ -276,7 +345,7 @@ pub(super) fn run_backfill_chunk_embeddings(
         tasks.sort_by_key(|(_, _, t)| t.chars().count());
         let pass_len = tasks.len();
         let mut pass_ok = 0usize;
-        for group in tasks.chunks(SUPER) {
+        for group in tasks.chunks(super_group_size()) {
             let texts: Vec<String> = group.iter().map(|(_, _, t)| t.clone()).collect();
             let vecs = crate::ai::embed_batched(&texts, BATCH);
             for ((md5, idx, _), v) in group.iter().zip(vecs) {
@@ -294,7 +363,7 @@ pub(super) fn run_backfill_chunk_embeddings(
                 }
             }
             processed += group.len();
-            report_progress("backfill_chunks", processed, total_missing, failed, started);
+            report_progress("backfill_chunks", processed, total_missing, failed, &mut tracker);
         }
         // A pass that embedded nothing would re-select the same rows forever
         // (e.g. every chunk keeps failing); stop instead of hot-looping.
@@ -406,6 +475,35 @@ mod tests {
     #[test]
     fn group_by_md5_empty_input() {
         assert!(group_by_md5(vec![]).is_empty());
+    }
+
+    /// The live rate must come from the recent window, not the lifetime
+    /// average: an earlier stall (long retries) would otherwise keep the
+    /// displayed speed and ETA depressed for the rest of the run.
+    #[test]
+    fn rate_tracker_recent_ignores_old_slow_stretch() {
+        use std::time::{Duration, Instant};
+        let started = Instant::now() - Duration::from_secs(600);
+        let mut t = super::RateTracker::new(started);
+        // Old, slow history is *not* in the window: only the last few samples.
+        let now = Instant::now();
+        t.samples.push_back((now - Duration::from_secs(60), 100));
+        t.samples.push_back((now - Duration::from_secs(20), 600));
+        t.record(800); // appends (now, 800)
+
+        let recent = t.recent(800).expect("window has >= 2 samples and progress");
+        assert!(recent > 10.0 && recent < 14.0, "recent={recent}"); // 700 items / ~60s
+        assert!(t.average(800) < 2.0, "lifetime avg must stay low");
+    }
+
+    #[test]
+    fn rate_tracker_needs_two_samples() {
+        use std::time::Instant;
+        let started = Instant::now();
+        let mut t = super::RateTracker::new(started);
+        t.record(10);
+        assert!(t.recent(10).is_none(), "one sample is not a rate");
+        assert!(t.recent(999).is_none());
     }
 
     /// The chunk backfill selects only genuinely-missing chunks and honours the

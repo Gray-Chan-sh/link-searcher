@@ -12,6 +12,16 @@ import { confirm } from '../utils/platform'
 import EmptyState from '../components/EmptyState'
 import { StatsCardSkeleton } from '../components/Skeleton'
 
+/** Compact ETA: "45s" / "12m" / "1h20m". */
+function formatEta(secs: number): string {
+  if (secs <= 0) return '—'
+  if (secs < 60) return `${Math.round(secs)}s`
+  const m = Math.round(secs / 60)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  return `${h}h${m % 60}m`
+}
+
 function formatTime(ts: number | null, t: (k: string) => string): string {
   if (!ts) return t('never')
   return new Date(ts / 1000).toLocaleString()
@@ -374,7 +384,12 @@ export default function IndexStatus() {
               <div key={tp.task}>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-xs font-medium text-gray-500 dark:text-gray-400">{t(`task_${tp.task}`)}</span>
-                  <span className="text-xs text-gray-500 dark:text-gray-400">{tp.detail || `${tp.current}/${tp.total}`}</span>
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                    {tp.current}/{tp.total}
+                    {tp.rate_now > 0 && ` · ${t('task_rate_now')} ${tp.rate_now.toFixed(1)}/s`}
+                    {tp.rate_avg > 0 && ` · ${t('task_rate_avg')} ${tp.rate_avg.toFixed(1)}/s`}
+                    {tp.eta_secs > 0 && ` · ${t('task_eta')} ${formatEta(tp.eta_secs)}`}
+                  </span>
                 </div>
                 <div className="h-2 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden">
                   <div

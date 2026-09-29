@@ -31,6 +31,15 @@ pub struct TaskProgress {
     pub current: u64,
     pub total: u64,
     pub detail: String,
+    /// Recent (windowed) processing rate, items/second. `0` = not enough samples.
+    #[serde(default)]
+    pub rate_now: f64,
+    /// Cumulative average rate since the task started, items/second.
+    #[serde(default)]
+    pub rate_avg: f64,
+    /// ETA in seconds, derived from `rate_now`.
+    #[serde(default)]
+    pub eta_secs: u64,
 }
 
 fn task_progress_registry() -> &'static Mutex<std::collections::HashMap<String, TaskProgress>> {
@@ -40,10 +49,33 @@ fn task_progress_registry() -> &'static Mutex<std::collections::HashMap<String, 
 
 /// Record/update a running task's progress (visible via `get_index_status`).
 pub fn set_task_progress(task: &str, current: u64, total: u64, detail: impl Into<String>) {
+    set_task_progress_rates(task, current, total, detail, 0.0, 0.0, 0);
+}
+
+/// Like [`set_task_progress`], but also carries the recent/cumulative rates and
+/// an ETA, so the UI can show a *live* speed instead of a lifetime average
+/// (which any earlier stall drags down for the rest of the run).
+pub fn set_task_progress_rates(
+    task: &str,
+    current: u64,
+    total: u64,
+    detail: impl Into<String>,
+    rate_now: f64,
+    rate_avg: f64,
+    eta_secs: u64,
+) {
     if let Ok(mut m) = task_progress_registry().lock() {
         m.insert(
             task.to_string(),
-            TaskProgress { task: task.to_string(), current, total, detail: detail.into() },
+            TaskProgress {
+                task: task.to_string(),
+                current,
+                total,
+                detail: detail.into(),
+                rate_now,
+                rate_avg,
+                eta_secs,
+            },
         );
     }
 }

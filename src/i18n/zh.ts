@@ -632,6 +632,9 @@ const zh: Record<string, string> = {
     embed_adaptive_hint: '对远程嵌入网关启用「并发 + 自适应批/并发度」：小批起步，逐步加大直到吞吐见顶，出错自动回退，并按「网关+模型」记住最优点。仅当嵌入模型是远程网关时生效；关闭则用固定单并发批次。',
     task_backfill: '向量回填（文档）',
     task_backfill_chunks: '向量回填（分块）',
+    task_rate_now: '实时',
+    task_rate_avg: '平均',
+    task_eta: '剩余',
     perf_one_click_optimize: '一键优化',
 }
 export default zh

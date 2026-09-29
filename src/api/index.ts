@@ -11,6 +11,12 @@ export interface TaskProgress {
   current: number
   total: number
   detail: string
+  /** Recent (windowed) items/second; 0 = not enough samples yet. */
+  rate_now: number
+  /** Cumulative average items/second since the task started. */
+  rate_avg: number
+  /** ETA in seconds, derived from rate_now. */
+  eta_secs: number
 }
 
 export interface IndexStatus {

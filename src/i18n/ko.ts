@@ -634,6 +634,9 @@ const ko: Record<string, string> = {
     embed_adaptive_hint: '원격 임베딩 게이트웨이에서 적응형 동시성을 사용합니다. 작게 시작해 처리량이 정체될 때까지 배치/동시성을 늘리고, 오류 시 물러서며, "게이트웨이+모델" 단위로 최적점을 기억합니다. 원격 모델에만 적용되며 끄면 고정 순차 배치입니다.',
     task_backfill: '벡터 백필(문서)',
     task_backfill_chunks: '벡터 백필(청크)',
+    task_rate_now: '현재',
+    task_rate_avg: '평균',
+    task_eta: '남은 시간',
     perf_one_click_optimize: '원클릭 최적화',
 }
 export default ko
