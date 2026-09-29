@@ -340,6 +340,7 @@ LLM 的上下文窗口有限，不能把几万条命中全塞进去。所以设�
 
 - 会话存成一个 JSON 文件，每个人含：标题、消息列表、来源文件、检索范围、每轮的证据。
 - 前端的"思考中"状态由一个"发送时间戳"驱动：发送时记下时间，收到完成事件清除。
+- **切页/跨页恢复**：聊天页随路由卸载会丢内存态，故用 `sessionStorage`（`ls_active_chat_session`）记住活动会话，切回时恢复；应用级 `ai/streamStore` 常驻监听 `ai-chunk`/`ai-done`，当回答完成而**本会话无订阅者**（用户已切走）时，由 store 自行 `load + buildSessionFromDone + save` 落库（`persisted` 标记），保证回答不因组件卸载而丢失。`buildSessionFromDone` 为两条落库路径共用的纯函数（`ai/applyDone.ts`）。
 
 ### 事件系统：桌面自带的，网页靠桥
 

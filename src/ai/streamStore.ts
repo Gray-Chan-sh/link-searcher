@@ -1,6 +1,8 @@
 import * as client from '../api/client'
 import { normalizePath } from '../utils/normalizePath'
-import type { AiDonePayload } from '../api/files'
+import { loadChatSession, saveChatSession, type AiDonePayload } from '../api/files'
+import { translate } from '../i18n'
+import { buildSessionFromDone } from './applyDone'
 
 type StreamState = { text: string; reasoning: string }
 
@@ -8,7 +10,53 @@ const active = new Set<string>()
 const streams = new Map<string, StreamState>()
 const dones = new Map<string, AiDonePayload>()
 const listeners = new Map<string, Set<() => void>>()
+// 正在由 store 代为落库的会话：期间挂载的 ChatPanel 不得清 pending（会同文件竞争写）
+const persisting = new Set<string>()
 let started: Promise<void> | null = null
+
+export function isPersisting(sessionId: string): boolean {
+  return persisting.has(sessionId)
+}
+
+/**
+ * 用户已切走、无 ChatPanel 订阅时，由 store 直接把 `ai-done` 结果写回会话。
+ * 这是「切页后回答丢失」的兜底：即使之后不再回到聊天页，回答也已持久化。
+ * 返回是否写入成功。
+ */
+async function persistDone(sessionId: string, e: AiDonePayload): Promise<boolean> {
+  persisting.add(sessionId)
+  try {
+    const cur = await loadChatSession(sessionId)
+    if (!cur) return false
+    await saveChatSession(buildSessionFromDone(cur, e, translate))
+    return true
+  } catch (err) {
+    console.error('[streamStore] persist done failed:', err)
+    return false
+  } finally {
+    persisting.delete(sessionId)
+  }
+}
+
+async function handleDone(raw: AiDonePayload): Promise<void> {
+  const sessionId = raw.session_id
+  active.delete(sessionId)
+  const e: AiDonePayload = {
+    ...raw,
+    source_files: raw.source_files.map(normalizePath),
+    evidence: raw.evidence?.map(ev => ({ ...ev, path: normalizePath(ev.path) })),
+  }
+  // 有订阅者说明 ChatPanel 正挂载在本会话上，它会即时落库；否则 store 代为落库。
+  // 订阅者存在时 notify 同步触发其回调，不存在「回调前卸载」窗口。
+  const hasSubscriber = (listeners.get(sessionId)?.size ?? 0) > 0
+  let persisted = false
+  if (!hasSubscriber && !e.cancelled) {
+    persisted = await persistDone(sessionId, e)
+  }
+  dones.set(sessionId, persisted ? { ...e, persisted: true } : e)
+  streams.delete(sessionId)
+  notify(sessionId)
+}
 
 function notify(sessionId: string) {
   const set = listeners.get(sessionId)
@@ -28,14 +76,7 @@ function ensureStarted(): Promise<void> {
         notify(e.session_id)
       })
       await client.listen<AiDonePayload>('ai-done', e => {
-        active.delete(e.session_id)
-        dones.set(e.session_id, {
-          ...e,
-          source_files: e.source_files.map(normalizePath),
-          evidence: e.evidence?.map(ev => ({ ...ev, path: normalizePath(ev.path) })),
-        })
-        streams.delete(e.session_id)
-        notify(e.session_id)
+        void handleDone(e)
       })
     })().catch(err => {
       console.error('[streamStore] listen failed:', err)

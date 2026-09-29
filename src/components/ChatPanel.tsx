@@ -12,7 +12,8 @@ import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
 import { basename, dirname, disambiguate } from '../utils/materialLabel'
-import { getStreamReasoning, getStreamText, hasAiDone, isStreamInFlight, markStreamEnded, markStreamStarted, subscribeAiStream, takeAiDone } from '../ai/streamStore'
+import { getStreamReasoning, getStreamText, hasAiDone, isPersisting, isStreamInFlight, markStreamEnded, markStreamStarted, subscribeAiStream, takeAiDone } from '../ai/streamStore'
+import { buildSessionFromDone } from '../ai/applyDone'
 import MentionPicker from './MentionPicker'
 import AiEventTimeline from './AiEventTimeline'
 
@@ -37,6 +38,11 @@ interface ChatPanelProps {
   onMentionConsumed?: () => void
   /** /范围:全库 或 /范围:目录路径 —— 交给持有 dirs 数据的父组件解析为路径后更新会话范围 */
   onScopeAction?: (action: string) => void
+  /**
+   * streamStore 已在用户切页期间代为落库时，用它把最新会话重新拉回视图
+   * （只读取、不再保存），避免重复追加回答。
+   */
+  onSessionReload?: (sessionId: string) => void | Promise<void>
 }
 
 // 请求进行中每秒走表，驱动 "mm:ss" 计时。独立小组件：只有计时文本 re-render，
@@ -54,7 +60,7 @@ function ElapsedTimer({ startedAt }: { startedAt: number }) {
   return <span>{`${mm}:${ss}`}</span>
 }
 
-export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction }: ChatPanelProps) {
+export default function ChatPanel({ llmEnabled, session, onSessionChange, pendingMention, onMentionConsumed, onScopeAction, onSessionReload }: ChatPanelProps) {
   const { t } = useI18n()
   const navigate = useNavigate()
   const [input, setInput] = useState('')
@@ -192,42 +198,15 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       setStreaming(null)
       setProgress(null)
       if (p.cancelled) return
-      const cur = sessionRef.current
-      if (!cur) return
-      const took = p.took_ms > 0 ? `\n\n⏱ ${fmtTook(p.took_ms)}` : ''
-      // 网关偶发返回空流（content_chars=0）：显式错误而非静默"没有回答"
-      const body = p.full_text.trim()
-        ? p.full_text
-        : `❌ ${t('err_empty_response')}`
-      const sourcesPatch = p.source_ids.length > 0
-        ? { source_ids: p.source_ids, source_files: p.source_files }
-        : {}
-      const userTurns = messagesRef.current.filter(m => m.role === 'user').length
-      const perTurnPatch = {
-        per_turn_evidence: [...(cur.per_turn_evidence ?? []), {
-          turn_index: userTurns - 1,
-          file_ids: p.source_ids,
-          items: p.evidence ?? [],
-          trace_id: p.trace_id ?? '',
-          took_ms: p.took_ms,
-          llm_model: p.llm_model ?? '',
-          embedding_model: p.embedding_model ?? '',
-          search_query: p.search_query ?? '',
-          search_terms: p.search_terms ?? [],
-          clarify_candidates: p.clarify_candidates ?? [],
-          clarify_slots: p.clarify_slots ?? [],
-          clarify_blocking: p.clarify_blocking ?? false,
-          hits: p.hits ?? 0,
-        }]
+      if (p.persisted) {
+        // 切页期间 streamStore 已代为落库：只需把最新会话拉回视图（不再保存），
+        // 避免重复追加回答。拉取的会话已含答案且 pending 已清空。
+        void onSessionReload?.(p.session_id)
+      } else {
+        const cur = sessionRef.current
+        if (!cur) return
+        onSessionChange(buildSessionFromDone(cur, p, t))
       }
-      onSessionChange({
-        ...cur,
-        messages: [...messagesRef.current, { role: 'assistant', content: body + took }],
-        ...sourcesPatch,
-        ...perTurnPatch,
-        pending_query: null,
-        pending_started_at: null,
-      })
       if (p.clarify_blocking && p.clarify_slots && p.clarify_slots.length > 0) {
         const lastUser = [...messagesRef.current].reverse().find(m => m.role === 'user')
         const baseQ = lastUser ? (lastUser.content.split('\n\n---\n引用:')[0] ?? '').trim() : ''
@@ -263,13 +242,6 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     return () => { disposed = true; un?.(); setProgress(null) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id])
-
-  const fmtTook = (ms: number) => {
-    const s = Math.round(ms / 1000)
-    const m = Math.floor(s / 60)
-    const ss = s % 60
-    return m > 0 ? `${m}分${ss}秒` : `${ss}秒`
-  }
 
   // 每条助手消息对应的本轮检索证据（按 turn_index 匹配）。
   const evidenceFor = (msgIndex: number) => {
@@ -481,10 +453,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
   // 依赖只能是 session.id：若含 pending_query，handleSend 一设置它就会立刻清掉
   // 刚写的 pending_started_at，使 loading 恒为 false。
-  // 仅当本会话确无在途流/未消费的 done 时才清理 pending（否则切页返回会误清）。
+  // 仅当本会话确无在途流 / 未消费的 done / 正在由 store 落库时才清理 pending
+  // （否则切页返回会误清，或与 store 的写回竞争覆盖回答）。
   useEffect(() => {
     if (!session || !session.pending_query) return
-    if (isStreamInFlight(session.id) || hasAiDone(session.id)) return
+    if (isStreamInFlight(session.id) || hasAiDone(session.id) || isPersisting(session.id)) return
     patchSession({ pending_query: null, pending_started_at: null })
   }, [session?.id])
 

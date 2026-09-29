@@ -8,6 +8,22 @@ import { getConfig, updateConfig } from '../api/config'
 type Lang = 'zh' | 'en' | 'ja' | 'ko'
 const translations: Record<Lang, Record<string, string>> = { zh, en, ja, ko }
 
+// 模块级当前语言 + 翻译函数：供无 React context 的模块（如 ai/streamStore
+// 在用户切走后代为落库）取用户可见文案，避免硬编码中文。
+let currentLang: Lang = 'zh'
+export function setI18nLang(l: Lang) {
+    currentLang = l
+}
+export function translate(key: string, params?: Record<string, string | number>): string {
+    let str = translations[currentLang][key] ?? key
+    if (params) {
+        for (const [k, v] of Object.entries(params)) {
+            str = str.replace(`{${k}}`, String(v))
+        }
+    }
+    return str
+}
+
 interface I18nContextType {
     t: (key: string, params?: Record<string, string | number>) => string
     lang: Lang
@@ -31,6 +47,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
             }
         }).catch(() => {})
     }, [])
+
+    // 同步模块级语言，使非组件模块的 translate() 与界面一致。
+    useEffect(() => {
+        setI18nLang(lang)
+    }, [lang])
 
     const setLang = useCallback(async (l: Lang) => {
         setLangState(l)

@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-09-29（续4）：AI 聊天切页后内容丢失 / 停在空「新会话」——恢复活动会话 + streamStore 兜底落库
+
+- **现象**：聊天途中切到其它页面，会话丢失，回答不落库；聊天完成后侧栏仍停在空「新会话」，看不到聊天记录。用户反馈「之前修过又复发」。
+- **根因（两处叠加）**：
+  1. **路由卸载 + 恢复竞态**：`App.tsx` 的 `<Route path="chat">` 在切页时卸载整个 `AiChat`，`activeId`/`activeSession` 全丢。切回时 `AiChat` 的「ensure session」effect 在 `ai_capabilities`（读内存 config，快）与 `list_chat_sessions`（读+解析整个 `chat_history.json`，慢）之间竞态——`aiCap.llm` 先变 true 而 `sessions` 仍为 `[]`，于是命中 `sessions.length === 0` 分支**每次都新建并激活一个空会话**。
+  2. **streamStore 修复不完整**：2026-09-20 引入的应用级 `streamStore` 只做到「常驻监听、切页不丢事件」，但真正写回会话的 `applyDone` 仍只在 `ChatPanel` 挂载到**那个确切的 session.id** 时才跑。App 乘上新建空会话后，`streamStore` 里缓冲的 `ai-done` 永远无人消费 → 回答不落库。历史越长 `list_chat_sessions` 越慢，竞态越稳定地输，故现在「每次都复现」。
+- **修复**：
+  - `src/pages/AiChat.tsx`：新增 `sessionsLoaded` 守卫，`list_chat_sessions` 返回前**绝不新建会话**；用 `sessionStorage`（`ls_active_chat_session`）记住并在切回时恢复 `activeId`（仅当存储在列表中才恢复，失效则回退最新/新建）；删除会话时同步清理该键；新增 `reloadSession`（只读拉回、不再保存）。
+  - 新增 `src/ai/applyDone.ts`：把「`ai-done` → 追加助手消息/来源/per-turn 证据 + 清 pending」抽成纯函数 `buildSessionFromDone`，供两条路径共用（消除重复实现）。
+  - `src/ai/streamStore.ts`：`ai-done` 到达时若**本会话无订阅者**（用户已切走、ChatPanel 未挂载），由 store 自行 `load + buildSessionFromDone + save` 落库（`persistDone`），并暴露 `isPersisting`；缓冲的 done 标记 `persisted`，ChatPanel 恢复时只重新拉取、不再追加，避免重复写入。有订阅者时仍由 ChatPanel 即时落库（`notify` 同步触发，无卸载窗口）。
+  - `src/components/ChatPanel.tsx`：改用共享 `buildSessionFromDone`；处理 `persisted` 分支（`onSessionReload`）；pending 清理 effect 增加 `isPersisting` 守卫，避免与 store 写回竞争覆盖回答。
+  - `src/i18n/index.tsx`：新增模块级 `translate`（+`setI18nLang`），供无 React context 的 `streamStore` 取用户可见文案（`err_empty_response`），避免硬编码中文。
+  - `src/api/files.ts`：`AiDonePayload` 增加可选 `persisted` 标记。
+- **涉及文件**：`src/pages/AiChat.tsx`、`src/components/ChatPanel.tsx`、`src/ai/streamStore.ts`、`src/ai/applyDone.ts`（新）、`src/ai/__tests__/applyDone.test.ts`（新）、`src/i18n/index.tsx`、`src/api/files.ts`、`AGENTS.md`、`USER_MANUAL.md`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0 错误；`npx vitest run` **61 passed**（新增 5 条 `applyDone` 单测）；`npm run lint` 0 错误（29 条既有 warning）；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-09-29（续3）：回填进度显示「实时速率」——窗口速率 + ETA，不再被历史卡顿拖累
 
 - **问题**：进度里的速率与 ETA 用的是 **从任务开始算起的累计平均**（`processed / elapsed`）。中途一旦卡顿（如网关故障期的长时间重试），这个数字会被**永久拖低**——实测切回 oMLX 后仍长期显示 `1.1/s`，而**即时速率约 1.6/s**，用户无法据此判断"现在到底快不快、正不正常"。

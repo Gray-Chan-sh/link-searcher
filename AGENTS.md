@@ -128,3 +128,14 @@ semgrep scan \
 - **触发条件**：网关不报 `capabilities.maxOutput`（agnes）、或聚合网关（如 `coding`）以超大 `max_tokens` 硬发时
 - **修复人/时间**：2026-09-28（第三次复发；前两次 `2026-09-19`、`2026-09-10` 均为非流式/局部修复）
 - **Tags**: `ai/mod.rs`, `chat_stream`, `max_tokens`, `LlmErrorKind`, `finish_reason`, `聚合网关`
+
+### 3. AI 聊天切页后会话丢失 / 回答不落库 / 停在空「新会话」
+- **现象**：聊天途中切到其它页面再回来，会话丢失；聊天完成后侧栏仍停在空「新会话」，看不到聊天记录
+- **根因（两处叠加）**：
+  1. `App.tsx` 的路由在切页时卸载整个 `AiChat`，`activeId` 全丢；切回时 `ai_capabilities`（快）与 `list_chat_sessions`（慢，读+解析整个 `chat_history.json`）竞态，`sessions` 还没回来就命中 `sessions.length === 0` → **每次新建并激活空会话**
+  2. `streamStore`（2026-09-20）只保证「事件不丢」，真正落库的 `applyDone` 仍只在 `ChatPanel` 挂载到**确切 session.id** 时跑；App 乘上新建空会话后，缓冲的 `ai-done` 无人消费。历史越长 `list_chat_sessions` 越慢，竞态越稳定地输
+- **修复**（2026-09-29）：`AiChat` 加 `sessionsLoaded` 守卫（列表未回不建会话）+ `sessionStorage(ls_active_chat_session)` 记住/恢复活动会话；`streamStore` 在**无订阅者**（用户已切走）时自行 `load+buildSessionFromDone+save` 兜底落库并标 `persisted`，ChatPanel 恢复时只重拉不追加；pending 清理加 `isPersisting` 守卫防写回竞争。`buildSessionFromDone` 抽为 `ai/applyDone.ts` 纯函数
+- **检查方法**：聊天途中切页→等回答完成→切回，确认侧栏高亮的是原会话、回答可见；再 grep `chat_history.json` 对应会话不含空 `assistant` 丢失；或看切回后是否新增空「新会话」条目
+- **触发条件**：任何「发送后切页 / 切回聊天页」；历史记录越大越必现
+- **修复人/时间**：2026-09-29（第二次修复；2026-09-20 仅修了"事件不丢"，未修"回到原会话"）
+- **Tags**: `AiChat.tsx`, `ChatPanel.tsx`, `ai/streamStore.ts`, `ai/applyDone.ts`, `sessionsLoaded`, `ls_active_chat_session`, `persisted`, 路由卸载

@@ -11,6 +11,10 @@ import ChatPanel from '../components/ChatPanel'
 
 type ResultNode = { name: string; path: string; isMatch: boolean; children: ResultNode[] }
 
+// 记住当前活动会话：切页会卸载整个 AiChat，没有它就无从判断"切回来该显示哪个会话"，
+// 会在 list_chat_sessions 返回前误建空会话，导致流式回答无处落库。
+const ACTIVE_CHAT_KEY = 'ls_active_chat_session'
+
 function buildResultTree(paths: string[]): ResultNode[] {
   const matchSet = new Set(paths)
   const roots: ResultNode[] = []
@@ -37,6 +41,7 @@ export default function AiChat() {
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const [capFailed, setCapFailed] = useState(false)
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([])
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [activeId, setActiveId] = useState<string | null>(null)
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
   // 树状文件浏览器
@@ -98,9 +103,15 @@ export default function AiChat() {
 
   const refreshList = useCallback(async () => {
     try { setSessions(await listChatSessions()) } catch { /* ignore */ }
+    finally { setSessionsLoaded(true) }
   }, [])
 
   useEffect(() => { refreshList() }, [refreshList])
+
+  // 记住活动会话 id，供切页返回后恢复（AiChat 会随路由卸载，state 全部丢失）。
+  useEffect(() => {
+    if (activeId) sessionStorage.setItem(ACTIVE_CHAT_KEY, activeId)
+  }, [activeId])
 
   useEffect(() => {
     const rawPaths = sessionStorage.getItem('ls_pending_chat_paths')
@@ -220,21 +231,31 @@ export default function AiChat() {
     if (activeSession) handleSessionChange({ ...activeSession, retrieval_scope: [] })
   }, [activeSession, handleSessionChange])
 
-  // Ensure a session exists when chat is enabled (create one if none).
+  // Ensure a session exists when chat is enabled (create one only when we know
+  // the list is truly empty — never while list_chat_sessions is still in flight,
+  // otherwise returning to this page always mints a fresh empty session and the
+  // in-flight answer has nowhere to be written back).
   useEffect(() => {
     if (!aiCap.llm || activeId) return
+    if (!sessionsLoaded) return
+    // 切页返回：优先恢复到离开前的会话，让 streamStore 缓冲的 ai-done 能被消费落库。
+    const stored = sessionStorage.getItem(ACTIVE_CHAT_KEY)
+    if (stored && sessions.some(s => s.id === stored)) {
+      loadSession(stored)
+      return
+    }
     if (sessions.length === 0) {
       createChatSession().then(id => {
         setActiveId(id)
-setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
+        setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
         refreshList()
       }).catch(() => {})
     } else {
       const latest = sessions[0]!.id
-      setActiveId(latest)
       loadSession(latest)
     }
-  }, [aiCap.llm, sessions.length, activeId])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [aiCap.llm, sessionsLoaded, sessions, activeId])
 
   const loadSession = useCallback(async (id: string) => {
     setActiveId(id)
@@ -253,6 +274,14 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     }
   }, [refreshList])
 
+  // streamStore 在切页期间已代为落库时，只把最新会话拉回视图（不再保存）。
+  const reloadSession = useCallback(async (id: string) => {
+    try {
+      const s = await loadChatSessionById(id)
+      if (s) setActiveSession(s)
+    } catch { /* ignore */ }
+  }, [])
+
   const handleNewSession = useCallback(async () => {
     try {
       const id = await createChatSession()
@@ -267,6 +296,7 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     if (!confirmed) return
     try {
       await deleteChatSession(id)
+      if (sessionStorage.getItem(ACTIVE_CHAT_KEY) === id) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
       if (id === activeId) {
         setActiveSession(null)
         setActiveId(null)
@@ -346,6 +376,8 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
     for (const id of ids) {
       try { await deleteChatSession(id) } catch { /* ignore */ }
     }
+    const storedActive = sessionStorage.getItem(ACTIVE_CHAT_KEY)
+    if (storedActive && ids.includes(storedActive)) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
     if (ids.includes(activeId ?? '')) {
       setActiveSession(null)
       setActiveId(null)
@@ -659,6 +691,7 @@ setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], so
             pendingMention={pendingMention}
             onMentionConsumed={() => setPendingMention(null)}
             onScopeAction={handleScopeAction}
+            onSessionReload={reloadSession}
           />
         ) : capFailed ? (
           <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-gray-400">

@@ -189,6 +189,11 @@ export interface AiDonePayload {
   total_match_count?: number
   llm_model?: string
   embedding_model?: string
+  /**
+   * 仅前端内部使用：true 表示该回答已由 streamStore 在用户切页期间自行落库，
+   * ChatPanel 恢复时只需重新拉取会话，无需再追加/保存（避免重复写入）。
+   */
+  persisted?: boolean
 }
 
 export async function smartSearchStream(query: string, sessionId: string): Promise<void> {
