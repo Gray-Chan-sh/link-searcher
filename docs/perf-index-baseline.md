@@ -261,6 +261,23 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 
 - **注意**：对**单线程串行执行**的网关（如 oMLX 的 MLX 全局单线程执行器）并发不会提升吞吐，个别实现还会因公平限流把批变小；自适应会自然收敛到 `并发=1`，属预期。
 
+### 8.8 实验：bge-m3 量化（MLX 4/6-bit）在 M4 上的吞吐（2026-09-29）
+
+- **动机**：算力瓶颈下，量化（更少权重字节 + Apple int4/6 内核）是否还有 ~2× 空间。
+- **方法**：另起一个 oMLX 实例（`:8090`，`--model-dir /Volumes/Data/ai-models/omlx-quant`），同一批 **64 条 × 1000 字符（32,384 token）** 请求，稳态取两轮；与内置 `:8000` 的 fp16 同机对比（GPU 同时被 app 回填占用，三者**同条件**）。
+- **结果（稳态 tok/s）**：
+
+  | 模型 | tok/s | item/s |
+  |---|---|---|
+  | fp16（`bge-m3`） | ~1,339 | 2.65 |
+  | **6-bit** | **~1,600** | **3.16–3.20** |
+  | 4-bit | ~1,505 | 2.97 |
+
+- **结论**：**6-bit 约 +20%**、4-bit 约 +12%（**4-bit 未胜 6-bit** → 此处瓶颈是算子/内核效率，不是权重字节）。**没有 ~2×**；且切换量化模型会改变向量、需重建全部向量库。故本次**不采纳**，继续用 fp16。
+- **留存**：模型在 `/Volumes/Data/ai-models/omlx-quant/{bge-m3-4bit,bge-m3-6bit}`，复测：`omlx serve --model-dir /Volumes/Data/ai-models/omlx-quant --port 8090 --api-key <key>`。
+- **副产**：基准负载显著抢了 GPU，app 内自适应随即把 `batch` 从 192 回退到 48（AIMD 收敛正确）；停止基准后会自动回升。
+
+
 
 
 
