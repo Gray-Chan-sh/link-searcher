@@ -258,6 +258,8 @@ const ko: Record<string, string> = {
     export_cancelled: '내보내기 취소됨',
     saved_to: '{path}에 저장됨',
     export_failed: '내보내기 실패: {error}',
+    save_failed: '세션 저장 실패',
+    delete_failed: '세션 삭제 실패',
     unknown_error: '알 수 없는 오류',
     search_your_documents: '문서 검색',
     search_description: '위의 검색창에 키워드를 입력하여 인덱스된 파일을 검색하세요',

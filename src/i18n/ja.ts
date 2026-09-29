@@ -258,6 +258,8 @@ const ja: Record<string, string> = {
     export_cancelled: 'エクスポートをキャンセルしました',
     saved_to: '{path} に保存しました',
     export_failed: 'エクスポート失敗: {error}',
+    save_failed: 'セッションの保存に失敗しました',
+    delete_failed: 'セッションの削除に失敗しました',
     unknown_error: '不明なエラー',
     search_your_documents: 'ドキュメントを検索',
     search_description: '上の検索ボックスにキーワードを入力して、インデックスされたファイルを検索',

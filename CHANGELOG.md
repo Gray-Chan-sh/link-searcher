@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-09-29（续6）：聊天内容全部无法持久化 —— `save_chat_session` 参数名回归（`session` → `sess`）
+
+- **现象**：会话能建、能列、能删，但发出的问题与 AI 回答在切页/重启后全部消失；会话永远是空「新会话」，标题不更新。日志里 AI 明明正常生成回答（`turn_begin`/`turn_end` 有完整内容），但 `chat_history.json` 里对应会话 `messages` 始终为空、文件 mtime 停在**创建那一刻**。
+- **根因**：commit `c41f84c`（拆分 `commands/ai.rs` 到子模块的重构）把 Tauri 命令 `save_chat_session` 的参数名从 `session` 误改为 `sess`。Tauri **按参数名反序列化**，而前端一直发 `invoke('save_chat_session', { session })` → 每次调用报 `invalid args ... sess` 失败；前端又用 `.catch(() => {})` 静默吞错，故自 2026-09-23 起长期无人察觉。`create/list/delete/load` 参数名未变，所以只有「保存」坏掉。
+- **修复**：
+  - `src-tauri/src/commands/ai.rs`：参数改回 `session`，并加注释警示参数名必须与前端 `invoke` 键一致。
+  - `src/pages/AiChat.tsx`：`handleSessionChange` / `handleDelete` / `handleBatchDelete` 的保存/删除失败改为 `console.error` + **error toast**，不再静默；新增 `save_failed` / `delete_failed` i18n（中/英/日/韩）。
+  - 顺带：删除会话的「不再自动重建」改用 `sessionStorage(ls_chat_no_autocreate)` 持久化，切页返回后仍不自动新建空会话。
+- **说明**：同卷（续4）streamStore 兜底落库、（续5）删除不重建，均为围绕同一现象的加固与显示修复；**真正让聊天内容落库的是本条参数名修复**。
+- **涉及文件**：`src-tauri/src/commands/ai.rs`、`src/pages/AiChat.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`AGENTS.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误（2 条既有 warning）；`npx tsc -b` 0 错误；`npx vitest run` 61 passed；`npm run lint` 0 错误；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-29（续5）：删除最后一个会话被立即自动重建（「新会话删不掉」）
 
 - **现象**：列表里的空「新会话」怎么删都在——删掉后立刻又冒出一个相同的空会话。

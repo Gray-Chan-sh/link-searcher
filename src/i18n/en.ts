@@ -258,6 +258,8 @@ const en: Record<string, string> = {
     export_cancelled: 'Export cancelled',
     saved_to: 'Saved to {path}',
     export_failed: 'Export failed: {error}',
+    save_failed: 'Failed to save session',
+    delete_failed: 'Failed to delete session',
     unknown_error: 'Unknown error',
     search_your_documents: 'Search your documents',
     search_description: 'Type a query above to search across your indexed files',

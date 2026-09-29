@@ -780,9 +780,12 @@ pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Optio
 #[tauri::command]
 pub fn save_chat_session(
     state: State<'_, AppState>,
-    sess: ChatSession,
+    // 参数名必须与前端 `invoke('save_chat_session', { session })` 一致：Tauri
+    // 按参数名反序列化，改名会让前端每次调用报 “invalid args” 且被静默吞掉，
+    // 表现为聊天内容全部无法持久化（2026-09-23 拆分重构曾误改为 `sess`）。
+    session: ChatSession,
 ) -> Result<(), String> {
-    session::save_chat_session(state, sess)
+    session::save_chat_session(state, session)
 }
 
 /// Export a session as Markdown (chat transcript with full traceability).

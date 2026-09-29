@@ -258,6 +258,8 @@ const zh: Record<string, string> = {
     export_cancelled: '已取消导出',
     saved_to: '已保存到 {path}',
     export_failed: '导出失败：{error}',
+    save_failed: '会话保存失败',
+    delete_failed: '删除会话失败',
     unknown_error: '未知错误',
     search_your_documents: '搜索您的文档',
     search_description: '在上方输入关键词，搜索所有已索引的文件',

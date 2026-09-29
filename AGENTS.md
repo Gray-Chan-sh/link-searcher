@@ -140,3 +140,12 @@ semgrep scan \
 - **修复人/时间**：2026-09-29（第二次修复；2026-09-20 仅修了"事件不丢"，未修"回到原会话"）
 - **联带修复（同日）**：删掉最后一个空会话会立刻被 ensure effect 自动重建（表现为「新会话删不掉」）→ 加 `suppressAutoCreateRef`：用户主动删除后不再自动建会话，主面板补「暂无会话 + 新建会话」空态
 - **Tags**: `AiChat.tsx`, `ChatPanel.tsx`, `ai/streamStore.ts`, `ai/applyDone.ts`, `sessionsLoaded`, `ls_active_chat_session`, `persisted`, `suppressAutoCreateRef`, 路由卸载
+
+### 4. 聊天内容全部无法持久化（save_chat_session 参数名与前端 invoke 不一致）
+- **现象**：会话能建/能列/能删，但问题与回答切页或重启后全部消失；会话永远是空「新会话」、标题不更新。日志里 AI 正常生成回答，但 `chat_history.json` 里 `messages` 始终为空、mtime 停在创建那一刻
+- **根因**：`c41f84c` 拆分 `commands/ai.rs` 时把 Tauri 命令 `save_chat_session` 参数名由 `session` 误改为 `sess`。Tauri **按参数名反序列化**，前端一直发 `{ session }` → 每次 `invalid args` 失败；前端 `.catch(() => {})` 静默吞错，长期无人察觉。`create/list/delete/load` 参数名未变，故只有「保存」坏
+- **修复**（2026-09-29）：参数改回 `session`；前端保存/删除失败改为 error toast 不再静默（新增 `save_failed`/`delete_failed`）
+- **检查方法**：新增/改动 `#[tauri::command]` 后，逐一比对**前端 `invoke('cmd', { key })` 的 key** 与 **Rust 参数名（snake_case → 前端 camelCase）**是否一致；聊天落库类问题先看 `chat_history.json` 的 mtime 是否随发送/回答更新，再 grep 前端 `save session failed`
+- **触发条件**：任何 Tauri 命令重命名/拆分重构；此案例自 2026-09-23 静默坏了一周
+- **修复人/时间**：2026-09-29
+- **Tags**: `commands/ai.rs`, `save_chat_session`, `sess`, Tauri 参数名, `invoke`, 静默吞错

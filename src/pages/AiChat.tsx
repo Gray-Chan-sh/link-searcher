@@ -6,6 +6,7 @@ import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { pickScopeDir } from '../utils/scopeResolve'
 import { saveFile, confirm } from '../utils/platform'
+import { toast } from '../utils/toast'
 import { PlusIcon, TrashIcon, FolderIcon, FolderOpenIcon, FileTextIcon, ChevronDownIcon, LoadingSpinner } from '../icons'
 import ChatPanel from '../components/ChatPanel'
 
@@ -14,6 +15,8 @@ type ResultNode = { name: string; path: string; isMatch: boolean; children: Resu
 // 记住当前活动会话：切页会卸载整个 AiChat，没有它就无从判断"切回来该显示哪个会话"，
 // 会在 list_chat_sessions 返回前误建空会话，导致流式回答无处落库。
 const ACTIVE_CHAT_KEY = 'ls_active_chat_session'
+// 用户删光会话后置位：切回聊天页不再自动新建空会话（本次会话内有效）。
+const NO_AUTO_CREATE_KEY = 'ls_chat_no_autocreate'
 
 function buildResultTree(paths: string[]): ResultNode[] {
   const matchSet = new Set(paths)
@@ -46,8 +49,14 @@ export default function AiChat() {
   const [activeSession, setActiveSession] = useState<ChatSession | null>(null)
   // 用户主动删除会话后置位：禁止 ensure effect 在列表为空时自动重建，
   // 否则删掉最后一个空「新会话」会立刻被重建，表现为"删不掉"。
-  // 新建会话 / 从搜索跳聊天时清除。
-  const suppressAutoCreateRef = useRef(false)
+  // 新建会话 / 从搜索跳聊天时清除。用 sessionStorage 持久化，切页返回后仍生效
+  // （仅本次会话，重启后恢复首进入自动建会话）。
+  const suppressAutoCreateRef = useRef(sessionStorage.getItem(NO_AUTO_CREATE_KEY) === '1')
+  const setSuppressAutoCreate = useCallback((v: boolean) => {
+    suppressAutoCreateRef.current = v
+    if (v) sessionStorage.setItem(NO_AUTO_CREATE_KEY, '1')
+    else sessionStorage.removeItem(NO_AUTO_CREATE_KEY)
+  }, [])
   // 树状文件浏览器
   const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
   const [treeExpanded, setTreeExpanded] = useState(false)
@@ -131,7 +140,7 @@ export default function AiChat() {
       try { const q = JSON.parse(rawQuery); if (typeof q === 'string' && q.length > 0) pendingQuery = q } catch { /* ignore */ }
     }
 
-    suppressAutoCreateRef.current = false
+    setSuppressAutoCreate(false)
     createChatSession().then(id => {
       const session: ChatSession = {
         id, title: '', created_at: 0, updated_at: 0,
@@ -148,7 +157,7 @@ export default function AiChat() {
         refreshList()
       }).catch(() => {})
     }).catch(() => {})
-  }, [])
+  }, [setSuppressAutoCreate])
 
   // 加载目录树（懒加载：只加载根层，展开时按需加载子目录）
   useEffect(() => {
@@ -186,9 +195,13 @@ export default function AiChat() {
   const handleSessionChange = useCallback((session: ChatSession | null) => {
     setActiveSession(session)
     if (session) {
-      saveChatSession(session).then(refreshList).catch(() => {})
+      // 保存失败必须可见：曾因后端参数名回归导致 save 全程静默失败、聊天内容全部丢失。
+      saveChatSession(session).then(refreshList).catch((e) => {
+        console.error('[AiChat] save session failed:', e)
+        toast(`${t('save_failed')}: ${e instanceof Error ? e.message : String(e)}`, 'error')
+      })
     }
-  }, [refreshList])
+  }, [refreshList, t])
 
   // 统一范围入口：把路径加入会话级检索范围，自动合并父路径吞并子路径
   const handleAddToScope = useCallback((path: string) => {
@@ -291,18 +304,18 @@ export default function AiChat() {
 
   const handleNewSession = useCallback(async () => {
     try {
-      suppressAutoCreateRef.current = false
+      setSuppressAutoCreate(false)
       const id = await createChatSession()
       setActiveSession({ id, title: '', created_at: 0, updated_at: 0, messages: [], source_ids: [], source_files: [], strict_docs: true, full_recall: false })
       setActiveId(id)
       refreshList()
     } catch { /* ignore */ }
-  }, [refreshList])
+  }, [refreshList, setSuppressAutoCreate])
 
   const handleDelete = useCallback(async (id: string) => {
     const confirmed = await confirm(t('confirm_delete_session'), t('delete'))
     if (!confirmed) return
-    suppressAutoCreateRef.current = true
+    setSuppressAutoCreate(true)
     try {
       await deleteChatSession(id)
       if (sessionStorage.getItem(ACTIVE_CHAT_KEY) === id) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
@@ -313,8 +326,11 @@ export default function AiChat() {
       } else {
         refreshList()
       }
-    } catch { /* ignore */ }
-  }, [activeId, refreshList])
+    } catch (e) {
+      console.error('[AiChat] delete session failed:', e)
+      toast(t('delete_failed'), 'error')
+    }
+  }, [activeId, refreshList, setSuppressAutoCreate, t])
 
   // 导出文件名时间序列：YYYYMMDD_HHMMSS（本地时区）
   const exportStamp = useCallback(() => {
@@ -381,11 +397,16 @@ export default function AiChat() {
       t('delete')
     )
     if (!confirmed) return
-    suppressAutoCreateRef.current = true
+    setSuppressAutoCreate(true)
     const ids = [...selectedIds]
+    let failed = 0
     for (const id of ids) {
-      try { await deleteChatSession(id) } catch { /* ignore */ }
+      try { await deleteChatSession(id) } catch (e) {
+        failed += 1
+        console.error('[AiChat] delete session failed:', id, e)
+      }
     }
+    if (failed > 0) toast(`${t('delete_failed')} (${failed}/${ids.length})`, 'error')
     const storedActive = sessionStorage.getItem(ACTIVE_CHAT_KEY)
     if (storedActive && ids.includes(storedActive)) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
     if (ids.includes(activeId ?? '')) {
@@ -395,7 +416,7 @@ export default function AiChat() {
     setSelectedIds(new Set())
     setSelectMode(false)
     refreshList()
-  }, [selectedIds, activeId, refreshList])
+  }, [selectedIds, activeId, refreshList, setSuppressAutoCreate, t])
 
   // 批量导出：逐会话导出并合并为一个 Markdown 文件
   const handleBatchExport = useCallback(async () => {
