@@ -21,6 +21,22 @@
 
 ---
 
+## 2026-09-29（续）：启动 chunk 回填改为"循环至补齐" —— 一次跑完所有缺口
+
+- **背景**：用户发现每次启动都在回填，且日志写"完成: 4096 块"却总也补不完。核实：chunk 向量回填**单次硬上限 `MAX_CHUNKS_PER_RUN=4096` 且只跑一遍**；启动链（`lib.rs`）对 chunk 回填只调用一次，**扫描完成钩子又不触发 chunk 回填**（只补 doc 向量 + 建分块）→ 一次启动最多补 4096，剩余缺口只能等下次重启或手动点击。
+- **实测（当时库）**：`doc_chunks` 22,201 块、`chunk_embeddings` 14,432，**仍缺 7,769 块（54 个长文档）**，约 65% 完成 → 单次 4096，还需 2 次启动才清零。
+- **改动**（`commands/index/embeddings.rs`）：
+  1. `run_backfill_chunk_embeddings` 内加**外层循环**：每轮取一批缺失块（上限 `MAX_CHUNKS_PER_PASS=4096`）嵌入，跑完复检，直到缺口为 0；`BACKFILL_LOCK` / `TaskGuard` 仍覆盖整段，UI 进度按**全局待补数**累计（不再每轮重置）。
+  2. 抽出 `count_missing_chunks()` 与 `collect_missing_chunk_tasks()`；每轮只取 `LEFT JOIN ... IS NULL` 的块，已嵌入的绝不重做（幂等、中断可续）。
+  3. **防死循环**：某轮 0 成功（如整批失败）即停止并告警。启动 / 手动命令 / 向量重建三个调用点都自动受益。
+  4. **修正日志语义**：结束日志改为"共 X 块, Y 失败, **剩余 Z**"（原"完成: 4096 块"会被误读为全库完成）。
+- **效果**：启动后一次把当前缺口跑完（约 7.8k 块，按本地 0.2–0.3/s 约 7–11h）；叠加 09-28 的 B/C（预留副本 + 让路），期间聊天不再被拖慢。
+- **不影响**：远程嵌入路径（09-29 远程自适应）与本地查询嵌入路径不变。
+- **涉及文件**：`src-tauri/src/commands/index/embeddings.rs`、`CHANGELOG.md`。
+- **验证**：新增单测 `count_and_collect_missing_chunks_respect_caps`（内存库验证：缺失计数、单轮上限、已嵌入块不被重选）；`cargo check --tests` 0 错误；`cargo test --lib embeddings::tests` 3 passed / 0 failed；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-09-28：AI 聊天无回复（同一 max_tokens 缺陷第三次复发）——未知即省略 + 截断检测 + 400 分类
 
 - **根因（完整链）**：
