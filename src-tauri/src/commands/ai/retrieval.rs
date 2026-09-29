@@ -110,6 +110,216 @@ mod hit_in_scope_tests {
     }
 }
 
+/// Escape SQLite LIKE metacharacters so an entity keyword containing `%`,
+/// `_` or `\` can't turn into a wildcard.
+fn escape_like_char(c: char) -> String {
+    match c {
+        '\\' | '%' | '_' => format!("\\{c}"),
+        _ => c.to_string(),
+    }
+}
+
+/// 字符集共现的「泛字」门槛：某个字在库里的文档频率超过
+/// `max(CHAR_COOCCUR_MIN_DF_FLOOR, 总文档数 × CHAR_COOCCUR_MAX_DF_RATIO)`
+/// 时视为泛字（实测：「常」22%、「海」57%），整词放弃。
+/// 否则一份长文档几乎命中所有常用字，无关长文会把候选池灌满——实测
+/// 「常宏」（常 22%）能命中 159 份模板文档，而「深蓝」只有 81 份。
+pub(crate) const CHAR_COOCCUR_MAX_DF_RATIO: f64 = 0.10;
+pub(crate) const CHAR_COOCCUR_MIN_DF_FLOOR: usize = 30;
+
+/// 字符集共现兜底（治词序颠倒 / 错别字）。
+///
+/// 实体词「深蓝」与正文里的「蓝深」没有任何字面交集（jieba 分词也是两个
+/// 不同的词），BM25 与向量都可能零召回。此处在主检索命中极少时退化为最宽松
+/// 的字面判据：正文**同时包含该实体词的每个汉字**（不要求相邻），把「蓝深」
+/// 这类倒序 / 别名写法捞回候选池。
+///
+/// 只扫描 `content_index`（有正文的文件）；单字与超过 `max_len` 的长词区分度
+/// 不足，直接跳过；任一字命中泛字门槛（见 [`CHAR_COOCCUR_MAX_DF_RATIO`]）时
+/// 整词放弃；单个词的命中间数超过 `max_candidates` 也视为泛词整词放弃。
+/// 返回 (file_id, path)，按 file_id 去重。
+pub(crate) fn char_cooccur_candidates(
+    conn: &rusqlite::Connection,
+    keywords: &[String],
+    max_len: usize,
+    max_candidates: usize,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let corpus: usize = conn
+        .query_row(
+            "SELECT COUNT(*) FROM content_index ci \
+             JOIN file_tracking ft ON ft.md5 = ci.md5 \
+             WHERE ft.status = 'active'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as usize)
+        .unwrap_or(0);
+    if corpus == 0 {
+        return out;
+    }
+    let max_df = ((corpus as f64 * CHAR_COOCCUR_MAX_DF_RATIO) as usize)
+        .max(CHAR_COOCCUR_MIN_DF_FLOOR);
+    let df_of = |ch: char| -> usize {
+        conn.query_row(
+            "SELECT COUNT(*) FROM content_index ci \
+             JOIN file_tracking ft ON ft.md5 = ci.md5 \
+             WHERE ft.status = 'active' AND ci.text_content LIKE ?1 ESCAPE '\\'",
+            rusqlite::params![format!("%{}%", escape_like_char(ch))],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n as usize)
+        .unwrap_or(0)
+    };
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for kw in keywords {
+        let chars: Vec<char> = kw.chars().filter(|c| !c.is_whitespace()).collect();
+        if chars.len() < 2 || chars.len() > max_len {
+            continue;
+        }
+        // 泛字门槛：任一字过于常见 → 整词放弃（如「常宏」的「常」）。
+        if let Some(&common) = chars.iter().find(|c| df_of(**c) > max_df) {
+            log::info!(
+                "[AI]   char_fallback: kw=\"{kw}\" skipped — char '{common}' too common (df>{} of {corpus})",
+                max_df
+            );
+            continue;
+        }
+        let mut sql = String::from(
+            "SELECT ft.id, ft.path FROM content_index ci \
+             JOIN file_tracking ft ON ft.md5 = ci.md5 \
+             WHERE ft.status = 'active'",
+        );
+        let mut params: Vec<String> = Vec::with_capacity(chars.len());
+        for (i, ch) in chars.iter().enumerate() {
+            sql.push_str(&format!(" AND ci.text_content LIKE ?{} ESCAPE '\\'", i + 1));
+            params.push(format!("%{}%", escape_like_char(*ch)));
+        }
+        // 多取一条以判断是否"泛词"（命中过多则整词放弃）。
+        sql.push_str(&format!(" LIMIT {}", max_candidates + 1));
+        let Ok(mut stmt) = conn.prepare(&sql) else { continue };
+        let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) else {
+            continue;
+        };
+        let mut hits: Vec<(String, String)> = Vec::new();
+        for row in rows.flatten() {
+            hits.push(row);
+        }
+        if hits.len() > max_candidates {
+            log::info!(
+                "[AI]   char_fallback: kw=\"{}\" too generic (>{max_candidates} hits), skipped",
+                kw
+            );
+            continue;
+        }
+        for (fid, path) in hits {
+            if seen.insert(fid.clone()) {
+                out.push((fid, path));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod char_cooccur_tests {
+    use super::*;
+
+    fn db() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE content_index (md5 TEXT PRIMARY KEY, text_content TEXT NOT NULL);
+             CREATE TABLE file_tracking (id TEXT PRIMARY KEY, path TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', md5 TEXT);",
+        )
+        .expect("schema");
+        conn
+    }
+
+    fn add(conn: &rusqlite::Connection, id: &str, path: &str, md5: &str, text: &str) {
+        conn.execute("INSERT INTO file_tracking (id, path, status, md5) VALUES (?1, ?2, 'active', ?3)",
+            rusqlite::params![id, path, md5]).expect("file row");
+        conn.execute("INSERT INTO content_index (md5, text_content) VALUES (?1, ?2)",
+            rusqlite::params![md5, text]).expect("content row");
+    }
+
+    #[test]
+    fn finds_character_order_swap() {
+        // 回归核心场景：查「深蓝」，文档里是「蓝深」→ 必须靠字符共现捞回。
+        let conn = db();
+        add(&conn, "f1", "1 文档/仲裁申请书-蓝深.doc", "m1",
+            "申请人:上海蓝深实业有限公司与被申请人中信文化传媒集团有限公司");
+        add(&conn, "f2", "模板/礼仪培训.doc", "m2",
+            "西装颜色以藏青、深蓝为主");
+        add(&conn, "f3", "无关.txt", "m3", "本文只提到蓝色，没有另一个字");
+
+        let hits = char_cooccur_candidates(&conn, &["深蓝".to_string()], 4, 300);
+        let ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"f1"), "倒序的「蓝深」文档必须命中: {ids:?}");
+        assert!(ids.contains(&"f2"), "含「深蓝」的文档也应命中: {ids:?}");
+        // f3 只含「蓝」不含「深」→ 不应命中
+        assert!(!ids.contains(&"f3"));
+    }
+
+    #[test]
+    fn generic_keyword_is_skipped() {
+        // 泛词（命中间数超过上限）整词放弃，不能把候选池灌满。
+        let conn = db();
+        for i in 0..5 {
+            add(&conn, &format!("f{i}"), &format!("p{i}.txt"), &format!("m{i}"), "上海某公司");
+        }
+        let hits = char_cooccur_candidates(&conn, &["上海".to_string()], 4, 3);
+        assert!(hits.is_empty(), "泛词应被跳过: {hits:?}");
+    }
+
+    #[test]
+    fn skips_single_char_and_long_keywords() {
+        let conn = db();
+        add(&conn, "f1", "a.txt", "m1", "深蓝公司");
+        assert!(char_cooccur_candidates(&conn, &["深".to_string()], 4, 300).is_empty());
+        assert!(char_cooccur_candidates(&conn, &["很深很深很深很".to_string()], 4, 300).is_empty());
+    }
+
+    #[test]
+    fn common_character_keywords_are_skipped() {
+        // 泛字门槛：某字的文档频率超过 max(30, 总数/10) 时整词放弃。
+        // 「常」这类常用字会让长文档几乎全命中（实测 159 份无关模板），
+        // 必须挡掉；「深/蓝」两字都罕见，正常兜底。
+        let conn = db();
+        for i in 0..40 {
+            add(&conn, &format!("c{i}"), &format!("c{i}.txt"), &format!("cm{i}"), "常规内容:公司管理制度与责任");
+        }
+        add(&conn, "f1", "1 文档/仲裁申请书-蓝深.doc", "m1", "申请人:上海蓝深实业有限公司");
+
+        let hits = char_cooccur_candidates(&conn, &["常宏".to_string()], 4, 300);
+        assert!(hits.is_empty(), "含泛字的词应被跳过: {hits:?}");
+
+        let ok = char_cooccur_candidates(&conn, &["深蓝".to_string()], 4, 300);
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].0, "f1");
+    }
+
+    #[test]
+    fn like_metacharacters_are_literal() {
+        // 实体词里的 % / _ 必须按字面匹配，不能变成通配符。
+        let conn = db();
+        add(&conn, "f1", "a.txt", "m1", "税率为100%计算_方式");
+        add(&conn, "f2", "b.txt", "m2", "税率为1005计算X方式");
+        let hits = char_cooccur_candidates(&conn, &["%_".to_string()], 4, 300);
+        let ids: Vec<&str> = hits.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(ids.contains(&"f1"));
+        assert!(!ids.contains(&"f2"), "% 被当通配符会误命中: {ids:?}");
+    }
+
+    #[test]
+    fn dedupes_by_file_id() {
+        let conn = db();
+        add(&conn, "f1", "a.txt", "m1", "深蓝公司");
+        let hits = char_cooccur_candidates(&conn, &["深蓝".to_string(), "蓝深".to_string()], 4, 300);
+        assert_eq!(hits.len(), 1, "同一文件被多个关键词命中只返回一次: {hits:?}");
+    }
+}
 
 /// Reciprocal Rank Fusion: score = Σ 1/(k + rank) summed over two
 /// pre-sorted lists (best-first). Lists must be ordered by score descending;

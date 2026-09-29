@@ -146,6 +146,27 @@ const VECTOR_THRESHOLD: f32 = 0.55;
 const CHUNK_VECTOR_THRESHOLD: f32 = 0.55;
 const CHUNK_VECTOR_TOP_K: usize = 500;
 
+/// 阈值只判「强相关」：短实体查询（2~4 字，如 "深蓝"）与全库任意文档的余弦
+/// 普遍落在 0.45~0.52，硬阈值 0.55 会让语义通道整条归零。**强命中为 0 时**
+/// 保底放行相似度最高的这么多份弱候选（见
+/// [`crate::ai::vector_scan_with_query_emb`]），以低权重进池、由重排决定去留；
+/// 已有强命中则不再追加，避免给健康查询制造噪声。
+const VECTOR_RELEASE_TOP_K: usize = 50;
+/// chunk 向量通道同上的保底放行条数。
+const CHUNK_VECTOR_RELEASE_K: usize = 50;
+/// 保底放行的弱向量候选（低于阈值）在 RRF 里的权重——低于强命中的 1.0，
+/// 避免弱信号与强命中同权把噪声抬进注入。
+const WEAK_VECTOR_RRF_WEIGHT: f64 = 0.4;
+/// 字符集兜底触发线：BM25 命中少于此值且语义无强命中时启用。
+/// 词序颠倒/错别字场景（"深蓝"↔"蓝深"）BM25 通常只命中 0~3 份噪音。
+const CHAR_FALLBACK_BM25_MAX: usize = 5;
+/// 字符集兜底的实体词最长字数（超出则区分度不足，放弃扫描）。
+const CHAR_FALLBACK_MAX_CHARS: usize = 4;
+/// 单个实体词的字符共现候选上限；超过即视为泛词（如"上海"），整词放弃。
+const CHAR_FALLBACK_MAX_CANDIDATES: usize = 300;
+/// 字符集兜底候选在 RRF 里的权重（字面证据强度介于 BM25 与路径匹配之间）。
+const CHAR_FALLBACK_RRF_WEIGHT: f64 = 0.5;
+
 /// Resolve file paths to file IDs with exact + LIKE fallback.
 /// Returns (resolved, missing) where resolved is (file_id, path) pairs.
 /// For each path: exact get_file_by_path first, then LIKE fallback
@@ -413,6 +434,15 @@ pub(crate) async fn prepare_conversation_prompt(
     let chunk_top_k = env_usize("LINK_SEARCHER_CHUNK_TOP_K", CHUNK_VECTOR_TOP_K);
     let chunk_rrf_weight = env_f32("LINK_SEARCHER_RRF_CHUNK_WEIGHT", 1.0) as f64;
     let bm25_rrf_weight = env_f32("LINK_SEARCHER_RRF_BM25_WEIGHT", 1.0) as f64;
+    // 阈值之外保底放行的弱候选条数 / 权重（见 VECTOR_RELEASE_TOP_K）。
+    let vector_release_k = env_usize("LINK_SEARCHER_VECTOR_RELEASE_K", VECTOR_RELEASE_TOP_K);
+    let chunk_vector_release_k = env_usize("LINK_SEARCHER_CHUNK_VECTOR_RELEASE_K", CHUNK_VECTOR_RELEASE_K);
+    let weak_vector_weight =
+        env_f32("LINK_SEARCHER_RRF_WEAK_VECTOR_WEIGHT", WEAK_VECTOR_RRF_WEIGHT as f32) as f64;
+    // 字符集兜底触发线（0 = 关闭）。
+    let char_fallback_max = env_usize("LINK_SEARCHER_CHAR_FALLBACK_MAX", CHAR_FALLBACK_BM25_MAX);
+    let char_fallback_weight =
+        env_f32("LINK_SEARCHER_RRF_CHAR_WEIGHT", CHAR_FALLBACK_RRF_WEIGHT as f32) as f64;
     // BM25 头部"精英加成"：BM25 排名越靠前，字面相关性的精度越高；中后段
     // 则是任关键词命中的长尾（噪声）。实测全局提高 BM25 权重会同时抬高
     // rank 100~500 的长尾，灌满融合前 30（总分 80%→68%）；而只抬高前 K 名
@@ -469,6 +499,8 @@ pub(crate) async fn prepare_conversation_prompt(
         final_kws.join(" OR ")
     };
     log::info!("[AI]   final_kws={:?} bm25_query=\"{}\"", final_kws, truncate_text(&bm25_query, 60));
+    // 语义通道里「强相关」（过阈值）的命中数：字符集兜底的触发条件之一。
+    let mut strong_vector_hits = 0usize;
     if !last_q.trim().is_empty() {
         check_cancel!();
         emit_progress("bm25", "BM25 检索中...", 0, 0);
@@ -511,7 +543,10 @@ pub(crate) async fn prepare_conversation_prompt(
             emit_progress("vector", "语义扫描中...", 0, 0);
             log::info!("[AI]   about to call vector_full_scan");
             let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
-            let vec_query = if final_kws.is_empty() { search_q.clone() } else { final_kws.join(" ") };
+            // 语义查询用**改写后的完整问句**：把问句压成实体词会让查询向量
+            // 退化成几个孤立汉字（"深蓝公司"→"深蓝"），余弦普遍低于阈值，
+            // 语义通道等于被关掉。实体词本就在 search_q 内，无需再拼。
+            let vec_query = if search_q.trim().is_empty() { final_kws.join(" ") } else { search_q.clone() };
             // 只嵌入一次，文件级与 chunk 级两个向量通道共享同一查询向量
             // （debug 下 bge-large 单次推理 85s，重复嵌入翻倍浪费）。
             // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
@@ -527,10 +562,16 @@ pub(crate) async fn prepare_conversation_prompt(
                 emit_progress("vector", "语义嵌入超时，已回退 BM25", 0, 0);
             }
             if let Some(qe) = &query_emb {
-                if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, vector_threshold) {
+                if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, vector_threshold, vector_release_k) {
                     log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
                     for (rank, (fid, sim)) in vec_hits.into_iter().enumerate() {
-                        rrf_add(&mut rrf_acc, &fid, rank, 1.0);
+                        // 过阈值=强命中（满权重）；保底放行的弱候选降权，避免
+                        // 与强命中同权把噪声抬进注入。
+                        let strong = sim >= vector_threshold;
+                        if strong {
+                            strong_vector_hits += 1;
+                        }
+                        rrf_add(&mut rrf_acc, &fid, rank, if strong { 1.0 } else { weak_vector_weight });
                         if all_seen.insert(fid.clone()) {
                             all_hits.push(ScoredHit {
                                 file_id: fid, path: String::new(), bm25_score: None,
@@ -565,9 +606,9 @@ pub(crate) async fn prepare_conversation_prompt(
                     if md5s.is_empty() {
                         // 粗筛 0 命中时回退全库 chunk 扫描（保底：不因漏斗丢失
                         // "仅块级可命中"的极端场景；正常粗筛命中数千份时走漏斗）。
-                        crate::ai::chunk_vector_scan_with_query_emb(&c, qe, chunk_threshold, chunk_top_k)
+                        crate::ai::chunk_vector_scan_with_query_emb(&c, qe, chunk_threshold, chunk_top_k, chunk_vector_release_k)
                     } else {
-                        crate::ai::chunk_vector_scan_for_md5s(&c, qe, &md5s, chunk_threshold, chunk_top_k)
+                        crate::ai::chunk_vector_scan_for_md5s(&c, qe, &md5s, chunk_threshold, chunk_top_k, chunk_vector_release_k)
                     }
                 } {
                     log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
@@ -580,8 +621,12 @@ pub(crate) async fn prepare_conversation_prompt(
                     for (md5, chunks) in by_md5 {
                         let Ok(file_ids) = crate::db::tracker::get_files_by_md5(&c, &md5) else { continue };
                         let first_rank = md5_first_rank.get(&md5).copied().unwrap_or(0);
+                        // 块相似度过阈=强命中；保底放行的弱块降权（与文件级一致）。
+                        let best = chunks.iter().map(|(_, s)| *s).fold(0.0_f32, f32::max);
+                        let chunk_w =
+                            if best >= chunk_threshold { chunk_rrf_weight } else { weak_vector_weight };
                         for fid in file_ids {
-                            rrf_add(&mut rrf_acc, &fid, first_rank, chunk_rrf_weight);
+                            rrf_add(&mut rrf_acc, &fid, first_rank, chunk_w);
                             if all_seen.insert(fid.clone()) {
                                 all_hits.push(ScoredHit {
                                     file_id: fid, path: String::new(), bm25_score: None,
@@ -620,6 +665,31 @@ pub(crate) async fn prepare_conversation_prompt(
                         file_id: fid, path: String::new(), bm25_score: None,
                         semantic_score: None, rrf_score: None, from_history: false,
                         from_chunk: false, hit_chunks: Vec::new(),
+                    });
+                }
+            }
+        }
+        // C. 字符集兜底（治词序颠倒 / 错别字）：BM25 命中极少且语义无强命中
+        // → 问句里的实体词很可能在文档里换了词序/写法（"深蓝"↔"蓝深"）。
+        // 字面与语义都救不回时，退化为最宽松的"字符共现"（正文含实体词的
+        // 全部汉字，不要求相邻），把倒序写法捞回候选池。
+        if char_fallback_max > 0
+            && !final_kws.is_empty()
+            && bm25_count < char_fallback_max
+            && strong_vector_hits == 0
+        {
+            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let cands = char_cooccur_candidates(
+                &c, &final_kws, CHAR_FALLBACK_MAX_CHARS, CHAR_FALLBACK_MAX_CANDIDATES,
+            );
+            log::info!("[AI]   char_fallback: kws={:?} -> {} candidates", final_kws, cands.len());
+            for (rank, (fid, path)) in cands.into_iter().enumerate() {
+                rrf_add(&mut rrf_acc, &fid, rank, char_fallback_weight);
+                if all_seen.insert(fid.clone()) {
+                    all_hits.push(ScoredHit {
+                        file_id: fid, path, bm25_score: None, semantic_score: None,
+                        rrf_score: None, from_history: false, from_chunk: false,
+                        hit_chunks: Vec::new(),
                     });
                 }
             }

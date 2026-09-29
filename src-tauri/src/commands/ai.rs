@@ -468,7 +468,7 @@ use rewrite::{rewrite_history, valid_rewrite_output};
 mod retrieval;
 pub use retrieval::{merge_scope_prefixes, weighted_mix};
 pub(crate) use retrieval::{bm25_relevant_hits, rrf_add};
-use retrieval::{apply_rerank_order, hit_in_scope, trace_rank, trace_target_ids};
+use retrieval::{apply_rerank_order, char_cooccur_candidates, hit_in_scope, trace_rank, trace_target_ids};
 #[cfg(test)]
 use retrieval::rrf_fuse;
 

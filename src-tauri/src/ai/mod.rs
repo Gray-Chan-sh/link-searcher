@@ -789,38 +789,51 @@ pub fn embed(text: &str) -> Option<Vec<f32>> {
 
 /// Brute-force cosine scan over ALL stored embeddings.
 /// Returns every doc_id with similarity >= threshold, sorted descending.
-/// No top-K limit — returns all matching documents.
+/// `release_top_k` is passed through to [`vector_scan_with_query_emb`];
+/// this wrapper keeps the pure-threshold behaviour (0 = no release).
 pub fn vector_full_scan(
     conn: &rusqlite::Connection,
     query: &str,
     threshold: f32,
 ) -> Result<Vec<(String, f32)>, String> {
     let query_emb = cached_embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
-    vector_scan_with_query_emb(conn, &query_emb, threshold)
+    vector_scan_with_query_emb(conn, &query_emb, threshold, 0)
 }
 
 /// Core of [`vector_full_scan`] taking a pre-computed query embedding,
 /// so callers scanning both file and chunk vectors only embed once.
+///
+/// 阈值只用来判定「强相关」，不再是整条通道的闸门：短实体查询（2~4 字，如
+/// "深蓝"）与全库任意文档的余弦普遍落在 0.45~0.52，硬阈值 0.55 会返回 0
+/// 命中，语义通道等于被关掉。`release_top_k > 0` 时，**若过阈值的强命中为 0**
+/// 则额外保底放行相似度最高的这么多份弱候选（调用方按相似度给低权重，交给
+/// 重排决定去留）；已有强命中说明通道工作正常，不再灌弱候选制造噪声。
+/// 返回按相似度降序：强相关在前，保底放行的弱候选在后。
 pub fn vector_scan_with_query_emb(
     conn: &rusqlite::Connection,
     query_emb: &[f32],
     threshold: f32,
+    release_top_k: usize,
 ) -> Result<Vec<(String, f32)>, String> {
     let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
     let all_count = all.len();
-    let mut max_sim: f32 = 0.0;
-    let mut results: Vec<(String, f32)> = all
+    let mut scored: Vec<(String, f32)> = all
         .into_iter()
-        .filter_map(|(fid, vec)| {
-            let sim = cosine(query_emb, &vec);
-            if sim > max_sim {
-                max_sim = sim;
-            }
-            if sim >= threshold { Some((fid, sim)) } else { None }
-        })
+        .map(|(fid, vec)| (fid, cosine(query_emb, &vec)))
         .collect();
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    log::info!("[AI]   vector: {} emb, {} above {:.2} (max_sim={:.4})", all_count, results.len(), threshold, max_sim);
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let max_sim = scored.first().map(|(_, s)| *s).unwrap_or(0.0);
+    let (strong, weak): (Vec<_>, Vec<_>) =
+        scored.into_iter().partition(|(_, sim)| *sim >= threshold);
+    let strong_count = strong.len();
+    let mut results = strong;
+    if release_top_k > 0 && results.is_empty() {
+        results.extend(weak.into_iter().take(release_top_k));
+    }
+    let released = results.len() - strong_count;
+    log::info!(
+        "[AI]   vector: {all_count} emb, {strong_count} above {threshold:.2} (+{released} released, max_sim={max_sim:.4})"
+    );
     Ok(results)
 }
 
@@ -829,14 +842,16 @@ pub fn vector_scan_with_query_emb(
 /// `top_k` so long documents with many chunks can't flood the caller.
 /// Chunk vectors encode ~1500-char windows, so detail-level content that a
 /// whole-file vector dilutes is directly retrievable here.
+/// `release_top_k` behaves as in [`vector_scan_with_query_emb`].
 pub fn chunk_vector_scan(
     conn: &rusqlite::Connection,
     query: &str,
     threshold: f32,
     top_k: usize,
+    release_top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
     let query_emb = cached_embed(query).ok_or("query embedding failed (embedding not enabled?)")?;
-    chunk_vector_scan_with_query_emb(conn, &query_emb, threshold, top_k)
+    chunk_vector_scan_with_query_emb(conn, &query_emb, threshold, top_k, release_top_k)
 }
 
 /// Core of [`chunk_vector_scan`] taking a pre-computed query embedding,
@@ -846,30 +861,39 @@ pub fn chunk_vector_scan_with_query_emb(
     query_emb: &[f32],
     threshold: f32,
     top_k: usize,
+    release_top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
     let all = crate::db::tracker::get_all_chunk_embeddings(conn).map_err(|e| e.to_string())?;
     let all_count = all.len();
-    let results = chunk_vector_scan_impl(query_emb, &all, threshold, top_k);
-    log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (top {top_k})", all_count, results.len(), threshold);
+    let results = chunk_vector_scan_impl(query_emb, &all, threshold, top_k, release_top_k);
+    let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
+    log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (+{} released, top {top_k})",
+        all_count, above, threshold, results.len() - above);
     Ok(results)
 }
 
 /// Pure scoring core of [`chunk_vector_scan`], split out for unit testing
-/// (no model / DB dependency).
+/// (no model / DB dependency). Same threshold + release semantics as the
+/// document-level scan: 仅当**过阈值的强命中为空**时，才在 `strong` 之后
+/// 保底放行 `release_top_k` 份最相似的弱候选。
 fn chunk_vector_scan_impl(
     query_emb: &[f32],
     rows: &[(String, usize, Vec<f32>)],
     threshold: f32,
     top_k: usize,
+    release_top_k: usize,
 ) -> Vec<(String, usize, f32)> {
-    let mut results: Vec<(String, usize, f32)> = rows
+    let mut scored: Vec<(String, usize, f32)> = rows
         .iter()
-        .filter_map(|(md5, idx, vec)| {
-            let sim = cosine(query_emb, vec);
-            if sim >= threshold { Some((md5.clone(), *idx, sim)) } else { None }
-        })
+        .map(|(md5, idx, vec)| (md5.clone(), *idx, cosine(query_emb, vec)))
         .collect();
-    results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let (strong, weak): (Vec<_>, Vec<_>) =
+        scored.into_iter().partition(|(_, _, sim)| *sim >= threshold);
+    let mut results = strong;
+    if release_top_k > 0 && results.is_empty() {
+        results.extend(weak.into_iter().take(release_top_k));
+    }
     results.truncate(top_k);
     results
 }
@@ -884,13 +908,15 @@ pub fn chunk_vector_scan_for_md5s(
     md5s: &[String],
     threshold: f32,
     top_k: usize,
+    release_top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
     let rows = crate::db::tracker::get_chunk_embeddings_by_md5s(conn, md5s).map_err(|e| e.to_string())?;
     let scanned = rows.len();
-    let results = chunk_vector_scan_impl(query_emb, &rows, threshold, top_k);
+    let results = chunk_vector_scan_impl(query_emb, &rows, threshold, top_k, release_top_k);
+    let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
     log::info!(
-        "[AI]   chunk_vector(funnel): {} md5s -> {} chunk emb scanned, {} above {:.2} (top {top_k})",
-        md5s.len(), scanned, results.len(), threshold
+        "[AI]   chunk_vector(funnel): {} md5s -> {} chunk emb scanned, {} above {:.2} (+{} released, top {top_k})",
+        md5s.len(), scanned, above, threshold, results.len() - above
     );
     Ok(results)
 }
@@ -1817,17 +1843,46 @@ mod tests {
             ("m3".to_string(), 1usize, vec![0.0, 1.0, 0.0]),      // cos 0.0 (below 0.5)
             ("m4".to_string(), 2usize, vec![0.5, 0.5, 0.0]),      // cos ~0.707
         ];
-        let out = chunk_vector_scan_impl(&q, &rows, 0.5, 10);
+        let out = chunk_vector_scan_impl(&q, &rows, 0.5, 10, 0);
         // 阈值过滤掉 m3，按相似度降序
         assert_eq!(out.len(), 3);
         assert_eq!(out[0].0, "m1");
         assert_eq!(out[1].0, "m2");
         assert_eq!(out[2].0, "m4");
         // top_k 截断
-        let out2 = chunk_vector_scan_impl(&q, &rows, 0.0, 2);
+        let out2 = chunk_vector_scan_impl(&q, &rows, 0.0, 2, 0);
         assert_eq!(out2.len(), 2);
         assert_eq!(out2[0].0, "m1");
         assert_eq!(out2[1].0, "m2");
+    }
+
+    #[test]
+    fn chunk_scan_releases_below_threshold_candidates() {
+        // 阈值只判「强相关」；只有在**强命中为空**（阈值会把通道清空）时，
+        // 才保底放行相似度最高的 release_top_k 份弱候选。
+        let q = vec![1.0, 0.0, 0.0];
+        let rows = vec![
+            ("m1".to_string(), 0usize, vec![1.0, 0.0, 0.0]),   // cos 1.0 强
+            ("m2".to_string(), 1usize, vec![0.0, 1.0, 0.0]),   // cos 0.0 弱
+            ("m3".to_string(), 2usize, vec![0.5, 0.5, 0.0]),   // cos ~0.707 弱
+        ];
+        // 无保底 → 只有强命中
+        let strict = chunk_vector_scan_impl(&q, &rows, 0.8, 10, 0);
+        assert_eq!(strict.len(), 1);
+        assert_eq!(strict[0].0, "m1");
+        // 已有强命中 → 不再追加弱候选（避免给健康查询制造噪声）
+        let no_noise = chunk_vector_scan_impl(&q, &rows, 0.8, 10, 5);
+        assert_eq!(no_noise.len(), 1);
+        assert_eq!(no_noise[0].0, "m1");
+        // 阈值清空通道（高于所有相似度）→ 保底放行最相似的弱候选
+        let released = chunk_vector_scan_impl(&q, &rows, 1.5, 10, 1);
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].0, "m1");
+        assert!(released[0].2 < 1.5, "保底候选必须低于阈值");
+        // top_k 仍生效
+        let capped = chunk_vector_scan_impl(&q, &rows, 1.5, 1, 5);
+        assert_eq!(capped.len(), 1);
+        assert_eq!(capped[0].0, "m1");
     }
 
     #[test]
