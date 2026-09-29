@@ -36,6 +36,37 @@ pub(super) fn page_media_size(doc: &lopdf::Document, page_id: lopdf::ObjectId) -
     None
 }
 
+/// Page `/Rotate` in degrees, normalized to `{0, 90, 180, 270}`, following
+/// `Parent` for inherited values. `0` when absent/unparseable.
+pub(super) fn page_rotate(doc: &lopdf::Document, page_id: lopdf::ObjectId) -> i64 {
+    let mut id = page_id;
+    for _ in 0..64 {
+        let Ok(dict) = doc.get_dictionary(id) else { break };
+        if let Ok(rotate) = dict.get(b"Rotate").and_then(lopdf::Object::as_i64) {
+            return rotate.rem_euclid(360);
+        }
+        match dict.get(b"Parent").and_then(lopdf::Object::as_reference) {
+            Ok(parent) => id = parent,
+            Err(_) => break,
+        }
+    }
+    0
+}
+
+/// Whether any page is rotated 90°/270° — i.e. its content is stored sideways
+/// relative to the page box (typical of copier scans fed in landscape).
+///
+/// `pdfimages` copies the raw embedded image and does **not** apply `/Rotate`,
+/// so such pages reach the OCR engine on their side and come back as garbage
+/// (measured on a real library: 89 of 92 low-quality PDFs are exactly these
+/// rotated scans — judgments, rulings, complaints). `pdftoppm` bakes the
+/// rotation in, so rotated documents must be rendered with it instead.
+pub(super) fn pages_rotated(doc: &lopdf::Document) -> bool {
+    doc.get_pages()
+        .values()
+        .any(|&id| matches!(page_rotate(doc, id), 90 | 270))
+}
+
 /// Minimum `image-size / page-size` ratio, in both dimensions, for a full-page image.
 const FULL_PAGE_IMAGE_COVERAGE: f32 = 0.8;
 

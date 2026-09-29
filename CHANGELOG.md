@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-09-29（续8）：旋转 90° 的扫描件被 OCR 成乱码 —— 二审判决书"检索到了却读不出来"
+
+- **现象**：会话「典欧公司与徐惠东之间的案件是什么情况」第 3 轮问"尊信的案子是什么情况"，AI 回答"目前材料中未提供二审最终判决书（材料[60]为乱码无法识别）"。但二审判决书**确实在库里**（`DO 典欧/尊信/二审/判决书（尊信）.pdf`），而且在检索范围 `DO 典欧/尊信` 之内、也**确实被检索到并作为材料[60]整篇注入了**——只是正文是乱码，模型读不出来。
+- **根因（两处）**：
+  1. **`pdfimages` 不应用页面旋转**。该文件是 RICOH MP 3555 复印机输出的纯扫描件（15 页、无任何字体、每页 2340×1654 JPEG@200dpi），`pdfinfo` 显示 **`Page rot: 90`**。`pdfimages` 抽的是**原始嵌入图**（不 bake `/Rotate`），页面被横过来喂给 OCR → 输出 `0 冈 半 叫 国 悔 溲 …` 这类"每个字一行"的乱码。`pdftoppm` 会应用旋转，同一页导出即是端正可读的《上海知识产权法院 民事判决书 (2020)沪73民终68号》。
+  2. **OCR 结果无质量门**：`try_ocr_fallback` 只用 `len > 100` 判定"OCR 成功"，乱码长度远超 100 → 直接采纳，**永远不会回退到 pdftoppm** 重试。
+- **影响面（实测）**：全库 92 份「≥200 字 + `low_printable`」的 PDF 中，**89 份 `/Rotate` ≠ 0**（39 份 90°、50 份 270°），只有 3 份 0°。也就是说这批旋转扫描件的正文**全是乱码**，且大量是判决书/裁决书/调解书/起诉状——例如 `BL 保利/…/20200824 众晶VS天民/二审/二审判决书（天民VS众晶）.pdf`、`YD 以东/吕梁/一审判决书（以东吕梁）.pdf`、`KT 开天/方亿/一审/一审判决书（方亿案）.pdf`、`LYGK 芦洋港口/…/0502判决书.pdf`、`RF 荣菲/一审判决.pdf`。
+- **修复**：
+  - **A（`pdf/scan.rs` + `pdf.rs`）**：新增 `page_rotate` / `pages_rotated`（沿 `/Parent` 继承解析页面 `/Rotate`）；命中 90°/270° 时**跳过 pdfimages**，直接交给 `pdftoppm`（它会把旋转 bake 进图像）。`run_pdf_ocr_pipeline` / `try_ocr_fallback` 增加 `skip_pdfimages` 参数。
+  - **B（`pdf/ocr.rs`）**：新增 `ocr_text_is_unusable` 质量门——一字一行（`换行数×2 >= 非空白字数`）、`is_garbled_text`、或质量分给出 `LowPrintable`/`LowLexicon`/`HighFffd` 任一，即判为不可用，**不采纳 pdfimages 结果，退回 pdftoppm 重试**；两条路都坏才降级。对未知的坏图同样有兜底。
+  - **C（`indexer.rs`）**：落库的 `ocr_used` 改为 `extracted.1.ocr_used || ocr_used`。此前写入的是本地变量（只有"图片短文本回退"会置 true），**PDF 一律记 0**——质量审计与"哪些文件是 OCR 出来的"统计全部失真（排查本问题时就被它误导）。
+  - `pdf.rs` 的 `#[ignore]` E2E 调试测试补充打印正文前 160 字（`E2E head:`），便于以后肉眼确认提取质量。
+- **实测验证**：修复后对同一文件跑 E2E 提取（`LS_TEST_PDF=… cargo test --lib tmp_e2e_extract_pdf -- --ignored`）：
+  - 修复前：1358 字符乱码，`ocr_used=0`；
+  - 修复后：**8095 字符可读正文**，`ocr_used=true`，开头即「上海知识产权法院 民事判决书 （2020）沪73民终68号 上诉人（原审被告）：上海典欧实业有限公司…」。
+- **说明**：**存量文件需要重跑提取才生效**（本次只改了管线，未动用户索引）。修复前重跑无效——旧的 `reextract` 仍会走 pdfimages 乱码路径；修复后可用「质量审计 → 重新提取」或 `quality reextract --file-id …` 批量修。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/pdf/scan.rs`、`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/indexer.rs`、`docs/EXTRACTION_SPECIAL_CASES.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误（2 条既有 warning）；`cargo test --lib` **471 passed / 0 failed**（新增 `pages_rotated_detects_page_and_inherited_rotate` + 2 条 `ocr_text_is_unusable` 单测）；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## v1.2.1（2026-09-29）
 
 检索召回修复版：中文名称**词序颠倒 / 错别字**也能命中；语义通道不再被相似度阈值一刀切成零命中。

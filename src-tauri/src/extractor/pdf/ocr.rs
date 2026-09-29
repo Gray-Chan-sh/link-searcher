@@ -41,6 +41,7 @@ pub(super) fn run_pdf_ocr_pipeline(
     page_texts: &[String],
     lang: &str,
     engine: &crate::extractor::ocr::OcrEngineType,
+    skip_pdfimages: bool,
 ) -> Option<String> {
     let page_count = if page_count == 0 {
         get_pdf_page_count(path).unwrap_or(0) as usize
@@ -49,7 +50,7 @@ pub(super) fn run_pdf_ocr_pipeline(
     };
 
     if !should_ocr_pages_individually(page_count, false) {
-        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, true) {
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, true, skip_pdfimages) {
             return Some(ocr_text);
         }
     } else {
@@ -60,7 +61,7 @@ pub(super) fn run_pdf_ocr_pipeline(
         // Skip whole-doc pdftoppm for large docs: rendering every page at once
         // takes minutes and reliably trips the 120s timeout, after which the
         // per-page loop below redoes the same work in parallel anyway.
-        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, false) {
+        if let Some(ocr_text) = try_ocr_fallback(path, lang, engine, false, skip_pdfimages) {
             return Some(ocr_text);
         }
     }
@@ -131,41 +132,88 @@ pub(super) fn run_pdf_ocr_pipeline(
 /// Try OCR via pdfimages → (optionally) pdftoppm, returning the first usable
 /// result. `allow_whole_doc_pdftoppm` is false for large documents, where the
 /// all-pages render is abandoned in favour of the budgeted per-page loop.
+/// `skip_pdfimages` is set for pages carrying `/Rotate` 90°/270°: `pdfimages`
+/// copies the raw embedded image without applying the rotation, so it only
+/// yields garbage — go straight to `pdftoppm` (which bakes it in).
 fn try_ocr_fallback(
     path: &Path,
     lang: &str,
     engine: &crate::extractor::ocr::OcrEngineType,
     allow_whole_doc_pdftoppm: bool,
+    skip_pdfimages: bool,
 ) -> Option<String> {
-    if pdfimages_path().is_some() {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    // pdfimages 结果被判乱码时先留着：万一 pdftoppm 也失败，宁可回退到它，
+    // 也不要因为一个误判把整篇内容丢掉。
+    let mut rejected: Option<String> = None;
+    if pdfimages_path().is_some() && !skip_pdfimages {
         match ocr_pdf_via_pdfimages(path, lang, engine) {
             Ok(ocr_text) if ocr_text.len() > 100 => {
-                log::info!(
-                    "[PDF] pdfimages OCR for {:?} (OCR'd {} chars)",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                    ocr_text.len(),
-                );
-                return Some(ocr_text);
+                // `len > 100` alone let rotated-page garbage through (~all real
+                // hits were one char per line). Reject it and retry with the
+                // rotation-aware renderer below.
+                if ocr_text_is_unusable(&ocr_text) {
+                    log::warn!(
+                        "[PDF] pdfimages OCR for {name:?} looks garbled ({} chars) — retrying via pdftoppm (applies page /Rotate)",
+                        ocr_text.len(),
+                    );
+                    rejected = Some(ocr_text);
+                } else {
+                    log::info!("[PDF] pdfimages OCR for {name:?} (OCR'd {} chars)", ocr_text.len());
+                    return Some(ocr_text);
+                }
             }
-            Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {:?}", path.file_name()),
-            Err(e) => log::warn!("[PDF] pdfimages OCR failed for {:?}: {e}", path.file_name()),
+            Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {name:?}"),
+            Err(e) => log::warn!("[PDF] pdfimages OCR failed for {name:?}: {e}"),
         }
+    } else if skip_pdfimages {
+        log::info!("[PDF] {name:?}: pages carry /Rotate — skipping pdfimages (it ignores page rotation)");
     }
     if allow_whole_doc_pdftoppm && pdftoppm_path().is_some() {
         match ocr_pdf_via_pdftoppm(path, lang, engine) {
             Ok(ocr_text) if !ocr_text.is_empty() => {
-                log::info!(
-                    "[PDF] pdftoppm OCR for {:?} (OCR'd {} chars)",
-                    path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
-                    ocr_text.len(),
-                );
+                log::info!("[PDF] pdftoppm OCR for {name:?} (OCR'd {} chars)", ocr_text.len());
                 return Some(ocr_text);
             }
-            Ok(_) => log::warn!("[PDF] pdftoppm OCR returned empty text for {:?}", path.file_name()),
-            Err(e) => log::warn!("[PDF] pdftoppm OCR failed for {:?}: {e}", path.file_name()),
+            Ok(_) => log::warn!("[PDF] pdftoppm OCR returned empty text for {name:?}"),
+            Err(e) => log::warn!("[PDF] pdftoppm OCR failed for {name:?}: {e}"),
         }
     }
+    if let Some(text) = rejected {
+        log::warn!("[PDF] {name:?}: pdftoppm yielded nothing — keeping the (suspect) pdfimages text");
+        return Some(text);
+    }
     None
+}
+
+/// Whether pdfimages-OCR output is unusable and must be retried with pdftoppm.
+///
+/// The old gate was `len > 100`, which rotated-page garbage trivially passes:
+/// OCR of a sideways page emits roughly one character per line (`"0\n冈\n半\n…"`),
+/// so the text looks long but carries no words. Reuse the same quality metrics
+/// the indexer uses, plus an explicit "newlines outnumber text" check.
+fn ocr_text_is_unusable(text: &str) -> bool {
+    use crate::extractor::quality::{ExtractMeta, QualityFlag, compute_quality};
+    if is_garbled_text(text) {
+        return true;
+    }
+    let newlines = text.chars().filter(|c| *c == '\n').count();
+    let non_ws = text.chars().filter(|c| !c.is_whitespace()).count();
+    // 换行比正文还密 ⇒ 每个字被拆成一行（旋转/误读的典型形态）
+    if non_ws > 0 && newlines * 2 >= non_ws {
+        return true;
+    }
+    let q = compute_quality(
+        text,
+        &ExtractMeta { ocr_used: true, ..Default::default() },
+        "pdf",
+    );
+    q.flags.iter().any(|f| {
+        matches!(
+            f,
+            QualityFlag::LowPrintable | QualityFlag::LowLexicon | QualityFlag::HighFffd
+        )
+    })
 }
 pub(super) fn page_needs_ocr(page_text: &str, page_has_images: bool) -> bool {
     if is_sparse_text_layer(page_text, 1) {
@@ -621,6 +669,23 @@ mod tests {
         clear_dir(tmp.path());
         assert_eq!(output_progress(tmp.path(), "img"), (0, 0));
         assert!(tmp.path().join("sub").is_dir());
+    }
+
+    #[test]
+    fn ocr_gate_rejects_rotated_page_garbage() {
+        // 旋转扫描件的 pdfimages OCR 输出长这样：每个字一行、没有词。
+        // 旧门槛只看 len>100，会被它骗过 → 必须判为不可用。
+        let garbage = "0\n冈\n半\n叫\n国\n悔\n溲\n叫\n世\n瞓\n绊 7\n屉\n专\n奬\n瞓\n甲\n0 、\n0\n冈\n叫\n跹\n叵\n0\n0\n叫\n逭\n《 0\n典\n叵\n叫\n岬 鋈\n回 .\n";
+        assert!(ocr_text_is_unusable(garbage));
+        // 正常的 OCR 判决书正文（多字成行）必须放行。
+        let normal = "上海市徐汇区人民法院\n民事判决书\n(2019)沪0104民初16644号\n原告:上海尊信科技服务(集团)有限责任公司,住所地上海市闵行区七莘路1855号第1幢208室。\n法定代表人:卢前荣,该公司董事长。\n被告:上海典欧实业有限公司。\n本院认为,涉案协议系双方就原告代理被告申请注册商标事宜达成的合意,合法有效,对原被告均有约束力。\n";
+        assert!(!ocr_text_is_unusable(normal));
+    }
+
+    #[test]
+    fn ocr_gate_rejects_empty_and_short() {
+        assert!(ocr_text_is_unusable(""));
+        assert!(ocr_text_is_unusable("\n\n   \n"));
     }
 
     #[test]

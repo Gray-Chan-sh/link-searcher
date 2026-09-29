@@ -23,9 +23,9 @@ pub use poppler::{is_pdfimages_available, is_pdftoppm_available, poppler_availab
 use poppler::{pdftotext_path, run_with_timeout};
 
 mod scan;
-use scan::is_image_based_scan;
+use scan::{is_image_based_scan, pages_rotated};
 #[cfg(test)]
-use scan::{full_page_image_pages, page_media_size};
+use scan::{full_page_image_pages, page_media_size, page_rotate};
 
 /// Extract text via pdftotext (poppler) and check for watermarks/repetition.
 /// Used as a fallback when lopdf cannot parse the PDF but the text layer is
@@ -116,7 +116,7 @@ impl PdfExtractor {
                     "[PDF] {:?}: pdftotext unavailable/watermarked, falling to image OCR",
                     path.file_name()
                 );
-                return if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
+                return if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine, false) {
                     Ok((text, true))
                 } else {
                     Err(anyhow::anyhow!(
@@ -132,7 +132,7 @@ impl PdfExtractor {
                 if let Some(text) = try_pdftotext_extract(path) {
                     return Ok((text, false));
                 }
-                if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine) {
+                if let Some(text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine, false) {
                     return Ok((text, true));
                 }
                 return Err(anyhow::anyhow!(
@@ -145,6 +145,9 @@ impl PdfExtractor {
         if pages.is_empty() {
             return Ok((String::new(), false));
         }
+        // 90°/270° pages: their raw embedded image is sideways, which `pdfimages`
+        // does not correct → OCR would return garbage. Use `pdftoppm` instead.
+        let rotated = pages_rotated(&doc);
 
         // Scans carry a synthetic, mis-ordered text layer that neither lopdf nor
         // poppler can reconstruct; OCR the page images instead. Some digital
@@ -161,7 +164,7 @@ impl PdfExtractor {
                 );
                 return Ok((text, false));
             }
-            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine) {
+            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine, rotated) {
                 log::info!(
                     "[PDF] {:?}: image-based scan — OCR bypassed text layer ({} chars)",
                     path.file_name(),
@@ -226,7 +229,7 @@ impl PdfExtractor {
                                 "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
                                 path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
                             );
-                            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
+                            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine, rotated) {
                                 return Ok((ocr_text, true));
                             }
                         }
@@ -321,7 +324,7 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: wm={} garbled={} rep={} sparse={} implausible={} → falling to image-layer OCR ({lang})",
             path.file_name(), is_wm, is_garbled, is_rep, is_sparse, is_implausible);
 
-        if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine) {
+        if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine, rotated) {
             return Ok((ocr_text, true));
         }
 
@@ -505,12 +508,18 @@ mod tests {
         let t = std::time::Instant::now();
         let extractor = PdfExtractor::new();
         match extractor.extract_with_lang(std::path::Path::new(&p), "chi_sim", Some(engine)) {
-            Ok((text, ocr_used)) => eprintln!(
-                "E2E: {} chars, ocr_used={}, {:.1}s",
-                text.chars().count(),
-                ocr_used,
-                t.elapsed().as_secs_f64()
-            ),
+            Ok((text, ocr_used)) => {
+                eprintln!(
+                    "E2E: {} chars, ocr_used={}, {:.1}s",
+                    text.chars().count(),
+                    ocr_used,
+                    t.elapsed().as_secs_f64()
+                );
+                eprintln!(
+                    "E2E head: {}",
+                    text.chars().take(160).collect::<String>().replace('\n', " / ")
+                );
+            }
             Err(e) => eprintln!("E2E ERR: {e} after {:.1}s", t.elapsed().as_secs_f64()),
         }
     }
@@ -590,6 +599,43 @@ mod tests {
 
         doc.trailer.set("Root", Object::Reference(catalog_id));
         doc.save(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn pages_rotated_detects_page_and_inherited_rotate() -> Result<()> {
+        let dir = std::env::temp_dir().join("extractor_test_pdf_rotate");
+        std::fs::create_dir_all(&dir)?;
+
+        // /Rotate 0（无旋转）→ 不判为旋转件
+        let plain = dir.join("rot0.pdf");
+        create_test_pdf(&plain, "no rotation here, just a normal digital page")?;
+        assert!(!pages_rotated(&Document::load(&plain)?));
+
+        // 页面自身的 /Rotate 90 → 旋转件（pdfimages 会抽到躺倒的图）
+        let rotated = dir.join("rot_page.pdf");
+        create_test_pdf(&rotated, "rotate me")?;
+        let mut doc = Document::load(&rotated)?;
+        let page_id = *doc.get_pages().values().next().expect("one page");
+        doc.get_dictionary_mut(page_id)?.set("Rotate", Object::Integer(90));
+        doc.save(&rotated)?;
+        let doc = Document::load(&rotated)?;
+        let page_id = *doc.get_pages().values().next().expect("one page");
+        assert_eq!(page_rotate(&doc, page_id), 90);
+        assert!(pages_rotated(&doc), "页面 /Rotate 90 必须识别为旋转件");
+
+        // /Rotate 只写在 /Pages 上（页面自身没有）→ 继承值同样要识别为 270
+        let inherited = dir.join("rot_parent.pdf");
+        create_test_pdf(&inherited, "inherited rotation")?;
+        let mut doc = Document::load(&inherited)?;
+        let page_id = *doc.get_pages().values().next().expect("one page");
+        let parent = doc.get_dictionary(page_id)?.get(b"Parent")?.as_reference()?;
+        doc.get_dictionary_mut(parent)?.set("Rotate", Object::Integer(270));
+        doc.save(&inherited)?;
+        let doc = Document::load(&inherited)?;
+        assert!(pages_rotated(&doc), "/Pages 上的 /Rotate 270 必须被继承识别");
+
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 

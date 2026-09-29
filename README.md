@@ -43,7 +43,7 @@
 
 | 格式 | 扩展名 | 提取方式 |
 |------|--------|---------|
-| PDF | `.pdf` | 文本提取 + 扫描件自动 OCR（pdftoppm 渲染 → PaddleOCR 识别） |
+| PDF | `.pdf` | 文本提取 + 扫描件自动 OCR（pdftoppm 渲染 → PaddleOCR 识别）；**90°/270° 旋转扫描件自动改用 pdftoppm 纠正朝向**，并对 OCR 结果做乱码质检后回退重试 |
 | Word | `.docx` `.doc` | `.doc` 经 rwml 纯 Rust 解析；`.docx` anydoc 原生解析 |
 | Excel | `.xlsx` `.xls` | calamine 原生读取所有单元格 |
 | PPT | `.pptx` `.ppt` | anydoc 原生解析 |

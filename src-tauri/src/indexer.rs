@@ -283,6 +283,11 @@ impl IndexerService {
             log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
             let quality =
                 crate::extractor::quality::compute_quality(&extracted.0, &extracted.1, &file_ext);
+            // 落库的 ocr_used 必须取提取器返回的 meta（PDF 扫描件的 OCR 是在
+            // pdf 模块内部完成的，本地变量 ocr_used 只覆盖"图片短文本回退"那
+            // 一条路），否则 content_index.ocr_used 对 PDF 永远是 0，质量审计
+            // 与"哪些文件是 OCR 出来的"统计全部失真。
+            let ocr_used = extracted.1.ocr_used || ocr_used;
             if let Err(e) = crate::db::tracker::store_content_with_quality(
                 conn,
                 &hash,

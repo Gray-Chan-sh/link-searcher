@@ -68,7 +68,7 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | 字体无 Name 值的 `/Encoding` 但有 `/ToUnicode` | 跳过 lopdf，走 pdftotext（需通过 garbled/implausible/sparse 检查） | `has_unparseable_font_encoding` |
 | Quartz/CFF PDF（lopdf + pdftotext 均失败） | `anydoc::to_markdown`（需 >100 字符） | `extract_with_lang` |
 
-**扫描件/图像（4 条）**
+**扫描件/图像（6 条）**
 
 | 病理 | 处理 | 函数 |
 |------|------|------|
@@ -76,6 +76,8 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | `pdf_inspector` 判定 Scanned/ImageBased 或 all_need_ocr | 直接走 OCR | `classify_pdf_mem` |
 | pdfimages 最大图 <100K px^2 | 判定"非扫描页"，拒绝 OCR | `extract_and_ocr_page_via_pdfimages` |
 | pdfimages 不足 50% 页有图 | 判定"非扫描 PDF"，返回错误 | `ocr_pdf_via_pdfimages` |
+| **页面 `/Rotate` ∈ {90,270}** | **跳过 pdfimages（它不应用页面旋转，抽到的图是躺倒的），改用 pdftoppm（会 bake 旋转）** | `pages_rotated` / `page_rotate`（`pdf/scan.rs`）|
+| **pdfimages OCR 结果判为乱码**（一字一行 / LowPrintable / LowLexicon / HighFffd） | **不采纳，退回 pdftoppm 重试** | `ocr_text_is_unusable`（`pdf/ocr.rs`）|
 
 **文本层质量（7 条）**
 
@@ -402,6 +404,7 @@ score = 0.20 * printable_ratio
 |-----------|-----|------|------|
 | `FULL_PAGE_IMAGE_COVERAGE` | 0.8 | `full_page_image_pages` | 满版图像覆盖率 |
 | pdfimages -list 超时 | 60s | `is_image_based_scan` | |
+| 页面 `/Rotate` 归一化 | `rem_euclid(360)`，沿 `/Parent` 继承 | `page_rotate` / `pages_rotated` | 判定 90/270 旋转件 |
 
 ### text.rs
 
@@ -541,6 +544,26 @@ OCR 以 163 次命中居首，远超第二名"重复"（52）。PDF 相关关键
 - **实测权衡**：文本层 1237 字符，字节正确；Vision OCR 1037 字符，阅读顺序正确但有 OCR 错误
   （小城->小坡/永誠，郑坚敏：勇），且水印被视觉渲染所以 OCR 也读到了（陈骥321***）
 - **结论**：对这类文件，OCR 更差，应保留文本层
+
+### 案例 4：判决书（尊信）.pdf（复印机 90° 旋转扫描件 → OCR 乱码）
+
+- **来源**：`DO 典欧/尊信/二审/判决书（尊信）.pdf`，RICOH MP 3555 复印机输出，
+  15 页，**无任何字体**（纯扫描件），每页一张 200dpi 的 2340×1654 JPEG，
+  `pdfinfo` 显示 **`Page rot: 90`**
+- **问题**：提取"成功"但正文全是乱码（1358 字符：`0 冈 半 叫 国 悔 溲 …`，
+  quality 0.72，flags `["low_printable"]`）。检索确实命中了它（作为材料[60]整篇
+  注入），但模型读不出内容，回答"未提供二审最终判决书"
+- **根因**：`pdfimages` 抽的是**原始嵌入图**，**不应用页面 `/Rotate`** → 页面被横过来
+  喂给 OCR → 每个字被拆成一行；而 `try_ocr_fallback` 旧门槛只看 `len > 100`，
+  乱码轻松通过 → 永远不会回退到 `pdftoppm`（会 bake 旋转）
+- **实测**：同一页用 `pdfimages` 导出是躺倒 90° 的，用 `pdftoppm` 导出是端正可读的
+  《上海知识产权法院 民事判决书 (2020)沪73民终68号》
+- **影响面**：真实库中 92 份「≥200 字 + `low_printable`」PDF 里 **89 份 `/Rotate` ≠ 0**
+  （39×90°、50×270°），大量是判决书/裁决书/调解书/起诉状
+- **修复**：`pages_rotated` 检测到 90/270 时跳过 pdfimages 直接用 pdftoppm；
+  另给 pdfimages 的 OCR 输出加质量门（一字一行 / LowPrintable / LowLexicon / HighFffd
+  → 不采纳，退回 pdftoppm）。修复后同一文件提取 **8095 字符**可读正文，
+  `ocr_used=true`
 
 ---
 
