@@ -34,6 +34,17 @@
 
 ---
 
+## 2026-09-29（续2）：回退 —— 彻底移除 Infinity，嵌入/重排切回 oMLX
+
+- **背景**：实测表明在这台 M4 上「客户端并发」≈无收益（§8.7）、「MLX 量化」仅 +12~20% 却需重建（§8.8）；且基准负载一度把 GPU 压满，导致回填出现瞬时失败。决定收敛到**单一后端**，减少一个服务面。
+- **客户端**（`config.json`）：删除 `Infinity-Embed` / `Infinity-Rerank` 两个 provider 及其 `embed_plans` 记录；`active_embedding_model_id` / `active_reranker_model_id` 指回 `oMLX-MacMini-M4`（`bge-m3` / `bge-reranker-v2-m3`）。**无需重建向量**（同一 `bge-m3`，doc/chunk 向量可比）。
+- **服务端（192.168.1.100）**：`launchctl bootout` + 删除 `com.gray.infinity-embed` / `-rerank` 及其 plist；删除 infinity venv、外接盘模型（bge-m3 / bge-reranker-v2-m3）、量化模型（omlx-quant）、`~/Library/Logs/infinity/`、`~/.infinity_api_key`；**整目录删除 `/Volumes/Data/ai-models/`（6.2G）**。OliveTin `services.json` 移除这两项并重生成面板（3 服务 / 23 动作）。
+- **切换顺序**：先确认 oMLX `/v1/embeddings`、`/v1/rerank` 可用 → 再改客户端 → 最后删除服务端（避免空窗）。切换前在途的重试请求会出现少量 `:8081` 失败（连接被拒），属预期。
+- **保留**：oMLX（brew services，内盘 `~/models`）、OliveTin 面板 + 每个 5 分钟刷新器、Homebrew。
+- **无源码改动**（仅文档）。`ai::embed_batched` 的远程并发/自适应代码**保留**（对多 worker 网关有效，且带来自适应超时/退避重试）。
+
+---
+
 ## 2026-09-29（续）：启动 chunk 回填改为"循环至补齐" —— 一次跑完所有缺口
 
 - **背景**：用户发现每次启动都在回填，且日志写"完成: 4096 块"却总也补不完。核实：chunk 向量回填**单次硬上限 `MAX_CHUNKS_PER_RUN=4096` 且只跑一遍**；启动链（`lib.rs`）对 chunk 回填只调用一次，**扫描完成钩子又不触发 chunk 回填**（只补 doc 向量 + 建分块）→ 一次启动最多补 4096，剩余缺口只能等下次重启或手动点击。

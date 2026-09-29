@@ -277,6 +277,13 @@ Select-String -Path $log -Pattern "per-page OCR loop"      | Measure-Object
 - **留存**：模型在 `/Volumes/Data/ai-models/omlx-quant/{bge-m3-4bit,bge-m3-6bit}`，复测：`omlx serve --model-dir /Volumes/Data/ai-models/omlx-quant --port 8090 --api-key <key>`。
 - **副产**：基准负载显著抢了 GPU，app 内自适应随即把 `batch` 从 192 回退到 48（AIMD 收敛正确）；停止基准后会自动回升。
 
+### 8.9 回退说明（2026-09-29）
+
+- §8.7 的**并发/自适应代码仍保留**（对多 worker 网关有效，且带来自适应超时 + 退避重试的鲁棒性）。
+- 但 §8.7/§8.8 的实测环境 **Infinity 已被移除**：嵌入/重排切回 **oMLX**（内盘 MLX fp16 `bge-m3` / `bge-reranker-v2-m3`），外接盘 `/Volumes/Data/ai-models/` 已整目录删除（含量化模型）。
+- 结论：本机嵌入吞吐已由硬件决定（≈2.0–2.7 条/s 量级）；后续如需更快，应换更强算力，而非继续在本机调参。基准要再测时应基于 **oMLX** 重新采集。
+
+
 
 
 
