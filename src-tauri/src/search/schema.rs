@@ -207,6 +207,43 @@ mod tests {
         assert_eq!(tokens, vec!["hello", " ", "world"]);
     }
 
+
+    #[test]
+    fn test_jieba_tokenizer_with_cjk_spaces() {
+        // 真实语料：卷七十/七十七 等 PDF 的文字层是一个字一个 text run，
+        // 抽出来带空格（"上 海 机 场"）。分词器本身无法还原——必须靠
+        // `sanitize_text` 的 squeeze_cjk_spaces 先压掉空格（见 extractor/mod.rs）。
+        let mut spaced = Vec::new();
+        {
+            let mut tokenizer = JiebaTokenizer;
+            let mut stream = tokenizer.token_stream("上 海 机 场 ( 集 团 ) 有 限 公 司");
+            while let Some(t) = stream.next() {
+                spaced.push(t.text.clone());
+            }
+        }
+        // 带空格 → 全是单字（会在 query/实体词提取阶段被 `< 2 字` 过滤丢掉）
+        assert!(
+            spaced.iter().filter(|t| !t.trim().is_empty()).all(|t| t.trim().chars().count() == 1),
+            "带空格的文本只会切出单字: {spaced:?}"
+        );
+
+        // 经 squeeze_cjk_spaces 之后 → 正常多字词
+        let squeezed = crate::extractor::squeeze_cjk_spaces("上 海 机 场 ( 集 团 ) 有 限 公 司");
+        assert_eq!(squeezed, "上海机场(集团)有限公司");
+        let mut normal = Vec::new();
+        {
+            let mut tokenizer = JiebaTokenizer;
+            let mut stream = tokenizer.token_stream(&squeezed);
+            while let Some(t) = stream.next() {
+                normal.push(t.text.clone());
+            }
+        }
+        assert!(
+            normal.iter().any(|t| t.chars().count() >= 2),
+            "压缩空格后应能切出多字词: {normal:?}"
+        );
+    }
+
     #[test]
     fn test_build_schema_contains_expected_fields() {
         let schema = build_schema();

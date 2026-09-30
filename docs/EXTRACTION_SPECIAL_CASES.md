@@ -245,13 +245,14 @@ score = 0.20 * printable_ratio
 复合阈值 0.75 在 UI 和 DB 层使用（见 README "低于 0.75 标记低质量"），
 `quality.rs` 本身未定义该常量。
 
-### 3.8 调度清洗（3 条）
+### 3.8 调度清洗（4 条）
 
 | 病理 | 处理 | 函数 |
 |------|------|------|
 | 未知扩展名回退 | 读前 10MB，UTF-8 解码，空白或二进制则拒绝 | `extract_text_with_meta` 的 `_` 分支 |
 | sanitize_text NUL | 含 NUL -> 返回空字符串 | `sanitize_text` |
 | sanitize_text 高 FFFD | FFFD 占比 >15% -> 替换为空格 | `sanitize_text` |
+| **CJK 字间空格** | **删掉"夹在两个汉字/假名（或中文邻近标点）之间"的空格**：`上 海 机 场 ( 集 团 )` → `上海机场(集团)` | `sanitize_text` → `squeeze_cjk_spaces` |
 
 ### 3.9 扫描器 helpers（6 条）
 
@@ -489,6 +490,9 @@ score = 0.20 * printable_ratio
 | 阈值 | 值 | 用途 |
 |------|-----|------|
 | FFFD 替换比 | >15% | NUL -> 空，FFFD >15% -> 替换为空格 |
+| CJK 空格压缩 | 空格两侧均为「汉字/假名 或 中文邻近标点」且至少一侧为汉字/假名 | `squeeze_cjk_spaces`：保留英文/数字旁的空格与换行 |
+
+> **为什么要压缩 CJK 空格**：复印机/IntSig·Foxit 导出的 PDF 把文字**一个汉字一个 text run** 存，poppler 忠实吐出 `"上 海 机 场"`。jieba 只在连续汉字上识别词，被空格切碎后**只剩单字 token**；而 `split_query_terms` / `extract_retrieval_keywords` 都会丢弃 `<2 字` 的 token → **文件整份检索不到**；同时嵌入是对带空格文本算的，余弦普遍低 0.03~0.05（实测某查询去空格后 0.6385 过阈值、带空格 0.5854 不过）。实测库内 1838 份文件汉字间空格占比 ≥30%。
 
 ---
 

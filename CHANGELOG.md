@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-10-01（续12）：扫描件正文"一字一空格"导致整份检索不到 —— 入库前压缩 CJK 字间空格
+
+- **现象（用户提问）**：`卷七十.pdf` 索引出来的文字**字与字之间有空格**（`上 海 市 监 察 委 员 会`），问是不是引擎问题、对搜索/语义有无影响。
+- **定位**：**不是 OCR 引擎的问题**。`卷七十三/七十二/七十七` 都是 `ocr_used=0`（没走 OCR，读的是 PDF 内嵌文字层），空格来自上游（Foxit 编辑器重排）把**一个汉字写成一个 text run**，poppler 按 run 边界吐空格；我新加的 OCR 路径输出同样带空格（80.8%）。对照：Word 转换的 `仲裁申请书-蓝深.doc` 仅 0.3%。
+- **影响（实测，两路检索都被削弱）**：
+  - **字面**：jieba 只在连续汉字上识别词，被空格切碎后**只剩单字 token**（`上 海 机 场` → `["上"," ","海"," ",...]`，见新测试 `test_jieba_tokenizer_with_cjk_spaces`）；而 `split_query_terms` / `extract_retrieval_keywords` 都有 `chars().count() < 2` 过滤 → **单字全被丢弃**。后果是**整份文件检索不到**：查「隐瞒境外存款952余万」、「证据卷七十七」均 **0 命中**——尽管卷七十七正文里就写着「证据卷七十七：隐瞒境外存款952余万」。
+  - **语义**：`doc_chunks` 带着空格进嵌入模型，余弦被拉低 **0.03~0.05**（同一段文本对照：`吴建融隐瞒境外存款` 0.6897→0.7261；`上海市监察委员会调查吴建融` **0.5854→0.6385，正好跨过 0.55 阈值**）。
+  - **面**：全库 **1838 份**文件汉字间空格占比 ≥30%，其中 `≥70%` 的 **1604 份**（以证据卷宗、合同、法律意见书为主）。
+- **修复**（`extractor/mod.rs`）：`sanitize_text` 末尾新增 `squeeze_cjk_spaces()`——**只删除"夹在两个汉字/假名（或中文邻近标点）之间"的空格**，并且要求**至少一侧是汉字/假名**（这样 `( 1 )`、`a - b` 这类纯 ASCII 序列不受影响）；英文/数字旁的空格与换行一律保留（`hello world 上海 机场` → `hello world 上海机场`）。放在 `sanitize_text` 里，**正文、doc_chunks、嵌入、Tantivy 索引**四处一次性干净。
+- **实测验证**（`卷七十.pdf` 重跑 E2E）：`上 海 市 监 察 委 员 会  第 九 纪 检 监 察 室  上 海 机 场 ( 集 团 )` → **`上海市监察委员会  第九纪检监察室  上海机场（集团）`**；同时 `福昕PDF编辑器 ·永久·轻巧·自由 批量购买` 的**英文/数字旁空格完好保留**。
+- **涉及文件**：`src-tauri/src/extractor/mod.rs`、`src-tauri/src/search/schema.rs`（回归测试）、`docs/EXTRACTION_SPECIAL_CASES.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **483 passed / 0 failed**（新增 6 条：`squeeze_cjk_spaces_joins_ideographs` / `_keeps_latin_words_apart` / `_keeps_pure_ascii_phrases_intact` / `_keeps_newlines` / `_handles_edge_cases` + 改写后的 `test_jieba_tokenizer_with_cjk_spaces`）；`semgrep --severity ERROR` **0 findings**。
+- **说明**：**存量文件需重跑提取**（重新分词 + 重新嵌入）才生效，那 1838 份里以扫描件/PDF 为主，可配合质量页按「有问题标记」批量重提取。**下一个方向**：`quality_flags` 写入「CJK 空格占比过高」标记，让这批文件在质量页可一键圈选（本轮未做）。
+
+---
+
 ## 2026-10-01（续11）：两块"整份文档静默变空"的坑 —— `pdfimages` 的 x-ppi=0 与 `lopdf` 无页树；外加空文件不该算低质量
 
 - **现象（用户反馈）**：
