@@ -77,6 +77,7 @@ pub async fn list_files_db(
     page: Option<usize>,
     page_size: Option<usize>,
     quality: Option<String>,
+    max_score: Option<f64>,
 ) -> Result<FileListResponse, String> {
     if state.is_rebuilding.load(Ordering::SeqCst) {
         return Err("索引重建中，请稍后再试".to_string());
@@ -92,6 +93,7 @@ pub async fn list_files_db(
         page.unwrap_or(1),
         page_size.unwrap_or(50),
         quality.as_deref(),
+        max_score,
     )
 }
 
@@ -548,6 +550,7 @@ pub(crate) fn query_file_list(
     page: usize,
     page_size: usize,
     quality: Option<&str>,
+    quality_max_score: Option<f64>,
 ) -> Result<FileListResponse, String> {
     let ps = page_size.clamp(1, 1000);
     let p = page.max(1);
@@ -580,7 +583,10 @@ pub(crate) fn query_file_list(
 
     let quality_join = match quality {
         Some("low") | Some("red") => {
-            wheres.push("ci.quality_score < 0.5".into());
+            // 阈值可调：默认 0.5（旧行为），前端「质量」页可放到 0.8 / 1.01（不限）
+            let max = quality_max_score.unwrap_or(0.5).clamp(1e-6, 1.01);
+            wheres.push("ci.quality_score < ?".into());
+            params.push(Box::new(max));
             "LEFT JOIN content_index ci ON ci.md5 = file_tracking.md5"
         }
         Some("yellow") => {
@@ -771,10 +777,30 @@ mod tests {
     }
 
     #[test]
+    fn quality_low_honours_custom_max_score() {
+        // 阈值可调：0.5 只出 0.2；放到 0.95 应把 0.2/0.6/0.9 都列出来
+        // （修复"旋转扫描件乱码分在 0.65~0.79、被硬阈值 0.5 漏掉"的问题）。
+        let conn = setup();
+        seed_quality_data(&conn);
+        let narrow =
+            query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low"), Some(0.5)).unwrap();
+        assert_eq!(narrow.items.len(), 1);
+
+        let wide =
+            query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low"), Some(0.95)).unwrap();
+        assert_eq!(wide.items.len(), 3, "阈值 0.95 应列出 0.2/0.6/0.9");
+
+        // 1.01 = 不限（只看有评分的；无评分的 d.pdf 仍排除）
+        let all =
+            query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low"), Some(1.01)).unwrap();
+        assert_eq!(all.items.len(), 3);
+    }
+
+    #[test]
     fn quality_low_returns_only_red() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low")).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("low"), None).unwrap();
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].rel_path, "a.pdf");
     }
@@ -783,7 +809,7 @@ mod tests {
     fn quality_red_same_as_low() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("red")).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("red"), None).unwrap();
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].rel_path, "a.pdf");
     }
@@ -792,7 +818,7 @@ mod tests {
     fn quality_yellow_returns_mid_range() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("yellow")).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("yellow"), None).unwrap();
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].rel_path, "b.pdf");
     }
@@ -801,7 +827,7 @@ mod tests {
     fn quality_green_returns_high() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green")).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green"), None).unwrap();
         assert_eq!(resp.items.len(), 1);
         assert_eq!(resp.items[0].rel_path, "c.pdf");
     }
@@ -810,7 +836,7 @@ mod tests {
     fn quality_none_returns_all_rows() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, None).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, None, None).unwrap();
         assert_eq!(resp.items.len(), 4);
         assert_eq!(resp.total, 4);
     }
@@ -819,7 +845,7 @@ mod tests {
     fn sort_quality_ascending_nulls_last() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, Some("quality"), None, 1, 50, None).unwrap();
+        let resp = query_file_list(&conn, None, None, None, Some("quality"), None, 1, 50, None, None).unwrap();
         let paths: Vec<&str> = resp.items.iter().map(|i| i.rel_path.as_str()).collect();
         assert_eq!(paths, vec!["a.pdf", "b.pdf", "c.pdf", "d.pdf"]);
     }
@@ -828,7 +854,7 @@ mod tests {
     fn quality_filter_populates_score_and_flags() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green")).unwrap();
+        let resp = query_file_list(&conn, None, None, None, None, None, 1, 50, Some("green"), None).unwrap();
         let item = &resp.items[0];
         assert!((item.quality_score.unwrap() - 0.9).abs() < 0.01);
         assert_eq!(item.quality_flags, r#"["ok"]"#);
@@ -838,9 +864,9 @@ mod tests {
     fn existing_filters_unaffected_by_quality_param() {
         let conn = setup();
         seed_quality_data(&conn);
-        let resp = query_file_list(&conn, Some("indexed"), None, None, None, None, 1, 50, None).unwrap();
+        let resp = query_file_list(&conn, Some("indexed"), None, None, None, None, 1, 50, None, None).unwrap();
         assert_eq!(resp.items.len(), 4);
-        let resp_ext = query_file_list(&conn, None, Some("pdf"), None, None, None, 1, 50, None).unwrap();
+        let resp_ext = query_file_list(&conn, None, Some("pdf"), None, None, None, 1, 50, None, None).unwrap();
         assert_eq!(resp_ext.items.len(), 4);
     }
 }

@@ -552,6 +552,7 @@ const zh: Record<string, string> = {
     quality_score_label: '质量评分',
     quality_flags_label: '质量标记',
     quality_flagged: '有问题标记',
+    quality_goto_page: '去「质量」页修复 →',
     select_all_page: '全选本页',
     audit_threshold: '阈值',
     audit_batch_reextract: '批量重新提取这 {n} 个',

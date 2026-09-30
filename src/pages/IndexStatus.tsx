@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, reindexFiles, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type QualityAuditEntry, type EmbeddingConsistency } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
@@ -52,14 +52,8 @@ export default function IndexStatus() {
   const [scanPhase, setScanPhase] = useState<string | null>(null)
   const [scanCounts, setScanCounts] = useState<{ processed: number; total: number } | null>(null)
   const [qualityData, setQualityData] = useState<{ green: number; yellow: number; red: number; unevaluated: number; total: number } | null>(null)
-  const [auditEntries, setAuditEntries] = useState<QualityAuditEntry[]>([])
-  const [showAudit, setShowAudit] = useState(false)
-  const [auditing, setAuditing] = useState(false)
-  const [auditMaxScore, setAuditMaxScore] = useState(0.5)
-  const [batchReextracting, setBatchReextracting] = useState(false)
   const [backfillingQuality, setBackfillingQuality] = useState(false)
   const [qualityBackfillMsg, setQualityBackfillMsg] = useState<string | null>(null)
-  const [reextractingId, setReextractingId] = useState<string | null>(null)
   const [showTools, setShowTools] = useState(false)
 
   const loadEmbedConsistency = async () => {
@@ -265,45 +259,6 @@ export default function IndexStatus() {
 
   useEffect(() => { fetchQualityData() }, [])
 
-  const handleAudit = async () => {
-    if (showAudit) { setShowAudit(false); return }
-    setAuditing(true)
-    try {
-      const entries = await qualityAudit(auditMaxScore, 200)
-      setAuditEntries(entries)
-      setShowAudit(true)
-    } catch {
-      setAuditEntries([])
-    } finally {
-      setAuditing(false)
-    }
-  }
-
-  /** 批量重新提取当前列出的文件（reindex_files：清缓存 → 重新提取/OCR → 重建索引）。
-   *  比逐个点「重新提取」快得多，也顺带覆盖了「阈值调高后」那批质量中等的文件。 */
-  const handleBatchReExtract = async () => {
-    const ids = auditEntries.map(e => e.file_id).filter((x): x is string => !!x)
-    if (ids.length === 0) return
-    setBatchReextracting(true)
-    setQualityBackfillMsg(null)
-    try {
-      const r = await reindexFiles(ids)
-      setQualityBackfillMsg(
-        t('audit_batch_reextract_done', {
-          ok: r.ok,
-          failedSuffix: r.failed > 0 ? `，${r.failed} 个失败` : '',
-        })
-      )
-      fetchQualityData()
-      const entries = await qualityAudit(auditMaxScore, 200)
-      setAuditEntries(entries)
-    } catch (e) {
-      setQualityBackfillMsg(String(e))
-    } finally {
-      setBatchReextracting(false)
-    }
-  }
-
   const handleBackfillQuality = async () => {
     setBackfillingQuality(true)
     setQualityBackfillMsg(null)
@@ -315,30 +270,10 @@ export default function IndexStatus() {
           : t('backfill_quality_noop')
       )
       fetchQualityData()
-      if (showAudit) {
-        const entries = await qualityAudit(auditMaxScore, 200)
-        setAuditEntries(entries)
-      }
     } catch (e) {
       setQualityBackfillMsg(String(e))
     } finally {
       setBackfillingQuality(false)
-    }
-  }
-
-  const handleReExtract = async (fileId: string) => {
-    setReextractingId(fileId)
-    try {
-      await reExtractFile(fileId)
-    } catch { /* empty */ } finally {
-      setReextractingId(null)
-      fetchQualityData()
-      if (showAudit) {
-        try {
-          const entries = await qualityAudit(auditMaxScore, 200)
-          setAuditEntries(entries)
-        } catch { /* empty */ }
-      }
     }
   }
 
@@ -510,13 +445,12 @@ export default function IndexStatus() {
                     {backfillingQuality && <LoadingSpinner className="size-3" />}
                     {backfillingQuality ? t('backfill_quality_busy') : t('backfill_quality')}
                   </button>
+                  {/* 逐文件审计 / 批量重新提取已移到「质量」页（那里有筛选、排序、预览与多选） */}
                   <button
-                    onClick={handleAudit}
-                    disabled={auditing}
-                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
+                    onClick={() => navigate('/quality')}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 transition-colors"
                   >
-                    {auditing && <LoadingSpinner className="size-3" />}
-                    {showAudit ? t('close') : t('audit_low_quality')}
+                    {t('quality_goto_page')}
                   </button>
                 </div>
               </div>
@@ -539,92 +473,6 @@ export default function IndexStatus() {
               {qualityBackfillMsg && (
                 <div className="mt-2 px-3 py-2 text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
                   {qualityBackfillMsg}
-                </div>
-              )}
-
-              {showAudit && (
-                <div className="mt-3 border-t border-gray-200 dark:border-gray-800 pt-3">
-                  <div className="flex items-center gap-2 mb-2 text-xs">
-                    <span className="text-gray-500 dark:text-gray-400">{t('audit_threshold')}</span>
-                    <select
-                      value={auditMaxScore}
-                      onChange={e => setAuditMaxScore(Number(e.target.value))}
-                      className="bg-transparent border border-gray-200 dark:border-gray-700 rounded px-1.5 py-0.5 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                    >
-                      <option value={0.5}>0.50</option>
-                      <option value={0.8}>0.80</option>
-                      <option value={1.01}>1.00</option>
-                    </select>
-                    <button
-                      onClick={handleAudit}
-                      disabled={auditing}
-                      className="px-2 py-0.5 text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
-                    >
-                      {t('refresh')}
-                    </button>
-                    {auditEntries.some(e => e.file_id) && (
-                      <button
-                        onClick={handleBatchReExtract}
-                        disabled={batchReextracting || auditing}
-                        className="ml-auto flex items-center gap-1.5 px-2.5 py-1 font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
-                      >
-                        {batchReextracting && <LoadingSpinner className="size-3" />}
-                        {t('audit_batch_reextract', { n: auditEntries.filter(e => e.file_id).length })}
-                      </button>
-                    )}
-                  </div>
-                  {auditing ? (
-                    <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
-                      <LoadingSpinner className="size-3" /> {t('auditing')}
-                    </div>
-                  ) : auditEntries.length === 0 ? (
-                    <p className="text-xs text-gray-400 dark:text-gray-500">{t('quality_audit_empty')}</p>
-                  ) : (
-                    <div className="max-h-72 overflow-y-auto space-y-2">
-                      {auditEntries.map((entry) => {
-                        const score = entry.quality_score
-                        const badgeColor = score !== null
-                          ? score > 0.75 ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
-                            : score >= 0.5 ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
-                              : 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-                          : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
-                        const flags: string[] = entry.quality_flags ? JSON.parse(entry.quality_flags) : []
-                        return (
-                          <div key={entry.md5} className="text-xs p-2 bg-gray-50 dark:bg-gray-800/50 border border-gray-100 dark:border-gray-800 rounded">
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="font-medium text-gray-900 dark:text-gray-100 truncate max-w-[60%]" title={entry.file_path ?? undefined}>
-                                {entry.file_path ?? t('quality_unknown_path')}
-                              </span>
-      <div className="flex items-center gap-2 flex-wrap">
-                                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeColor}`}>
-                                  {score !== null ? score.toFixed(2) : '—'}
-                                </span>
-                                {entry.file_id && (
-                                  <button
-                                    onClick={() => handleReExtract(entry.file_id!)}
-                                    disabled={reextractingId === entry.file_id}
-                                    className="text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
-                                  >
-                                    {reextractingId === entry.file_id ? t('quality_re_extracting') : t('quality_re_extract')}
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                            {flags.length > 0 && (
-                              <div className="flex flex-wrap gap-1 mb-1">
-                                {flags.map((f) => (
-                                  <span key={f} className="px-1 py-0.5 bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300 rounded text-[10px]">{f}</span>
-                                ))}
-                              </div>
-                            )}
-                            {entry.preview && (
-                              <p className="text-gray-400 dark:text-gray-500 truncate">{entry.preview.slice(0, 120)}</p>
-                            )}
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
                 </div>
               )}
             </div>

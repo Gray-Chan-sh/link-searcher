@@ -4,6 +4,22 @@
 
 ---
 
+## 2026-10-01（续10）：质量体检归位到「质量」页 + 阈值可调即时生效 + 批量按钮常驻
+
+- **背景**：上一轮（续9）把审计面板放在「索引」页的质量体检卡片里，用起来两处不顺：① 质量相关的能力本就该集中在**「质量」页**（那里有筛选、排序、预览、多选）；② 面板是 `showAudit` 可折叠的，**点「刷新」会先 `setShowAudit(false)` 把它收起来**，还要再展开一次；且**改阈值后不会自动重查**，必须再手动点一次刷新。
+- **修复**：
+  - **审计面板整体移到「质量」页**（`src/pages/Quality.tsx`）：工具栏常驻
+    **阈值下拉（0.50 / 0.80 / 1.00=不限）** + **「批量重新提取这 N 个」** + **「补齐质量评分」**，不再有折叠/收起；筛选切换「仅问题文件 ↔ 全部」时阈值选择保留。
+  - **阈值改动即时生效**：`maxScore` 进入 `loadFiles` 的依赖 → 下拉一变立即重查（不再需要点刷新）；`page` 同时归 1。
+  - 阈值**改为真正可用的筛选条件**：`list_files_db` 新增 `max_score`（`quality=low/red` 时只列 `quality_score < max_score`，`clamp(1e-6, 1.01)`；`1.01` = 不限）。此前是**硬编码 `< 0.5`**，正是"旋转扫描件乱码分在 0.65~0.79 却被整套漏掉"的原因。
+  - 「质量」页工具栏下方新增**质量分布概览条**（良好/一般/低质量/未评估，取自 `get_quality_summary`，与当前筛选无关），以及操作结果提示条。
+  - **「索引」页**：质量体检卡片保留概览 + 「补齐质量评分」，审计入口替换为 **「去「质量」页修复 →」**（`quality_goto_page`）；删掉 IndexStatus 里已无用的审计状态与处理函数（`auditEntries`/`showAudit`/`auditing`/`reextractingId` 及 `handleAudit`/`handleReExtract`）。
+  - 新增 i18n：`quality_goto_page`（zh/en/ja/ko）。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **472 passed**（新增 `quality_low_honours_custom_max_score`：0.5→1 条 / 0.95→3 条 / 1.01→3 条）；`npx tsc -b` 0 错误；`npx vitest run` 61 passed；`npm run lint` 0 错误；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src/pages/Quality.tsx`、`src/pages/IndexStatus.tsx`、`src/api/files.ts`、`src-tauri/src/commands/files.rs`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/07-index-manage.md`、`CHANGELOG.md`。
+
+---
+
 ## 2026-10-01（续9）：GUI 批量修复低质量文件 —— 审计面板加批量按钮与阈值、浏览页加「有问题标记」与全选本页
 
 - **背景**：排查"旋转扫描件 OCR 乱码"时发现，GUI 里**没有可用的批量修复入口**：

@@ -356,6 +356,8 @@ export async function listFilesDb(params: {
   page?: number
   pageSize?: number
   quality?: string
+  /** 仅当 quality='low'/'red' 时生效：只列出 quality_score < maxScore（默认 0.5，1.01=不限） */
+  maxScore?: number
 }): Promise<FileListResponse> {
   return client.invoke<FileListResponse>('list_files_db', params)
 }

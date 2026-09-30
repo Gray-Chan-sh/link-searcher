@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { resolveAssetUrlSync as resolveAssetUrl } from '../utils/platform'
 import { getFilePreview, openFile, revealInFolder, type FilePreview } from '../api/files'
 import { type FileItem, listFilesDb } from '../api/files'
-import { reExtractFile } from '../api/index'
+import { reExtractFile, reindexFiles, getQualitySummary, backfillQuality, type QualitySummary } from '../api/index'
 import { useI18n } from '../i18n'
 import { LoadingSpinner } from '../icons'
 import { toast } from '../utils/toast'
@@ -97,6 +97,13 @@ export default function Quality() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewError, setPreviewError] = useState<string | null>(null)
   const [reExtracting, setReExtracting] = useState(false)
+  // ── 质量体检（概览 + 阈值 + 批量重新提取）──
+  const [summary, setSummary] = useState<QualitySummary | null>(null)
+  // 阈值 = 只显示"质量分 < 阈值"的文件；1.01 表示不限
+  const [maxScore, setMaxScore] = useState(0.5)
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [backfilling, setBackfilling] = useState(false)
+  const [batchMsg, setBatchMsg] = useState<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const rowHeightRef = useRef<number | null>(null)
   const previewVersionRef = useRef(0)
@@ -130,9 +137,11 @@ export default function Quality() {
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const qualityParam = showAll ? undefined : 'flagged'
+      // 阈值可调：低于阈值才列为"待修复"；1.01 表示不限（只看有评分的）
+      const qualityParam = showAll ? undefined : 'low'
       const res = await listFilesDb({
         quality: qualityParam,
+        maxScore: showAll ? undefined : maxScore,
         sort: 'quality',
         order: 'asc',
         page,
@@ -147,7 +156,17 @@ export default function Quality() {
     } finally {
       setLoading(false)
     }
-  }, [showAll, search, page, pageSize])
+  }, [showAll, maxScore, search, page, pageSize])
+
+  const loadSummary = useCallback(async () => {
+    try {
+      setSummary(await getQualitySummary())
+    } catch {
+      setSummary(null)
+    }
+  }, [])
+
+  useEffect(() => { void loadSummary() }, [loadSummary])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   useEffect(() => {
@@ -202,6 +221,44 @@ export default function Quality() {
   const flagSolutionKey = (flag: string): string =>
     `quality_flag_${flag}_solution` as const
 
+  /** 批量重新提取当前列出的全部文件（清缓存 → 重新提取/OCR → 重建索引）。 */
+  const handleBatchReExtract = async () => {
+    const ids = items.map(i => i.file_id).filter(Boolean)
+    if (ids.length === 0) return
+    setBatchRunning(true)
+    setBatchMsg(null)
+    try {
+      const r = await reindexFiles(ids)
+      setBatchMsg(t('audit_batch_reextract_done', {
+        ok: r.ok,
+        failedSuffix: r.failed > 0 ? `，${r.failed} 个失败` : '',
+      }))
+      await loadFiles()
+      loadSummary()
+    } catch (e) {
+      setBatchMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBatchRunning(false)
+    }
+  }
+
+  const handleBackfillQuality = async () => {
+    setBackfilling(true)
+    setBatchMsg(null)
+    try {
+      const r = await backfillQuality()
+      setBatchMsg(r.processed > 0
+        ? t('backfill_quality_done', { processed: r.processed, scored: r.scored })
+        : t('backfill_quality_noop'))
+      await loadFiles()
+      loadSummary()
+    } catch (e) {
+      setBatchMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBackfilling(false)
+    }
+  }
+
   const isImage = preview?.file_type === 'image'
   const imageSrc = isImage && preview.image_path
     ? (preview.image_base64
@@ -240,6 +297,38 @@ export default function Quality() {
               {t('quality_show_all')}
             </button>
           </div>
+          {!showAll && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 shrink-0">
+              {t('audit_threshold')}
+              {/* 阈值 = 只列出"质量分 < 阈值"的文件；1.01 = 不限 */}
+              <select
+                value={maxScore}
+                onChange={e => { setMaxScore(Number(e.target.value)); setPage(1) }}
+                className="bg-transparent border border-gray-200 dark:border-gray-700 rounded px-1.5 py-1 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              >
+                <option value={0.5}>0.50</option>
+                <option value={0.8}>0.80</option>
+                <option value={1.01}>1.00</option>
+              </select>
+            </label>
+          )}
+          <button
+            onClick={handleBatchReExtract}
+            disabled={batchRunning || loading || items.length === 0}
+            title={t('audit_batch_reextract', { n: items.length })}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors shrink-0"
+          >
+            {batchRunning && <LoadingSpinner className="size-3" />}
+            {t('audit_batch_reextract', { n: items.length })}
+          </button>
+          <button
+            onClick={handleBackfillQuality}
+            disabled={backfilling}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg hover:bg-blue-100 dark:hover:bg-blue-900/40 disabled:opacity-50 transition-colors shrink-0"
+          >
+            {backfilling && <LoadingSpinner className="size-3" />}
+            {backfilling ? t('backfill_quality_busy') : t('backfill_quality')}
+          </button>
           <div className="relative flex-1 min-w-[160px] max-w-xs">
             <input
               type="text"
@@ -256,6 +345,30 @@ export default function Quality() {
           <button onClick={() => loadFiles()} disabled={loading} className="text-xs px-2 py-1 text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 disabled:opacity-50" title={t('refresh')}>↻</button>
           <span className="text-xs text-gray-400 dark:text-gray-500 ml-auto">{total.toLocaleString()} {t('files')}</span>
         </div>
+
+        {/* 质量体检概览：整体分布（不随筛选变化） */}
+        {summary && summary.total > 0 && (
+          <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-800 flex items-center gap-3 text-xs">
+            <span className="text-gray-500 dark:text-gray-400 shrink-0">{t('quality_total', { n: summary.total })}</span>
+            <div className="flex-1 h-3 bg-gray-200 dark:bg-gray-800 rounded-full overflow-hidden flex min-w-[80px]">
+              {summary.green > 0 && <div className="h-full bg-green-500 transition-all" style={{ width: `${(summary.green / summary.total) * 100}%` }} />}
+              {summary.yellow > 0 && <div className="h-full bg-yellow-400 transition-all" style={{ width: `${(summary.yellow / summary.total) * 100}%` }} />}
+              {summary.red > 0 && <div className="h-full bg-red-400 transition-all" style={{ width: `${(summary.red / summary.total) * 100}%` }} />}
+            </div>
+            <span className="flex items-center gap-3 tabular-nums shrink-0">
+              <span className="text-green-600 dark:text-green-400">{t('quality_green')} {summary.green}</span>
+              <span className="text-yellow-600 dark:text-yellow-400">{t('quality_yellow')} {summary.yellow}</span>
+              <span className="text-red-500 dark:text-red-400">{t('quality_red')} {summary.red}</span>
+              {summary.unevaluated > 0 && <span className="text-gray-400 dark:text-gray-500">{t('quality_unevaluated')} {summary.unevaluated}</span>}
+            </span>
+          </div>
+        )}
+
+        {batchMsg && (
+          <div className="px-4 py-2 text-xs text-blue-700 dark:text-blue-300 bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 dark:border-blue-800">
+            {batchMsg}
+          </div>
+        )}
 
         <div className="flex-1 overflow-auto" ref={tableRef}>
           {loading ? (

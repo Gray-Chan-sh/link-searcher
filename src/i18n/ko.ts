@@ -546,6 +546,7 @@ const ko: Record<string, string> = {
     quality_score_label: '품질 점수',
     quality_flags_label: '품질 플래그',
     quality_flagged: '문제 있음',
+    quality_goto_page: '「품질」페이지에서 수정 →',
     select_all_page: '이 페이지 전체 선택',
     audit_threshold: '임계값',
     audit_batch_reextract: '이 {n}개 재추출',

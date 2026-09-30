@@ -552,6 +552,7 @@ const en: Record<string, string> = {
     quality_score_label: 'Quality Score',
     quality_flags_label: 'Quality Flags',
     quality_flagged: 'Flagged',
+    quality_goto_page: 'Fix in Quality →',
     select_all_page: 'Select all on page',
     audit_threshold: 'Threshold',
     audit_batch_reextract: 'Re-extract these {n}',

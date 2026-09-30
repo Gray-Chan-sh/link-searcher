@@ -546,6 +546,7 @@ const ja: Record<string, string> = {
     quality_score_label: '品質スコア',
     quality_flags_label: '品質フラグ',
     quality_flagged: '問題あり',
+    quality_goto_page: '「品質」ページで修復 →',
     select_all_page: 'このページを全選択',
     audit_threshold: 'しきい値',
     audit_batch_reextract: 'この {n} 件を再抽出',
