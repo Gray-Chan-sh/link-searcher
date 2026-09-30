@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-10-01（续11）：两块"整份文档静默变空"的坑 —— `pdfimages` 的 x-ppi=0 与 `lopdf` 无页树；外加空文件不该算低质量
+
+- **现象（用户反馈）**：
+  1. 库里的 `Readme.md`（1 字节占位文件）被质量体检测成"低质量"。
+  2. `WJR 吴建融/PDF2/卷七十.pdf`（57MB / 114 页）**索引不出文字**——日志 `PDF text short (0), using as-is` → `提取文字: 卷七十.pdf (0 字符)`。
+- **根因（三个独立缺陷，前两个都在"扫描件判定"上）**：
+  1. **`pdfimages -list` 的 `x-ppi` 为 0**。IntSig/Foxit 生成的这批扫描件，上游把 x-ppi 写成 0（y-ppi 正常）。`full_page_image_pages()` 原本 `if xppi <= 0.0 || yppi <= 0.0 { continue; }` **直接丢弃该行** → 114 页全部被丢 → `is_image_based_scan()` 判定"不是扫描件" → **不走 OCR**。实测同目录 `卷七十一/七十二/七十三/七十六` 全部 100% 中招。
+  2. **`lopdf` 解析不出页树**：`doc.get_pages()` 为空，旧代码直接 `return Ok((String::new(), false))`，**pdftotext 与 OCR 两条兜底一条都没走**，正文彻底丢失且日志只有一句 `PDF text short (0)`。
+  3. **0 字符一律等于低质量**：`compute_quality` 的零字符分支完全不看源文件大小，1 字节的 `Readme.md` 与"57MB 扫描件抽不出正文"被打成同一个标签。
+- **修复**：
+  - **`pdf/scan.rs`**：新增 `parse_image_list_row()` —— ppi/size/ratio **从右往左取**（`x-ppi y-ppi size ratio` 恒为末四列），不再硬编码 `f[12]/f[13]`（`object ID`/`interp` 的列数会随 poppler 版本变化）；`full_page_image_pages()` 在 ppi ≤ 0 时**按像素数（1px = 1pt）估算覆盖率**，宁可多跑一次 OCR 也不漏掉整份扫描文档。`image_list_info()` 复用同一解析器。
+  - **`pdf.rs`**：① 正文抽完为空且页数 > 0 → 日志 `no text layer at all across N pages — forcing OCR` 并**强制 OCR**（兜住任何扫描检测漏判）；② `pages.is_empty()` → 改为**退回 pdftotext，再退回 OCR**，不再静默返回空串。
+  - **`extractor/quality.rs`**：`ExtractMeta` 新增 `file_size`；零字符分支按 `file_size <= EMPTY_SOURCE_MAX_BYTES`（16B）区分：**空源文件 → `score=1.0`、`flags=[]`**（正常，不再提示）；**非空源文件 → 仍标低质量**（真问题，提示重新提取）；来源未知时沿用旧行为。`indexer.rs` / `extractor/mod.rs` / `pdf.rs` / 质量回填三处调用点都已传源文件大小。
+- **实测验证**：
+  - `卷七十.pdf` 走 E2E 提取：**0 → 33139 字符可读正文**，`ocr_used=true`，开头即「上海市监察委员会…上海市监察委调查上海机场（集团）有限公司董事长、党委副书记吴建融违反党的纪律、涉嫌受贿和隐瞒境外存款…」；
+  - 库内 4 个 1 字节 `Readme.md`（`RF 荣菲/`、`SYDZ 申源电子/变电站 函/`、`WJ 吴杰/里凡/` ×2）改用新评分后不再标低质量；57MB 的 `卷七十.pdf` 仍会被标出（真问题）；
+  - 0 字符文件共 211 个，其中**真·空文件只有这 4 个**，其余 207 个是源文件有内容却没抽出文字的（需重提取）。
+- **涉及文件**：`src-tauri/src/extractor/pdf/scan.rs`、`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/quality.rs`、`src-tauri/src/extractor/mod.rs`、`src-tauri/src/indexer.rs`、`src-tauri/src/commands/index.rs`、`docs/EXTRACTION_SPECIAL_CASES.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **477 passed / 0 failed**（新增 `test_full_page_image_pages_handles_zero_x_ppi`、`test_parse_image_list_row_reads_right_anchored_ppi`、`test_full_page_image_pages_ignores_bad_page_size`、`test_zero_byte_source_is_not_low_quality`、`test_nonempty_source_without_text_is_low_quality`）；`semgrep --severity ERROR` **0 findings**。
+- **说明**：**存量文件需重跑提取**才能拿到正文（本次只改管线）。`卷七十.pdf` 这类"源文件非空、0 字符"的文件重提取后即可检索。
+
+---
+
 ## 2026-10-01（续10）：质量体检归位到「质量」页 + 阈值可调即时生效 + 批量按钮常驻
 
 - **背景**：上一轮（续9）把审计面板放在「索引」页的质量体检卡片里，用起来两处不顺：① 质量相关的能力本就该集中在**「质量」页**（那里有筛选、排序、预览、多选）；② 面板是 `showAudit` 可折叠的，**点「刷新」会先 `setShowAudit(false)` 把它收起来**，还要再展开一次；且**改阈值后不会自动重查**，必须再手动点一次刷新。

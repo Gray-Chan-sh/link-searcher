@@ -25,7 +25,7 @@ use poppler::{pdftotext_path, run_with_timeout};
 mod scan;
 use scan::{is_image_based_scan, pages_rotated};
 #[cfg(test)]
-use scan::{full_page_image_pages, page_media_size, page_rotate};
+use scan::{full_page_image_pages, page_media_size, page_rotate, scan_tests_row};
 
 /// Extract text via pdftotext (poppler) and check for watermarks/repetition.
 /// Used as a fallback when lopdf cannot parse the PDF but the text layer is
@@ -143,6 +143,29 @@ impl PdfExtractor {
         };
         let pages: Vec<u32> = doc.get_pages().into_keys().collect();
         if pages.is_empty() {
+            // 页树解析不出来（异常/加密/非标准 xref）——不能静默返回空文本，
+            // 否则正文全丢且无处可查。退回 pdftotext / 图像 OCR 两条兜底。
+            log::warn!(
+                "[PDF] {:?}: lopdf found no pages — falling back to pdftotext/OCR",
+                path.file_name()
+            );
+            if let Some(text) = try_pdftotext_extract(path)
+                && !is_garbled_text(&text)
+                && !text.trim().is_empty()
+            {
+                log::info!(
+                    "[PDF] {:?}: pdftotext recovered {} chars (no page tree)",
+                    path.file_name(), text.chars().count()
+                );
+                return Ok((text, false));
+            }
+            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, 0, &[], lang, &engine, false) {
+                log::info!(
+                    "[PDF] {:?}: OCR recovered {} chars (no page tree)",
+                    path.file_name(), ocr_text.chars().count()
+                );
+                return Ok((ocr_text, true));
+            }
             return Ok((String::new(), false));
         }
         // 90°/270° pages: their raw embedded image is sideways, which `pdfimages`
@@ -213,6 +236,24 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: extracted {} chars", path.file_name(), merged.len());
         let is_sparse = is_sparse_text_layer(&merged, pages.len());
         let is_implausible = is_implausible_text_layer(&merged, pages.len());
+
+        // 安全网：多页 PDF 抽不到正文时，它必然是扫描件 —— 无论扫描检测为何
+        // 漏判（如 pdfimages 把 x-ppi 写成 0），都必须走 OCR。此前这种文件会
+        // 静默产出 0 字符正文（日志 `PDF text short (0), using as-is`），
+        // 既检索不到，也被质量体检测成"低质量"却无从修复。
+        if merged.trim().is_empty() && !pages.is_empty() {
+            log::warn!(
+                "[PDF] {:?}: no text layer at all across {} pages — forcing OCR",
+                path.file_name(), pages.len()
+            );
+            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine, rotated) {
+                return Ok((ocr_text, true));
+            }
+            log::warn!(
+                "[PDF] {:?}: forced OCR produced nothing; keeping the empty text layer",
+                path.file_name()
+            );
+        }
 
         // Capture pdf_inspector page-level info for per-page OCR decisions.
         // pages_needing_ocr is 0-indexed.
@@ -345,6 +386,7 @@ impl PdfExtractor {
             page_count,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: std::fs::metadata(path).ok().map(|m| m.len()),
         };
         Ok((text, meta))
     }
@@ -966,6 +1008,48 @@ page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-pp
         pages.sort_unstable();
         // p1 (1240x1754@150) and p3 (2480x3508@300) both render to full A4.
         assert_eq!(pages, vec![1, 3]);
+    }
+
+    /// 回归：IntSig/Foxit 生成的扫描件把 **x-ppi 写成 0**（y-ppi 正常）。
+    /// 旧实现 `if xppi <= 0.0 || yppi <= 0.0 { continue; }` 会把整份 114 页
+    /// 扫描件判成"没有满版图像"→ 永不走 OCR → 正文全丢（实测卷七十.pdf）。
+    /// 现在 ppi 不可用时按像素数（1px = 1pt）兜底，页面盒 1240x1754pt 与
+    /// 图像 1240x1754px 正好匹配 → 必须识别为满版扫描页。
+    #[test]
+    fn test_full_page_image_pages_handles_zero_x_ppi() {
+        let listing = "\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    1240  1754  rgb     3   8  image  no       584  0     0    72  122K 1.9%
+   2     1 image    1760  2496  rgb     3   8  jpeg   no         8  0   214   213  567K 4.4%";
+        // 第 1 行 x-ppi=0 → 兜底用像素数；1240x1754px 对 1240x1754pt 满版。
+        // 第 2 行 ppi 正常但像素尺寸(1760x2496pt)远大于页面盒 → 不计入。
+        let page_box = (1240.0_f32, 1754.0_f32);
+        let mut pages: Vec<u32> =
+            full_page_image_pages(listing, |_| Some(page_box)).into_iter().collect();
+        pages.sort_unstable();
+        assert_eq!(pages, vec![1], "x-ppi=0 的满版扫描页必须被识别");
+    }
+
+    #[test]
+    fn test_full_page_image_pages_ignores_bad_page_size() {
+        // 页面尺寸异常（0 或缺失）时不应 panic，也不应把页面当成满版图像。
+        let listing = "\
+page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio
+--------------------------------------------------------------------------------------------
+   1     0 image    1240  1754  rgb     3   8  jpeg   no       551  0   150   150 38.6K 0.6%";
+        assert!(full_page_image_pages(listing, |_| Some((0.0, 0.0))).is_empty());
+        assert!(full_page_image_pages(listing, |_| None).is_empty());
+    }
+
+    #[test]
+    fn test_parse_image_list_row_reads_right_anchored_ppi() {
+        // 右锚定解析：即便 object ID / interp 列数变化，ppi 仍取末尾四列。
+        let line = "   1     0 image    1240  1754  rgb     3   8  image  no       584  0     0    72  122K 1.9%";
+        let row = super::scan_tests_row(line).expect("row parses");
+        assert_eq!(row.1, 1240, "width");
+        assert_eq!(row.2, 0.0, "x-ppi (0 in this real-world file)");
+        assert_eq!(row.3, 72.0, "y-ppi");
     }
 
     #[test]

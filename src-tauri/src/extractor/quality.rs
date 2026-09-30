@@ -10,7 +10,15 @@ pub struct ExtractMeta {
     /// FFFD ratio computed on the raw text BEFORE sanitize_text strips replacement chars.
     /// This ensures HighFffd flag fires correctly even when sanitize_text clears FFFD >15%.
     pub pre_sanitize_fffd_ratio: Option<f32>,
+    /// 源文件字节数。用于区分两种"零字符"：**源文件本身就是空的**
+    /// （0 字节的 readme.md、占位文件）不该被当成低质量；**源文件非空却抽不出
+    /// 正文**（纯扫描件没走成 OCR）才是真问题，必须标出来。
+    pub file_size: Option<u64>,
 }
+
+/// 源文件小到"本来就不该有正文"的阈值。0 字节按空文件处理；
+/// 这里给一点余量，容忍只有 BOM/换行的占位文件。
+pub const EMPTY_SOURCE_MAX_BYTES: u64 = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +134,23 @@ fn compute_lexicon_hit_rate(text: &str) -> f32 {
 pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> QualityResult {
     let total_chars = text.chars().count();
     if total_chars == 0 || text.chars().all(|c| c.is_whitespace()) {
+        // 源文件本身就是空的（0 字节 readme.md 之类）→ 没有正文是**正常的**，
+        // 不该被标成"低质量"并反复提示重新提取。给出中性分与空 flags。
+        // 只有"源文件非空却抽不出正文"才走下面的问题分支。
+        let source_is_empty = meta
+            .file_size
+            .is_some_and(|s| s <= EMPTY_SOURCE_MAX_BYTES);
+        if source_is_empty {
+            return QualityResult {
+                score: 1.0,
+                printable_ratio: 1.0,
+                fffd_ratio: 0.0,
+                confidence: meta.mean_confidence,
+                density_norm: 1.0,
+                lexicon_hit_rate: 1.0,
+                flags: Vec::new(),
+            };
+        }
         return QualityResult {
             score: 0.0,
             printable_ratio: 0.0,
@@ -278,11 +303,37 @@ mod tests {
 
     #[test]
     fn test_empty_string_quality() {
+        // 源文件大小未知（老数据/未知来源）→ 沿用旧行为：标为疑似问题
         let meta = ExtractMeta::default();
         let res = compute_quality("", &meta, "txt");
         assert_eq!(res.score, 0.0);
         assert_eq!(res.printable_ratio, 0.0);
         assert_eq!(res.density_norm, 0.0);
+        assert!(res.flags.contains(&QualityFlag::LowPrintable));
+        assert!(res.flags.contains(&QualityFlag::LowDensity));
+    }
+
+    /// 源文件本身就是 0 字节（readme.md、占位文件）→ 没有正文是正常的，
+    /// 不该被当成"低质量"反复提示重新提取。
+    #[test]
+    fn test_zero_byte_source_is_not_low_quality() {
+        let meta = ExtractMeta { file_size: Some(0), ..Default::default() };
+        let res = compute_quality("", &meta, "md");
+        assert!(res.flags.is_empty(), "空源文件不应带任何低质量 flag: {:?}", res.flags);
+        assert!(res.score > 0.9, "空源文件应给中性高分, got {}", res.score);
+
+        // 只有 BOM / 换行的极小占位文件同样放过
+        let meta2 = ExtractMeta { file_size: Some(4), ..Default::default() };
+        assert!(compute_quality("   \n", &meta2, "txt").flags.is_empty());
+    }
+
+    /// 源文件非空却抽不出正文（例如扫描件没走成 OCR）→ 必须标为低质量，
+    /// 否则这类文件会既检索不到、又不会被质量体检提示去修。
+    #[test]
+    fn test_nonempty_source_without_text_is_low_quality() {
+        let meta = ExtractMeta { file_size: Some(57_474_434), ..Default::default() };
+        let res = compute_quality("", &meta, "pdf");
+        assert_eq!(res.score, 0.0);
         assert!(res.flags.contains(&QualityFlag::LowPrintable));
         assert!(res.flags.contains(&QualityFlag::LowDensity));
     }
@@ -296,6 +347,7 @@ mod tests {
             page_count: None,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
         let res = compute_quality(text, &meta, "txt");
         assert!(
@@ -336,6 +388,7 @@ mod tests {
             page_count: None,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
         let res_high = compute_quality(text, &meta_high, "png");
         assert!(
@@ -349,6 +402,7 @@ mod tests {
             page_count: None,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
         let res_low = compute_quality(text, &meta_low, "png");
         assert!(
@@ -366,6 +420,7 @@ mod tests {
             page_count: Some(1),
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
         let res_some = compute_quality(text, &meta_some, "pdf");
         assert!(res_some.score > 0.0);
@@ -376,6 +431,7 @@ mod tests {
             page_count: None,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
         let res_none = compute_quality(text, &meta_none, "pdf");
         assert!(res_none.score > 0.0);

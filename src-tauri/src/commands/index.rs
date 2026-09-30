@@ -1080,27 +1080,23 @@ pub(crate) fn run_quality_backfill(
             page_count: None,
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
+            file_size: None,
         };
 
-        if ext == "pdf" {
-            if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
-                if let Some(root) = dir_roots.get(dir_id) {
-                    let abs = std::path::Path::new(root).join(rel);
-                    meta.page_count =
-                        crate::extractor::pdf::get_pdf_page_count(&abs).ok();
-                }
-            }
-        } else if matches!(
-            ext.as_str(),
-            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
-        ) {
-            if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path) {
-                if let Some(root) = dir_roots.get(dir_id) {
-                    let abs = std::path::Path::new(root).join(rel);
+        // 源文件大小：区分"本来就没有正文"（空文件）与"抽不出正文"（真问题）。
+        if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path)
+            && let Some(root) = dir_roots.get(dir_id) {
+                let abs = std::path::Path::new(root).join(rel);
+                meta.file_size = std::fs::metadata(&abs).ok().map(|m| m.len());
+                if ext == "pdf" {
+                    meta.page_count = crate::extractor::pdf::get_pdf_page_count(&abs).ok();
+                } else if matches!(
+                    ext.as_str(),
+                    "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "tiff" | "tif"
+                ) {
                     meta.image_dims = ::image::image_dimensions(&abs).ok();
                 }
             }
-        }
 
         let quality =
             crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
@@ -1512,6 +1508,7 @@ mod tests {
                 page_count: None,
                 image_dims: None,
                 pre_sanitize_fffd_ratio: None,
+            file_size: None,
             };
             let quality = crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
             let flags_json = crate::extractor::quality::flags_to_json(&quality.flags);

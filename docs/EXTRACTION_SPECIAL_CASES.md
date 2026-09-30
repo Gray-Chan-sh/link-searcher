@@ -78,6 +78,9 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | pdfimages 不足 50% 页有图 | 判定"非扫描 PDF"，返回错误 | `ocr_pdf_via_pdfimages` |
 | **页面 `/Rotate` ∈ {90,270}** | **跳过 pdfimages（它不应用页面旋转，抽到的图是躺倒的），改用 pdftoppm（会 bake 旋转）** | `pages_rotated` / `page_rotate`（`pdf/scan.rs`）|
 | **pdfimages OCR 结果判为乱码**（一字一行 / LowPrintable / LowLexicon / HighFffd） | **不采纳，退回 pdftoppm 重试** | `ocr_text_is_unusable`（`pdf/ocr.rs`）|
+| **`pdfimages -list` 的 `x-ppi` 为 0**（IntSig/Foxit 上游元数据缺失） | **不再丢弃该行**：改按像素数（1px = 1pt）估算覆盖率；同时 ppi 改为**从右往左**取（object ID/interp 列数会变） | `parse_image_list_row` / `full_page_image_pages` |
+| **多页 PDF 抽到的正文为空** | **强制走 OCR**（无论扫描检测是否漏判） | `extract_with_lang`（`pdf.rs`）|
+| **`lopdf` 解析不出页树**（`pages.is_empty()`） | **退回 pdftotext → OCR**，不再静默返回空文本 | `extract_with_lang`（`pdf.rs`）|
 
 **文本层质量（7 条）**
 
@@ -218,6 +221,15 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | `LowConfidence` | `ocr_used && confidence < 0.6` | `compute_quality` |
 | `LowDensity` | `density_norm < 0.25` | `compute_quality` |
 | `LowLexicon` | `lexicon_hit_rate < 0.4` | `compute_quality` |
+
+**零字符分支的两种情况**（`compute_quality` 开头）——由 `ExtractMeta.file_size`
+区分，不能一律当成低质量：
+
+| 情况 | 判定 | 结果 |
+|------|------|------|
+| **源文件本身就是空的**（`file_size <= EMPTY_SOURCE_MAX_BYTES`，16 字节） | 如库里的 1 字节 `Readme.md` 占位文件 | `score=1.0`、`flags=[]` —— 没有正文是**正常**的，不该提示"低质量/重新提取" |
+| **源文件非空却抽不出正文** | 如扫描件没走成 OCR（`卷七十.pdf` 57MB / 0 字符） | `score=0.0`、`flags=[LowPrintable, LowDensity]` —— **真问题**，要提示重新提取 |
+| 源文件大小未知（老数据 / 未知来源） | `file_size = None` | 沿用旧行为（按问题处理） |
 
 复合评分公式（`compute_quality`）：
 

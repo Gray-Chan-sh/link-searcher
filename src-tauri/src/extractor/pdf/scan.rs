@@ -67,40 +67,90 @@ pub(super) fn pages_rotated(doc: &lopdf::Document) -> bool {
         .any(|&id| matches!(page_rotate(doc, id), 90 | 270))
 }
 
+/// Parsed row of one `pdfimages -list` data line.
+///
+/// The listing's right-most four columns are always `x-ppi y-ppi size ratio`, so
+/// the scan reads them from the **right** rather than hard-coding `f[12]/f[13]`
+/// (the `object ID` + `interp` fields shift the left side across poppler builds).
+/// Measured on a real library, `x-ppi` is legitimately `0` for whole archives
+/// produced by IntSig/Foxit — the value is missing upstream, not mis-parsed.
+struct ImageListRow<'a> {
+    page: u32,
+    #[allow(dead_code)] // 保留 `type` 列以便将来区分 image/stencil/smask
+    kind: &'a str,
+    width: u32,
+    height: u32,
+    enc: &'a str,
+    x_ppi: f32,
+    y_ppi: f32,
+}
+
+/// Fixed left columns before the trailing `x-ppi y-ppi size ratio` quartet:
+/// `page num type width height color comp bpc enc interp` — `interp` is present
+/// in poppler ≥ 0.65; the parser tolerates its absence by checking the shape.
+const IMAGE_LIST_MIN_COLS: usize = 14;
+
 /// Minimum `image-size / page-size` ratio, in both dimensions, for a full-page image.
 const FULL_PAGE_IMAGE_COVERAGE: f32 = 0.8;
 
+fn parse_image_list_row(line: &str) -> Option<ImageListRow<'_>> {
+    let f: Vec<&str> = line.split_whitespace().collect();
+    if f.len() < IMAGE_LIST_MIN_COLS {
+        return None;
+    }
+    if !matches!(f[2], "image" | "stencil" | "smask") {
+        return None;
+    }
+    let page = f[0].parse::<u32>().ok()?;
+    let width = f[3].parse::<u32>().ok()?;
+    let height = f[4].parse::<u32>().ok()?;
+    let n = f.len();
+    // Right-anchored: … x-ppi y-ppi size ratio
+    let x_ppi = f[n - 4].parse::<f32>().unwrap_or(0.0);
+    let y_ppi = f[n - 3].parse::<f32>().unwrap_or(0.0);
+    Some(ImageListRow {
+        page,
+        kind: f[2],
+        width,
+        height,
+        enc: f[8],
+        x_ppi,
+        y_ppi,
+    })
+}
+
 /// 1-based pages holding an image covering ≥ `FULL_PAGE_IMAGE_COVERAGE` of the
 /// page in both dimensions. `listing` is `pdfimages -list` output.
+///
+/// Coverage uses the image's physical size (`pixels / ppi`), and **falls back to
+/// the raw pixel count against the page box** when the listing reports a
+/// non-positive ppi (seen on IntSig/Foxit-produced scans, where the object id
+/// absorbs the ppi column). Without the fallback those files look like "no
+/// full-page image at all" and never reach OCR.
 pub(super) fn full_page_image_pages(
     listing: &str,
     page_size: impl Fn(u32) -> Option<(f32, f32)>,
 ) -> HashSet<u32> {
     let mut pages = HashSet::new();
     for line in listing.lines() {
-        // Columns: page num type width height color comp bpc enc interp object id x-ppi y-ppi size ratio
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 14 || !matches!(f[2], "image" | "stencil" | "smask") {
-            continue;
-        }
-        let (Ok(page), Ok(w), Ok(h), Ok(xppi), Ok(yppi)) = (
-            f[0].parse::<u32>(),
-            f[3].parse::<u32>(),
-            f[4].parse::<u32>(),
-            f[12].parse::<f32>(),
-            f[13].parse::<f32>(),
-        ) else {
+        let Some(row) = parse_image_list_row(line) else {
             continue;
         };
-        if xppi <= 0.0 || yppi <= 0.0 {
-            continue;
-        }
-        let Some((pw, ph)) = page_size(page) else {
+        let Some((pw, ph)) = page_size(row.page) else {
             continue;
         };
-        let (w_pt, h_pt) = (w as f32 / xppi * 72.0, h as f32 / yppi * 72.0);
+        if pw <= 0.0 || ph <= 0.0 {
+            continue;
+        }
+        let (w_pt, h_pt) = if row.x_ppi > 0.0 && row.y_ppi > 0.0 {
+            (row.width as f32 / row.x_ppi * 72.0, row.height as f32 / row.y_ppi * 72.0)
+        } else {
+            // ppi 不可用：按 1px = 1pt（72dpi）粗估。宁可误判为扫描件
+            // （多跑一次 OCR）也不要漏掉整份扫描文档（正文全丢）。
+            (row.width as f32, row.height as f32)
+        };
         if w_pt >= FULL_PAGE_IMAGE_COVERAGE * pw && h_pt >= FULL_PAGE_IMAGE_COVERAGE * ph {
-            pages.insert(page);
+            pages.insert(row.page);
         }
     }
     pages
@@ -130,6 +180,13 @@ pub(super) fn is_image_based_scan(path: &Path, doc: &lopdf::Document) -> bool {
         page_ids.get(&p).and_then(|&id| page_media_size(doc, id))
     });
     !full.is_empty() && full.len() * 2 >= page_ids.len()
+}
+
+/// Test-only projection of [`parse_image_list_row`] so the pdf.rs test module
+/// (which cannot see the private struct) can assert the right-anchored columns.
+#[cfg(test)]
+pub(super) fn scan_tests_row(line: &str) -> Option<(u32, u32, f32, f32)> {
+    parse_image_list_row(line).map(|r| (r.page, r.width, r.x_ppi, r.y_ppi))
 }
 
 /// Per-page image inventory from one `pdfimages -list` run.
@@ -164,16 +221,11 @@ pub(super) fn image_list_info(path: &Path) -> Option<ImageListInfo> {
     let mut enc_by_page: HashMap<u32, String> = HashMap::new();
     let mut max_page = 0usize;
     for line in listing.lines() {
-        // Columns: page num type width height color comp bpc enc interp object ID x-ppi y-ppi size ratio
-        let f: Vec<&str> = line.split_whitespace().collect();
-        if f.len() < 14 || !matches!(f[2], "image" | "stencil" | "smask") {
-            continue;
-        }
-        let Ok(page) = f[0].parse::<u32>() else {
+        let Some(row) = parse_image_list_row(line) else {
             continue;
         };
-        enc_by_page.insert(page, f[8].to_string());
-        max_page = max_page.max(page as usize);
+        enc_by_page.insert(row.page, row.enc.to_string());
+        max_page = max_page.max(row.page as usize);
     }
     Some(ImageListInfo {
         total_pages: max_page,
