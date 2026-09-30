@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-10-01（续9）：GUI 批量修复低质量文件 —— 审计面板加批量按钮与阈值、浏览页加「有问题标记」与全选本页
+
+- **背景**：排查"旋转扫描件 OCR 乱码"时发现，GUI 里**没有可用的批量修复入口**：
+  1. 浏览页筛选「低质量」和后端 `re_extract_low_quality` 都是**硬阈值 `score < 0.5`**，而旋转乱码件实际落在 **0.64~0.79**，被整套漏掉；
+  2. 后端其实**早就有** `re_extract_low_quality`（批量）与 `quality=flagged`（按 `quality_flags != '[]'`）两个能力，但**前端从未接入**（`reExtractLowQuality` 在 `src/api/index.ts` 里定义了却无人调用）；
+  3. 浏览页表格**没有复选框列、没有全选**，批量选 88 个文件只能靠 Shift 区间（而这区间里混着 ~570 份无关文件）。
+- **修复**：
+  - **索引页 · 质量体检 → 审计面板**（`src/pages/IndexStatus.tsx`）：
+    - 新增**阈值下拉** `0.50 / 0.80 / 1.00`（1.00 = 全部有评分的文件），改后可点「刷新」重新列出（上限由 100 提到 200，取回后再点批量）；
+    - 新增 **「批量重新提取这 N 个」** 按钮 → 调用现有 `reindex_files`（清缓存 → 重新提取/OCR → 重建索引），完成后刷新质量分布与列表。
+  - **`quality_audit` 命令**（`commands/index.rs`）：`max_score` 做 `.clamp(1e-6, 1.01)`，`1.01` 用于表达"全部"（`0.0` 会被 `.unwrap_or(0.5)` 吞掉）。
+  - **浏览页**（`src/pages/Browse.tsx`）：
+    - 筛选下拉新增 **「有问题标记」** → 走已有的 `quality=flagged`（按 `quality_flags != '[]'` 过滤），能捞到"评分中等但已标问题"的文件；
+    - 表头「文件名」加 **全选本页** 复选框（只对当前页生效，动作与 Ctrl 点选一致，不改变既有的单选/点开行为）。
+  - 新增 i18n：`quality_flagged` / `select_all_page` / `audit_threshold` / `audit_batch_reextract` / `audit_batch_reextract_done`（zh/en/ja/ko）。
+- **典型用法（一条龙）**：浏览页 →「有问题标记」+ 扩展名 `PDF` → 排序「质量 ↑」→ 全选本页 → 右键「批量重新索引」。
+- **涉及文件**：`src/pages/IndexStatus.tsx`、`src/pages/Browse.tsx`、`src-tauri/src/commands/index.rs`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/05-browse.md`、`docs/07-index-manage.md`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0 错误；`npx vitest run` **61 passed**；`npm run lint` 0 错误（29 条既有 warning）；`cargo check` 0 错误；`cargo test --lib` **471 passed**；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-09-29（续8）：旋转 90° 的扫描件被 OCR 成乱码 —— 二审判决书"检索到了却读不出来"
 
 - **现象**：会话「典欧公司与徐惠东之间的案件是什么情况」第 3 轮问"尊信的案子是什么情况"，AI 回答"目前材料中未提供二审最终判决书（材料[60]为乱码无法识别）"。但二审判决书**确实在库里**（`DO 典欧/尊信/二审/判决书（尊信）.pdf`），而且在检索范围 `DO 典欧/尊信` 之内、也**确实被检索到并作为材料[60]整篇注入了**——只是正文是乱码，模型读不出来。

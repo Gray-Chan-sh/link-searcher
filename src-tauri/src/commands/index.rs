@@ -927,10 +927,15 @@ pub async fn quality_audit(
     max_score: Option<f64>,
     limit: Option<usize>,
 ) -> Result<Vec<tracker::LowQualityRow>, String> {
+    if state.is_rebuilding.load(Ordering::SeqCst) {
+        return Err("索引重建中，请稍后再试".to_string());
+    }
+    // `quality_audit` 要求 max_score>0（0 会被 `.unwrap_or(0.5)` 吞成 0.5），
+    // 前端用 1.01 表示"全部有评分的文件"。
+    let clamped_score = max_score.unwrap_or(0.5).clamp(1e-6, 1.01);
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let score = max_score.unwrap_or(0.5);
     let lim = limit.unwrap_or(100).min(1000);
-    tracker::get_low_quality_files(&conn, score, lim).map_err(|e| format!("{e}"))
+    tracker::get_low_quality_files(&conn, clamped_score, lim).map_err(|e| format!("{e}"))
 }
 
 #[tauri::command]

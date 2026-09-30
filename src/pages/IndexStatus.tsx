@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type QualityAuditEntry, type EmbeddingConsistency } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, qualityAudit, reExtractFile, reindexFiles, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type QualityAuditEntry, type EmbeddingConsistency } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
@@ -55,6 +55,8 @@ export default function IndexStatus() {
   const [auditEntries, setAuditEntries] = useState<QualityAuditEntry[]>([])
   const [showAudit, setShowAudit] = useState(false)
   const [auditing, setAuditing] = useState(false)
+  const [auditMaxScore, setAuditMaxScore] = useState(0.5)
+  const [batchReextracting, setBatchReextracting] = useState(false)
   const [backfillingQuality, setBackfillingQuality] = useState(false)
   const [qualityBackfillMsg, setQualityBackfillMsg] = useState<string | null>(null)
   const [reextractingId, setReextractingId] = useState<string | null>(null)
@@ -267,13 +269,38 @@ export default function IndexStatus() {
     if (showAudit) { setShowAudit(false); return }
     setAuditing(true)
     try {
-      const entries = await qualityAudit(0.5, 100)
+      const entries = await qualityAudit(auditMaxScore, 200)
       setAuditEntries(entries)
       setShowAudit(true)
     } catch {
       setAuditEntries([])
     } finally {
       setAuditing(false)
+    }
+  }
+
+  /** 批量重新提取当前列出的文件（reindex_files：清缓存 → 重新提取/OCR → 重建索引）。
+   *  比逐个点「重新提取」快得多，也顺带覆盖了「阈值调高后」那批质量中等的文件。 */
+  const handleBatchReExtract = async () => {
+    const ids = auditEntries.map(e => e.file_id).filter((x): x is string => !!x)
+    if (ids.length === 0) return
+    setBatchReextracting(true)
+    setQualityBackfillMsg(null)
+    try {
+      const r = await reindexFiles(ids)
+      setQualityBackfillMsg(
+        t('audit_batch_reextract_done', {
+          ok: r.ok,
+          failedSuffix: r.failed > 0 ? `，${r.failed} 个失败` : '',
+        })
+      )
+      fetchQualityData()
+      const entries = await qualityAudit(auditMaxScore, 200)
+      setAuditEntries(entries)
+    } catch (e) {
+      setQualityBackfillMsg(String(e))
+    } finally {
+      setBatchReextracting(false)
     }
   }
 
@@ -289,7 +316,7 @@ export default function IndexStatus() {
       )
       fetchQualityData()
       if (showAudit) {
-        const entries = await qualityAudit(0.5, 100)
+        const entries = await qualityAudit(auditMaxScore, 200)
         setAuditEntries(entries)
       }
     } catch (e) {
@@ -308,7 +335,7 @@ export default function IndexStatus() {
       fetchQualityData()
       if (showAudit) {
         try {
-          const entries = await qualityAudit(0.5, 100)
+          const entries = await qualityAudit(auditMaxScore, 200)
           setAuditEntries(entries)
         } catch { /* empty */ }
       }
@@ -517,6 +544,35 @@ export default function IndexStatus() {
 
               {showAudit && (
                 <div className="mt-3 border-t border-gray-200 dark:border-gray-800 pt-3">
+                  <div className="flex items-center gap-2 mb-2 text-xs">
+                    <span className="text-gray-500 dark:text-gray-400">{t('audit_threshold')}</span>
+                    <select
+                      value={auditMaxScore}
+                      onChange={e => setAuditMaxScore(Number(e.target.value))}
+                      className="bg-transparent border border-gray-200 dark:border-gray-700 rounded px-1.5 py-0.5 text-gray-600 dark:text-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value={0.5}>0.50</option>
+                      <option value={0.8}>0.80</option>
+                      <option value={1.01}>1.00</option>
+                    </select>
+                    <button
+                      onClick={handleAudit}
+                      disabled={auditing}
+                      className="px-2 py-0.5 text-blue-600 dark:text-blue-400 hover:underline disabled:opacity-50"
+                    >
+                      {t('refresh')}
+                    </button>
+                    {auditEntries.some(e => e.file_id) && (
+                      <button
+                        onClick={handleBatchReExtract}
+                        disabled={batchReextracting || auditing}
+                        className="ml-auto flex items-center gap-1.5 px-2.5 py-1 font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/40 disabled:opacity-50 transition-colors"
+                      >
+                        {batchReextracting && <LoadingSpinner className="size-3" />}
+                        {t('audit_batch_reextract', { n: auditEntries.filter(e => e.file_id).length })}
+                      </button>
+                    )}
+                  </div>
                   {auditing ? (
                     <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                       <LoadingSpinner className="size-3" /> {t('auditing')}

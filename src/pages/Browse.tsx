@@ -207,9 +207,12 @@ return () => document.removeEventListener('click', close)
   const loadFiles = useCallback(async () => {
     setLoading(true)
     try {
-      const apiFilter = filter === 'low_quality' ? 'all' : filter
-      const qualityParam = filter === 'low_quality' ? 'low' : undefined
-      const res = await listFilesDb({ filter: apiFilter as FilterType, ext: ext || undefined, search: (forcedSearch ?? debouncedSearch) || undefined, sort: sort as SortKey, order, page, pageSize, quality: qualityParam })
+      // 'low_quality' / 'flagged' 是"质量"维度的过滤，不是状态过滤：
+      // 走 quality 参数（后端支持 low / yellow / green / flagged）。
+      const qualityFilter =
+        filter === 'low_quality' ? 'low' : filter === 'flagged' ? 'flagged' : undefined
+      const apiFilter = qualityFilter ? 'all' : filter
+      const res = await listFilesDb({ filter: apiFilter as FilterType, ext: ext || undefined, search: (forcedSearch ?? debouncedSearch) || undefined, sort: sort as SortKey, order, page, pageSize, quality: qualityFilter })
       setItems(res.items)
       setTotal(res.total)
     } catch {
@@ -387,6 +390,7 @@ return (
             <option value="failed">{t('failed')}</option>
             <option value="deleted">{t('deleted')}</option>
             <option value="low_quality">{t('low_quality')}</option>
+            <option value="flagged">{t('quality_flagged')}</option>
           </select>
 
           <select
@@ -510,7 +514,24 @@ return (
               <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/80 backdrop-blur z-10">
                 <tr className="border-b border-gray-200 dark:border-gray-800 text-gray-500 dark:text-gray-400 text-left">
                   <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.filename }}>
-                    {t('filename')}
+                    <span className="inline-flex items-center gap-1.5">
+                      <input
+                        type="checkbox"
+                        title={t('select_all_page')}
+                        aria-label={t('select_all_page')}
+                        checked={items.length > 0 && items.every(i => selectedIds.has(i.file_id))}
+                        onChange={e => {
+                          setSelectedIds(prev => {
+                            const next = new Set(prev)
+                            if (e.target.checked) items.forEach(i => next.add(i.file_id))
+                            else items.forEach(i => next.delete(i.file_id))
+                            return next
+                          })
+                        }}
+                        className="size-3 align-middle accent-blue-600 cursor-pointer"
+                      />
+                      {t('filename')}
+                    </span>
                     <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-500/50 active:bg-blue-500" onMouseDown={(e) => handleResizeStart(e, 'filename')} onDoubleClick={() => handleAutoFit('filename')} />
                   </th>
                   <th className="px-2 py-1 font-medium relative" style={{ width: colWidths.path }}>
