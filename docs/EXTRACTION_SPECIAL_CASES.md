@@ -221,6 +221,7 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | `LowConfidence` | `ocr_used && confidence < 0.6` | `compute_quality` |
 | `LowDensity` | `density_norm < 0.25` | `compute_quality` |
 | `LowLexicon` | `lexicon_hit_rate < 0.4` | `compute_quality` |
+| **`CjkSpaced`** | **汉字/假名 ≥ [`CJK_SPACE_MIN_IDEOGRAPHS`]（50）且「汉字 空格 汉字」占比 ≥ [`CJK_SPACE_RATIO_THRESHOLD`]（0.30）** | `cjk_space_ratio` |
 
 **零字符分支的两种情况**（`compute_quality` 开头）——由 `ExtractMeta.file_size`
 区分，不能一律当成低质量：
@@ -491,6 +492,7 @@ score = 0.20 * printable_ratio
 |------|-----|------|
 | FFFD 替换比 | >15% | NUL -> 空，FFFD >15% -> 替换为空格 |
 | CJK 空格压缩 | 空格两侧均为「汉字/假名 或 中文邻近标点」且至少一侧为汉字/假名 | `squeeze_cjk_spaces`：保留英文/数字旁的空格与换行 |
+| `CjkSpaced` 标记 | 汉字 ≥ 50 且字间空格占比 ≥ 0.30 | `cjk_space_ratio`：圈出**尚未重提取**的存量文件 |
 
 > **为什么要压缩 CJK 空格**：复印机/IntSig·Foxit 导出的 PDF 把文字**一个汉字一个 text run** 存，poppler 忠实吐出 `"上 海 机 场"`。jieba 只在连续汉字上识别词，被空格切碎后**只剩单字 token**；而 `split_query_terms` / `extract_retrieval_keywords` 都会丢弃 `<2 字` 的 token → **文件整份检索不到**；同时嵌入是对带空格文本算的，余弦普遍低 0.03~0.05（实测某查询去空格后 0.6385 过阈值、带空格 0.5854 不过）。实测库内 1838 份文件汉字间空格占比 ≥30%。
 

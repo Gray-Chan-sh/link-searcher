@@ -28,6 +28,15 @@ pub enum QualityFlag {
     LowConfidence,
     LowDensity,
     LowLexicon,
+    /// 正文里"汉字 空格 汉字"占比过高。
+    ///
+    /// 复印机 / IntSig·Foxit 导出的 PDF 把**一个汉字写成一个 text run**，
+    /// poppler 按 run 边界吐空格（`上 海 机 场`）。jieba 只在连续汉字上识别词，
+    /// 被切碎后只剩单字 token，而 query 构造与实体词提取都会丢弃 `<2 字` 的
+    /// token → **整份文件检索不到**；嵌入也因此在带空格文本上计算，余弦低
+    /// 0.03~0.05。入库时的 `squeeze_cjk_spaces` 会修好新提取的内容，这个标记
+    /// 用来把**尚未重提取的存量文件**圈出来一键修复。
+    CjkSpaced,
     Exhausted,
     MaxReextract,
 }
@@ -230,6 +239,12 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
     if lexicon_hit_rate < 0.4 {
         flags.push(QualityFlag::LowLexicon);
     }
+    // 汉字间空格过多 → 分词会被切碎、整份文件检索不到（见 QualityFlag::CjkSpaced）。
+    if ideograph_count(text) >= CJK_SPACE_MIN_IDEOGRAPHS
+        && cjk_space_ratio(text) >= CJK_SPACE_RATIO_THRESHOLD
+    {
+        flags.push(QualityFlag::CjkSpaced);
+    }
 
     QualityResult {
         score: composite,
@@ -241,6 +256,48 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
         flags,
     }
 }
+
+/// Whether `c` is an ideograph/kana (the scripts written without word spaces).
+fn quality_is_ideo(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{3040}'..='\u{309F}'
+            | '\u{30A0}'..='\u{30FF}')
+}
+
+fn ideograph_count(text: &str) -> usize {
+    text.chars().filter(|c| quality_is_ideo(*c)).count()
+}
+
+/// Ratio of "ideograph space ideograph" gaps to ideographs.
+///
+/// A high ratio means the text layer stores one glyph per run (copier / Foxit
+/// exports). `squeeze_cjk_spaces` runs at ingest, so freshly extracted content
+/// scores ~0; this metric exists to **find the not-yet-re-extracted backlog**.
+pub fn cjk_space_ratio(text: &str) -> f32 {
+    let chars: Vec<char> = text.chars().collect();
+    let mut ideo = 0usize;
+    let mut gaps = 0usize;
+    for (i, &c) in chars.iter().enumerate() {
+        if quality_is_ideo(c) {
+            ideo += 1;
+            if i + 2 < chars.len()
+                && (chars[i + 1] == ' ' || chars[i + 1] == '\u{3000}')
+                && quality_is_ideo(chars[i + 2])
+            {
+                gaps += 1;
+            }
+        }
+    }
+    if ideo == 0 { 0.0 } else { gaps as f32 / ideo as f32 }
+}
+
+/// 汉字间空格占比阈值：超过即标 `CjkSpaced`（要求正文足够长，避免短样本误报）。
+pub const CJK_SPACE_RATIO_THRESHOLD: f32 = 0.30;
+/// 参与 CjkSpaced 判定的最少汉字数——短文本（几行模板）比例不稳。
+pub const CJK_SPACE_MIN_IDEOGRAPHS: usize = 50;
 
 /// Character Error Rate: normalized Levenshtein distance after stripping ASCII whitespace.
 pub fn cer(reference: &str, hypothesis: &str) -> f64 {
@@ -299,6 +356,31 @@ mod tests {
             "en size expected ~3000, got {}",
             en
         );
+    }
+
+    #[test]
+    fn test_cjk_space_ratio_and_flag() {
+        // 正常中文（无字间空格）→ 比例 0，不打标
+        let normal = "上海市监察委员会第九纪检监察室调查上海机场集团有限公司董事长吴建融违反党的纪律涉嫌受贿和隐瞒境外存款犯罪等问题";
+        assert!(cjk_space_ratio(normal) < 0.05, "ratio={}", cjk_space_ratio(normal));
+        let meta = ExtractMeta { file_size: Some(10_000), ..Default::default() };
+        assert!(!compute_quality(normal, &meta, "pdf").flags.contains(&QualityFlag::CjkSpaced));
+
+        // 一字一空格的扫描件形态 → 比例高，必须打标
+        let spaced: String = normal.chars().map(|c| format!("{c} ")).collect();
+        let r = cjk_space_ratio(&spaced);
+        assert!(r >= CJK_SPACE_RATIO_THRESHOLD, "ratio={r}");
+        let q = compute_quality(&spaced, &meta, "pdf");
+        assert!(q.flags.contains(&QualityFlag::CjkSpaced), "flags={:?}", q.flags);
+
+        // 短文本不判（比例不稳）
+        let short = "上 海 机 场";
+        assert!(!compute_quality(short, &meta, "txt").flags.contains(&QualityFlag::CjkSpaced));
+
+        // 纯英文文本不误判
+        let en = "hello world ".repeat(50);
+        assert_eq!(cjk_space_ratio(&en), 0.0);
+        assert!(!compute_quality(&en, &meta, "txt").flags.contains(&QualityFlag::CjkSpaced));
     }
 
     #[test]

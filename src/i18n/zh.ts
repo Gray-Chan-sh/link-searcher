@@ -594,6 +594,8 @@ const zh: Record<string, string> = {
     quality_flag_low_lexicon_solution: '人工核对，必要时重新提取',
     quality_flag_low_confidence_reason: 'OCR 识别置信度低',
     quality_flag_low_confidence_solution: '提高扫描质量或更换引擎后重新提取',
+    quality_flag_cjk_spaced_reason: '汉字之间夹空格（扫描件一字一个文本块），会切碎分词导致搜不到',
+    quality_flag_cjk_spaced_solution: '重新提取（新版会在入库时压掉汉字间空格，恢复正常分词）',
     quality_flag_exhausted_reason: '已多次重新提取仍未改善',
     quality_flag_exhausted_solution: '人工检查源文件',
     quality_flag_max_reextract_reason: '已达重新提取次数上限',

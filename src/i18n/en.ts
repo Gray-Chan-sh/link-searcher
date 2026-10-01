@@ -594,6 +594,8 @@ const en: Record<string, string> = {
     quality_flag_low_lexicon_solution: 'Manual check recommended, re-extract if necessary',
     quality_flag_low_confidence_reason: 'Low OCR recognition confidence',
     quality_flag_low_confidence_solution: 'Improve scan quality or switch engine then re-extract',
+    quality_flag_cjk_spaced_reason: 'Spaces between CJK characters (one glyph per text run) — breaks tokenization and makes the file unsearchable',
+    quality_flag_cjk_spaced_solution: 'Re-extract (new versions squeeze CJK spaces at ingest so tokenization works)',
     quality_flag_exhausted_reason: 'Multiple re-extractions yielded no improvement',
     quality_flag_exhausted_solution: 'Manually inspect source file',
     quality_flag_max_reextract_reason: 'Maximum re-extraction limit reached',

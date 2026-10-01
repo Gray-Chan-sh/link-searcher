@@ -596,6 +596,8 @@ const ko: Record<string, string> = {
     quality_flag_low_lexicon_solution: '수동 확인 권장, 필요 시 재추출',
     quality_flag_low_confidence_reason: 'OCR 인식 신뢰도가 낮음',
     quality_flag_low_confidence_solution: '스캔 품질을 높이거나 엔진을 변경한 후 재추출하세요',
+    quality_flag_cjk_spaced_reason: '한자 사이에 공백(1자 1텍스트런) → 토큰화가 깨져 검색되지 않습니다',
+    quality_flag_cjk_spaced_solution: '재추출(새 버전은 수집 시 한자 사이 공백을 제거합니다)',
     quality_flag_exhausted_reason: '여러 번 재추출했으나 개선 없음',
     quality_flag_exhausted_solution: '소스 파일을 수동으로 확인하세요',
     quality_flag_max_reextract_reason: '재추출 횟수 상한 도달',

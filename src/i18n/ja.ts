@@ -596,6 +596,8 @@ const ja: Record<string, string> = {
     quality_flag_low_lexicon_solution: '手動確認を推奨、必要に応じて再抽出',
     quality_flag_low_confidence_reason: 'OCR認識の信頼度が低い',
     quality_flag_low_confidence_solution: 'スキャン品質を向上させるかエンジンを変更して再抽出',
+    quality_flag_cjk_spaced_reason: '漢字の間に空白（1 文字 1 テキストラン）→ 分かち書きが壊れて検索できません',
+    quality_flag_cjk_spaced_solution: '再抽出（新版は取り込み時に漢字間の空白を除去します）',
     quality_flag_exhausted_reason: '複数回の再抽出で改善なし',
     quality_flag_exhausted_solution: 'ソースファイルを手動で確認してください',
     quality_flag_max_reextract_reason: '再抽出回数の上限に達しました',

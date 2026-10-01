@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-10-02（续13）：新增 `CjkSpaced` 质量标记 —— 一键圈出"字间带空格、分词被切碎"的存量文件
+
+- **背景**：续12 加了入库时的 `squeeze_cjk_spaces`，新提取的内容不会再带汉字间空格；但**存量 2000+ 份**还没重提取，而原来的 `quality_flags` 里**没有任何标记能圈出它们**——只能在质量页按扩展名粗筛，无法精确批量修复。
+- **修复**：
+  - `extractor/quality.rs` 新增 `QualityFlag::CjkSpaced`、`cjk_space_ratio(text)`、`CJK_SPACE_RATIO_THRESHOLD = 0.30`、`CJK_SPACE_MIN_IDEOGRAPHS = 50`；`compute_quality` 在汉字数达标且占比超阈值时打标。
+  - 阈值与下限的取舍：`0.30` 沿用上一轮实测的"明显异常"分界；`50 汉字` 的下限避开短文本（几行模板）比例不稳导致的误报——实测新标记命中 **2116 份**（上一轮"≥300 字符且 ≥30%"的口径是 1838 份，多出的部分是篇幅较短但汉字足够多的文件）。
+  - i18n（zh/en/ja/ko）新增 `quality_flag_cjk_spaced_reason` / `_solution`；质量页按 `quality_flag_{flag}_{reason|solution}` 自动取值，无需改组件。
+- **用法**：质量页 →「仅问题文件」→ 阈值调到 `1.00` → 看到带 `cjk_spaced` 的文件 → 点「批量重新提取这 N 个」。重提取后正文经 `squeeze_cjk_spaces` 压缩，分词恢复、嵌入重算，标记随之消失。
+- **涉及文件**：`src-tauri/src/extractor/quality.rs`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/EXTRACTION_SPECIAL_CASES.md`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **484 passed / 0 failed**（新增 `test_cjk_space_ratio_and_flag`，覆盖正常中文不打标、一字一空格打标、短文本不判、纯英文不误判）；`npx tsc -b` 0 错误；`npx vitest run` 61 passed；`npm run lint` 0 错误；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-10-01（续12）：扫描件正文"一字一空格"导致整份检索不到 —— 入库前压缩 CJK 字间空格
 
 - **现象（用户提问）**：`卷七十.pdf` 索引出来的文字**字与字之间有空格**（`上 海 市 监 察 委 员 会`），问是不是引擎问题、对搜索/语义有无影响。
