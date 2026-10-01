@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-10-02（续14）：强制 OCR 的结果被丢弃 + 同一份扫描件 OCR 跑两遍
+
+- **发现方式**：用户问"现在 OCR 在进行么？"。查日志发现 `卷七十一.pdf`（145 页旋转扫描件）的 OCR **跑了 4 轮 / 耗时翻倍**，且日志出现 `forced OCR produced nothing`。**（我一度误判成"死循环"，实测日志 12 秒零增长、05:59:55 已完成并写入 146625 字符——真实情况是"两个并发任务各跑一遍"，不是死循环。教训：读日志要采样验证，不能只看尾部行序。）**
+- **Bug 1（真 bug，会丢正文）**：`merge_page_texts(text_layer, ocr_pages)` **只遍历 `text_layer`**。而续11 新加的"无文字层 → 强制 OCR"安全网调它时传的是 **`&[]`**，于是循环 0 次、**142 页 OCR 结果全部丢弃并返回空串** → `merged.trim().is_empty()` → 返回 `None` → 日志 `forced OCR produced nothing`。
+  - 为什么 `卷七十` 没暴露：它走 `pdfimages` 路径，不经过这个 merge；**只有旋转件（走 pdftoppm per-page）会踩到** —— 我上一轮的保险自身有洞。
+  - **修复**：页数改为 `max(text_layer.len(), 最大 OCR 页 + 1)`，逐页优先取 OCR、无 OCR 时回退原生文本。
+- **Bug 2（浪费一半时间）**：强制 OCR 分支与紧随其后的 `pdf-inspector=Scanned` 分支是**同一份文件的两条路**，各调一次 `run_pdf_ocr_pipeline` → 145 页 OCR **跑两遍**（5 分钟 × 2）。
+  - **修复**：新增 `forced_ocr_attempted` 标记；强制 OCR 跑过（无论成败）后，pdf-inspector 分支只记一行 `skipping duplicate pass` 日志，不再重复 OCR。
+- **实测验证**（`卷七十一.pdf` 重跑 E2E）：**41756 字符**、`ocr_used=true`，日志中不再出现 `produced nothing`，也无重复轮次。
+- **涉及文件**：`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/extractor/pdf.rs`、`CHANGELOG.md`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **488 passed / 0 failed**（新增 4 条 `merge_page_texts_*`：正常拼接、**空 text_layer 必须保留全部 OCR 页**、部分覆盖保留未命中页、空输入）；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-10-02（续13）：新增 `CjkSpaced` 质量标记 —— 一键圈出"字间带空格、分词被切碎"的存量文件
 
 - **背景**：续12 加了入库时的 `squeeze_cjk_spaces`，新提取的内容不会再带汉字间空格；但**存量 2000+ 份**还没重提取，而原来的 `quality_flags` 里**没有任何标记能圈出它们**——只能在质量页按扩展名粗筛，无法精确批量修复。

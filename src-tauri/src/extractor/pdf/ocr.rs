@@ -228,15 +228,24 @@ pub(super) fn page_needs_ocr(page_text: &str, page_has_images: bool) -> bool {
     false
 }
 
+/// Splice per-page OCR results into the text layer, one line per page.
+///
+/// The page count is `max(text_layer.len(), highest OCR page + 1)` — the caller
+/// may pass an **empty** text layer (the "no text layer at all" path forces OCR
+/// with `&[]`), in which case iterating `text_layer` alone would drop every
+/// OCR'd page and return an empty string. That regression silently discarded
+/// 142 of 145 pages on a real scanned volume.
 pub(super) fn merge_page_texts(text_layer: &[String], ocr_pages: &HashMap<usize, String>) -> String {
-    let parts: Vec<&str> = text_layer
-        .iter()
-        .enumerate()
-        .map(|(i, tl)| match ocr_pages.get(&i) {
-            Some(ocr) => ocr.as_str(),
-            None => tl.as_str(),
-        })
-        .collect();
+    let ocr_len = ocr_pages.keys().max().map(|m| m + 1).unwrap_or(0);
+    let page_count = text_layer.len().max(ocr_len);
+    let mut parts: Vec<&str> = Vec::with_capacity(page_count);
+    for i in 0..page_count {
+        if let Some(ocr) = ocr_pages.get(&i) {
+            parts.push(ocr.as_str());
+        } else if let Some(tl) = text_layer.get(i) {
+            parts.push(tl.as_str());
+        }
+    }
     parts.join("\n")
 }
 
@@ -669,6 +678,44 @@ mod tests {
         clear_dir(tmp.path());
         assert_eq!(output_progress(tmp.path(), "img"), (0, 0));
         assert!(tmp.path().join("sub").is_dir());
+    }
+
+    #[test]
+    fn merge_page_texts_splices_ocr_into_text_layer() {
+        let tl = vec!["页1原生".to_string(), "页2原生".to_string()];
+        let mut ocr = HashMap::new();
+        ocr.insert(1usize, "页2 OCR".to_string());
+        assert_eq!(merge_page_texts(&tl, &ocr), "页1原生\n页2 OCR");
+    }
+
+    /// 回归：强制 OCR 路径传的是**空** text_layer。旧实现只遍历 text_layer，
+    /// 会把所有 OCR 结果丢掉、返回空串（实测在 145 页卷宗上丢了 142 页文字）。
+    #[test]
+    fn merge_page_texts_handles_empty_text_layer() {
+        let mut ocr = HashMap::new();
+        for i in 0..142usize {
+            ocr.insert(i, format!("第{i}页OCR"));
+        }
+        let merged = merge_page_texts(&[], &ocr);
+        assert!(merged.starts_with("第0页OCR"), "空 text_layer 也必须保留 OCR 结果");
+        assert!(merged.contains("第141页OCR"), "最后一页不能丢");
+        assert_eq!(merged.lines().count(), 142, "页数应等于 OCR 命中页数");
+    }
+
+    #[test]
+    fn merge_page_texts_prefers_ocr_and_keeps_unmatched_pages() {
+        // OCR 只覆盖部分页时，其余页保留原生文本；页数以两者最大值为准
+        let tl = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let mut ocr = HashMap::new();
+        ocr.insert(1usize, "B".to_string());
+        ocr.insert(3usize, "D".to_string()); // 超出 text_layer 页数
+        let merged = merge_page_texts(&tl, &ocr);
+        assert_eq!(merged, "a\nB\nc\nD");
+    }
+
+    #[test]
+    fn merge_page_texts_empty_inputs() {
+        assert_eq!(merge_page_texts(&[], &HashMap::new()), "");
     }
 
     #[test]

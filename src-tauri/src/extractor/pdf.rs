@@ -241,7 +241,14 @@ impl PdfExtractor {
         // 漏判（如 pdfimages 把 x-ppi 写成 0），都必须走 OCR。此前这种文件会
         // 静默产出 0 字符正文（日志 `PDF text short (0), using as-is`），
         // 既检索不到，也被质量体检测成"低质量"却无从修复。
+        //
+        // 走完这一支后 `forced_ocr_attempted` 置位：下面的 pdf-inspector 分支
+        // 也是同一份扫描件，不该把同样的 145 页 OCR **再跑一遍**（实测跑两遍
+        // = 5 分钟 × 2，日志里表现为连续两次 "running per-page OCR loop"）。
+        let mut forced_ocr_attempted = false;
+        let mut merged = merged;
         if merged.trim().is_empty() && !pages.is_empty() {
+            forced_ocr_attempted = true;
             log::warn!(
                 "[PDF] {:?}: no text layer at all across {} pages — forcing OCR",
                 path.file_name(), pages.len()
@@ -266,12 +273,19 @@ impl PdfExtractor {
                             && (class.pages_needing_ocr.len() * 2 > class.page_count as usize
                                 || is_sparse);
                         if matches!(class.pdf_type, pdf_inspector::PdfType::Scanned | pdf_inspector::PdfType::ImageBased) || all_need_ocr {
-                            log::info!(
-                                "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
-                                path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
-                            );
-                            if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine, rotated) {
-                                return Ok((ocr_text, true));
+                            if forced_ocr_attempted {
+                                log::info!(
+                                    "[PDF] {:?}: pdf-inspector={:?} but OCR already attempted for this document — skipping duplicate pass",
+                                    path.file_name(), class.pdf_type
+                                );
+                            } else {
+                                log::info!(
+                                    "[PDF] {:?}: pdf-inspector={:?} (conf={:.0}%, {} ocr pages), bypassing text layer",
+                                    path.file_name(), class.pdf_type, class.confidence * 100., class.pages_needing_ocr.len()
+                                );
+                                if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &page_texts, lang, &engine, rotated) {
+                                    return Ok((ocr_text, true));
+                                }
                             }
                         }
                         class.pages_needing_ocr
