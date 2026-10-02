@@ -168,6 +168,11 @@ pub struct AppConfig {
     /// Written by the adaptive tuner (`ai::embed_batched` remote path).
     #[serde(default)]
     pub embed_plans: std::collections::HashMap<String, EmbedPlan>,
+    /// Web API Bearer token。空 = 尚未初始化：首次启动生成一次后写回本文件，
+    /// 之后每次启动都从这里读（`webapi::resolve_token`），保证 token 跨重启稳定、
+    /// 用户可查看/分发。运行期由设置页 / Web 端修改（`set_web_api_token` 同步回写）。
+    #[serde(default)]
+    pub web_api_token: String,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -194,6 +199,7 @@ impl Default for AppConfig {
             semantic_weight: 0.3,
             pending_cleanup_dir: None,
             embed_plans: std::collections::HashMap::new(),
+            web_api_token: String::new(),
         }
     }
 }
@@ -225,6 +231,39 @@ pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
     if let Err(e) = write_config_file(&cfg) {
         log::warn!("[AI] 保存嵌入调优计划失败: {e}");
     }
+}
+
+/// Read the Web API token from `config.json`（不做迁移/默认填充，直接读文件）。
+pub fn web_api_token() -> String {
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    read_config_file().web_api_token
+}
+
+/// 把 Web API token 写回 `config.json`（加锁的整文件读-改-写，避免与
+/// provider CRUD / embed plan 更新互相覆盖）。值未变化时不落盘。
+/// 设置页与 Web 端改 token 都会调用，保证配置文件与 DB 中的 token 一致。
+pub fn set_web_api_token(token: &str) {
+    if token.is_empty() {
+        return;
+    }
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = read_config_file();
+    if cfg.web_api_token == token {
+        return;
+    }
+    cfg.web_api_token = token.to_string();
+    if let Err(e) = write_config_file(&cfg) {
+        log::warn!("[CONFIG] 写入 web_api_token 失败: {e}");
+    }
+}
+
+/// 持锁读取配置文件；文件缺失/损坏时返回默认配置（与 [`load_config`] 一致）。
+fn read_config_file() -> AppConfig {
+    let path = config_dir().join(CONFIG_FILE);
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<AppConfig>(&s).ok())
+        .unwrap_or_default()
 }
 
 fn config_dir() -> PathBuf {

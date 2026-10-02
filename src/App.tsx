@@ -4,6 +4,7 @@ import { useTheme } from './theme'
 import { useI18n } from './i18n'
 import { alert, isTauri, getToken, setToken } from './utils/platform'
 import { invoke } from './api/client'
+import type { SessionDeniedDetail } from './api/client'
 import { getSetupStatus } from './api/settings'
 import {
   SearchIcon, FolderIcon, ActivityIcon, GearIcon, FileTextIcon,
@@ -48,6 +49,37 @@ export default function App() {
 
   const needsToken = !isTauri() && !getToken()
   const [authFailed, setAuthFailed] = useState(false)
+  // 单用户会话被他人持有（403）时的遮罩信息。
+  const [sessionDenied, setSessionDenied] = useState<SessionDeniedDetail | null>(null)
+
+  // 会话被占：client.ts 在 403 时派发 session-denied。
+  useEffect(() => {
+    if (isTauri()) return
+    const onDenied = (e: Event) => {
+      setSessionDenied((e as CustomEvent<SessionDeniedDetail>).detail ?? {})
+    }
+    window.addEventListener('session-denied', onDenied)
+    return () => window.removeEventListener('session-denied', onDenied)
+  }, [])
+
+  // 心跳：每 30s 续租一次会话（SSE 长连接期间没有普通请求，不心跳会被超时回收）。
+  // 也用于自动恢复：持有方超时退出后，下一次心跳成功即撤掉被占遮罩。
+  useEffect(() => {
+    if (isTauri()) return
+    const id = window.setInterval(() => {
+      if (!getToken()) return
+      invoke('web_session_ping')
+        .then(() => setSessionDenied(null))
+        .catch(() => { /* 401/403 已由 client.ts 派发事件，无需重复处理 */ })
+    }, 30000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  const retrySession = () => {
+    invoke('web_session_ping')
+      .then(() => setSessionDenied(null))
+      .catch(() => { /* 仍被占：保持遮罩 */ })
+  }
 
   useEffect(() => {
     if (isTauri()) return
@@ -310,6 +342,34 @@ export default function App() {
             />
             <div className="flex justify-end">
               <button onClick={handleLoginToken} className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700">确认</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {!isTauri() && sessionDenied && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
+          <div className="bg-white dark:bg-gray-800 rounded-xl p-6 shadow-xl max-w-md w-full mx-4">
+            <h2 className="text-lg font-semibold mb-3 text-gray-900 dark:text-gray-100">
+              {sessionDenied.session_ip
+                ? `已由 ${sessionDenied.session_ip} 登录`
+                : '会话已被占用'}
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-2">
+              本应用为单用户模式：同一时刻只允许一个 Web 会话，以来源 IP 识别身份。
+            </p>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              {typeof sessionDenied.expires_in === 'number'
+                ? `对方约 ${Math.ceil(sessionDenied.expires_in)} 秒无操作后自动释放，届时本页会自动重连；`
+                : ''}
+              也可在桌面端「设置 → Web API」中强制退出对方会话。
+            </p>
+            <div className="flex justify-end">
+              <button
+                onClick={retrySession}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              >
+                立即重试
+              </button>
             </div>
           </div>
         </div>

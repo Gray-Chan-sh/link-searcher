@@ -161,6 +161,11 @@ const MAPPINGS: Record<string, Mapping> = {
     transform: (data) => (data as Record<string, unknown>)?.json,
   }),
 
+  // ── Web session (单用户会话) ──
+  web_session_status: { method: 'GET', path: '/api/session' },
+  web_session_ping: { method: 'POST', path: '/api/session/ping' },
+  web_session_logout: { method: 'POST', path: '/api/session/logout' },
+
   // ── Settings ──
   get_settings: { method: 'GET', path: '/api/settings' },
   update_settings: (a) => ({ method: 'PUT', path: '/api/settings', body: a }),
@@ -225,6 +230,21 @@ const MAPPINGS: Record<string, Mapping> = {
   install_funasr: { method: 'POST', path: '/api/ai/install/funasr' },
 };
 
+/** 会话被他人占用时的 403 响应体（session_guard 返回）。 */
+export interface SessionDeniedDetail {
+  error?: string;
+  /** 当前持有会话的 IP */
+  session_ip?: string;
+  /** 对方空闲超时的剩余秒数，过后本端可登入 */
+  expires_in?: number;
+}
+
+function dispatchSessionDenied(body: Record<string, unknown>): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('session-denied', { detail: body }));
+  }
+}
+
 export async function invoke<T = unknown>(command: string, args?: InvokeArgs): Promise<T> {
   if (isTauri()) {
     const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
@@ -259,6 +279,13 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
       window.dispatchEvent(new Event('auth-failed'))
     }
     throw new Error('Token 无效，请重新输入')
+  }
+  if (resp.status === 403) {
+    // 单用户会话：token 正确但本 IP 不是当前会话持有者（或会话被接管）。
+    // 不清除本地 token——等对方退出/超时后原 token 依然可用。
+    const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+    dispatchSessionDenied(body);
+    throw new Error((body.error as string) || '会话被占用');
   }
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -295,6 +322,19 @@ export async function listen<T = unknown>(
     headers: { Authorization: `Bearer ${token}` },
     signal: controller.signal,
   }).then(async (resp) => {
+    if (resp.status === 401) {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('ls_token');
+        window.dispatchEvent(new Event('auth-failed'));
+      }
+      return;
+    }
+    if (resp.status === 403) {
+      // 会话被他人持有：SSE 是长连接，403 必须显式上报，否则界面毫无反应。
+      const body = await resp.json().catch(() => ({}) as Record<string, unknown>);
+      dispatchSessionDenied(body);
+      return;
+    }
     const reader = resp.body!.getReader();
     const decoder = new TextDecoder();
     let buffer = '';

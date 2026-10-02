@@ -14,3 +14,4 @@ pub mod rerank;
 pub mod search;
 pub mod settings;
 pub mod tesseract;
+pub mod webapi;

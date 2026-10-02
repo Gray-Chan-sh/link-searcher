@@ -4,6 +4,7 @@ pub mod index;
 pub mod dirs;
 pub mod ai;
 pub mod settings;
+pub mod session;
 pub mod events;
 pub mod logs;
 pub mod tesseract;
@@ -44,12 +45,17 @@ pub fn build_router(state: ApiState) -> Router {
     // A forgotten token can only be reset from the desktop Settings page —
     // an unauthenticated reset endpoint would let anyone on the network
     // overwrite the token and take over the API.
+    //
+    // Layer order: `route_layer` added later runs first on the request, so
+    // `bearer_auth` (token check) wraps `session_guard` (single-user IP lease):
+    // a wrong token gets 401 before any session state is touched/created.
     search::router(state.clone())
         .merge(files::router(state.clone()))
         .merge(index::router(state.clone()))
         .merge(dirs::router(state.clone()))
         .merge(ai::router(state.clone()))
         .merge(settings::router(state.clone()))
+        .merge(session::router(state.clone()))
         .merge(logs::router(state.clone()))
         .merge(tesseract::router(state.clone()))
         .merge(backup::router(state.clone()))
@@ -57,8 +63,14 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(events::router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            crate::webapi::session::session_guard,
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             auth::bearer_auth,
         ))
+        // 静态资源（SPA 的 HTML/JS/CSS）不走鉴权与会话：浏览器必须先加载页面
+        // 才能输入 token 登录；API 一律在上面两层之内。
         .fallback(static_files::serve_static)
         .with_state(state)
 }

@@ -21,6 +21,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "web_api_token",
     "web_api_bind",
     "web_api_dev_mode",
+    "web_session_timeout_secs",
     "perf_tier",
     "perf_batch_io_concurrency",
     "perf_commit_interval",
@@ -63,6 +64,18 @@ pub async fn update_settings(
             rusqlite::params![key, value],
         )
         .map_err(|e| format!("failed to update setting '{key}': {e}"))?;
+    }
+    drop(conn);
+    // token 双端（设置页 / Web 端走同一实现）可改：改了就同步进 config.json
+    // （token 的持久化来源）并作废当前 Web 会话——持旧 token 的客户端会在下
+    // 一次请求收到 401，本机（同 IP）下一次请求则重新建立会话。
+    if let Some(token) = settings.get("web_api_token")
+        && !token.trim().is_empty()
+    {
+        crate::config::set_web_api_token(token.trim());
+        if crate::webapi::session::clear(None) {
+            log::info!("[WEBAPI-SESSION] token changed → session reset");
+        }
     }
     Ok(())
 }

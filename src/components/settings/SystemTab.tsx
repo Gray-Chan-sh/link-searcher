@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { Section, TextField, NumberField, TextareaField, ToggleField, SelectField } from './SettingsFields'
+import { invoke } from '../../api/client'
 
 interface SystemTabProps {
   settings: Record<string, string>
@@ -7,8 +9,55 @@ interface SystemTabProps {
   onRegenerateToken: () => void
 }
 
+/** 与 Rust 端 `webapi::session::status_json` 对齐（缺字段时按默认处理）。 */
+interface WebSessionStatus {
+  active?: boolean
+  ip?: string
+  last_seen?: number
+  expires_in?: number
+  lan_ip?: string
+  port?: number
+  bind?: string
+}
+
 export function SystemTab({ settings, onFieldChange, onRegenerateToken }: SystemTabProps) {
   const { t } = useI18n()
+  const [session, setSession] = useState<WebSessionStatus | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // 单用户会话状态 + 局域网地址（桌面端走 Tauri 命令，Web 端走 GET /api/session）。
+  const refreshSession = () => {
+    invoke<WebSessionStatus>('web_session_status')
+      .then(s => setSession(s))
+      .catch(() => setSession(null))
+  }
+  useEffect(() => {
+    refreshSession()
+    const id = window.setInterval(refreshSession, 10000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  // 默认开启：只有显式存了 "false" 才算关闭（与 lib.rs 启动判定一致）。
+  const webEnabled = settings['web_api_enabled'] !== 'false'
+  const port = String(session?.port ?? settings['web_api_port'] ?? '8443')
+  const lanHost = session?.lan_ip && session.lan_ip !== '127.0.0.1' ? session.lan_ip : '127.0.0.1'
+  const localUrl = `https://127.0.0.1:${port}`
+  const remoteUrl = `https://${lanHost}:${port}`
+
+  const copyRemoteUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(remoteUrl)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1500)
+    } catch { /* 剪贴板不可用（非安全上下文）时忽略 */ }
+  }
+
+  const forceLogout = async () => {
+    try {
+      await invoke('web_session_logout')
+      refreshSession()
+    } catch { /* 无会话可踢 */ }
+  }
 
   return (
     <div className="space-y-6">
@@ -63,23 +112,59 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
 
       <Section title="Web API">
         <ToggleField
-          label="启用 Web API"
-          checked={settings['web_api_enabled'] === 'true'}
+          label="启用 Web API（默认开启，启动即监听）"
+          checked={webEnabled}
           onChange={v => onFieldChange('web_api_enabled', v ? 'true' : 'false')}
         />
-        {settings['web_api_enabled'] === 'true' && (
+        {webEnabled && (
           <>
             <div className="p-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-900 rounded-lg text-sm text-amber-700 dark:text-amber-400">
-              ⚠️ 需要重启应用后才会启动 Web API 服务器
+              ⚠️ 修改开关需要重启应用后才会生效（端口 / 绑定地址同理）
             </div>
             <ToggleField
               label="开发模式（代理到 Vite dev server，需先运行 npm run dev）"
               checked={settings['web_api_dev_mode'] === 'true'}
               onChange={v => onFieldChange('web_api_dev_mode', v ? 'true' : 'false')}
             />
-            <div className="text-sm text-gray-700 dark:text-gray-300">
-              <span className="text-gray-500 dark:text-gray-400">访问地址：</span>
-              <span className="font-mono">https://127.0.0.1:{settings['web_api_port'] ?? '8443'}</span>
+            <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1">
+              <div>
+                <span className="text-gray-500 dark:text-gray-400">本机访问：</span>
+                <span className="font-mono">{localUrl}</span>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-gray-500 dark:text-gray-400">远程访问：</span>
+                <span className="font-mono">{remoteUrl}</span>
+                <button
+                  type="button"
+                  onClick={copyRemoteUrl}
+                  className="px-2 py-0.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+                >
+                  {copied ? '已复制' : '复制'}
+                </button>
+              </div>
+              <div className="text-xs text-gray-500 dark:text-gray-400">
+                其它机器用浏览器打开远程地址并输入下方 Token 即可使用（自签名证书需在浏览器中信任一次）。
+              </div>
+            </div>
+            {/* 单用户会话：谁连着 / 强制踢出 */}
+            <div className="p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg text-sm flex items-center justify-between gap-3 flex-wrap">
+              <span className="text-gray-700 dark:text-gray-300">
+                {session?.active && session.ip
+                  ? <>当前在线：<span className="font-mono">{session.ip}</span>
+                      {typeof session.last_seen === 'number' &&
+                        <> · 最后活跃 {new Date(session.last_seen * 1000).toLocaleTimeString()}</>}
+                    </>
+                  : '当前无 Web 连接（单用户模式，同一时刻仅允许一个会话）'}
+              </span>
+              {session?.active && (
+                <button
+                  type="button"
+                  onClick={forceLogout}
+                  className="shrink-0 px-3 py-1 text-xs font-medium text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/30 rounded-lg hover:bg-red-100 dark:hover:bg-red-900/50 transition-colors"
+                >
+                  强制退出
+                </button>
+              )}
             </div>
           </>
         )}
@@ -90,6 +175,14 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
           min={1}
           max={65535}
           placeholder="默认: 8443"
+        />
+        <NumberField
+          label="会话空闲超时（秒）：超过后自动释放，其它设备方可登录"
+          value={parseInt(settings['web_session_timeout_secs'] ?? '600', 10)}
+          onChange={v => onFieldChange('web_session_timeout_secs', String(v))}
+          min={60}
+          max={86400}
+          placeholder="默认: 600"
         />
         <div>
           <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Bearer Token</label>

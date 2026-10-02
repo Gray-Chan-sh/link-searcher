@@ -107,6 +107,11 @@ pub(crate) async fn update_token_handler(
         rusqlite::params!["web_api_token", &new_token],
     )
     .map_err(|e| ApiError { error: e.to_string() })?;
+    drop(conn);
+    // 持久化来源是 config.json（启动时优先读它），DB 之外必须同步回写；
+    // 同时作废当前会话，持旧 token 的其它客户端下一次请求即 401 掉线。
+    crate::config::set_web_api_token(&new_token);
+    crate::webapi::session::clear(None);
     state.auth_token = std::sync::Arc::new(new_token.clone());
     log::info!("[WEBAPI] token updated via web UI");
     Ok(Json(serde_json::json!({ "status": "ok", "token": new_token })))

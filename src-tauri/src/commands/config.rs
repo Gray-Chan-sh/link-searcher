@@ -92,6 +92,9 @@ pub fn update_config(
         active_reranker_model_id: new_config.active_reranker_model_id,
         pending_cleanup_dir: current.pending_cleanup_dir.clone(),
         embed_plans: current.embed_plans.clone(),
+        // token 的持久化来源是 config.json；本函数会整文件重写，必须原样保留，
+        // 否则一次「保存配置」就把 Web token 抹掉了。
+        web_api_token: current.web_api_token.clone(),
     };
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.

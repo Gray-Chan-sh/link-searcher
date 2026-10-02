@@ -125,7 +125,37 @@ pub(super) fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// `chat_history.json` 的进程内互斥锁：桌面端（IPC）与 Web 端（axum）可能
+/// 同时读-改-写同一文件，无锁 RMW 会让后写者覆盖先写者（丢整个会话）。
+/// 所有跨调用的 RMW 必须走 [`mutate_history`]，单次读/写走本锁的
+/// [`read_history`] / [`write_history`]。
+fn history_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    // Poisoned: 持锁方 panic 不会留下半写状态（写入是原子 rename），安全恢复。
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// 持锁执行一次完整的「读 → 改 → 写」事务。写失败时文件仍保持 rename 前的
+/// 完整旧内容（原子替换），不会出现半截 JSON。
+pub fn mutate_history<T>(
+    data_dir: &std::path::Path,
+    f: impl FnOnce(&mut ChatHistoryFile) -> Result<T, String>,
+) -> Result<T, String> {
+    let _g = history_lock();
+    let mut h = read_history_unlocked(data_dir);
+    let out = f(&mut h)?;
+    write_history_unlocked(data_dir, &h)?;
+    Ok(out)
+}
+
 pub fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
+    let _g = history_lock();
+    read_history_unlocked(data_dir)
+}
+
+fn read_history_unlocked(data_dir: &std::path::Path) -> ChatHistoryFile {
     let path = chat_history_path(data_dir);
     match std::fs::read_to_string(&path) {
         Ok(c) => {
@@ -163,7 +193,8 @@ pub fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
         strict_docs: true,
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
-                let _ = write_history(data_dir, &migrated);
+                // 调用方已持锁 → 走 unlocked 版本（std Mutex 不可重入）。
+                let _ = write_history_unlocked(data_dir, &migrated);
                 return migrated;
             }
             serde_json::from_str(&c).unwrap_or_default()
@@ -173,9 +204,23 @@ pub fn read_history(data_dir: &std::path::Path) -> ChatHistoryFile {
 }
 
 pub fn write_history(data_dir: &std::path::Path, h: &ChatHistoryFile) -> Result<(), String> {
+    let _g = history_lock();
+    write_history_unlocked(data_dir, h)
+}
+
+/// 原子写：先写临时文件再 rename 覆盖（`std::fs::rename` 在 Windows 上同样
+/// 替换目标）。读者要么看到旧文件、要么看到新文件，永远不会读到半截 JSON——
+/// 半截 JSON 会被 `serde_json::from_str(...).unwrap_or_default()` 静默解析成
+/// 空列表，表现为「会话列表瞬间清空」。
+fn write_history_unlocked(data_dir: &std::path::Path, h: &ChatHistoryFile) -> Result<(), String> {
     let path = chat_history_path(data_dir);
     let json = serde_json::to_string_pretty(h).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| format!("写入聊天记录失败: {e}"))
+    let tmp = data_dir.join("chat_history.json.tmp");
+    std::fs::write(&tmp, &json).map_err(|e| format!("写入聊天记录失败: {e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("写入聊天记录失败: {e}")
+    })
 }
 
 /// Generate a short title from the first user message (first ~20 chars).
@@ -224,21 +269,28 @@ pub fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, St
         strict_docs: false,
     };
     let id = session.id.clone();
-    let mut h = read_history(data_dir);
-    if h.sessions.len() >= 50 {
-        h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        h.sessions.pop();
-    }
-    h.sessions.push(session);
-    write_history(data_dir, &h)?;
+    // 持锁 RMW：并发创建（桌面 + Web）不会互相覆盖。
+    mutate_history(data_dir, |h| {
+        if h.sessions.len() >= 50 {
+            h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            h.sessions.pop();
+        }
+        h.sessions.push(session);
+        Ok(())
+    })?;
     Ok(id)
 }
 
 /// Delete a session by id.
 pub fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let mut h = read_history(&state.data_dir);
-    h.sessions.retain(|s| s.id != id);
-    write_history(&state.data_dir, &h)
+    delete_chat_session_impl(&state.data_dir, id)
+}
+
+pub fn delete_chat_session_impl(data_dir: &std::path::Path, id: String) -> Result<(), String> {
+    mutate_history(data_dir, |h| {
+        h.sessions.retain(|s| s.id != id);
+        Ok(())
+    })
 }
 
 /// Load a full session by id. Returns None if not found.
@@ -257,29 +309,31 @@ pub fn save_chat_session(
 }
 
 pub(super) fn save_chat_session_impl(data_dir: &std::path::Path, session: ChatSession) -> Result<(), String> {
-    let mut h = read_history(data_dir);
     let now = now_ts();
     let mut session = session;
     session.updated_at = now;
     if session.title.is_empty() || session.title == "新会话" {
         session.title = title_from_first_message(&session);
     }
-    let exists = h.sessions.iter_mut().find(|s| s.id == session.id);
-    match exists {
-        Some(existing) => {
-            if session.created_at == 0 {
-                session.created_at = existing.created_at;
+    // 持锁 RMW：两个客户端同时保存不同会话时不再互相覆盖。
+    mutate_history(data_dir, |h| {
+        let exists = h.sessions.iter_mut().find(|s| s.id == session.id);
+        match exists {
+            Some(existing) => {
+                if session.created_at == 0 {
+                    session.created_at = existing.created_at;
+                }
+                *existing = session
             }
-            *existing = session
-        }
-        None => {
-            if session.created_at == 0 {
-                session.created_at = now;
+            None => {
+                if session.created_at == 0 {
+                    session.created_at = now;
+                }
+                h.sessions.push(session)
             }
-            h.sessions.push(session)
         }
-    }
-    write_history(data_dir, &h)
+        Ok(())
+    })
 }
 
 /// Format a single evidence item as Markdown.
@@ -684,4 +738,90 @@ pub fn get_turn_ai_events(
     let events = crate::db::ai_events::get_turn_events(&conn, &session_id, turn_number)
         .map_err(|e| format!("{e}"))?;
     Ok(events.iter().map(ai_event_to_json).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir() -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ls_history_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn mk_session(id: &str, title: &str) -> ChatSession {
+        let now = now_ts();
+        ChatSession {
+            id: id.to_string(),
+            title: title.to_string(),
+            created_at: now,
+            updated_at: now,
+            messages: vec![],
+            source_ids: vec![],
+            source_files: vec![],
+            pending_query: None,
+            pending_started_at: None,
+            per_turn_evidence: vec![],
+            per_turn_scopes: vec![],
+            retrieval_scope: vec![],
+            strict_docs: false,
+        }
+    }
+
+    /// 两个线程同时保存不同会话 → 都必须存活（锁 + 原子写之前的实现会
+    /// 「后写覆盖先写」丢掉一个）。同时覆盖 50 次重复 RMW 循环。
+    #[test]
+    fn concurrent_saves_do_not_lose_sessions() {
+        let dir = temp_dir();
+        let d1 = dir.clone();
+        let d2 = dir.clone();
+        let t1 = std::thread::spawn(move || {
+            for i in 0..50 {
+                save_chat_session_impl(&d1, mk_session("s-a", &format!("a{i}"))).unwrap();
+            }
+        });
+        let t2 = std::thread::spawn(move || {
+            for i in 0..50 {
+                save_chat_session_impl(&d2, mk_session("s-b", &format!("b{i}"))).unwrap();
+            }
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+
+        let h = read_history(&dir);
+        let ids: Vec<&str> = h.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert!(ids.contains(&"s-a"), "session A must survive, got {ids:?}");
+        assert!(ids.contains(&"s-b"), "session B must survive, got {ids:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 写入必须是原子替换：文件要么是完整的旧 JSON、要么是完整的新 JSON。
+    #[test]
+    fn write_history_leaves_no_temp_file() {
+        let dir = temp_dir();
+        save_chat_session_impl(&dir, mk_session("s-1", "t")).unwrap();
+        assert!(chat_history_path(&dir).is_file());
+        assert!(
+            !dir.join("chat_history.json.tmp").exists(),
+            "tmp file must be renamed away"
+        );
+        // 读回仍是合法 JSON（未被半截写破坏）
+        let h = read_history(&dir);
+        assert_eq!(h.sessions.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// create / delete 走 mutate_history，同样不得丢已存在的会话。
+    #[test]
+    fn create_and_delete_preserve_other_sessions() {
+        let dir = temp_dir();
+        let a = create_chat_session_impl(&dir).unwrap();
+        save_chat_session_impl(&dir, mk_session("s-x", "x")).unwrap();
+        delete_chat_session_impl(&dir, a).unwrap();
+        let h = read_history(&dir);
+        assert_eq!(h.sessions.len(), 1);
+        assert_eq!(h.sessions[0].id, "s-x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

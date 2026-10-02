@@ -146,12 +146,8 @@ async fn chat_session_delete_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let mut h = crate::commands::ai::read_history(&app_state.data_dir);
-    h.sessions.retain(|s| s.id != id);
-    crate::commands::ai::write_history(&app_state.data_dir, &h)
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
+    crate::commands::ai::delete_chat_session_impl(&app_state.data_dir, id)
+        .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 

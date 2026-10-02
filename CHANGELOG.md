@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-10-03（续16）：Web 模式启动即开 + Token 固化到 config.json + 单用户 IP 会话（多端冲突解法）
+
+- **需求**：启动自动开启 Web 服务供其它机器连接；token 从配置文件读入而非每次随机生成；解决多用户同时连接的冲突。
+- **启动即开 Web（默认开）**：`lib.rs` 中 `web_api_enabled` 判定由 `== "true"` 改为 `!= "false"`——**显式关闭才关**，其余情况启动即 spawn 监听 `0.0.0.0:8443`；设置页开关保留（改后需重启），开关判定与文案同步为默认开。
+- **Token 配置文件化**：`config.rs` 的 `AppConfig` 新增 `web_api_token` 字段 + 加锁的 `web_api_token()` / `set_web_api_token()`（整文件读-改-写，防与 provider CRUD 互相覆盖）；`webapi/mod.rs::generate_or_load_token` 改为 `resolve_token`，优先级 **`LS_WEB_API_TOKEN` 环境变量 > config.json > DB 旧值（一次性迁移进配置文件）> 首次生成**，解析结果**三处同步**（config.json + `app_settings`，鉴权中间件从 DB 读）。**双端可改**：设置页与 Web 端的 token 修改都会回写 config.json 并**立即重置会话**（`commands/settings.rs::update_settings`、`webapi/routes/settings.rs::update_token_handler`）；`commands/config.rs::update_config` 整文件重写时显式保留 `web_api_token`（否则一次保存配置就抹掉 token）。
+- **连接便利化**：新增 `webapi::lan_ip()`（UDP connect 路由探测，零新依赖）；启动日志打印 `远程访问: https://<LAN-IP>:<port> (token: ...)`（仅本机绑定时打 127.0.0.1）；设置页 Web API 区块显示本机地址 + **局域网远程地址 + 复制按钮**。
+- **单用户 IP 会话（多用户冲突解法）**：新增 `webapi/session.rs`——同一时刻全网只允许一个活跃 Web 会话，按**规范化来源 IP**（去 `::ffff:` 前缀、loopback 归一）识别：无会话/超时→授予；同 IP→续租（多标签页视为同一人）；异 IP 未超时→**403 拒绝**（附持有方 IP 与剩余时间，**不允许强占**，须等超时/本人退出/桌面端踢出）。挂在 `bearer_auth` **之后**的第二层中间件（错误 token 先 401，不会污染会话），请求经 `into_make_service_with_connect_info::<SocketAddr>()` 取来源 IP。新路由 `GET /api/session`、`POST /api/session/ping`（30s 心跳续租，覆盖 SSE 长连接无请求的空窗）、`POST /api/session/logout`（web 主动退出）；新 Tauri 命令 `web_session_status` / `web_session_logout`（桌面端查看在线 IP + **强制踢出**，已注册 `invoke_handler`）。超时可配（`web_session_timeout_secs`，默认 600s，逐请求读取即时生效）。前端：`client.ts` 对 401/403 分流（403 不清 token，派发 `session-denied` 事件，SSE 连接同样处理）、`App.tsx` 30s 心跳 + 「已由 x.x.x.x 登录」遮罩（**对方超时释放后自动恢复**）、`SystemTab.tsx` 在线状态 + 强制退出 + 超时配置。
+- **冲突加固（会话锁之外仍须处理的桌面/Web 并发）**：
+  - `chat_history.json`：新增进程锁 `history_lock` + **`mutate_history` 持锁读-改-写事务**（create/save/delete 全部收敛）+ **tmp+rename 原子写**——根治「两人同时保存丢会话」与「读到半截 JSON 列表被静默清空」；Web 删除路由改走 `delete_chat_session_impl`。
+  - Web 扫描触发 `webapi/routes/index.rs::trigger_scan_handler` 补 **`is_scanning` CAS**（与 IPC 路径同一把锁，重复触发返回明确错误，且置位后状态接口/按钮不再失真），并用 drop guard 保证 panic 也复位标志。
+- **涉及文件**：`src-tauri/src/{config.rs, lib.rs, webapi/mod.rs, webapi/session.rs(新), webapi/routes/{mod,session,settings,index,ai}.rs, commands/{mod,settings,config,webapi}.rs, commands/ai/session.rs, commands/ai.rs}`、`src/{App.tsx, api/client.ts, components/settings/SystemTab.tsx}`、`README.md`、`docs/{06-settings.md, ARCHITECTURE.md, USER_MANUAL.md}`。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **494 通过**（含新增 5 条：会话生命周期 grant/renew/deny/expire/kick、IP 规范化、并发保存不丢会话、原子写无残留 tmp、create/delete 不影响其它会话）；集成测试除 3 项**预存在失败**外全部通过（`auto_ui_e2e`/`ipc_test` 启动即 `0xc0000139` DLL 环境问题、`integration::test_incremental_indexing_dedup` 断言失败——三者均已在 stash 后的基线复现，确认与本次改动无关）；`npx tsc -b` 0 错误；`npm run lint` 0 error（61 vitest 全过）；`semgrep --severity ERROR` **0 findings**。
+
+---
+
 ## 2026-10-03（续15）：重索引「先删后写」导致内容行永久丢失 —— 文件从「质量」页隐身
 
 - **现象**：用户手动重索引后问"最近两次的手动索引是否有问题"。两次手动索引本身正常（`卷七十七/七十三` 提取成功、空格压缩生效），但对照旧日志发现 **4 个文件丢失了 `content_index` 内容行**：`LF 李枫/证据（闵行/静安）/09 照片.pdf`（3 个副本共用同一 md5）与 `WC 吾诚/周锐/诉讼材料/连城照片.pdf`。

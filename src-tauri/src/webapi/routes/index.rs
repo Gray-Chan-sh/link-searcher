@@ -196,9 +196,31 @@ async fn trigger_scan_handler(
             error: "no directories configured".into(),
         });
     }
+    // 与 IPC 路径（commands/index.rs::trigger_scan）同一把锁：Web 端与桌面端
+    // 重复/并发触发一律拒绝，且 is_scanning 必须置位，否则状态接口报告
+    // 「没在扫描」、按钮不置灰，诱使再次触发。
+    if app_state
+        .is_scanning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError {
+            error: "a scan is already in progress".into(),
+        });
+    }
     let app_handle = state.app_handle.clone();
     let scanner = app_state.scanner.clone();
+    let is_scanning = app_state.is_scanning.clone();
     tokio::task::spawn_blocking(move || {
+        // Drop guard: 正常结束或 full_scan panic（unwind）都必须复位标志，
+        // 否则一次 panic 会让扫描永久显示「进行中」。
+        struct ScanFlagGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for ScanFlagGuard {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::SeqCst);
+            }
+        }
+        let _flag = ScanFlagGuard(is_scanning);
         for dir in &dirs {
             let _ = scanner.full_scan(&dir.id, |_| {});
         }

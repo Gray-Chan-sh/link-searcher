@@ -25,6 +25,7 @@ use crate::commands::files::{download_files, get_duplicates, get_file, get_file_
 use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{get_settings, get_version, update_settings};
+use crate::commands::webapi::{web_session_logout, web_session_status};
 use crate::commands::performance::{detect_hardware, auto_optimize, get_performance_profile, set_performance_tier};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
@@ -166,6 +167,8 @@ get_dir_children,
             remove_dir_with_files,
             get_settings,
             update_settings,
+            web_session_status,
+            web_session_logout,
             check_tesseract,
             list_ocr_engines,
             test_ocr_engine,
@@ -400,7 +403,8 @@ get_dir_children,
 
             app.manage(app_state);
 
-            // Web API server (optional, default off)
+            // Web API server — 默认开启（`web_api_enabled == "false"` 才关闭），
+            // 启动即监听，远程机器可直接访问（token 见 config.json / 设置页）。
             {
                 let app_handle_for_api = app.handle().clone();
                 let app_state_ref = app_handle_for_api.state::<AppState>();
@@ -409,13 +413,15 @@ get_dir_children,
                         "SELECT value FROM app_settings WHERE key = 'web_api_enabled'",
                         [],
                         |r| r.get(0),
-                    ).unwrap_or_default() == "true"
+                    ).unwrap_or_default() != "false"
                 } else {
-                    false
+                    true
                 };
                 if web_api_enabled {
-                    log::info!("[STARTUP] Web API: https://0.0.0.0:8443");
+                    log::info!("[STARTUP] Web API: 自动开启（web_api_enabled != false）");
                     webapi::spawn_server(app.handle().clone());
+                } else {
+                    log::info!("[STARTUP] Web API: 已被设置关闭（web_api_enabled = false）");
                 }
             }
 

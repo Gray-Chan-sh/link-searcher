@@ -143,7 +143,7 @@
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
-| **远程 WebUI / API** | 可选 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），默认关闭，设置页开启并可切换 localhost / LAN；Token 轮换需已认证，忘记 Token 只能从桌面端重置 |
+| **远程 WebUI / API** | **默认开启**的 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），启动即监听 `0.0.0.0:8443`，其它机器浏览器直连；**单用户 IP 会话**（同一时刻仅一个会话，超时/主动退出/桌面端强制踢出）；Token 存 `config.json`（`web_api_token`，可用 `LS_WEB_API_TOKEN` 注入），设置页与 Web 端均可修改 |
 
 ---
 

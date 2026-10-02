@@ -741,7 +741,8 @@ mod session;
 pub use session::{
     AiEventJson, ChatHistoryFile, ChatSession, ChatSessionMeta, PerTurnEvidence, PerTurnScope,
     ScopeCondition, TurnScope, chat_history_path, create_chat_session_impl,
-    export_chat_session_impl, export_chat_session_json_impl, read_history, write_history,
+    delete_chat_session_impl, export_chat_session_impl, export_chat_session_json_impl,
+    mutate_history, read_history, write_history,
 };
 use session::{
     assign_material_no, prior_evidence_paths, prior_material_order, visible_material_numbers,
