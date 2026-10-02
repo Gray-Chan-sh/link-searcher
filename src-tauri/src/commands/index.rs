@@ -803,6 +803,55 @@ pub async fn reextract_missing_content(
 /// path (clear dedup cache → delete stale Tantivy doc → index_file), run in
 /// `spawn_blocking` so a large selection doesn't block the event loop.
 /// `reindex_file` itself stays for single-file/restore paths.
+/// 确保 `md5` 在 `content_index` 里**至少有一行**。
+///
+/// 用于重索引/重提取之后兜底：`index_file` 可能命中 dedup 缓存（只返回文本、
+/// 不落库）或提前返回，导致该 md5 **没有内容行**。而「质量」页是
+/// `content_index` 的 INNER JOIN，缺行 = 文件**彻底隐身**（界面看不出异常、
+/// 无法一键修复）。这里补一行空内容，让它至少可见、可被质量体检列出。
+///
+/// 已有行时**不动**（避免覆盖刚提取出来的正文）。
+pub(crate) fn ensure_content_row(
+    conn: &rusqlite::Connection,
+    md5: &str,
+    path: &str,
+) -> Result<(), String> {
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM content_index WHERE md5 = ?1",
+            rusqlite::params![md5],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if exists {
+        return Ok(());
+    }
+    // 用空文本 + 低质量标记落一行。质量分给 0（列在待处理里）。
+    //
+    // 注意 `file_size` 要显式给一个**非空**值：`compute_quality` 用
+    // `file_size <= EMPTY_SOURCE_MAX_BYTES` 判定"源文件本来就空、无需处理"，
+    // 而这里恰恰相反 —— 文件非空却没提出正文，是**真问题**，必须打低质量标记
+    // 让它在「质量」页可见、可重试。
+    let quality = crate::extractor::quality::compute_quality(
+        "",
+        &crate::extractor::quality::ExtractMeta { file_size: Some(1024), ..Default::default() },
+        path.rsplit('.').next().unwrap_or(""),
+    );
+    crate::db::tracker::store_content_with_quality(
+        conn,
+        md5,
+        "",
+        false,
+        None,
+        Some(&quality),
+    )
+    .map_err(|e| format!("ensure_content_row store failed: {e}"))?;
+    log::warn!(
+        "[REINDEX] {path}: 重提取后仍无内容行，已补空行（避免从质量页隐身）"
+    );
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn reindex_files(
     state: State<'_, AppState>,
@@ -842,12 +891,22 @@ pub async fn reindex_files(
                     continue;
                 }
             };
-            // Clear the dedup cache for this file's hash so re-extraction
-            // actually runs (important when OCR language changed).
-            if let Some(ref md5) = rec.md5 {
-                let _ = tracker::delete_content(&conn, md5);
-            }
+            // NOTE: 这里**不能**先删内容行。
+            //
+            // 旧实现是「先 delete_content(md5) 再 index_file」，意图是清掉去重缓存
+            // 以便真正重新提取。但 `index_file` 内部有两条路径**不写回**内容行：
+            //   ① 命中 dedup 缓存（`break 'dedup t` 只返回文本，不落库）
+            //   ② 提取失败/被取消（直接 `return Err`）
+            // 于是"删了但没写回"→ 该 md5 的内容行**永久消失**；更糟的是同一 md5
+            // 被多个文件共用时（实测全库 562 组），一个副本的删除会打掉所有副本
+            // 共用的那一行，而并发中的另一个副本若恰好命中 dedup 就不会重建它。
+            // 实测后果：文件从「质量」页消失（该页 join content_index），
+            // 界面上看不出异常，也无法一键修复。
+            //
+            // 改法：**先让 index_file 正常走完**（它会用 INSERT OR REPLACE 覆盖
+            // 同一 md5 的内容行），成功后再确保内容行存在。见下方 ensure_content_row。
             let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            let md5_for_check = rec.md5.clone();
             drop(conn);
             // Must delete the stale Tantivy doc first — re-adding without it
             // leaves a duplicate document for the same file.
@@ -855,7 +914,17 @@ pub async fn reindex_files(
                 log::warn!("[REINDEX_FILES] delete stale doc failed {file_id}: {e}");
             }
             match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
-                Ok(()) => ok += 1,
+                Ok(()) => {
+                    // 保证内容行存在：万一 index_file 走了 dedup/早退而没有落库，
+                    // 这里补一行（空内容 + 标记），杜绝"文件从质量页隐身"。
+                    if let Some(ref md5) = md5_for_check
+                        && let Ok(conn) = db_pool.get() {
+                            if let Err(e) = ensure_content_row(&conn, md5, &rec.path) {
+                                log::warn!("[REINDEX_FILES] ensure_content_row {file_id}: {e}");
+                            }
+                        }
+                    ok += 1;
+                }
                 Err(e) => {
                     log::warn!("[REINDEX_FILES] {}: {e}", rec.path);
                     failed += 1;
@@ -1172,6 +1241,29 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn ensure_content_row_creates_missing_row_and_keeps_existing() {
+        let conn = setup_conn();
+        // 缺行 → 补一行空内容，避免文件从质量页（INNER JOIN content_index）隐身
+        assert!(tracker::get_content(&conn, "md5miss").unwrap().is_none());
+        ensure_content_row(&conn, "md5miss", "LF 李枫/证据/09 照片.pdf").unwrap();
+        let row = tracker::get_content(&conn, "md5miss").unwrap();
+        assert!(row.is_some(), "必须补出内容行");
+        assert_eq!(row.unwrap(), "", "补的行应为空正文");
+        // 质量分应为 0（列在待处理里），不算"已修好"
+        let (score, _, _) = tracker::get_content_quality(&conn, "md5miss").unwrap().unwrap();
+        assert_eq!(score, Some(0.0));
+
+        // 已有正文 → 绝不能覆盖
+        tracker::store_content(&conn, "md5has", "真实正文", false, None).unwrap();
+        ensure_content_row(&conn, "md5has", "some/path.pdf").unwrap();
+        assert_eq!(
+            tracker::get_content(&conn, "md5has").unwrap().unwrap(),
+            "真实正文",
+            "已有内容行不得被兜底逻辑覆盖"
+        );
     }
 
     #[test]

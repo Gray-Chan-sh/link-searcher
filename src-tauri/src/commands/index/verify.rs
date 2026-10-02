@@ -143,8 +143,9 @@ pub(crate) fn reextract_one(
         });
     }
 
-    // ponytail: delete_content clears md5 cache so index_file re-extracts
-    let _ = tracker::delete_content(&conn, &md5);
+    // NOTE: 不预先 delete_content —— 见 commands/index.rs::reindex_files 的注释。
+    // 「先删后写」在 index_file 走 dedup/失败时不写回，会永久丢内容行。
+    // index_file 内部用 INSERT OR REPLACE，同一 md5 自然覆盖，无需先删。
     let full_path = std::path::Path::new(&dir.path).join(&rec.path);
     drop(conn);
 
@@ -155,6 +156,10 @@ pub(crate) fn reextract_one(
     let conn = db_pool
         .get()
         .map_err(|e| anyhow::anyhow!("db error: {e}"))?;
+    // 兜底：若 index_file 走了 dedup/早退而没落库，这里补一行，避免文件从质量页隐身。
+    if let Err(e) = super::ensure_content_row(&conn, &md5, &rec.path) {
+        log::warn!("[REEXTRACT] ensure_content_row {file_id}: {e}");
+    }
     let (new_score, _new_count, _new_confidence) = match tracker::get_content_quality(&conn, &md5)? {
         Some(v) => v,
         None => (None, 0, None),
