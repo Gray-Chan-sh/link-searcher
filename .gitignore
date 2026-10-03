@@ -79,3 +79,5 @@ test-visual/results.tsv
 .freebuff/
 .mcp.json
 docs/link-searcher-architecture.visual-check.json
+# archify 工作目录（生成源已复制到 docs/diagrams/specs/，本目录为临时产物）
+.archify/

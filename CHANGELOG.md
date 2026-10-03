@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-10-04：新增交互式图表 —— 文件生命周期总览（17）与 PDF/OCR 深度分图（17b）
+
+- **需求**：把「一个文件从进入系统到最终可被调用」的完整生命周期画成一张大图，并特别体现不同类型文件（尤其需要 OCR 的）差异化、复杂的处理路径。
+- **做法**：安装 [archify](https://github.com/tt-a1i/archify) agent skill（`~/.agents/skills/archify`，v3.0.1；注意 `npx skills add` 安装包缺 `renderers/shared/*.mjs` 导致 `finalize` 报 `Cannot find module output-path.mjs`，需从仓库 `archify/` 目录补全后再用），用其 **workflow** 类型 typed JSON 生成交互式 HTML。
+  - **主图 17**（`docs/diagrams/17-file-lifecycle.html`，spec `docs/diagrams/specs/17-file-lifecycle.json`）：6 泳道（入口发现 / 过滤登记 / Phase 1 提取 / 清洗质检落库 / Phase 2 写索引→可调用 / 异常终态）+ 6 张说明卡，覆盖四类触发、MD5 去重视图、并行与进度（indexed=0/3/1/2 状态）、各类型提取器、质量 5 信号、删除/移位、最终可调用能力。PDF 细节收敛为一个「PDF 高级路径」节点并指向分图。
+  - **分图 17b**（`docs/diagrams/17b-pdf-ocr-path.html`，spec `docs/diagrams/specs/17b-pdf-ocr-path.json`）：PDF 多级兜底（① lopdf → ② pdftotext → ③ anydoc → ④ 扫描件/旋转检测 → ⑤ pdftoppm/pdfimages → ⑥ OCR 引擎 → ⑦ 拼接）+ 5 张深度说明卡（文本层 5 信号质量判定、`pdfimages -list` 覆盖率≥0.8 扫描件判定、`/Rotate 90°/270°` 强制 pdftoppm、pdfimages `-j`/`-png` 快速路径与判废、OCR 引擎优先级与并发闸门 min(核,8)、逐页看门狗 120s）。
+- **验证**：两图均通过 archify `finalize` 四道门（validate / deliver / check / browser-check），零诊断；`meta.quality_profile=showcase` 但按 `--quality standard` 通过桌面适配门禁（showcase 的 6px 投影文本下限对 6 泳道较严，已通过收窄节点/精简副标题满足可读性）。浏览器门用 `ARCHIFY_CHROME` 指向本机 Edge（Chromium）。
+- **涉及文件**：`docs/diagrams/{17-file-lifecycle.html, 17b-pdf-ocr-path.html}`（新）、`docs/diagrams/specs/{17-file-lifecycle.json, 17b-pdf-ocr-path.json}`（新）、`docs/ARCHITECTURE.md`（模块二补充图表链接）、`.archify/`（archify 生成源，随仓库保留以便复现）。
+
+---
+
 ## 2026-10-03（续19）：Web 端依赖中心 —— 可查看依赖状态、可安装/取消
 
 - **需求**：通过 Web 访问时"无法了解依赖是否安装完成"（新装机器上最需要的恰好就是装依赖）。

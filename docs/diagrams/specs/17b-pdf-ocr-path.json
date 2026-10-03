@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "分图 17b · PDF 提取与 OCR 深度路径",
+    "subtitle": "Link-Searcher · 多级兜底 + 扫描件 OCR（主图 17 的展开）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/17b-pdf-ocr-path.html"
+  },
+  "lanes": [
+    { "id": "entry", "label": "PDF 入口" },
+    { "id": "fallback", "label": "多级文本兜底" },
+    { "id": "decide", "label": "质量判定 · 扫描件检测" },
+    { "id": "ocr", "label": "扫描件 OCR 管线" },
+    { "id": "engine", "label": "OCR 引擎 → 输出" }
+  ],
+  "phases": [
+    { "id": "p_text", "label": "文本层优先", "fromCol": 0, "toCol": 2 },
+    { "id": "p_ocr", "label": "图像 OCR 兜底", "fromCol": 3, "toCol": 4, "variant": "emphasis" }
+  ],
+  "mainPath": ["pdfIn", "lopdf", "textPages", "quality", "scanCheck", "ocrPipeline"],
+  "nodes": [
+    { "id": "pdfIn", "lane": "entry", "col": 0, "type": "external", "label": "PDF 文件", "sublabel": "PdfExtractor::extract_with_lang", "width": 132 },
+    { "id": "lopdf", "lane": "entry", "col": 1, "type": "backend", "label": "① lopdf 解析", "sublabel": "catch_unwind 防 panic", "width": 132 },
+
+    { "id": "pdftotext", "lane": "fallback", "col": 1, "type": "external", "label": "② pdftotext 兜底", "sublabel": "poppler · 水印/乱码质检", "width": 148 },
+    { "id": "anydoc", "lane": "fallback", "col": 1, "type": "backend", "label": "③ anydoc 兜底", "sublabel": "Quartz / CFF", "width": 148, "yOffset": 92 },
+    { "id": "textPages", "lane": "fallback", "col": 2, "type": "backend", "label": "逐页抽取文本层", "sublabel": "doc.extract_text 每页", "width": 148 },
+
+    { "id": "quality", "lane": "decide", "col": 2, "type": "security", "label": "文本层质量判定", "sublabel": "稀疏 / 乱码 / 水印 / 重复 / 不可信", "width": 168, "yOffset": 92 },
+    { "id": "recover", "lane": "decide", "col": 3, "type": "external", "label": "pdftotext 恢复", "sublabel": "字体缺 /Encoding · 页树为空", "width": 148 },
+    { "id": "scanCheck", "lane": "decide", "col": 3, "type": "security", "label": "扫描件 / 旋转检测", "sublabel": "pdfimages -list 覆盖率≥0.8 · /Rotate 旋转", "width": 176, "yOffset": 92 },
+
+    { "id": "ocrPipeline", "lane": "ocr", "col": 4, "type": "backend", "label": "PDF OCR 管线", "sublabel": "run_pdf_ocr_pipeline", "width": 148 },
+    { "id": "pdfimages", "lane": "ocr", "col": 4, "type": "external", "label": "pdfimages 提取", "sublabel": "-j 原生 JPEG / -png 回退 · 整篇一次 -p", "width": 148, "yOffset": 92 },
+    { "id": "ocrQuality", "lane": "ocr", "col": 4, "type": "security", "label": "OCR 结果质检", "sublabel": "乱码 / 换行比正文密 → 判废", "width": 148, "yOffset": 184 },
+    { "id": "pdftoppm", "lane": "ocr", "col": 5, "type": "external", "label": "pdftoppm 渲染", "sublabel": "烘焙旋转 · 1000~2500px · 30s 超时", "width": 148 },
+
+    { "id": "engine", "lane": "engine", "col": 5, "type": "cloud", "label": "OCR 引擎", "sublabel": "PaddleOCR / 原生 / Tesseract · 闸门 min(核,8)", "width": 176 },
+    { "id": "merge", "lane": "engine", "col": 5, "type": "backend", "label": "逐页拼接", "sublabel": "merge_page_texts · 看门狗 120s/页", "width": 168, "yOffset": 92 },
+    { "id": "pdfOut", "lane": "engine", "col": 5, "type": "frontend", "label": "文本 → 清洗管线", "sublabel": "回到主图 17 的清洗步骤", "width": 168, "yOffset": 184 }
+  ],
+  "edges": [
+    { "id": "e-in-lopdf", "from": "pdfIn", "to": "lopdf", "label": "load", "variant": "emphasis" },
+    { "id": "e-lopdf-pdftotext", "from": "lopdf", "to": "pdftotext", "label": "parse 失败 / panic", "variant": "dashed", "role": "error" },
+    { "id": "e-pdftotext-anydoc", "from": "pdftotext", "to": "anydoc", "label": "仍失败", "variant": "dashed", "role": "error" },
+    { "id": "e-lopdf-textpages", "from": "lopdf", "to": "textPages", "label": "parse 成功", "variant": "emphasis" },
+    { "id": "e-pdftotext-textpages", "from": "pdftotext", "to": "textPages", "label": "恢复文本", "variant": "dashed", "role": "branch" },
+    { "id": "e-textpages-quality", "from": "textPages", "to": "quality", "label": "文本层", "variant": "emphasis" },
+    { "id": "e-quality-recover", "from": "quality", "to": "recover", "label": "不可信", "variant": "dashed", "role": "branch" },
+    { "id": "e-quality-scan", "from": "quality", "to": "scanCheck", "label": "文本层健康", "variant": "emphasis" },
+    { "id": "e-recover-out", "from": "recover", "to": "pdfOut", "label": "恢复成功", "variant": "dashed", "role": "return" },
+    { "id": "e-scan-ocr", "from": "scanCheck", "to": "ocrPipeline", "label": "扫描件 / 稀疏 / 乱码", "variant": "emphasis" },
+    { "id": "e-scan-out", "from": "scanCheck", "to": "pdfOut", "label": "文本层可用 → 直接用", "variant": "dashed", "role": "branch" },
+    { "id": "e-ocr-images", "from": "ocrPipeline", "to": "pdfimages", "label": "先试整篇快速路径", "variant": "emphasis" },
+    { "id": "e-images-quality", "from": "pdfimages", "to": "ocrQuality", "variant": "default" },
+    { "id": "e-quality-pdftoppm", "from": "ocrQuality", "to": "pdftoppm", "label": "判废 → 转渲染", "variant": "dashed", "role": "error" },
+    { "id": "e-pdftoppm-engine", "from": "pdftoppm", "to": "engine", "label": "渲染页图", "variant": "emphasis" },
+    { "id": "e-images-engine", "from": "pdfimages", "to": "engine", "label": "页图", "variant": "default" },
+    { "id": "e-engine-merge", "from": "engine", "to": "merge", "variant": "emphasis" },
+    { "id": "e-merge-out", "from": "merge", "to": "pdfOut", "label": "逐页文本", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "violet", "title": "①–③ 文本层多级兜底（顺序）", "items": ["① lopdf::Document::load（catch_unwind 防 panic）；成功即逐页抽取", "parse 失败/panic → ② pdftotext（poppler）兜底", "  pdftotext 也失败 → ③ anydoc（Quartz / CFF 等）", "③ 再失败 → 进入图像 OCR 管线", "页树为空或字体缺 /Encoding → pdftotext 恢复"] },
+    { "dot": "cyan", "title": "④ 文本层质量判定（5 个信号）", "items": ["sparse：文本层过稀（每页字符太少）", "garbled：乱码（FFFD / 控制字符占比过高）", "watermark：逐页前缀归一化后 >80% 相同", "repetitive：正文重复度过高", "implausible：字符量相对页数不合理", "任一不通过 → 转向扫描件 OCR"] },
+    { "dot": "rose", "title": "⑤ 扫描件 / 旋转检测", "items": ["is_image_based_scan：pdfimages -list 整页图覆盖率≥0.8 且过半页带图", "/Rotate 90°/270°：pdfimages 不校正朝向 → 强制改用 pdftoppm（烘焙旋转）", "pdf_inspector::classify_pdf_mem 判 Scanned / ImageBased，或过半页需 OCR → 绕过文本层直接 OCR", "整篇无文本层 → 强制 OCR"] },
+    { "dot": "amber", "title": "⑥ OCR 管线（pdfimages 快速路径）", "items": ["页数 ≤20：先试整篇快速路径；>20：跳过整篇直接分页循环", "pdfimages 整篇一次 -p：JPEG 用 -j 原生（~0.1s/页），其余用 -png 回退", "按页分组取最大图；页图域 <100K px² 视为图标跳过", "结果质检 ocr_text_is_unusable：乱码 / 换行数≥正文一半 → 判废", "判废 → 转 pdftoppm 烘焙旋转重渲染"] },
+    { "dot": "orange", "title": "⑦ OCR 引擎 → 拼接 → 输出", "items": ["引擎优先级：PaddleOCR（PP-OCRv5）→ 平台原生 Apple Vision / Windows OCR → Tesseract；配置不可用自动回退", "全局并发闸门 min(核数, 8)，防并行嵌套把 CPU 拖垮", "逐页 pdftoppm 渲染（1000~2500px clamp，单页 30s 超时）→ OCR", "前 5 页全无文本则中止；单页看门狗 120s（只看单页卡死，不是整篇预算）", "merge_page_texts 逐页拼接（空文本层也必须保留 OCR 结果）→ 回主图清洗"] }
+  ]
+}

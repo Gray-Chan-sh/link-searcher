@@ -1,0 +1,71 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "文件生命周期 · 从进入到可调用",
+    "subtitle": "Link-Searcher 主链路总览（PDF/OCR 细节见分图 17b）",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/17-file-lifecycle.html"
+  },
+  "lanes": [
+    { "id": "entry", "label": "入口 · 发现" },
+    { "id": "gate", "label": "过滤 · 登记" },
+    { "id": "extract", "label": "Phase 1 提取（Rayon 并行）" },
+    { "id": "clean", "label": "清洗 · 质检 · 落库" },
+    { "id": "serve", "label": "Phase 2 写索引 → 可调用" },
+    { "id": "exception", "label": "异常 · 终态", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "p_discover", "label": "发现 · 登记", "fromCol": 0, "toCol": 1 },
+    { "id": "p_extract", "label": "提取", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "p_clean", "label": "清洗 · 写索引 · 可调用", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "mainPath": ["addDir", "walk", "filter", "upsert", "md5", "route", "typeOut", "sanitize", "store", "tantivy", "ready"],
+  "nodes": [
+    { "id": "addDir", "lane": "entry", "col": 0, "type": "external", "label": "添加监控目录", "sublabel": "设置页 / 目录管理", "width": 110 },
+    { "id": "walk", "lane": "entry", "col": 1, "type": "backend", "label": "扫描 / 监控触发", "sublabel": "walkdir / notify", "width": 110 },
+    { "id": "filter", "lane": "entry", "col": 1, "type": "security", "label": "排除 + 白名单", "sublabel": "# $ . ~ / .tmp", "width": 110, "yOffset": 92 },
+    { "id": "unsupported", "lane": "entry", "col": 0, "type": "external", "label": "不支持扩展名", "sublabel": "仅计数 · 不入索引", "width": 110, "yOffset": 184 },
+
+    { "id": "upsert", "lane": "gate", "col": 1, "type": "database", "label": "upsert_file", "sublabel": "file_tracking · indexed=0", "width": 110 },
+
+    { "id": "md5", "lane": "extract", "col": 1, "type": "database", "label": "流式 MD5 + 去重", "sublabel": "命中即复用文本", "width": 116 },
+    { "id": "route", "lane": "extract", "col": 2, "type": "backend", "label": "格式路由", "sublabel": "按扩展名分发", "width": 110 },
+    { "id": "typeOut", "lane": "extract", "col": 3, "type": "backend", "label": "各类型提取器", "sublabel": "文本 / Office / 图片 / 音频等", "width": 118 },
+    { "id": "pdfPath", "lane": "extract", "col": 3, "type": "cloud", "label": "PDF 高级路径", "sublabel": "多级兜底 + OCR · 见分图", "width": 118, "yOffset": 92 },
+
+    { "id": "sanitize", "lane": "clean", "col": 4, "type": "backend", "label": "清洗 + 质量评分", "sublabel": "NFKC · 5 信号 <0.75 低质量", "width": 118 },
+    { "id": "store", "lane": "clean", "col": 4, "type": "database", "label": "store_content", "sublabel": "content_index · doc_chunks", "width": 118, "yOffset": 92 },
+
+    { "id": "tantivy", "lane": "serve", "col": 5, "type": "backend", "label": "add_document", "sublabel": "Tantivy 写 · indexed=1", "width": 118, "yOffset": -64 },
+    { "id": "ready", "lane": "serve", "col": 5, "type": "frontend", "label": "可调用", "sublabel": "搜索 / 语义 / RAG / 聊天", "width": 118, "yOffset": 64 },
+
+    { "id": "failed", "lane": "exception", "col": 5, "type": "security", "label": "提取 / 写入失败", "sublabel": "mark_failed indexed=2", "width": 118 }
+  ],
+  "edges": [
+    { "id": "e-add-walk", "from": "addDir", "to": "walk", "label": "配置目录", "variant": "emphasis" },
+    { "id": "e-walk-filter", "from": "walk", "to": "filter", "variant": "default" },
+    { "id": "e-walk-unsupported", "from": "walk", "to": "unsupported", "label": "不支持", "variant": "dashed", "role": "branch" },
+    { "id": "e-filter-upsert", "from": "filter", "to": "upsert", "label": "白名单通过", "variant": "emphasis" },
+    { "id": "e-upsert-md5", "from": "upsert", "to": "md5", "label": "indexed=0", "variant": "emphasis" },
+    { "id": "e-md5-route", "from": "md5", "to": "route", "label": "未命中：提取", "variant": "emphasis" },
+    { "id": "e-route-type", "from": "route", "to": "typeOut", "label": "非 PDF：按扩展名", "variant": "emphasis" },
+    { "id": "e-route-pdf", "from": "route", "to": "pdfPath", "label": "PDF", "variant": "emphasis" },
+    { "id": "e-type-sanitize", "from": "typeOut", "to": "sanitize", "label": "文本", "variant": "emphasis" },
+    { "id": "e-pdf-sanitize", "from": "pdfPath", "to": "sanitize", "label": "文本", "variant": "emphasis" },
+    { "id": "e-sanitize-store", "from": "sanitize", "to": "store", "label": "清洗 + 评分", "variant": "emphasis" },
+    { "id": "e-store-tantivy", "from": "store", "to": "tantivy", "label": "Phase 2 串行写", "variant": "emphasis", "fromSide": "bottom", "toSide": "left" },
+    { "id": "e-tantivy-ready", "from": "tantivy", "to": "ready", "label": "已索引可搜（向量回填可选）", "variant": "emphasis" },
+    { "id": "e-sanitize-failed", "from": "sanitize", "to": "failed", "label": "提取失败", "variant": "security", "role": "error", "fromSide": "left", "toSide": "left" },
+    { "id": "e-tantivy-failed", "from": "tantivy", "to": "failed", "label": "写失败：回滚", "variant": "security", "role": "error", "fromSide": "right", "toSide": "right" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "四类触发", "items": ["全量扫描：walkdir 两趟（先 3s 限时计数给进度条，再遍历）", "增量扫描：仅 mtime 变化或需重索引；无记录退回全量", "启动扫描：含移位检测（MD5+文件名匹配，改路径不重提取）", "实时监控：notify 300ms 防抖；已索引且未变则跳过"] },
+    { "dot": "emerald", "title": "非 PDF 提取器（6 类）", "items": ["文本/代码：txt md csv json xml yaml 脚本 → 直接读取", "Office：doc→rwml；xls/xlsx/xlsb→calamine；docx/ppt/odt/rtf/epub→anydoc（纯原生，无 LibreOffice）", "图片：预处理（升采样+对比度，保梯度不二值化）→ OCR 引擎", "音频：ffmpeg 转码 → FunASR-Nano 转写 + pyannote 分段 + CAM++ 说话人分离", "压缩包：枚举条目，文本直读、Office/PDF/图片走提取管线", "未知格式：读前 10MB 当 UTF-8 文本兜底"] },
+    { "dot": "violet", "title": "并行与进度", "items": ["Phase 1：Rayon 并行提取，专用线程池 + OCR 闸门 min(核数,8)", "每 250 个 job 中途 flush；每 500 个一块提交，块完成即可搜", "Phase 1 完成写 indexed=3（进度可见）；Phase 2 写完 indexed=1", "MD5 命中复用文本、跳过提取；长文自动分块；写失败回滚文档"] },
+    { "dot": "slate", "title": "删除与移位（扫描 / 监控触发）", "items": ["文件移位：MD5+文件名/大小匹配 → 仅更新路径，不重新提取", "文件删除：Tantivy delete_document + file_tracking 软删（status）", "遍历出错时跳过删除检测，避免目录瞬断误删", "目录配置变更自动触发增量扫描"] },
+    { "dot": "rose", "title": "质量与异常", "items": ["5 信号评分：可打印率 / FFFD / OCR 置信度 / 字符密度 / 词典命中，<0.75 标低质量，最多重提取 3 次", "错误分类：访问拒绝 / 解析失败 / OCR 失败 / 超时 → mark_failed(indexed=2)", "写失败回滚（delete_document）并记 log_index_error", "重扫遍历出错时跳过删除检测，防目录瞬断误删"] },
+    { "dot": "orange", "title": "最终可调用", "items": ["关键词：BM25 + jieba 分词 / 模糊 / 通配 / 短语 / 文件名语法", "语义：向量 embedding + BM25 可调权重 RRF 混合", "问答：RAG 跨文件问答 / 多轮 AI 聊天（带检索溯源与推理时间线）", "预览 / 导出 CSV；indexed=1 后关键词立即可搜，向量为可选增强"] }
+  ]
+}
