@@ -12,7 +12,19 @@ Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 |----------|------|:----:|----------|------|
 | Mock IPC 测试 | `src-tauri/tests/auto_ui_e2e.rs` | 15 | `cargo test --test auto_ui_e2e` | 无（可 CI） |
 | IPC 命令测试 | `src-tauri/tests/ipc_test.rs` | 8 | `cargo test --test ipc_test` | 无（可 CI） |
+| **Web API HTTP 冒烟** | `src-tauri/tests/webapi_http.rs` | 1（多断言） | `cargo test --test webapi_http` | 无（可 CI） |
+| 前端会话测试 | `src/api/__tests__/sessionClient.test.ts` | 7 | `npm run test` | 无 |
 | MCP E2E 测试 | `src-tauri/tests/e2e_mcp.sh` | 22 | `bash src-tauri/tests/e2e_mcp.sh` | 需 App 窗口 + LLM |
+
+### Web API HTTP 冒烟测试（`webapi_http.rs`）
+
+真实起 axum（`into_make_service_with_connect_info::<SocketAddr>()`，与生产一致）+ `ureq` 打真请求，覆盖鉴权与单用户会话全链路：401(无/错 token，且**不创建会话**) → 200 + 首次授予会话（证明来源 IP 抽取成功）→ `/api/session` JSON 形状 → `ping` 续租 → `logout` → 重新登入。
+
+两个实现要点（改动前请先读）：
+1. `ApiState.app_handle` 是**具体类型** `AppHandle<Wry>`，`MockRuntime` 的 handle 不匹配 → 用 `tauri::Builder::default().manage(state).build(tauri::test::mock_context(tauri::test::noop_assets()))` 构造真实 Wry app（无窗口，headless 可行）。
+2. `tao` 在 Windows **禁止非主线程创建事件循环**，libtest 默认在线程里跑测试 → 本文件在 `Cargo.toml` 用 `[[test]] name = "webapi_http" harness = false`，测试体跑在进程主线程。
+
+> 鉴权中间件从 **DB** 的 `app_settings['web_api_token']` 读 token（`ApiState.auth_token` 不参与比对），测试需先写入该行。
 
 ### ⚠️ Windows 上的两个已知坑（2026-10-03 已修，勿回退）
 

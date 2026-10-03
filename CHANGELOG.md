@@ -4,6 +4,29 @@
 
 ---
 
+## 2026-10-03（续18）：补 Web API 测试覆盖 —— HTTP 冒烟测试 + 前端会话测试 + 真机 curl 验证
+
+> 承接续16 的 Web 模式改动。此前该功能的**运行时链路零覆盖**（`session_guard` 依赖 `ConnectInfo`，接错会让每个 API 请求 500 而无人察觉），本轮补齐三层验证。
+
+- **① 新增 `src-tauri/tests/webapi_http.rs`（HTTP 冒烟测试，进 CI）**：用真实 axum `serve` + **`into_make_service_with_connect_info::<SocketAddr>()`**（与生产一致）+ `ureq` 打真请求，在 `127.0.0.1:0` 上验证：无 token→401、错 token→401 **且不创建会话**（证明 `bearer_auth` 在 `session_guard` 外层）、正确 token→200 并**首次授予会话**（证明来源 IP 抽取成功）、`GET /api/session` 的 `is_owner/port/bind/lan_ip/timeout_secs` 形状、`ping` 续租、`logout` 清会话、退出后可重新登入。
+  - **两个关键实现点（易踩）**：
+    1. `ApiState.app_handle` 是具体类型 `AppHandle<Wry>`，`MockRuntime` 的 handle 类型不匹配 → 必须构造真实 Wry app：`tauri::Builder::default().manage(state).build(tauri::test::mock_context(tauri::test::noop_assets()))`（mock_context 无窗口，可 headless）。
+    2. `tao` 在 Windows **禁止非主线程创建事件循环**，而 libtest 在线程里跑测试 → 该文件用 `Cargo.toml` 的 `[[test]] name="webapi_http" harness=false`，让测试体跑在进程主线程。
+  - 另注：鉴权中间件从 **DB** `app_settings['web_api_token']` 读取（`ApiState.auth_token` 不参与比对），测试需先写入该行。
+- **② 前端新增 `src/api/__tests__/sessionClient.test.ts`（7 条）**：`web_session_status/ping/logout` 三个命令的 HTTP 映射与 Bearer 头；403 → 派发 `session-denied`（带 `session_ip`/`expires_in`）且**不清除本地 token**、403 非 JSON 体也不炸；401 → 清除 token 并派发 `auth-failed`。（vitest 默认 node 环境，测试内装最小 `window`/`localStorage`/`fetch` 桩。）
+- **③ 真机端到端验证（隔离 `LS_CONFIG_DIR` + 临时 `data_dir`，未触碰真实配置/数据；14/14 PASS）**：
+  - 默认开启：启动即监听，无 token→401；`config.json` 里的 token→200（B 需求实证）
+  - `GET /api/session` 返回真实 `lan_ip":"192.168.1.72"`、`port:8443`、`timeout_secs:600`、`is_owner:true`（LAN 探测实证）
+  - 心跳 ping→200
+  - **Web 端改 token**（`PUT /api/settings {"settings":{"web_api_token":...}}` 与专用 `POST /api/auth/token {"token":...}` 两条路径）均→200，且 **`config.json` 落盘同步**、旧 token 立即 401、新 token 200
+  - `ALLOWED_KEYS` 守卫：未知键→400 `unknown setting key: bogus_key`
+  - `logout`→200 并可重新登入（`active:true`）
+  - 启动日志实证：`[STARTUP] Web API: 自动开启（web_api_enabled != false）` + `[WEBAPI] 远程访问: https://192.168.1.72:8443 (token: ...)`；token 变更日志 `token changed → session reset`、退出日志 `user logged out (127.0.0.1)`
+- **涉及文件**：`src-tauri/tests/webapi_http.rs`（新）、`src-tauri/Cargo.toml`（`[[test]] harness=false`）、`src/api/__tests__/sessionClient.test.ts`（新）、`docs/12-testing.md`。
+- **验证**：`cargo test --no-fail-fast` **EXIT=0 全绿**（lib 494 / auto_ui_e2e 15 / integration 9 / ipc_test 8 / **webapi_http 冒烟 通过** / 其余全过）；`npm run test` **68 通过**（+7）；`npx tsc -b` 0；`npm run lint` 0；`semgrep --severity ERROR` 0 findings。
+
+---
+
 ## 2026-10-03（续17）：修 3 个预存在的 Windows 测试基础设施问题 —— 全套测试首次全绿
 
 > 承接续16 末尾记录的 3 项预存在失败（已确认与 Web 改动无关），逐一修复。

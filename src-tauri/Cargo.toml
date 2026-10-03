@@ -9,6 +9,12 @@ edition = "2024"
 name = "link_searcher_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+# Web API HTTP 冒烟测试需要在**进程主线程**构造真实 Wry AppHandle
+# （tao 在 Windows 禁止非主线程创建事件循环），所以关掉 libtest harness。
+[[test]]
+name = "webapi_http"
+harness = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
