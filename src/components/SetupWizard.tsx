@@ -4,7 +4,6 @@ import { useI18n } from '../i18n'
 import { useSetup, type ProgressState } from '../hooks/useSetup'
 import { LoadingSpinner } from '../icons'
 import type { DepStatus } from '../api/settings'
-import { isTauri } from '../utils/platform'
 
 interface SetupWizardProps {
   onDone: () => void
@@ -186,7 +185,7 @@ export default function SetupWizard({ onDone }: SetupWizardProps) {
               <div className="text-center py-4">
                 <div className="text-5xl mb-3">🚀</div>
                 <p className="text-sm text-gray-600 dark:text-gray-400">
-                  {isTauri() && missing.length > 0
+                  {missing.length > 0
                     ? t('wizard_done_partial')
                     : t('setup_all_ready')}
                 </p>

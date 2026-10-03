@@ -41,6 +41,8 @@ const BRIDGED_EVENTS: &[&str] = &[
     "funasr-install-done",
     "bge-install-done",
     "restore-completed",
+    "dep-progress",
+    "dep-install-done",
 ];
 
 pub fn spawn_server(app_handle: tauri::AppHandle) {

@@ -5,6 +5,7 @@ pub mod dirs;
 pub mod ai;
 pub mod settings;
 pub mod session;
+pub mod setup;
 pub mod events;
 pub mod logs;
 pub mod tesseract;
@@ -56,6 +57,7 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(ai::router(state.clone()))
         .merge(settings::router(state.clone()))
         .merge(session::router(state.clone()))
+        .merge(setup::router(state.clone()))
         .merge(logs::router(state.clone()))
         .merge(tesseract::router(state.clone()))
         .merge(backup::router(state.clone()))

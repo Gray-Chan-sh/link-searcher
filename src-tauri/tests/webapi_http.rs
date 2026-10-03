@@ -159,13 +159,28 @@ fn spawn_api_server(tmp: &TempDir) -> (SocketAddr, tokio::sync::oneshot::Sender<
 
 /// 发一个 HTTP 请求；4xx/5xx 也返回 (状态码, body) 而不 panic。
 fn request(addr: SocketAddr, method: &str, path: &str, token: Option<&str>) -> (u16, String) {
+    request_with_body(addr, method, path, token, None)
+}
+
+/// 同上，但可带 JSON body。
+fn request_with_body(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<&str>,
+) -> (u16, String) {
     let url = format!("http://{addr}{path}");
     let agent = ureq::AgentBuilder::new().build();
     let mut req = agent.request(method, &url).set("Connection", "close");
     if let Some(t) = token {
         req = req.set("Authorization", &format!("Bearer {t}"));
     }
-    match req.call() {
+    let result = match body {
+        Some(b) => req.set("Content-Type", "application/json").send_string(b),
+        None => req.call(),
+    };
+    match result {
         Ok(resp) => (resp.status(), resp.into_string().unwrap_or_default()),
         Err(ureq::Error::Status(code, resp)) => (code, resp.into_string().unwrap_or_default()),
         Err(e) => panic!("request {method} {path} failed: {e}"),
@@ -246,6 +261,47 @@ fn main() {
     assert_eq!(v["active"], Value::Bool(true));
     assert_eq!(v["is_owner"], Value::Bool(true));
 
+    // ── 8. 依赖中心（方案 A：Web 端可看状态 + 可安装） ──
+    let (status, body) = request(addr, "GET", "/api/setup/status", Some(good));
+    assert_eq!(status, 200, "setup status must be reachable: {body}");
+    let v = json(&body);
+    assert!(v["deps"].is_array(), "setup status must carry a deps array");
+    assert!(
+        v["all_recommended_ready"].is_boolean(),
+        "setup status must carry all_recommended_ready"
+    );
+    assert!(v["data_dir"].is_string(), "setup status must carry data_dir");
+
+    // 刷新后恢复进度条：install-status 必须是合法形状
+    let (status, body) = request(addr, "GET", "/api/setup/install-status", Some(good));
+    assert_eq!(status, 200);
+    let v = json(&body);
+    assert_eq!(v["installing"], Value::Bool(false), "nothing installing initially");
+    assert!(v["dep"].is_null(), "dep is null when idle");
+
+    // 空 dep / 未知 dep 必须被拒绝（不能静默落空）
+    let (status, _) = request_with_body(
+        addr,
+        "POST",
+        "/api/setup/install",
+        Some(good),
+        Some(r#"{"dep":""}"#),
+    );
+    assert_eq!(status, 400, "empty dep must be 400");
+
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/setup/install",
+        Some(good),
+        Some(r#"{"dep":"definitely-not-a-dep"}"#),
+    );
+    assert_eq!(status, 400, "unknown dep must be 400: {body}");
+
+    // 未安装任何依赖时取消 → 400「没有正在进行的安装」
+    let (status, _) = request(addr, "POST", "/api/setup/cancel", Some(good));
+    assert_eq!(status, 400, "cancel with no install in flight must be 400");
+
     // 收尾：清会话 + 关停服务器
     link_searcher_lib::webapi::session::clear(None);
     let _ = shutdown.send(());
@@ -253,6 +309,7 @@ fn main() {
 
     println!(
         "✓ Web API HTTP smoke test passed: 401(no token) / 401(bad token, no session) / \
-         200 + session granted (ConnectInfo) / session JSON shape / ping / logout / re-login"
+         200 + session granted (ConnectInfo) / session JSON shape / ping / logout / re-login / \
+         setup status + install-status reachable / install validation / cancel guard"
     );
 }

@@ -166,6 +166,12 @@ const MAPPINGS: Record<string, Mapping> = {
   web_session_ping: { method: 'POST', path: '/api/session/ping' },
   web_session_logout: { method: 'POST', path: '/api/session/logout' },
 
+  // ── Dependency center (依赖中心) ──
+  get_setup_status: { method: 'GET', path: '/api/setup/status' },
+  install_dep: (a) => ({ method: 'POST', path: '/api/setup/install', body: a }),
+  cancel_dep_install: { method: 'POST', path: '/api/setup/cancel' },
+  dep_install_status: { method: 'GET', path: '/api/setup/install-status' },
+
   // ── Settings ──
   get_settings: { method: 'GET', path: '/api/settings' },
   update_settings: (a) => ({ method: 'PUT', path: '/api/settings', body: a }),

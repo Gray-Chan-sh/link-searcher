@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-10-03（续19）：Web 端依赖中心 —— 可查看依赖状态、可安装/取消
+
+- **需求**：通过 Web 访问时"无法了解依赖是否安装完成"（新装机器上最需要的恰好就是装依赖）。
+- **根因（三层叠加）**：
+  1. **前端主动短路**：`src/hooks/useSetup.ts` 的 `refresh()` 与 `pollActive()` 都以 `if (!isTauri()) return` 开头——Web 端**永远不发请求**，直接把 `status` 伪造成 `{deps: [], all_recommended_ready: true}`，依赖面板因此空白且"假装一切就绪"。
+  2. **命令无 HTTP 映射**：`src/api/client.ts` 的 MAPPINGS 里只有旧的 `check_dependencies`，`get_setup_status` / `install_dep` / `cancel_dep_install` / `dep_install_status` **四条全部缺失**。
+  3. **后端无路由**：`webapi/routes/` 下没有 setup 相关 handler（只有旧的 `/api/ocr/dependencies`）。
+- **修复（方案 A：完整对齐桌面端）**：
+  - **后端**：新增 `src-tauri/src/webapi/routes/setup.rs`，**复用 `deps::commands` 的实现**（不复制逻辑）：`GET /api/setup/status`、`POST /api/setup/install`（body `{"dep": "..."}`）、`POST /api/setup/cancel`、`GET /api/setup/install-status`；在 `routes/mod.rs` 注册（落在 `bearer_auth` + `session_guard` 之内）。
+  - **事件桥**：`dep-progress` / `dep-install-done` 加入 `webapi::BRIDGED_EVENTS`——**否则 Web 端看不到安装进度条、装完也不会自动刷新**（这是第 4 个隐藏缺口）。
+  - **前端**：`client.ts` 补 4 条 MAPPINGS；`useSetup.ts` **删除 `!isTauri()` 短路**，两个环境统一走同一套请求，`dep_install_status` 轮询在 Web 端同样启用（刷新页面可恢复进度条）。
+  - **顺带修文案**：`SetupWizard.tsx` 完成页原本 `isTauri() && missing.length > 0` 才提示"部分依赖未装"，Web 端会**错误显示"全部就绪"** → 去掉 `isTauri()` 条件（该组件已无 Tauri 依赖，import 一并删除）。
+- **并发安全**：依赖安装本身有 `INSTALLING_DEP` 单飞守卫；外面还有单用户会话制（同一时刻仅一个 Web 客户端）——不会出现两个浏览器同时触发安装竞争。
+- **涉及文件**：`src-tauri/src/webapi/{routes/setup.rs(新), routes/mod.rs, mod.rs}`、`src/{api/client.ts, hooks/useSetup.ts, components/SetupWizard.tsx}`、`src-tauri/tests/webapi_http.rs`（扩展断言）。
+- **验证**：`cargo test --no-fail-fast` **EXIT=0 全绿**（HTTP 冒烟新增：`/api/setup/status` + `/api/setup/install-status` 可达且形状正确、空 dep/未知 dep → 400、无安装时 cancel → 400）；`npm run test` 68 过；`npx tsc -b` 0；`npm run lint` 0；`semgrep --error` 0 findings。
+
+---
+
 ## 2026-10-03（续18）：补 Web API 测试覆盖 —— HTTP 冒烟测试 + 前端会话测试 + 真机 curl 验证
 
 > 承接续16 的 Web 模式改动。此前该功能的**运行时链路零覆盖**（`session_guard` 依赖 `ConnectInfo`，接错会让每个 API 请求 500 而无人察觉），本轮补齐三层验证。

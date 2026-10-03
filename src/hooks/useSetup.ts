@@ -4,10 +4,10 @@ import {
   getSetupStatus,
   installDep,
   cancelDepInstall,
+  depInstallStatus,
   type SetupStatus,
   type DepInstallResult,
 } from '../api/settings'
-import { isTauri } from '../utils/platform'
 
 export interface ProgressState {
   dep: string
@@ -33,15 +33,6 @@ export function useSetup() {
   const installingRef = useRef(false)
 
   const refresh = useCallback(async () => {
-    if (!isTauri()) {
-      setStatus({
-        deps: [],
-        all_recommended_ready: true,
-        data_dir: '',
-      })
-      setLoading(false)
-      return
-    }
     try {
       const s = await getSetupStatus()
       setStatus(s)
@@ -58,10 +49,10 @@ export function useSetup() {
   }, [])
 
   // Poll dep_install_status so the UI recovers after reloads mid-install.
+  // Web 端同样生效（GET /api/setup/install-status），刷新页面后可恢复进度条。
   const pollActive = useCallback(async () => {
-    if (!isTauri()) return
     try {
-      const st = await import('../api/settings').then(m => m.depInstallStatus())
+      const st = await depInstallStatus()
       if (st.installing) {
         installingRef.current = true
         setActiveDep(st.dep)
