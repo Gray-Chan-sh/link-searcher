@@ -111,6 +111,22 @@ impl TestEnv {
         dir_ids: Option<Vec<String>>,
         ext_filter: Option<Vec<String>>,
     ) -> Vec<String> {
+        self.search_response(query, dir_ids, ext_filter, true)
+            .hits
+            .into_iter()
+            .map(|h| h.file_id)
+            .collect()
+    }
+
+    /// 与 [`Self::search`] 相同，但返回完整响应且可控制 `dedupe`，供去重相关
+    /// 断言使用（默认搜索是 dedupe=true，会把同 (md5, size) 折叠成一条）。
+    fn search_response(
+        &self,
+        query: &str,
+        dir_ids: Option<Vec<String>>,
+        ext_filter: Option<Vec<String>>,
+        dedupe: bool,
+    ) -> link_searcher_lib::search::searcher::SearchResponse {
         let mgr = self.index_mgr.read().unwrap();
         let reader = mgr.reader().unwrap().clone();
         let idx = mgr.index().clone();
@@ -129,9 +145,9 @@ impl TestEnv {
             page_size: 100,
             fuzzy: false,
             semantic: false,
-            dedupe: true,
+            dedupe,
         };
-        searcher.search(&params).unwrap().hits.into_iter().map(|h| h.file_id).collect()
+        searcher.search(&params).unwrap()
     }
 }
 
@@ -198,8 +214,18 @@ fn test_incremental_indexing_dedup() -> Result<()> {
     let count: i64 = c.query_row("SELECT COUNT(*) FROM content_index", [], |r| r.get(0))?;
     assert_eq!(count, 1, "content_index should have one entry");
 
-    // Tantivy still has two documents (different file_ids).
-    assert_eq!(env.search("duplicate", None, None).len(), 2);
+    // Tantivy 里仍有两个文档（不同 file_id）：dedupe=false 时不折叠。
+    assert_eq!(
+        env.search_response("duplicate", None, None, false).hits.len(),
+        2,
+        "Tantivy should keep two documents (one per file_id)"
+    );
+
+    // 默认 dedupe=true：同内容（md5+size）折叠成一条，并标注重复数。
+    let deduped = env.search_response("duplicate", None, None, true);
+    assert_eq!(deduped.hits.len(), 1, "dedupe should collapse same-md5 hits");
+    assert_eq!(deduped.hits[0].duplicate_count, 2);
+    assert_eq!(deduped.total, 1);
     Ok(())
 }
 

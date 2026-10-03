@@ -128,7 +128,15 @@ fn invoke_cmd(
             cmd: cmd.to_string(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            // Windows 上 Tauri 的本地源是 `http://tauri.localhost`，其它平台是
+            // `tauri://localhost`；用错会被 ACL 判为 Remote 而拒绝所有命令。
+            url: if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .unwrap(),
             body: args.clone().into(),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),
@@ -172,8 +180,11 @@ fn test_ipc_add_dir() {
         }),
     );
 
+    // add_dir 会按 normalize_os_path 把路径统一为正斜杠（跨平台索引存储），
+    // 因此断言也要用归一化后的形式，不能直接比 Windows 的反斜杠路径。
+    let expected_path = dir_path.to_str().unwrap().replace('\\', "/");
     assert_eq!(
-        result["path"], json!(dir_path.to_str().unwrap()),
+        result["path"], json!(expected_path),
         "path should match"
     );
     assert_eq!(result["alias"], json!("test"), "alias should match");

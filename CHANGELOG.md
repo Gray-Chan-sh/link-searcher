@@ -4,6 +4,21 @@
 
 ---
 
+## 2026-10-03（续17）：修 3 个预存在的 Windows 测试基础设施问题 —— 全套测试首次全绿
+
+> 承接续16 末尾记录的 3 项预存在失败（已确认与 Web 改动无关），逐一修复。
+
+- **`ipc_test` / `auto_ui_e2e` 启动即 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`（连测试一行都跑不到）**：
+  - **根因**（用 PE 导入/导出表解析定位）：两个测试二进制都导入 `comctl32.dll!TaskDialogIndirect`，而该函数**只有 comctl32 v6 导出**；System32 里的 comctl32 是 **v5.82**（不导出）。进程要加载 v6 必须靠应用 manifest 声明 side-by-side 依赖，但 `build.rs` 的 `tauri_build::build()` **只给主二进制嵌了 manifest**（实测主程序含 `Common-Controls` + `version="6.0.0.0"`，两个测试 exe 完全没有）→ 加载器按 v5.82 绑定 → 进程在调用任何测试代码前终止。
+  - **修复**：`build.rs` 新增 `embed_test_manifest()`（`#[cfg(windows)]`），用 `cargo:rustc-link-arg-tests=/MANIFEST:EMBED /MANIFESTINPUT:<生成的 manifest> /MANIFESTUAC:NO` **只给测试目标**注入一份声明 comctl32 v6 的 manifest——不触碰主二进制（仍由 tauri-build 嵌完整 manifest），无需新依赖。
+- **测试能启动后，所有 IPC 命令被 ACL 拒绝**（`... not allowed on window "main" ... URL: tauri://localhost`）：测试硬编码 `InvokeRequest.url = "tauri://localhost"`，但 **Windows 上 Tauri 的本地源是 `http://tauri.localhost`**（macOS/Linux 才是 `tauri://localhost`，见 `tauri::test` 官方文档）。`is_local_url()` 按平台协议 URL 比对，Windows 下 scheme 不匹配 → 判为 `Remote` → `ExecutionContext::Local` 的 `__allow_command` 全部失配。**修复**：两个测试文件用 `if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }`。
+- **路径分隔符断言**（`test_ipc_add_dir` / `test_add_and_remove_dir`）：`add_dir` 按设计用 `normalize_os_path` 把路径规范化为正斜杠，测试却拿 Windows 反斜杠路径直接比。**修复**：断言同样归一化（`.replace('\\', "/")`）。
+- **`integration::test_incremental_indexing_dedup` 断言过期**：断言 `search("duplicate").len() == 2`（注释"Tantivy 有两个文档"），但测试辅助函数传 `dedupe: true`；`8997194` 引入搜索结果去重后，同 `(md5,file_size)` 会被折叠成 1 条 → 断言与当前设计矛盾（去重功能本身正常，`content_index` 1 行/共享 md5 的前半段断言都通过）。**修复**：改用新增的 `TestEnv::search_response(.., dedupe)` 断言当前语义——`dedupe=false` 时 2 条（证明 Tantivy 确有 2 个文档）+ `dedupe=true` 时 1 条且 `duplicate_count == 2`、`total == 1`。
+- **涉及文件**：`src-tauri/build.rs`、`src-tauri/tests/{ipc_test.rs, auto_ui_e2e.rs, integration.rs}`、`docs/12-testing.md`（补 Windows 两个坑的说明，防回退）。
+- **验证**：`cargo test --no-fail-fast` **EXIT=0，所有目标全绿**（lib 494 / ai_chat_stream_wire 15 / auto_ui_e2e **15** / integration **9** / ipc_test **8** / 其余全过，2 ignored）；`semgrep --severity ERROR` 0 findings。此前 3 项预存在失败**全部消除**。
+
+---
+
 ## 2026-10-03（续16）：Web 模式启动即开 + Token 固化到 config.json + 单用户 IP 会话（多端冲突解法）
 
 - **需求**：启动自动开启 Web 服务供其它机器连接；token 从配置文件读入而非每次随机生成；解决多用户同时连接的冲突。
@@ -15,7 +30,7 @@
   - `chat_history.json`：新增进程锁 `history_lock` + **`mutate_history` 持锁读-改-写事务**（create/save/delete 全部收敛）+ **tmp+rename 原子写**——根治「两人同时保存丢会话」与「读到半截 JSON 列表被静默清空」；Web 删除路由改走 `delete_chat_session_impl`。
   - Web 扫描触发 `webapi/routes/index.rs::trigger_scan_handler` 补 **`is_scanning` CAS**（与 IPC 路径同一把锁，重复触发返回明确错误，且置位后状态接口/按钮不再失真），并用 drop guard 保证 panic 也复位标志。
 - **涉及文件**：`src-tauri/src/{config.rs, lib.rs, webapi/mod.rs, webapi/session.rs(新), webapi/routes/{mod,session,settings,index,ai}.rs, commands/{mod,settings,config,webapi}.rs, commands/ai/session.rs, commands/ai.rs}`、`src/{App.tsx, api/client.ts, components/settings/SystemTab.tsx}`、`README.md`、`docs/{06-settings.md, ARCHITECTURE.md, USER_MANUAL.md}`。
-- **验证**：`cargo check` 0 错误；`cargo test --lib` **494 通过**（含新增 5 条：会话生命周期 grant/renew/deny/expire/kick、IP 规范化、并发保存不丢会话、原子写无残留 tmp、create/delete 不影响其它会话）；集成测试除 3 项**预存在失败**外全部通过（`auto_ui_e2e`/`ipc_test` 启动即 `0xc0000139` DLL 环境问题、`integration::test_incremental_indexing_dedup` 断言失败——三者均已在 stash 后的基线复现，确认与本次改动无关）；`npx tsc -b` 0 错误；`npm run lint` 0 error（61 vitest 全过）；`semgrep --severity ERROR` **0 findings**。
+- **验证**：`cargo check` 0 错误；`cargo test --lib` **494 通过**（含新增 5 条：会话生命周期 grant/renew/deny/expire/kick、IP 规范化、并发保存不丢会话、原子写无残留 tmp、create/delete 不影响其它会话）；集成测试除 3 项**预存在失败**外全部通过（`auto_ui_e2e`/`ipc_test` 启动即 `0xc0000139` DLL 环境问题、`integration::test_incremental_indexing_dedup` 断言失败——三者均已在 stash 后的基线复现，确认与本次改动无关，**已在续17 修复，现已全绿**）；`npx tsc -b` 0 错误；`npm run lint` 0 error（61 vitest 全过）；`semgrep --severity ERROR` **0 findings**。
 
 ---
 

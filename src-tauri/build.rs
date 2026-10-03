@@ -19,7 +19,44 @@ fn git_dirty() -> bool {
         .unwrap_or(false)
 }
 
+/// Windows 上，链接了 tauri GUI 栈（`windows` crate → `comctl32!TaskDialogIndirect`）
+/// 的**测试二进制**默认没有应用 manifest，加载器会按 System32 的 comctl32
+/// **v5.82** 绑定，而 `TaskDialogIndirect` 只有 **v6** 才导出 → 进程在任何测试
+/// 代码运行前就以 `STATUS_ENTRYPOINT_NOT_FOUND` (0xc0000139) 终止（`ipc_test` /
+/// `auto_ui_e2e` 即此症）。
+///
+/// 主二进制由 `tauri_build::build()` 嵌入了完整的 v6 manifest，但那只作用于
+/// bin target；这里用 `rustc-link-arg-tests` **只给测试目标**补一份声明
+/// comctl32 v6 的 manifest，不触碰主二进制。
+#[cfg(windows)]
+fn embed_test_manifest() {
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
+    let manifest_path = std::path::Path::new(&out_dir).join("comctl32-v6.manifest");
+    let manifest = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+    if std::fs::write(&manifest_path, manifest).is_err() {
+        return;
+    }
+    println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
+    println!("cargo:rustc-link-arg-tests=/MANIFESTUAC:NO");
+}
+
 fn main() {
+    #[cfg(windows)]
+    embed_test_manifest();
+
     let hash = git_output(&["rev-parse", "--short", "HEAD"]);
     let time = git_output(&["log", "-1", "--format=%ci"]);
     let dirty = git_dirty();

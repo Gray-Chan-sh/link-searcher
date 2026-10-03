@@ -11,7 +11,15 @@ Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 | 测试套件 | 文件 | 数量 | 运行方式 | 依赖 |
 |----------|------|:----:|----------|------|
 | Mock IPC 测试 | `src-tauri/tests/auto_ui_e2e.rs` | 15 | `cargo test --test auto_ui_e2e` | 无（可 CI） |
+| IPC 命令测试 | `src-tauri/tests/ipc_test.rs` | 8 | `cargo test --test ipc_test` | 无（可 CI） |
 | MCP E2E 测试 | `src-tauri/tests/e2e_mcp.sh` | 22 | `bash src-tauri/tests/e2e_mcp.sh` | 需 App 窗口 + LLM |
+
+### ⚠️ Windows 上的两个已知坑（2026-10-03 已修，勿回退）
+
+上述两个 mock 测试在 Windows 曾**连启动都失败**（`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND`）或全部命令被拒，原因与修复：
+
+1. **测试二进制缺 comctl32 v6 manifest**：`tauri` GUI 栈会导入 `comctl32!TaskDialogIndirect`（仅 v6 导出）。`tauri_build::build()` 只给主二进制嵌 manifest，`tests/` 下的测试二进制没有 → 加载器按 System32 的 v5.82 绑定 → 进程启动即死。修复在 `build.rs::embed_test_manifest()`，用 `cargo:rustc-link-arg-tests` **只给测试目标**注入 v6 manifest（不影响主二进制）。
+2. **mock 请求 URL 平台差异**：`InvokeRequest.url` 必须与平台本地源一致——Windows 是 `http://tauri.localhost`，macOS/Linux 是 `tauri://localhost`。写错会被 ACL 判为 `Remote` 而拒绝所有命令（报 `... not allowed on window "main" ... URL: ...`）。测试里用 `if cfg!(windows) { ... } else { ... }` 处理。
 
 ---
 

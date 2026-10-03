@@ -170,7 +170,15 @@ fn try_invoke_cmd(
             cmd: cmd.to_string(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            // Windows 上 Tauri 的本地源是 `http://tauri.localhost`，其它平台是
+            // `tauri://localhost`；用错会被 ACL 判为 Remote 而拒绝所有命令。
+            url: if cfg!(windows) {
+                "http://tauri.localhost"
+            } else {
+                "tauri://localhost"
+            }
+            .parse()
+            .unwrap(),
             body: args.clone().into(),
             headers: Default::default(),
             invoke_key: INVOKE_KEY.to_string(),
@@ -383,7 +391,9 @@ fn test_add_and_remove_dir() {
         "alias": "e2e-test",
         "recursive": true,
     }));
-    assert_eq!(added["path"], json!(dir_path.to_str().unwrap()), "path should match");
+    // add_dir 归一化路径为正斜杠（normalize_os_path），断言同样归一化。
+    let expected_path = dir_path.to_str().unwrap().replace('\\', "/");
+    assert_eq!(added["path"], json!(expected_path), "path should match");
     assert_eq!(added["alias"], json!("e2e-test"), "alias should match");
 
     let dir_id = added["id"].as_str().unwrap().to_string();
