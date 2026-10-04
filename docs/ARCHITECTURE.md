@@ -117,7 +117,7 @@ Link-Searcher 是一个**本地全文搜索 + AI 文档问答**的桌面应用�
 
 📁 **文件生命周期（从进入到可调用）**：[查看交互式总览图 17](diagrams/17-file-lifecycle.html) —— 一个文件从被扫描发现，到提取、清洗、写索引、最终可被搜索/问答调用的完整生命周期（含 MD5 去重、并行与进度、失败与删除）。
 
-🔬 **分图 17b · PDF 提取与 OCR 深度路径**：[查看交互式分图](diagrams/17b-pdf-ocr-path.html) —— PDF 的多级兜底（lopdf → pdftotext → anydoc → 图像 OCR）、扫描件/旋转检测、pdfimages/pdftoppm 与 OCR 引擎的完整细节。
+🔬 **分图 17b · PDF 提取与 OCR 深度路径**：[查看交互式分图](diagrams/17b-pdf-ocr-path.html) · [详细文字说明](diagrams/17b-pdf-ocr-path.md) —— PDF 的多级兜底（lopdf → pdftotext → anydoc → 图像 OCR）、扫描件/旋转检测、pdfimages/pdftoppm 与 OCR 引擎的完整细节。
 
 
 ### 各提取器的设计要点
