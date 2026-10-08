@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-10-09：Web 端依赖中心整块空白 —— 陈旧 dist + `invoke` 缺映射静默兜底
+
+- **现象**：通过 `https://<host>:8443/#/settings` 打开「依赖中心」，只见标题、说明和**空的 `data dir:`**，一个依赖项都不显示（后端 `/api/setup/status` 实测 200 + 9 个依赖，正常）。
+- **根因（两层叠加）**：
+  1. **静态资源陈旧**：Web 端 `dist/` 由 `serve_from_dist` 提供（`web_api_dev_mode` 默认 false），而 `dist/` 构建于 **9-22**；`/api/setup/*` 的前端映射是 **10-03** 的 `a4a3735` 才加的 → 浏览器端**根本没有这 4 条映射**（`grep api/setup dist/assets` 零命中）。
+  2. **静默兜底掩盖了缺失**：`src/api/client.ts` 的 `invoke()` 找不到映射时**不报错、`console.warn` 后 `return []`**，`useSetup` 把 `status` 设成空数组；旧 dist 里 `useSetup` 还有 `!isTauri()` 短路把 status 伪造成 `{deps:[]}` → 页面不报错，只是空白。
+- **修复**：
+  - **代码**：`src/api/client.ts` 缺映射改为 `console.error` + `throw`，让「Web 端未实现 / 映射缺失」显式暴露，而不是伪装成空数据；新增守护测试 `src/api/__tests__/clientMissingMapping.test.ts`。已确认 6 个无映射命令（`ai_topic_clusters`/`auto_optimize`/`check_rerank_installed`/`detect_hardware`/`get_performance_profile`/`set_performance_tier`）的调用点**均已 catch**，抛错只会把它们从「静默空白」变成「可见报错」。
+  - **运行侧**：在 Mac 上 `npm run build` 重建 `dist/`（`dist` 为 gitignored，不入库）。
+- **涉及文件**：`src/api/client.ts`、`src/api/__tests__/clientMissingMapping.test.ts`（新）、`CHANGELOG.md`。
+- **验证**：`npx vitest run` 70 过（新增 2）；`npx tsc -b` 0；`npm run lint` 0；`semgrep --severity ERROR` 0 findings；重建后 `dist/assets` 含 `api/setup/status`。
+
+---
+
 ## 2026-10-04：新增交互式图表 —— 文件生命周期总览（17）与 PDF/OCR 深度分图（17b）
 
 - **需求**：把「一个文件从进入系统到最终可被调用」的完整生命周期画成一张大图，并特别体现不同类型文件（尤其需要 OCR 的）差异化、复杂的处理路径。

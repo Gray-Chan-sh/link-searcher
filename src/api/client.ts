@@ -259,8 +259,12 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
 
   const entry = MAPPINGS[command];
   if (!entry) {
-    console.warn(`[client] No mapping for "${command}"`);
-    return ([] as unknown) as T;
+    // 曾经这里静默 `return []`，把「Web 端未实现/映射缺失」伪装成「空数据」：
+    // 页面不报错、只是空白（依赖中心整块消失就是被这个坑到，见 CHANGELOG
+    // 2026-10-09）。改为显式抛错，让调用方/UI 暴露缺失的映射。
+    const msg = `[client] No HTTP mapping for "${command}" (web mode)`;
+    console.error(msg);
+    throw new Error(msg);
   }
 
   const spec = typeof entry === 'function' ? entry(args || {}) : entry;
