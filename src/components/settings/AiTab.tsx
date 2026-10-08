@@ -207,10 +207,10 @@ export function AiTab({
                                 <div className="text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
                                   {t('ai_enabled_models', { n: enabledModels.length })}
                                 </div>
-                                {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
+                                {(['Embedding', 'Llm', 'Reranker', 'Unknown'] as const).map(group => {
                                   const matched = enabledModels.filter(m => m.model_type === group)
                                   if (matched.length === 0) return null
-                                  const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
+                                  const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : group === 'Reranker' ? 'model_group_reranker' : 'model_group_unknown'
                                   return (
                                     <div key={`en-${group}`} className="mb-1">
                                       <div className="text-[10px] text-gray-400 dark:text-gray-500 px-1">{t(labelKey, { n: matched.length })}</div>
@@ -225,6 +225,7 @@ export function AiTab({
                                           >
                                             <option value="Embedding">{t('ai_type_embedding')}</option>
                                             <option value="Llm">{t('ai_type_llm')}</option>
+                                            <option value="Reranker">{t('ai_type_reranker')}</option>
                                             <option value="Unknown">{t('ai_type_unknown')}</option>
                                           </select>
                                           <button
@@ -251,12 +252,12 @@ export function AiTab({
                               className="mb-1.5 w-full px-2 py-1 text-xs bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded text-gray-900 dark:text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-blue-500 transition-colors"
                             />
                             <div className="space-y-1">
-                              {(['Embedding', 'Llm', 'Unknown'] as const).map(group => {
+                              {(['Embedding', 'Llm', 'Reranker', 'Unknown'] as const).map(group => {
                                 const matched = p.models.filter(m =>
                                   m.model_type === group && (!filter || m.id.toLowerCase().includes(filter)))
                                 if (matched.length === 0) return null
                                 const key = `${p.id}:${group}`
-                                const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : 'model_group_unknown'
+                                const labelKey = group === 'Embedding' ? 'model_group_embedding' : group === 'Llm' ? 'model_group_llm' : group === 'Reranker' ? 'model_group_reranker' : 'model_group_unknown'
                                 const isExpanded = expanded(key)
                                 return (
                                   <div key={group}>
@@ -281,10 +282,12 @@ export function AiTab({
                                               ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300'
                                               : m.model_type === 'Llm'
                                                 ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300'
-                                                : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
+                                                : m.model_type === 'Reranker'
+                                                  ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                                                  : 'bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400'
                                           }`}
                                         >
-                                          {m.model_type === 'Embedding' ? 'Embed' : m.model_type === 'Llm' ? 'LLM' : '?'}
+                                          {m.model_type === 'Embedding' ? 'Embed' : m.model_type === 'Llm' ? 'LLM' : m.model_type === 'Reranker' ? 'Rerank' : '?'}
                                         </span>
                                         <span className="flex-1 text-xs font-mono text-gray-700 dark:text-gray-300 truncate px-0.5">{m.id}</span>
                                         {m.enabled ? (

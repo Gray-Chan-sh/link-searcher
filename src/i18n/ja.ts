@@ -67,6 +67,7 @@ const ja: Record<string, string> = {
     ai_model_type: 'モデルタイプ',
     ai_type_embedding: 'Embedding',
     ai_type_llm: 'LLM',
+    ai_type_reranker: 'リランカー',
     ai_type_unknown: '不明',
     ai_pull_error: 'モデルのプルに失敗しました: {detail}',
     ai_add_required: '名前とベースURLを入力してください',
@@ -398,6 +399,7 @@ const ja: Record<string, string> = {
     ai_model_in_use: '使用中 — 先に切り替えてください',
     model_group_embedding: 'Embedding ({n})',
     model_group_llm: 'LLM ({n})',
+    model_group_reranker: 'リランカー ({n})',
     model_group_unknown: '不明 ({n})',
 
     err_empty_question: '質問を入力してください',

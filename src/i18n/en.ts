@@ -67,6 +67,7 @@ const en: Record<string, string> = {
     ai_model_type: 'Model Type',
     ai_type_embedding: 'Embedding',
     ai_type_llm: 'LLM',
+    ai_type_reranker: 'Reranker',
     ai_type_unknown: 'Unknown',
     ai_pull_error: 'Model pull failed: {detail}',
     ai_add_required: 'Please fill in Name and Base URL',
@@ -402,6 +403,7 @@ const en: Record<string, string> = {
     ai_model_in_use: 'In use — switch it first',
     model_group_embedding: 'Embedding ({n})',
     model_group_llm: 'LLM ({n})',
+    model_group_reranker: 'Reranker ({n})',
     model_group_unknown: 'Unknown ({n})',
 
     err_empty_question: 'Question cannot be empty',

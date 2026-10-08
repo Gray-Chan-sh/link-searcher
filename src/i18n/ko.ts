@@ -67,6 +67,7 @@ const ko: Record<string, string> = {
     ai_model_type: '모델 유형',
     ai_type_embedding: 'Embedding',
     ai_type_llm: 'LLM',
+    ai_type_reranker: '리랭커',
     ai_type_unknown: '알 수 없음',
     ai_pull_error: '모델 가져오기 실패: {detail}',
     ai_add_required: '이름과 기본 URL을 입력하세요',
@@ -398,6 +399,7 @@ const ko: Record<string, string> = {
     ai_model_in_use: '사용 중 — 먼저 전환하세요',
     model_group_embedding: 'Embedding ({n})',
     model_group_llm: 'LLM ({n})',
+    model_group_reranker: '리랭커 ({n})',
     model_group_unknown: '알 수 없음 ({n})',
 
     err_empty_question: '질문을 입력해 주세요',

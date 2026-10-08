@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-10-09：AI 设置无法启用远端重排模型 —— 模型列表漏了 Reranker 类型
+
+- **现象**：给局域网 provider（如 Mac 上 `192.168.1.100:8000` 的 omlx，含 `bge-reranker-v2-m3`）后，怎么点都**无法启用重排模型**：「重排模型」下拉永远为空。
+- **根因**：AI 设置页的 provider 模型列表**只按 `Embedding / Llm / Unknown` 三类分组**（`AiTab.tsx` 的分组数组、类型下拉、徽章），**完全漏了 `Reranker`**。于是被自动分类为 Reranker 的模型不在列表里渲染 → 点不到「＋ 启用」→ 永远是 `enabled=false`；而「重排模型」下拉只收录 `enabled !== false` 且类型为 Reranker 的模型（`useSettingsProviders.ts:65`）→ 永远为空。旁证：provider 行显示「3 个模型」，展开只有 2 个（重排那个被吞掉）。后端本身支持重排（`set_active_model(kind="reranker")`、本地重排模型均正常），纯前端 UI 遗漏。
+- **修复**：`AiTab.tsx` 两处分组数组加入 `Reranker`、类型下拉补 `Reranker` 选项、徽章补 `Rerank`（琥珀色）、`labelKey` 补 `model_group_reranker`；i18n zh/en/ja/ko 各加 `ai_type_reranker`、`model_group_reranker`。
+- **涉及文件**：`src/components/settings/AiTab.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`CHANGELOG.md`。
+- **验证**：`npx tsc -b` 0；`npm run test` 70 过；`npm run lint` 0；`semgrep --severity ERROR` 0。
+
+---
+
 ## 2026-10-09：macOS 局域网 AI 网关连不上 —— 补「本地网络」声明 + 友好报错
 
 - **现象**：在 Mac 上给 AI 添加局域网 LLM 供应商（9router，`http://192.168.1.50:20128/v1`）后测试失败：`Connection Failed: Connect error: No route to host (os error 65)`。同机 shell 的 `curl`/`python`/`nc`/`node` 却能连通同一地址。

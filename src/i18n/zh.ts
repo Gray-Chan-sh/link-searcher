@@ -67,6 +67,7 @@ const zh: Record<string, string> = {
     ai_model_type: '模型类型',
     ai_type_embedding: 'Embedding',
     ai_type_llm: 'LLM',
+    ai_type_reranker: '重排',
     ai_type_unknown: '未知',
     ai_pull_error: '模型拉取失败：{detail}',
     ai_add_required: '请填写名称与 Base URL',
@@ -402,6 +403,7 @@ const zh: Record<string, string> = {
     ai_model_in_use: '当前使用中，请先切换',
     model_group_embedding: 'Embedding ({n})',
     model_group_llm: 'LLM ({n})',
+    model_group_reranker: '重排 ({n})',
     model_group_unknown: '未知 ({n})',
 
     err_empty_question: '问题不能为空',
