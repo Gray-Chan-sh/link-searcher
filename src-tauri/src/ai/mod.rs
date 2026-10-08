@@ -1629,6 +1629,26 @@ pub fn capabilities() -> (bool, bool) {
     (embedding_enabled(), llm_enabled())
 }
 
+/// 把底层网络错误翻译成用户能据此行动的信息。
+///
+/// macOS 15+ 的「本地网络」隐私会把**局域网**访问拒绝成
+/// `EHOSTUNREACH (os error 65)`（"No route to host"），而同机的公网/网关却
+/// 正常——用户只看到一个莫名的 "No route to host"，完全无从下手（见 CHANGELOG
+/// 2026-10-09）。这里补一句可操作的提示。非 macOS 或非该错误时原样返回。
+fn friendly_net_error(err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    let unreachable = err.contains("os error 65") || lower.contains("no route to host");
+    if cfg!(target_os = "macos") && unreachable {
+        format!(
+            "{err} —— 若目标在局域网内，可能是 macOS「本地网络」隐私拦截：\
+             系统设置 → 隐私与安全性 → 本地网络，允许 Link-Searcher（或启动它的终端）；\
+             也可改用该服务的 Tailscale / 局域网外地址"
+        )
+    } else {
+        err.to_string()
+    }
+}
+
 /// Pull a provider's model list from `GET {base_url}/models`, classified by
 /// name heuristics. Returns `(models, err?)` — an error string when the
 /// request failed (caller keeps the old list).
@@ -1681,7 +1701,7 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
                 .collect::<Vec<_>>();
             (models, None)
         }
-        Err(e) => (Vec::new(), Some(e)),
+        Err(e) => (Vec::new(), Some(friendly_net_error(&e))),
     }
 }
 
@@ -1985,6 +2005,22 @@ mod tests {
         assert_eq!(classify_model_by_name("gpt-4o"), ModelType::Llm);
         assert_eq!(classify_model_by_name("custom-thing"), ModelType::Llm);
         assert_eq!(classify_model_by_name("Qwen-EMBED-2"), ModelType::Embedding);
+    }
+
+    #[test]
+    fn friendly_net_error_hints_only_for_unreachable() {
+        // 普通错误原样返回，不引入噪音。
+        assert_eq!(friendly_net_error("boom"), "boom");
+        assert_eq!(friendly_net_error("status code 404"), "status code 404");
+        // EHOSTUNREACH：macOS 上追加可操作提示，其它平台原样。
+        let e = "http://192.168.1.50:20128/v1/models: Connection Failed: Connect error: No route to host (os error 65)";
+        let out = friendly_net_error(e);
+        if cfg!(target_os = "macos") {
+            assert!(out.starts_with(e));
+            assert!(out.contains("本地网络"));
+        } else {
+            assert_eq!(out, e);
+        }
     }
 
     #[test]

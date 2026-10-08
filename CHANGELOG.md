@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-10-09：macOS 局域网 AI 网关连不上 —— 补「本地网络」声明 + 友好报错
+
+- **现象**：在 Mac 上给 AI 添加局域网 LLM 供应商（9router，`http://192.168.1.50:20128/v1`）后测试失败：`Connection Failed: Connect error: No route to host (os error 65)`。同机 shell 的 `curl`/`python`/`nc`/`node` 却能连通同一地址。
+- **根因**：**macOS 15+ 的「本地网络」隐私（Local Network Privacy）**。应用访问局域网其它主机被拒绝成 `EHOSTUNREACH`（"No route to host"），而公网、网关、自身地址正常；系统日志有直接证据 `Got local network blocked notification: ... bundle_id: (null)`。命令行工具在系统豁免名单里，故能连。**Tailscale 地址不属于「本地网络」，实测应用经 `http://100.101.102.50:20128/v1` 可正常连通（发现 673 个模型）。**
+- **修复**：
+  - **打包声明（治本）**：新增 `src-tauri/Info.plist`（含 `NSLocalNetworkUsageDescription`），并在 `tauri.conf.json` 的 `bundle.macOS.infoPlist` 引用——否则正式 App 缺少该键时系统不会给出正常授权弹窗，局域网访问被直接拒绝。
+  - **友好报错**：`src-tauri/src/ai/mod.rs` 新增 `friendly_net_error()`：当错误命中 `os error 65` / `No route to host` 且平台为 macOS 时，追加「系统设置 → 隐私与安全性 → 本地网络」的可操作提示（供应商列表拉取/测试均走此路径），避免再被这种报错误导。附单测。
+  - **用户侧即时解法**：把 9router 的 `base_url` 改为 Tailscale 地址 `http://100.101.102.50:20128/v1`（已在 Mac 上执行并拉取 673 个模型）；或按系统设置给应用/终端授予「本地网络」权限。
+- **涉及文件**：`src-tauri/Info.plist`（新）、`src-tauri/tauri.conf.json`、`src-tauri/src/ai/mod.rs`、`CHANGELOG.md`。
+- **验证**：cargo 测试（`friendly_net_error`）/ `tsc` / lint / `semgrep --error` 见下；Mac 端重启 dev 后 provider 测试通过。
+
+---
+
 ## 2026-10-09：Web 端依赖中心整块空白 —— 陈旧 dist + `invoke` 缺映射静默兜底
 
 - **现象**：通过 `https://<host>:8443/#/settings` 打开「依赖中心」，只见标题、说明和**空的 `data dir:`**，一个依赖项都不显示（后端 `/api/setup/status` 实测 200 + 9 个依赖，正常）。

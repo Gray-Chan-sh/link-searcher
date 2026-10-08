@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  打包（bundle）时合并进 macOS App 的 Info.plist，见 tauri.conf.json
+  bundle.macOS.infoPlist。
+
+  macOS 15+ 起，访问**局域网**（RFC1918 等）需要「本地网络」隐私授权；缺少
+  NSLocalNetworkUsageDescription 时系统不会给出正常授权弹窗，局域网访问会被
+  直接拒绝成 EHOSTUNREACH（"No route to host"）。自建/局域网内的 LLM 网关
+  （如 9router、Ollama、vLLM）正是这类访问，因此必须声明该键。
+-->
+<plist version="1.0">
+<dict>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Link-Searcher 需要访问本地网络，以连接局域网内的 LLM / Embedding / 重排网关（如自建的 9router、Ollama、vLLM）与本地服务。</string>
+</dict>
+</plist>
