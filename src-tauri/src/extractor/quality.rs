@@ -1,9 +1,22 @@
 use std::collections::HashSet;
 use std::sync::LazyLock;
 
+/// Where the final extracted body came from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BodySource {
+    #[default]
+    Unknown,
+    PdfText,
+    ImageOcr,
+    Hybrid,
+    FallbackText,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ExtractMeta {
     pub ocr_used: bool,
+    pub body_source: BodySource,
     pub mean_confidence: Option<f32>,
     pub page_count: Option<u32>,
     pub image_dims: Option<(u32, u32)>,

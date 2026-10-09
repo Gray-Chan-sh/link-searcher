@@ -22,7 +22,6 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use super::poppler::pdftotext_path;
@@ -32,9 +31,6 @@ use super::poppler::pdftotext_path;
 const MAX_LINE_CHARS: usize = 4;
 /// Minimum number of collinear candidates for a diagonal chain.
 const MIN_CHAIN: usize = 4;
-/// A line whose whole text matches a known dictionary fragment may be up to this
-/// many non-whitespace characters (covers e.g. `2026. 3. 30` date stamps).
-const MAX_DICT_LINE_CHARS: usize = 16;
 /// Allowed slope (dy/dx) range. Negative = text rising to the right. Body text is
 /// horizontal (slope ≈ 0) and vertical CJK is steep (|slope| ≫ 2), both excluded.
 const SLOPE_MIN: f64 = -2.0;
@@ -43,22 +39,6 @@ const SLOPE_MAX: f64 = -0.12;
 const MIN_SPAN: f64 = 40.0;
 /// Point-to-line tolerance, in PDF points.
 const INLIER_TOL: f64 = 6.0;
-
-// ── Corpus-wide watermark fragment dictionary ──────────────────────────────
-
-static DICT: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
-
-fn dict() -> &'static RwLock<HashSet<String>> {
-    DICT.get_or_init(|| RwLock::new(HashSet::new()))
-}
-
-/// Replace the in-memory dictionary (called by the indexer after loading it
-/// from SQLite). Cheap; safe to call repeatedly.
-pub fn set_dictionary(tokens: impl IntoIterator<Item = String>) {
-    let mut w = dict().write().unwrap_or_else(|e| e.into_inner());
-    w.clear();
-    w.extend(tokens);
-}
 
 // ── Data model ─────────────────────────────────────────────────────────────
 
@@ -169,16 +149,13 @@ fn run_bbox_layout(bin: &Path, path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&out).to_string())
 }
 
-/// Analyze parsed word boxes and produce a scan result, using the current
-/// corpus-wide dictionary. Pure function (no I/O) — unit-testable.
+/// Analyze parsed word boxes using only geometry from this PDF. Pure function
+/// (no I/O) — unit-testable and deliberately independent of other documents.
 pub fn analyze(pages: &[PageBoxes]) -> WatermarkScan {
-    let d = dict().read().unwrap_or_else(|e| e.into_inner()).clone();
-    analyze_with(pages, &d)
+    analyze_with(pages)
 }
 
-/// Like [`analyze`] but with an explicit dictionary (used by tests to avoid
-/// touching the shared global state).
-pub fn analyze_with(pages: &[PageBoxes], dict_set: &HashSet<String>) -> WatermarkScan {
+fn analyze_with(pages: &[PageBoxes]) -> WatermarkScan {
     let mut tokens: Vec<String> = Vec::new();
     let mut token_seen: HashSet<String> = HashSet::new();
     let mut removed_chars = 0usize;
@@ -192,24 +169,20 @@ pub fn analyze_with(pages: &[PageBoxes], dict_set: &HashSet<String>) -> Watermar
         let mut flat: Vec<WordBox> = Vec::new();
         let mut line_of: Vec<usize> = Vec::new();
         let mut line_char_counts: Vec<usize> = Vec::new();
-        let mut line_texts: Vec<String> = Vec::new();
         for (li, line) in page.lines.iter().enumerate() {
             let mut chars = 0usize;
-            let mut joined: Vec<&str> = Vec::new();
             for w in &line.words {
                 chars += w.text.chars().filter(|c| !c.is_whitespace()).count();
-                joined.push(w.text.trim());
                 line_of.push(li);
                 flat.push(w.clone());
             }
             line_char_counts.push(chars);
-            line_texts.push(joined.join(" "));
         }
         if flat.is_empty() {
             continue;
         }
 
-        let removed = detect_watermark_words(&flat, &line_of, &line_char_counts, &line_texts, dict_set);
+        let removed = detect_watermark_words(&flat, &line_of, &line_char_counts);
 
         // Reconstruct raw / cleaned text (one line per bbox line).
         let mut raw_here = String::new();
@@ -276,8 +249,6 @@ fn detect_watermark_words(
     flat: &[WordBox],
     line_of: &[usize],
     line_char_counts: &[usize],
-    line_texts: &[String],
-    dict_set: &HashSet<String>,
 ) -> Vec<bool> {
     let mut removed = vec![false; flat.len()];
 
@@ -291,20 +262,6 @@ fn detect_watermark_words(
     let chain_hits = ransac_diagonals(flat, &cands);
     for i in chain_hits {
         removed[i] = true;
-    }
-
-    // 2) Dictionary-confirmed lines (catches longer signature fragments such as
-    //    a date stamp that are not part of the short-token chain). Restricted to
-    //    short lines so a legitimate word from a long body line is never removed.
-    if !dict_set.is_empty() {
-        for i in 0..flat.len() {
-            let line = &line_texts[line_of[i]];
-            if line.chars().filter(|c| !c.is_whitespace()).count() <= MAX_DICT_LINE_CHARS
-                && dict_set.contains(line.trim())
-            {
-                removed[i] = true;
-            }
-        }
     }
 
     removed
@@ -503,7 +460,7 @@ mod tests {
     #[test]
     fn detects_diagonal_watermark_and_keeps_body() {
         let pages = vec![synthetic_page()];
-        let scan = analyze_with(&pages, &HashSet::new());
+        let scan = analyze(&pages);
         assert!(scan.found, "diagonal watermark should be detected");
         assert!(
             scan.cleaned_text.contains("常宏"),
@@ -534,7 +491,7 @@ mod tests {
                 ("正文", 160.0, 100.0 + i as f64 * 12.0),
             ]));
         }
-        let scan = analyze_with(&[PageBoxes { lines }], &HashSet::new());
+        let scan = analyze(&[PageBoxes { lines }]);
         assert!(!scan.found, "horizontal body text must not be flagged");
         assert_eq!(scan.removed_chars, 0);
     }
@@ -546,24 +503,13 @@ mod tests {
         for i in 0..8 {
             lines.push(line(&[("1", 80.0 + i as f64 * 40.0, 300.0)]));
         }
-        let scan = analyze_with(&[PageBoxes { lines }], &HashSet::new());
+        let scan = analyze(&[PageBoxes { lines }]);
         assert!(
             !scan.found,
             "collinear-on-a-row tiny tokens must not be treated as a watermark"
         );
     }
 
-    #[test]
-    fn dictionary_fragment_on_tiny_line_is_removed() {
-        let mut dict_set = HashSet::new();
-        dict_set.insert("2026. 3. 30".to_string());
-        let mut lines = Vec::new();
-        lines.push(line(&[("正文内容", 80.0, 100.0), ("继续", 160.0, 100.0)]));
-        lines.push(line(&[("2026. 3. 30", 500.0, 400.0)]));
-        let scan = analyze_with(&[PageBoxes { lines }], &dict_set);
-        assert!(scan.found, "dictionary fragment should be removed");
-        assert!(!scan.cleaned_text.contains("2026"));
-    }
 
     #[test]
     fn parses_poppler_bbox_xml() {

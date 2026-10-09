@@ -24,7 +24,7 @@ use poppler::{pdftotext_path, run_with_timeout};
 
 mod scan;
 mod watermark;
-pub use watermark::{set_dictionary, WatermarkScan};
+pub use watermark::WatermarkScan;
 use scan::{is_image_based_scan, pages_rotated};
 #[cfg(test)]
 use scan::{full_page_image_pages, page_media_size, page_rotate, scan_tests_row};
@@ -179,15 +179,37 @@ impl PdfExtractor {
         // PDFs (e.g. PowerPoint exports) also carry full-page background images
         // yet have a clean text layer — those must not pay for OCR.
         if is_image_based_scan(path, &doc) {
+            let watermark_scan = watermark::scan(path);
             if let Some(text) = try_pdftotext_extract(path)
+                && !watermark_dominates_text(watermark_scan.as_ref(), pages.len())
                 && prefer_recovered_text("", &text, pages.len())
             {
+                if let Some((selected, ocr_pages)) = selectively_ocr_image_pages(
+                    path,
+                    &text,
+                    pages.len(),
+                    lang,
+                    &engine,
+                ) {
+                    log::info!(
+                        "[PDF] {:?}: image-based scan selective OCR replaced {} page(s)",
+                        path.file_name(),
+                        ocr_pages
+                    );
+                    return Ok((selected, true));
+                }
                 log::info!(
                     "[PDF] {:?}: image-based scan but pdftotext layer is clean — using text layer ({} chars)",
                     path.file_name(),
                     text.chars().count()
                 );
                 return Ok((text, false));
+            }
+            if watermark_scan.as_ref().is_some_and(|scan| scan.found) {
+                log::info!(
+                    "[PDF] {:?}: image-based scan has geometry watermark evidence; text-layer acceptance requires body-density check",
+                    path.file_name()
+                );
             }
             if let Some(ocr_text) = run_pdf_ocr_pipeline(path, pages.len(), &[], lang, &engine, rotated) {
                 log::info!(
@@ -301,6 +323,11 @@ impl PdfExtractor {
                 Vec::new()
             };
 
+        // Phase 1: emit a page-level source diagnostic without changing the
+        // existing document-level selection below. This makes mixed PDFs and
+        // watermark-heavy text layers visible before we enable page routing.
+        log_page_source_diagnostics(&page_texts, &inspector_ocr_pages, path);
+
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
         let is_rep = is_repetitive(&merged);
@@ -395,6 +422,13 @@ impl PdfExtractor {
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<(String, super::quality::ExtractMeta)> {
         let (mut text, mut ocr_used) = self.extract_with_lang(path, lang, engine.clone())?;
+        // Phase 1 diagnostic: retain the current document-level decision while
+        // exposing its source. Page-level source selection will refine this.
+        let mut body_source = if ocr_used {
+            super::quality::BodySource::ImageOcr
+        } else {
+            super::quality::BodySource::PdfText
+        };
         let page_count = get_pdf_page_count(path).ok();
         let pages = page_count.unwrap_or(1).max(1) as usize;
 
@@ -448,6 +482,7 @@ impl PdfExtractor {
                         if !filtered.trim().is_empty() {
                             text = filtered;
                             ocr_used = true;
+                            body_source = super::quality::BodySource::ImageOcr;
                             wm_removed = true;
                             log::info!(
                                 "[PDF] {:?}: text layer was watermark-dominated — escalated to OCR",
@@ -468,6 +503,7 @@ impl PdfExtractor {
 
         let meta = super::quality::ExtractMeta {
             ocr_used,
+            body_source,
             mean_confidence: None,
             page_count,
             image_dims: None,
@@ -494,6 +530,101 @@ impl Extractor for PdfExtractor {
         let lang = global_ocr_lang();
         self.extract_with_lang(path, &lang, None).map(|(text, _ocr)| text)
     }
+}
+
+/// A watermark-heavy text layer is evidence only, not a body source. Keep the
+/// threshold conservative: a page with substantial cleaned text can still use
+/// the cleaned layer, while a mostly-fragmentary layer must go to image OCR.
+fn watermark_dominates_text(scan: Option<&WatermarkScan>, page_count: usize) -> bool {
+    let Some(scan) = scan else { return false };
+    if !scan.found {
+        return false;
+    }
+    let cleaned_non_ws = scan.cleaned_text.chars().filter(|c| !c.is_whitespace()).count();
+    scan.removed_ratio() > 0.5 || cleaned_non_ws < 50 * page_count.max(1)
+}
+
+/// Replace only sparse/garbled/repetitive pages in an image-backed PDF. This is
+/// the first safe step toward page-level routing: healthy text pages remain
+/// untouched, while pages that cannot be trusted as a body source use OCR.
+fn selectively_ocr_image_pages(
+    path: &Path,
+    text: &str,
+    page_count: usize,
+    lang: &str,
+    engine: &super::ocr::OcrEngineType,
+) -> Option<(String, usize)> {
+    let page_texts: Vec<String> = text
+        .split('\x0c')
+        .map(|page| page.trim().to_owned())
+        .filter(|page| !page.is_empty())
+        .collect();
+    if page_texts.len() != page_count {
+        return None;
+    }
+    let candidates: Vec<usize> = page_texts
+        .iter()
+        .enumerate()
+        .filter_map(|(index, page)| page_needs_ocr(page, true).then_some(index))
+        .collect();
+    if candidates.is_empty() || candidates.len() == page_count {
+        return None;
+    }
+
+    let dpi = global_pdf_dpi();
+    let mut ocr_pages = HashMap::new();
+    for &index in &candidates {
+        let page_number = (index + 1) as u32;
+        if let Some(ocr) = ocr_single_pdf_page(path, page_number, dpi, lang, engine) {
+            ocr_pages.insert(index, ocr);
+        }
+    }
+    if ocr_pages.len() != candidates.len() {
+        return None;
+    }
+    Some((merge_page_texts(&page_texts, &ocr_pages), candidates.len()))
+}
+
+/// Emit a compact page-level diagnostic for the source-selection rollout.
+///
+/// This deliberately has no effect on extraction yet. `pdf_inspector` reports
+/// pages that are image/OCR candidates; the local text heuristics identify
+/// pages that are sparse, garbled, or repetitive. The latter are logged as
+/// uncertain rather than silently discarded because a short page can be a
+/// legitimate form or table.
+fn log_page_source_diagnostics(page_texts: &[String], inspector_ocr_pages: &[u32], path: &Path) {
+    if page_texts.is_empty() {
+        return;
+    }
+    let inspector_set: HashSet<usize> = inspector_ocr_pages.iter().map(|&p| p as usize).collect();
+    let mut pdf_text = 0usize;
+    let mut image_candidates = Vec::new();
+    let mut uncertain = Vec::new();
+
+    for (index, text) in page_texts.iter().enumerate() {
+        let has_image_candidate = inspector_set.contains(&index);
+        let sparse = is_sparse_text_layer(text, 1);
+        let garbled = is_garbled_text(text);
+        let repetitive = is_repetitive(text);
+        if has_image_candidate || garbled {
+            image_candidates.push(index + 1);
+        } else if sparse || repetitive {
+            uncertain.push(index + 1);
+        } else {
+            pdf_text += 1;
+        }
+    }
+
+    log::info!(
+        "[PDF] {:?}: page source diagnostic: total={}, pdf_text={}, image_ocr_candidate={}, uncertain={}, image_pages={:?}, uncertain_pages={:?}",
+        path.file_name(),
+        page_texts.len(),
+        pdf_text,
+        image_candidates.len(),
+        uncertain.len(),
+        image_candidates.iter().take(20).collect::<Vec<_>>(),
+        uncertain.iter().take(20).collect::<Vec<_>>(),
+    );
 }
 
 /// Best-effort read of the app-level OCR language setting. Falls back to
@@ -638,12 +769,15 @@ mod tests {
         let engine = crate::extractor::ocr::OcrEngineType::PaddleOCR;
         let t = std::time::Instant::now();
         let extractor = PdfExtractor::new();
-        match extractor.extract_with_lang(std::path::Path::new(&p), "chi_sim", Some(engine)) {
-            Ok((text, ocr_used)) => {
+        match extractor.extract_with_meta(std::path::Path::new(&p), "chi_sim", Some(engine)) {
+            Ok((text, meta)) => {
                 eprintln!(
-                    "E2E: {} chars, ocr_used={}, {:.1}s",
+                    "E2E: {} chars, ocr_used={}, body_source={:?}, watermark_detected={}, watermark_removed={}, {:.1}s",
                     text.chars().count(),
-                    ocr_used,
+                    meta.ocr_used,
+                    meta.body_source,
+                    meta.watermark_detected,
+                    meta.watermark_removed,
                     t.elapsed().as_secs_f64()
                 );
                 eprintln!(

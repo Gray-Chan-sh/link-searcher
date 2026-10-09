@@ -5,14 +5,13 @@ pub mod chunks;
 pub mod dir_config;
 pub mod search_history;
 pub mod tracker;
-pub mod watermark;
 
 use anyhow::{Context, Result};
 use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -99,6 +98,11 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Drop its table to reclaim space (idempotent — no-op on fresh DBs).
     tx.execute_batch("DROP TABLE IF EXISTS doc_qa_pairs;")
         .context("failed to drop retired doc_qa_pairs table")?;
+
+    // Watermark decisions must never leak between documents. Older databases
+    // may still contain the retired cross-document fragment dictionary.
+    tx.execute_batch("DROP TABLE IF EXISTS watermark_tokens;")
+        .context("failed to drop retired watermark_tokens table")?;
 
     // One-time normalization of dir_config.path rows stored before
     // normalize-on-write (Windows backslashes / \\?\ verbatim prefixes);
@@ -367,13 +371,6 @@ const CREATE_TABLES_SQL: &str = "
         PRIMARY KEY (md5, chunk_index)
     );
 
-    -- 跨文档水印碎片字典：同一碎片在多个文档中出现 → 判定为水印（几何之外的第二信号）。
-    -- 由索引流程在读到时回填，检测时读入内存（watermark::set_dictionary）。
-    CREATE TABLE IF NOT EXISTS watermark_tokens (
-        token       TEXT PRIMARY KEY,
-        doc_count   INTEGER NOT NULL DEFAULT 1,
-        updated_at  INTEGER NOT NULL
-    );
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any
@@ -586,7 +583,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_4() {
+    fn test_schema_version_is_7() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -595,7 +592,7 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
     }
 
     #[test]
