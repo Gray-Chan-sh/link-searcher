@@ -81,3 +81,6 @@ test-visual/results.tsv
 docs/link-searcher-architecture.visual-check.json
 # archify 工作目录（生成源已复制到 docs/diagrams/specs/，本目录为临时产物）
 .archify/
+
+# Local PDF OCR samples and extracted outputs (may contain private documents)
+ocr_test/
