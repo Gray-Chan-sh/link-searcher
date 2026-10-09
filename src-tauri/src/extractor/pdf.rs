@@ -23,6 +23,8 @@ pub use poppler::{is_pdfimages_available, is_pdftoppm_available, poppler_availab
 use poppler::{pdftotext_path, run_with_timeout};
 
 mod scan;
+mod watermark;
+pub use watermark::{set_dictionary, WatermarkScan};
 use scan::{is_image_based_scan, pages_rotated};
 #[cfg(test)]
 use scan::{full_page_image_pages, page_media_size, page_rotate, scan_tests_row};
@@ -392,8 +394,78 @@ impl PdfExtractor {
         lang: &str,
         engine: Option<super::ocr::OcrEngineType>,
     ) -> Result<(String, super::quality::ExtractMeta)> {
-        let (text, ocr_used) = self.extract_with_lang(path, lang, engine)?;
+        let (mut text, mut ocr_used) = self.extract_with_lang(path, lang, engine.clone())?;
         let page_count = get_pdf_page_count(path).ok();
+        let pages = page_count.unwrap_or(1).max(1) as usize;
+
+        // Watermark cleaning. The watermark scan is geometry-based and, when
+        // poppler is unavailable, simply yields `None` (no behaviour change).
+        //
+        // Policy: removal is a cleaning step, never a terminal one. If stripping
+        // cannot retain enough body text we escalate to OCR; if OCR also yields
+        // nothing we keep the original (watermarked) text layer rather than
+        // storing an empty document.
+        let mut wm_detected = false;
+        let mut wm_removed = false;
+        let mut wm_tokens: Vec<String> = Vec::new();
+        if let Some(scan) = watermark::scan(path)
+            && scan.found
+        {
+            wm_detected = true;
+            wm_tokens = scan.tokens.clone();
+            if ocr_used {
+                // OCR output is (in practice) watermark-immune, but a residual
+                // fragment may still slip through — drop it.
+                let filtered = watermark::filter_text(&text, &scan.tokens);
+                if !filtered.trim().is_empty() {
+                    text = filtered;
+                    wm_removed = true;
+                }
+            } else {
+                let cleaned_non_ws = scan
+                    .cleaned_text
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .count();
+                let density_ok = cleaned_non_ws >= 50 * pages;
+                if scan.removed_ratio() <= 0.5 && density_ok {
+                    log::info!(
+                        "[PDF] {:?}: watermark removed from text layer ({} fragments, {:.0}% of chars)",
+                        path.file_name(),
+                        scan.tokens.len(),
+                        scan.removed_ratio() * 100.0
+                    );
+                    text = scan.cleaned_text.clone();
+                    wm_removed = true;
+                } else {
+                    // Text layer is mostly/entirely watermark — try the image
+                    // path, which does not read the faint watermark.
+                    let resolved = super::ocr::preferred_engine(engine);
+                    if let Some(ocr) =
+                        run_pdf_ocr_pipeline(path, pages, &[], lang, &resolved, false)
+                    {
+                        let filtered = watermark::filter_text(&ocr, &scan.tokens);
+                        if !filtered.trim().is_empty() {
+                            text = filtered;
+                            ocr_used = true;
+                            wm_removed = true;
+                            log::info!(
+                                "[PDF] {:?}: text layer was watermark-dominated — escalated to OCR",
+                                path.file_name()
+                            );
+                        }
+                    }
+                    if !wm_removed {
+                        log::warn!(
+                            "[PDF] {:?}: watermark detected but body unrecoverable — keeping watermarked text layer ({} fragments)",
+                            path.file_name(),
+                            scan.tokens.len()
+                        );
+                    }
+                }
+            }
+        }
+
         let meta = super::quality::ExtractMeta {
             ocr_used,
             mean_confidence: None,
@@ -401,6 +473,9 @@ impl PdfExtractor {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: std::fs::metadata(path).ok().map(|m| m.len()),
+            watermark_detected: wm_detected,
+            watermark_removed: wm_removed,
+            watermark_tokens: wm_tokens,
         };
         Ok((text, meta))
     }

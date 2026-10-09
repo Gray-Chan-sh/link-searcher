@@ -224,6 +224,11 @@ impl IndexerService {
                 .ok()
                 .map(|v| crate::extractor::ocr::map_engine(&v));
             let ocr_engine = engine_override.clone().or(db_engine);
+            // Load the cross-document watermark dictionary so detection can use
+            // it (a fragment seen in >=2 documents is a stamp, not content).
+            if let Ok(tokens) = crate::db::watermark::load_tokens(conn) {
+                crate::extractor::pdf::set_dictionary(tokens);
+            }
             let extracted = match crate::extractor::extract_text_with_meta(
                 &job.file_path,
                 &ocr_lang,
@@ -232,7 +237,13 @@ impl IndexerService {
                 Ok((t, meta)) if t.len() > 10 => (t, meta),
                 Ok((t, meta)) => {
                     if file_ext.eq_ignore_ascii_case("pdf") {
-                        log::info!("[INDEX] PDF text short ({}), using as-is", t.len());
+                        // A PDF that yields almost no text is not a normal state —
+                        // surface it (quality flags will mark it LowPrintable/LowDensity)
+                        // instead of silently accepting an empty body.
+                        log::warn!(
+                            "[INDEX] PDF text short ({} chars) — 可能未成功恢复正文 (file: {file_name})",
+                            t.len()
+                        );
                         (t, meta)
                     } else {
                         log::info!("[INDEX] 提取内容过短 ({}), 尝试 OCR 回退", t.len());
@@ -281,6 +292,13 @@ impl IndexerService {
             };
             let char_count = extracted.0.chars().count();
             log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
+            // Grow the cross-document watermark dictionary with fragments found
+            // in this document (only helps detection once seen in >=2 documents).
+            if !extracted.1.watermark_tokens.is_empty()
+                && let Err(e) = crate::db::watermark::record_tokens(conn, &extracted.1.watermark_tokens)
+            {
+                log::warn!("[INDEX] 记录水印碎片失败: {e}");
+            }
             let mut qmeta = extracted.1.clone();
             qmeta.file_size = Some(file_size);
             let quality =

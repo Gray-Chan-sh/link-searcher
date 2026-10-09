@@ -195,6 +195,7 @@ pub fn extract_text_with_meta(
                         image_dims: dims,
                         pre_sanitize_fffd_ratio: None,
                         file_size: std::fs::metadata(path).ok().map(|m| m.len()),
+                        ..Default::default()
                     };
                     (Ok(text), meta)
                 }

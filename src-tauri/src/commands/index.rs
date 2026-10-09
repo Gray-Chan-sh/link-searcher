@@ -1150,6 +1150,7 @@ pub(crate) fn run_quality_backfill(
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
 
         // 源文件大小：区分"本来就没有正文"（空文件）与"抽不出正文"（真问题）。
@@ -1600,7 +1601,8 @@ mod tests {
                 page_count: None,
                 image_dims: None,
                 pre_sanitize_fffd_ratio: None,
-            file_size: None,
+                file_size: None,
+                ..Default::default()
             };
             let quality = crate::extractor::quality::compute_quality(&row.text_content, &meta, &ext);
             let flags_json = crate::extractor::quality::flags_to_json(&quality.flags);

@@ -4,7 +4,20 @@
 
 ---
 
-## 2026-10-09：AI 设置无法启用远端重排模型 —— 模型列表漏了 Reranker 类型
+## 2026-10-09：PDF 水印自动识别与去除（文字层/矢量层，跨文档字典）
+
+- **现象**：律所签名水印（`陈骥` + `X/3/4/**` 碎片，斜向浅灰）会被 OCR 写进 PDF 文字层；带此类水印的 PDF 被直接采纳文字层后，水印碎片静默进入索引（实测某 17 页笔录文字层约 **49.3%** 的非空行是水印碎片）。抽样 88 个可解析 PDF 中有 **16 个（≈18%）** 带同一水印签名。
+- **根因**：原 `is_watermark_text()` 只比较“每页开头的归一化文本是否重复”，而该水印是**斜向、分散、跨页坐标一致但每页前缀不同**，因此漏判；且 `extract_with_lang` 在所有 OCR 路径失败时直接 `Ok((merged, false))` 返回文字层，纯水印文字层也会被当正文入库。
+- **修复**：
+  - **新增 `extractor/pdf/watermark.rs`**：`pdftotext -bbox-layout` 取词坐标 → “行内总字数 ≤4”的候选 → 负斜率对角链（RANSAC，`MIN_CHAIN=4`，`span≥40pt`）→ 命中即判水印；再叠加**跨文档碎片字典**（同一碎片在 ≥2 个文档出现即视为水印）兜住日期戳等较长碎片。
+  - **去除策略（可回退，非终点）**：命中后按几何剔除碎片；水印占比 >50% 或剔除后正文密度不足 → 升级走图像 OCR（实测 OCR 不读浅灰水印）；OCR 结果仅删**非中文**碎片，避免误删 `上海`/`律师`/`陈骥` 等真实正文；**正文无法恢复时回退带水印文字层**，绝不返回空。
+  - **新增 `db/watermark.rs` + `watermark_tokens` 表**：索引前载入字典、抽取后回填碎片（`doc_count≥2` 才生效）。
+  - **`quality.rs`**：`ExtractMeta` 增 `watermark_detected/removed/tokens`，新增 `QualityFlag::WatermarkResidual`（“检出水印但未去除”进质量审计）；`indexer.rs` 空正文由 `info 使用原样` 改为 `WARN 可能未恢复正文`。
+  - **修复管道死锁**：`poppler::run_with_timeout` 在子进程退出后才读 stdout，而 `-bbox-layout` 输出约 360KB ≫ 64KB 管道缓冲 → 子进程阻塞、120s 超时、检测整体失效。新 `run_bbox_layout` 用**独立线程边读边等**，实测 0.17s 完成。
+- **涉及文件**：`src-tauri/src/extractor/pdf/watermark.rs`（新）、`src-tauri/src/db/watermark.rs`（新）、`src-tauri/src/extractor/pdf.rs`、`src-tauri/src/extractor/quality.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/indexer.rs`、`src-tauri/src/commands/index.rs`。
+- **验证**：新增单测 6 项（对角水印命中且保留正文 / 水平正文不误判 / 行内短 token 不误判 / 字典碎片 / bbox 解析 / 保守过滤）；`cargo test --lib` **503 过 0 失败**；实测三文件——case2 水印行 49.3%→17.9%、正文保留，case1/case3 无变化；反例 `证据目录.pdf`、`万1.pdf`（发票，含真实“上海小城律师事务所”）零改动。
+
+---
 
 - **现象**：给局域网 provider（如 Mac 上 `192.168.1.100:8000` 的 omlx，含 `bge-reranker-v2-m3`）后，怎么点都**无法启用重排模型**：「重排模型」下拉永远为空。
 - **根因**：AI 设置页的 provider 模型列表**只按 `Embedding / Llm / Unknown` 三类分组**（`AiTab.tsx` 的分组数组、类型下拉、徽章），**完全漏了 `Reranker`**。于是被自动分类为 Reranker 的模型不在列表里渲染 → 点不到「＋ 启用」→ 永远是 `enabled=false`；而「重排模型」下拉只收录 `enabled !== false` 且类型为 Reranker 的模型（`useSettingsProviders.ts:65`）→ 永远为空。旁证：provider 行显示「3 个模型」，展开只有 2 个（重排那个被吞掉）。后端本身支持重排（`set_active_model(kind="reranker")`、本地重排模型均正常），纯前端 UI 遗漏。

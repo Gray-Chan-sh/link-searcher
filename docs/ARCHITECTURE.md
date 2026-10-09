@@ -523,6 +523,7 @@ LLM 的上下文窗口有限，不能把几万条命中全塞进去。所以设�
 - **RAG 检索/注入重做**：四路检索（BM25 / 整篇语义 / 段落语义 / 路径）+ RRF 融合 + cross-encoder 重排；注入层改为按相关性排序、预算与面板一致，并标注材料源文档区间（`injected_spans`）。
 - **消歧 / 指代系统**：新增 `src-tauri/src/commands/clarify.rs`（脏提案 → `State`/`Grounding` → `Resolver` 计数裁决），指代未绑定时「只问不答」+ 槽位填空式澄清；候选来源扩到正文实体。
 - **提取质量评分**：`src-tauri/src/extractor/quality.rs` 五信号评分（可打印率 / 乱码率 / OCR 置信度 / 字符密度 / 词典命中），低质量审计与批量重提取（索引状态页、浏览页质量列）。
+- **PDF 水印识别/去除**：`src-tauri/src/extractor/pdf/watermark.rs` 用 `pdftotext -bbox-layout` 的词坐标做**几何判定**（独占短行 + 负斜率对角链 + 跨页一致），叠加跨文档碎片字典（`db/watermark.rs` + `watermark_tokens` 表，`doc_count≥2` 生效）；命中后剔除碎片，正文过稀则升级图像 OCR，正文不可恢复时回退带水印文字层（新增 `QualityFlag::WatermarkResidual`）。
 - **首启向导合并**：`SetupWizard` 统一「功能介绍 → 依赖检测/下载 → 准备就绪」，设置页可重跑。
 - **Web API 安全加固**：`/api/auth/token` 移入鉴权中间件、静态文件路径穿越修复、恒定时间 token 比较。
 - **索引状态页信息架构**：5 张统计卡 + 独立扫描进度卡片 +「维护工具」折叠区。

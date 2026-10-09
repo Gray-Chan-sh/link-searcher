@@ -14,6 +14,13 @@ pub struct ExtractMeta {
     /// （0 字节的 readme.md、占位文件）不该被当成低质量；**源文件非空却抽不出
     /// 正文**（纯扫描件没走成 OCR）才是真问题，必须标出来。
     pub file_size: Option<u64>,
+    /// 检测到文档带水印（几何/字典判定）。
+    pub watermark_detected: bool,
+    /// 水印已成功从正文中去除。`watermark_detected && !watermark_removed`
+    /// 表示"检测到水印但正文无法恢复，保留了带水印的文字层"。
+    pub watermark_removed: bool,
+    /// 检测到的水印碎片（用于跨文档字典增长与 OCR 结果二次过滤）。
+    pub watermark_tokens: Vec<String>,
 }
 
 /// 源文件小到"本来就不该有正文"的阈值。0 字节按空文件处理；
@@ -39,6 +46,8 @@ pub enum QualityFlag {
     CjkSpaced,
     Exhausted,
     MaxReextract,
+    /// 检测到水印，但正文无法恢复，保留了带水印的文字层。需要人工/后续重提取。
+    WatermarkResidual,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -245,6 +254,10 @@ pub fn compute_quality(text: &str, meta: &ExtractMeta, file_ext: &str) -> Qualit
     {
         flags.push(QualityFlag::CjkSpaced);
     }
+    // 检测到水印但没能去除 → 正文里很可能混着水印碎片，标出来供质量审计处理。
+    if meta.watermark_detected && !meta.watermark_removed {
+        flags.push(QualityFlag::WatermarkResidual);
+    }
 
     QualityResult {
         score: composite,
@@ -430,6 +443,7 @@ mod tests {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
         let res = compute_quality(text, &meta, "txt");
         assert!(
@@ -471,6 +485,7 @@ mod tests {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
         let res_high = compute_quality(text, &meta_high, "png");
         assert!(
@@ -485,6 +500,7 @@ mod tests {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
         let res_low = compute_quality(text, &meta_low, "png");
         assert!(
@@ -503,6 +519,7 @@ mod tests {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
         let res_some = compute_quality(text, &meta_some, "pdf");
         assert!(res_some.score > 0.0);
@@ -514,6 +531,7 @@ mod tests {
             image_dims: None,
             pre_sanitize_fffd_ratio: None,
             file_size: None,
+            ..Default::default()
         };
         let res_none = compute_quality(text, &meta_none, "pdf");
         assert!(res_none.score > 0.0);

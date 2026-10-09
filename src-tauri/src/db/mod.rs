@@ -5,6 +5,7 @@ pub mod chunks;
 pub mod dir_config;
 pub mod search_history;
 pub mod tracker;
+pub mod watermark;
 
 use anyhow::{Context, Result};
 use r2d2::{CustomizeConnection, Pool};
@@ -364,6 +365,14 @@ const CREATE_TABLES_SQL: &str = "
         vector      BLOB NOT NULL,
         updated_at  INTEGER NOT NULL,
         PRIMARY KEY (md5, chunk_index)
+    );
+
+    -- 跨文档水印碎片字典：同一碎片在多个文档中出现 → 判定为水印（几何之外的第二信号）。
+    -- 由索引流程在读到时回填，检测时读入内存（watermark::set_dictionary）。
+    CREATE TABLE IF NOT EXISTS watermark_tokens (
+        token       TEXT PRIMARY KEY,
+        doc_count   INTEGER NOT NULL DEFAULT 1,
+        updated_at  INTEGER NOT NULL
     );
 ";
 
