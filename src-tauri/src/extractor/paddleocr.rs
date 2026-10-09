@@ -91,7 +91,7 @@ impl EnginePool {
     }
 }
 
-static POOL: OnceLock<EnginePool> = OnceLock::new();
+static POOL: OnceLock<Result<EnginePool, String>> = OnceLock::new();
 static MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Point the OCR engine at a data dir (packaged builds). Called at startup
@@ -113,7 +113,7 @@ fn try_build_engine() -> Result<SendEngine, String> {
 
     let det = dir.join("det.onnx");
     let rec = dir.join("rec.onnx");
-    let dict = dir.join("ppocrv5_dict.txt");
+    let dict = dict_with_space_token(&dir.join("ppocrv5_dict.txt"))?;
 
     let inner = OcrEngineBuilder::new()
         .det_model_path(&det)
@@ -126,20 +126,64 @@ fn try_build_engine() -> Result<SendEngine, String> {
     Ok(SendEngine(Mutex::new(inner)))
 }
 
+/// Return a dictionary path whose vocabulary includes the model's space class.
+///
+/// PP-OCRv5's recognition model is trained with `use_space_char`, so it has one
+/// more output class than the shipped `ppocrv5_dict.txt`: a trailing space
+/// token. The crate's CTC decoder maps any class index past the dictionary to a
+/// hard-coded `"[UNK]"`, which surfaced at **every word gap** (measured: 13
+/// `[UNK]` in one complaint; 5 on a single page). Appending the missing space
+/// line removes them (verified 5 → 0 on the same page).
+///
+/// The rewrite is done at runtime into a temp file so it works for both the
+/// repo dev models and the models downloaded by the dependency installer.
+fn dict_with_space_token(dict_path: &Path) -> Result<PathBuf, String> {
+    let raw = std::fs::read_to_string(dict_path)
+        .map_err(|e| format!("读取 OCR 字典失败: {e}"))?;
+    if raw.lines().any(|line| line == " ") {
+        return Ok(dict_path.to_path_buf());
+    }
+
+    let mut content = raw.trim_end_matches(['\n', '\r']).to_string();
+    content.push('\n');
+    content.push(' ');
+    content.push('\n');
+
+    let out = std::env::temp_dir().join(format!(
+        "ls_ppocrv5_dict_space_{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&out, content).map_err(|e| format!("写入 OCR 字典缓存失败: {e}"))?;
+    Ok(out)
+}
+
 fn with_engine<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce(&OcrEngine) -> Result<T, String>,
 {
-    let pool = match POOL.get() {
-        Some(pool) => pool,
-        None => {
-            let n = std::thread::available_parallelism().map(|p| p.get()).unwrap_or(2).clamp(1, 8);
-            let pool = EnginePool::new(n)?;
-            let _ = POOL.set(pool); // race loser's engines are dropped
-            POOL.get().expect("just set") // nosemgrep: rust-expect-panic
-        }
-    };
-    pool.with_engine(f)
+    engine_pool()?.with_engine(f)
+}
+
+/// Build the engine pool exactly once.
+///
+/// The previous `POOL.get()`-then-`EnginePool::new()` sequence was a race: when
+/// several OCR threads started simultaneously (parallel per-page OCR on a fresh
+/// process), each built its own pool. That means N threads × N engines of
+/// duplicate 21 MB models at once, and a build failure in any of them made the
+/// whole page's OCR return `None` and get silently dropped — the cause of the
+/// "only part of the document was extracted" symptom. `OnceLock::get_or_init`
+/// runs the initializer once and makes the others wait for it.
+fn engine_pool() -> Result<&'static EnginePool, String> {
+    match POOL.get_or_init(|| {
+        let n = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(2)
+            .clamp(1, 8);
+        EnginePool::new(n)
+    }) {
+        Ok(pool) => Ok(pool),
+        Err(e) => Err(e.clone()),
+    }
 }
 
 pub fn health_check() -> Result<(), String> {
@@ -189,12 +233,47 @@ mod tests {
     fn min_confidence_is_expected_value() {
         assert!((MIN_CONFIDENCE - 0.5).abs() < f32::EPSILON);
     }
+
+    /// The dictionary must gain exactly one trailing space token so the model's
+    /// `use_space_char` class decodes as a space instead of `[UNK]`.
+    #[test]
+    fn dict_with_space_token_appends_missing_space() {
+        let dir = std::env::temp_dir().join(format!("ls_dict_test_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("ppocrv5_dict.txt");
+        std::fs::write(&src, "a\nb\n\u{3000}\n").unwrap();
+
+        let out = dict_with_space_token(&src).expect("ok");
+        let content = std::fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = content.trim_end_matches('\n').split('\n').collect();
+        assert_eq!(lines.last(), Some(&" "), "space token must be appended");
+        assert_eq!(lines.len(), 4, "content lines plus appended space: {lines:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A dictionary that already carries a space line is used unchanged.
+    #[test]
+    fn dict_with_space_token_keeps_existing_space() {
+        let dir = std::env::temp_dir().join(format!("ls_dict_test2_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("ppocrv5_dict.txt");
+        std::fs::write(&src, "a\nb\n \n").unwrap();
+
+        let out = dict_with_space_token(&src).expect("ok");
+        assert_eq!(out, src, "existing space token must short-circuit");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Number of engines currently built in the pool (0 if not yet built).
 /// Used for per-page OCR performance diagnosis in `pdf.rs`.
 pub fn active_pool_size() -> usize {
-    POOL.get().map(|p| p.engines.len()).unwrap_or(0)
+    POOL.get()
+        .and_then(|r| r.as_ref().ok())
+        .map(|p| p.engines.len())
+        .unwrap_or(0)
 }
 
 /// Like `recognize_from_path`, but also returns the number of detected text
