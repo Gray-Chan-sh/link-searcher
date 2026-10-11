@@ -412,11 +412,31 @@ impl PdfExtractor {
                 );
                 let dpi = global_pdf_dpi();
                 let mut ocr_pages = HashMap::new();
+                let mut done = 0usize;
                 for (i, &needs) in needs_ocr.iter().enumerate() {
-                    if needs {
-                        if let Some(text) = ocr_single_pdf_page(path, pages[i], dpi, lang, &engine) {
+                    if !needs {
+                        continue;
+                    }
+                    let page_num = pages[i];
+                    let started = std::time::Instant::now();
+                    match ocr_single_pdf_page(path, pages[i], dpi, lang, &engine) {
+                        Some(text) => {
                             ocr_pages.insert(i, text);
                         }
+                        None => log::warn!(
+                            "[PDF] {:?}: mixed OCR page {page_num} produced no text",
+                            path.file_name()
+                        ),
+                    }
+                    done += 1;
+                    // Progress heartbeat: the loop is otherwise silent for
+                    // hundreds of pages, which looks like a hang.
+                    if done % 25 == 0 || done == ocr_count {
+                        log::info!(
+                            "[PDF] {:?}: mixed OCR progress {done}/{ocr_count} pages ({:.1}s last page)",
+                            path.file_name(),
+                            started.elapsed().as_secs_f64()
+                        );
                     }
                 }
                 if ocr_pages.len() == ocr_count {
