@@ -370,9 +370,17 @@ pub fn absorb_subdir(
     Ok(count as u64)
 }
 
+/// Automatic extraction retries before a failed file is left alone. A
+/// permanently corrupt/encrypted file should not be re-extracted on every
+/// scan; the user can still force a re-index manually.
+pub const MAX_EXTRACT_ATTEMPTS: i64 = 3;
+
 pub fn get_files_needing_index(conn: &Connection, limit: usize) -> Result<Vec<FileRecord>> {
     let mut s = conn
-        .prepare(&format!("{SEL} WHERE indexed IN (0,2,3) ORDER BY updated_at ASC LIMIT ?1"))
+        .prepare(&format!(
+            "{SEL} WHERE indexed IN (0,3) OR (indexed=2 AND fail_count < {MAX_EXTRACT_ATTEMPTS}) \
+             ORDER BY updated_at ASC LIMIT ?1"
+        ))
         .context("prepare get_files_needing_index")?;
     let rows = s.query_map(rusqlite::params![limit as i64], row_to_record)?;
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect needing_index")
@@ -405,7 +413,7 @@ pub fn find_dead_files(conn: &Connection) -> Result<Vec<FileRecord>> {
 pub fn update_indexed(conn: &Connection, file_id: &str, md5: Option<&str>) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, updated_at=?2 WHERE id=?3",
+            "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, fail_count=0, updated_at=?2 WHERE id=?3",
             rusqlite::params![md5, chrono::Utc::now().timestamp(), file_id],
         )
         .context("update_indexed failed")?;
@@ -420,7 +428,7 @@ pub fn update_indexed_batch(conn: &Connection, batch: &[(String, String)]) -> Re
     {
         let mut stmt = tx
             .prepare(
-                "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, updated_at=?2 WHERE id=?3",
+                "UPDATE file_tracking SET indexed=1, md5=?1, error_msg=NULL, dead_content=0, fail_count=0, updated_at=?2 WHERE id=?3",
             )
             .context("update_indexed_batch prepare failed")?;
         let now = chrono::Utc::now().timestamp();
@@ -457,7 +465,7 @@ pub fn clear_dead_content(conn: &Connection, file_id: &str) -> Result<()> {
 pub fn mark_failed(conn: &Connection, file_id: &str, error: &str) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET indexed=2, error_msg=?1, updated_at=?2 WHERE id=?3",
+            "UPDATE file_tracking SET indexed=2, error_msg=?1, fail_count=fail_count+1, updated_at=?2 WHERE id=?3",
             rusqlite::params![error, chrono::Utc::now().timestamp(), file_id],
         )
         .context("mark_failed failed")?;
@@ -468,7 +476,7 @@ pub fn mark_failed(conn: &Connection, file_id: &str, error: &str) -> Result<()> 
 pub fn mark_extracted(conn: &Connection, file_id: &str, md5: Option<&str>) -> Result<()> {
     let n = conn
         .execute(
-            "UPDATE file_tracking SET indexed=3, md5=?1, updated_at=?2 WHERE id=?3",
+            "UPDATE file_tracking SET indexed=3, md5=?1, fail_count=0, updated_at=?2 WHERE id=?3",
             rusqlite::params![md5, chrono::Utc::now().timestamp(), file_id],
         )
         .context("mark_extracted failed")?;
@@ -1300,5 +1308,38 @@ mod tests {
              VALUES (lower(hex(randomblob(16))), ?1, ?2, 0, 0, ?3, 'active', 1, NULL, 0, 0, 0)",
             rusqlite::params![path, dir_id, md5],
         ).unwrap();
+    }
+
+    /// A permanently failing file must stop being retried after
+    /// `MAX_EXTRACT_ATTEMPTS`, so corrupt/encrypted files are not re-extracted
+    /// on every scan.
+    #[test]
+    fn failed_files_stop_after_max_attempts() {
+        let conn = db();
+        let id = upsert_file(&conn, "/bad.pdf", "d1", 1000, 1, None).unwrap();
+
+        // First failure: still a retry candidate.
+        mark_failed(&conn, &id, "boom").unwrap();
+        assert!(
+            get_files_needing_index(&conn, 100).unwrap().iter().any(|r| r.id == id),
+            "first failure should still be retried"
+        );
+
+        // Exhaust the cap.
+        for _ in 1..MAX_EXTRACT_ATTEMPTS {
+            mark_failed(&conn, &id, "boom").unwrap();
+        }
+        assert!(
+            !get_files_needing_index(&conn, 100).unwrap().iter().any(|r| r.id == id),
+            "file must become terminal after {MAX_EXTRACT_ATTEMPTS} failures"
+        );
+
+        // A later success clears the counter.
+        mark_extracted(&conn, &id, Some("md5")).unwrap();
+        mark_failed(&conn, &id, "boom").unwrap();
+        assert!(
+            get_files_needing_index(&conn, 100).unwrap().iter().any(|r| r.id == id),
+            "success must reset the retry counter"
+        );
     }
 }

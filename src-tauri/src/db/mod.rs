@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "7";
+const SCHEMA_VERSION: &str = "8";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -89,6 +89,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
     // Quality persistence: quality_score, quality_flags, reextract_count.
     ensure_quality_columns(&tx)?;
+
+    // Retry cap for failed extractions: `fail_count` stops a permanently
+    // corrupt/encrypted file from being re-extracted on every scan.
+    ensure_fail_count_column(&tx)?;
 
     // P6 removal: migrate existing databases that still carry the legacy
     // `private` column on dir_config.
@@ -212,6 +216,30 @@ fn drop_dir_config_private_column(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Add the `fail_count` column used to cap automatic retries of failed
+/// extractions. Idempotent — safe to call on every startup.
+fn ensure_fail_count_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(file_tracking)")
+            .context("failed to inspect file_tracking")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "fail_count")
+    };
+    if has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE file_tracking ADD COLUMN fail_count INTEGER NOT NULL DEFAULT 0")
+        .context("failed to add fail_count column")?;
+    Ok(())
+}
+
 fn ensure_quality_columns(tx: &Connection) -> Result<()> {
     let columns: Vec<String> = {
         let mut stmt = tx
@@ -258,7 +286,8 @@ const CREATE_TABLES_SQL: &str = "
         error_msg   TEXT,
         created_at  INTEGER NOT NULL,
         updated_at  INTEGER NOT NULL,
-        dead_content INTEGER NOT NULL DEFAULT 0
+        dead_content INTEGER NOT NULL DEFAULT 0,
+        fail_count  INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_ft_dir_id ON file_tracking(dir_id);
     CREATE INDEX IF NOT EXISTS idx_ft_status ON file_tracking(status);
@@ -583,7 +612,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_7() {
+    fn test_schema_version_is_8() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -592,7 +621,7 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "7");
+        assert_eq!(version, "8");
     }
 
     #[test]

@@ -163,8 +163,10 @@ fn try_ocr_fallback(
                     return Some(ocr_text);
                 }
             }
-            Ok(_) => log::warn!("[PDF] pdfimages OCR returned empty text for {name:?}"),
-            Err(e) => log::warn!("[PDF] pdfimages OCR failed for {name:?}: {e}"),
+            Ok(_) => log::info!("[PDF] pdfimages OCR returned empty text for {name:?}"),
+            // Expected routing outcomes (not a scanned PDF / no single-JPEG
+            // page) land here and fall through to the renderer — INFO, not WARN.
+            Err(e) => log::info!("[PDF] pdfimages path skipped for {name:?}: {e}"),
         }
     } else if skip_pdfimages {
         log::info!("[PDF] {name:?}: pages carry /Rotate — skipping pdfimages (it ignores page rotation)");

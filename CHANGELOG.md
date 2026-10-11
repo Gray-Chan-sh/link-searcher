@@ -1,5 +1,13 @@
 # Link-Searcher 变更日志
 
+## 2026-10-11：Phase 0 收尾 — 降噪、排除 smask、失败重试上限
+
+- **降噪**：`pdfimages` 路径的“非扫描件 / 无单张 JPEG 页”属**预期路由决策**（随后由渲染兜底），日志级别从 WARN 降为 INFO，避免刷屏（实测单轮 682 次）。
+- **排除 smask**：`pdfimages -list` 的 `smask` 是 alpha 遮罩、不是可渲染内容，不再计入每页图片数，避免“1 张 JPEG + 其 smask”被误判为多图而走慢速渲染。
+- **失败重试上限**：`file_tracking` 新增 `fail_count`（schema v8，幂等迁移）；`mark_failed` 自增、成功（`mark_extracted`/校验恢复）清零；`get_files_needing_index` 只重试 `fail_count < 3` 的失败文件。永久损坏/加密的文件不再每次扫描都重试（可手动重新索引）。
+- **测试**：新增 `failed_files_stop_after_max_attempts` 单测。
+- **涉及文件**：`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/extractor/pdf/scan.rs`、`src-tauri/src/db/mod.rs`、`src-tauri/src/db/tracker.rs`。
+
 ## 2026-10-11：Phase 2 — 水印全文级跨页聚类（检测 + 诊断）
 
 - **目标**：补上“纯文字层水印”的判定信号——它没有几何异常，单页无法区分，只能靠**整份文档内、同一归一化位置的重复**识别。

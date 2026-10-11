@@ -76,7 +76,7 @@ pub(super) fn pages_rotated(doc: &lopdf::Document) -> bool {
 /// produced by IntSig/Foxit — the value is missing upstream, not mis-parsed.
 struct ImageListRow<'a> {
     page: u32,
-    #[allow(dead_code)] // 保留 `type` 列以便将来区分 image/stencil/smask
+    /// `image` / `stencil` / `smask` — `smask` is an alpha mask, not content.
     kind: &'a str,
     width: u32,
     height: u32,
@@ -245,6 +245,12 @@ pub(super) fn image_list_info(path: &Path) -> Option<ImageListInfo> {
         let Some(row) = parse_image_list_row(line) else {
             continue;
         };
+        // `smask` is an alpha mask for another image, not renderable content —
+        // counting it would make "1 JPEG + its smask" look like a multi-image
+        // page and needlessly force the slow renderer.
+        if row.kind == "smask" {
+            continue;
+        }
         images_by_page
             .entry(row.page)
             .or_default()
