@@ -1,5 +1,19 @@
 # Link-Searcher 变更日志
 
+## 2026-10-11：Phase 0 — 修复 pdfimages 图像层提取（丢页/丢正文/慢回退）
+
+- **现象**：生产日志今日 `BitmapDecoder::CreateAsync failed (0x88982F50)` **10487 次**、`pdfimages OCR returned empty` 46 次、逐页 `pdftoppm` 慢回退 113 次（单份最多 674 页）；部分扫描件只提取到一部分文字。
+- **根因**：
+  1. `pdfimages -j` 对非 JPEG（CCITT/JBIG2）图片会写成 Netpbm（`.pbm`/`.ppm`），Windows OCR 的 `BitmapDecoder` 不支持 → 整页解码失败、丢页；而 `image` crate 能解码，所以没被过滤掉。
+  2. `scan.rs` 的 `enc_by_page` 每页只记录**最后一张**图片的编码（last-wins），可能让整份文档误判为“全 JPEG”，从而走 `-j`。
+  3. `group_images_by_page` 每页只保留**面积最大**的一张图；但有些页正文在小图（CCITT stencil / 4693×74 细条）里，最大图是近乎空白的背景 → OCR 得到空。
+- **修复**：
+  - `scan.rs`：`ImageListInfo` 改为记录每页**全部**图片（`images_by_page: HashMap<u32, Vec<PageImageInfo>>`），新增 `is_single_jpeg()` / `image_count()`。
+  - `ocr.rs`：`ocr_pdf_via_pdfimages` 改为**逐页策略**——仅“单张 JPEG 页”走快速 `-j` 路径，其余（多图/非 JPEG/旋转）用 `pdftoppm` 渲染合成；`group_images_by_page` → `collect_page_images`（保留每页全部图并按面积排序）；逐页日志补上文件名（便于归因）。
+  - 移除不再使用的 `clear_dir`。
+- **实测**：`执业承诺.pdf`（正文在 CCITT 小图）从“pdfimages 空 + 慢回退”变为直接渲染 OCR，得到 219 字正确内容；`陈海平 律师证 - 副本 - 副本.pdf`（细条 JPEG）得到 348 字正确内容。
+- **涉及文件**：`src-tauri/src/extractor/pdf/scan.rs`、`src-tauri/src/extractor/pdf/ocr.rs`。
+
 ## 2026-10-11：PDF OCR/水印方案重构为全局设计
 
 - **文档重构**：`docs/PDF_WATERMARK_EXTRACTION_PLAN.md` 骨架从“逐项补丁”改为**子系统全局设计**——统一不变量、端到端管线位置、逐页来源判定状态机、OCR/水印/结构/质量四个能力层、数据与可观测性、评估体系、迁移、已知失败模式、分阶段路线图。

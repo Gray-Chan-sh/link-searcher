@@ -189,18 +189,39 @@ pub(super) fn scan_tests_row(line: &str) -> Option<(u32, u32, f32, f32)> {
     parse_image_list_row(line).map(|r| (r.page, r.width, r.x_ppi, r.y_ppi))
 }
 
+/// One image listed on a page by `pdfimages -list`.
+#[derive(Debug, Clone)]
+pub(super) struct PageImageInfo {
+    /// Encoding as reported by poppler (`jpeg`, `ccitt`, `jbig2`, `image`, …).
+    pub enc: String,
+}
+
 /// Per-page image inventory from one `pdfimages -list` run.
 ///
-/// `pages_with_image` counts pages carrying any image object (any size);
-/// `enc_by_page` maps page → image encoding (`jpeg`, `ccitt`, `jbig2`, …) so
-/// the OCR pass can extract JPEGs natively (`pdfimages -j`, ~0.1s/page) instead
-/// of always re-encoding to PNG (~26s/page on a 3000×4000 scan).
+/// `pages_with_image` counts pages carrying any image object (any size).
+/// `images_by_page` keeps **every** image on a page (1-based) — a page can hold
+/// a full-page background *plus* several CCITT/JBIG2 "stencil" masks that carry
+/// the actual text, so recording only the last encoding (the old
+/// `enc_by_page.insert`) both lost those images and could make the whole
+/// document look like "all JPEG", which made `pdfimages -j` emit Netpbm
+/// (`.pbm`) files the OCR engine cannot decode.
 #[derive(Debug)]
 pub(super) struct ImageListInfo {
     /// Highest page number seen in the listing (0 when there are no images).
     pub total_pages: usize,
     pub pages_with_image: usize,
-    pub enc_by_page: HashMap<u32, String>,
+    pub images_by_page: HashMap<u32, Vec<PageImageInfo>>,
+}
+
+impl ImageListInfo {
+    /// True when the page carries exactly one image and that image is JPEG —
+    /// the only case safe for the fast native `pdfimages -j` path. Any other
+    /// page (multiple images, non-JPEG encoding) must be rendered instead.
+    pub fn is_single_jpeg(&self, page: u32) -> bool {
+        self.images_by_page
+            .get(&page)
+            .is_some_and(|imgs| imgs.len() == 1 && imgs[0].enc.eq_ignore_ascii_case("jpeg"))
+    }
 }
 
 /// Cheap scan-coverage probe: one `pdfimages -list` (fast even on 100MB+ files —
@@ -218,18 +239,68 @@ pub(super) fn image_list_info(path: &Path) -> Option<ImageListInfo> {
         return None;
     }
     let listing = String::from_utf8_lossy(&stdout);
-    let mut enc_by_page: HashMap<u32, String> = HashMap::new();
+    let mut images_by_page: HashMap<u32, Vec<PageImageInfo>> = HashMap::new();
     let mut max_page = 0usize;
     for line in listing.lines() {
         let Some(row) = parse_image_list_row(line) else {
             continue;
         };
-        enc_by_page.insert(row.page, row.enc.to_string());
+        images_by_page
+            .entry(row.page)
+            .or_default()
+            .push(PageImageInfo {
+                enc: row.enc.to_string(),
+            });
         max_page = max_page.max(row.page as usize);
     }
     Some(ImageListInfo {
         total_pages: max_page,
-        pages_with_image: enc_by_page.len(),
-        enc_by_page,
+        pages_with_image: images_by_page.len(),
+        images_by_page,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn info(pages: &[(u32, &[&str])]) -> ImageListInfo {
+        let mut images_by_page: HashMap<u32, Vec<PageImageInfo>> = HashMap::new();
+        let mut max_page = 0;
+        for (page, encs) in pages {
+            images_by_page.insert(
+                *page,
+                encs.iter()
+                    .map(|e| PageImageInfo {
+                        enc: (*e).to_string(),
+                    })
+                    .collect(),
+            );
+            max_page = max_page.max(*page);
+        }
+        ImageListInfo {
+            total_pages: max_page as usize,
+            pages_with_image: images_by_page.len(),
+            images_by_page,
+        }
+    }
+
+    /// A page is "fast" only when it carries exactly one JPEG image. A second
+    /// image (e.g. a CCITT stencil holding the text) or a non-JPEG encoding
+    /// must route to the renderer, otherwise `pdfimages -j` emits a Netpbm
+    /// file the OCR engine cannot decode.
+    #[test]
+    fn single_jpeg_detection() {
+        let i = info(&[
+            (1, &["jpeg"]),
+            (2, &["jpeg", "ccitt"]),
+            (3, &["ccitt"]),
+            (4, &["image"]),
+        ]);
+        assert!(i.is_single_jpeg(1));
+        assert!(!i.is_single_jpeg(2), "two images → not fast");
+        assert!(!i.is_single_jpeg(3), "non-JPEG → not fast");
+        assert!(!i.is_single_jpeg(4), "non-JPEG → not fast");
+        assert!(!i.is_single_jpeg(9), "missing page → not fast");
+    }
 }

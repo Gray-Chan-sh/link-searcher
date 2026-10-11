@@ -415,102 +415,140 @@ pub fn ocr_pdf_via_pdfimages(
     lang: &str,
     engine: &crate::extractor::ocr::OcrEngineType,
 ) -> Result<String> {
-    log::info!("[PDF] pdfimages: extracting {:?}", path.file_name());
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("?")
+        .to_owned();
+    log::info!("[PDF] pdfimages: extracting {name:?}");
 
     let page_count = get_pdf_page_count(path)? as usize;
     if page_count == 0 {
         return Ok(String::new());
     }
 
-    // One `pdfimages -list` (0.1–0.2s) gives both the scan-coverage pre-check
-    // and the per-page image encoding, so JPEGs can be extracted natively.
-    let info = super::scan::image_list_info(path);
-
-    // A digital/vector PDF with few (or zero) page images is NOT a scan — the
-    // image pass would recover nothing. Only run it when most pages carry one.
-    if let Some(ref i) = info {
-        if i.pages_with_image == 0 || (i.total_pages > 2 && i.pages_with_image * 2 < i.total_pages) {
+    // Optional cheap pre-check from `pdfimages -list`. It can time out on huge
+    // PDFs, so it is an optimization only — the per-page strategy is decided
+    // from the actually-extracted files below.
+    if let Some(info) = super::scan::image_list_info(path) {
+        // A digital/vector PDF with few (or zero) page images is NOT a scan.
+        if info.pages_with_image == 0
+            || (info.total_pages > 2 && info.pages_with_image * 2 < info.total_pages)
+        {
             return Err(anyhow::anyhow!(
                 "pdfimages: only {}/{} pages have images — not a scanned PDF",
-                i.pages_with_image, i.total_pages
+                info.pages_with_image, info.total_pages
+            ));
+        }
+        if (1..=page_count as u32).all(|p| !info.is_single_jpeg(p)) {
+            return Err(anyhow::anyhow!(
+                "pdfimages: no single-JPEG page among {page_count} — using renderer"
             ));
         }
     }
 
-    log::info!(
-        "[PDF] {:?}: {} pages, extracting images via pdfimages",
-        path.file_name(),
-        page_count,
-    );
-
-    // JPEGs are copied out natively (`-j`, ~0.1s/page) instead of decoded and
-    // re-encoded to PNG (~26s/page on a 12 MP scan). Use the native path only
-    // when every listed image is JPEG; any other encoding needs `-png`.
-    let all_jpeg = match &info {
-        Some(i) => {
-            !i.enc_by_page.is_empty()
-                && i.enc_by_page
-                    .values()
-                    .all(|e| e.eq_ignore_ascii_case("jpeg"))
-        }
-        None => true,
-    };
-
     let tmp = TempDir::new("ls_pdfimg")?;
     let prefix = tmp.path().join("img");
-    let primary = if all_jpeg { "-j" } else { "-png" };
     let stall = global_ocr_stall_timeout();
-    run_pdfimages_doc(path, primary, &prefix, stall)?;
-    let mut per_page = group_images_by_page(tmp.path(), page_count)?;
-    if per_page.iter().all(Option::is_none) && primary == "-j" {
-        // `-j` skips non-JPEG encodings (CCITT/JBIG2/…): retry with PNG. Clear
-        // any partial output first so the retry's progress check and page
-        // grouping only see the PNG run.
-        clear_dir(tmp.path());
-        run_pdfimages_doc(path, "-png", &prefix, stall)?;
-        per_page = group_images_by_page(tmp.path(), page_count)?;
-    }
+    run_pdfimages_doc(path, "-j", &prefix, stall)?;
+    let per_page = collect_page_images(tmp.path(), page_count)?;
 
-    // Count pages with an extracted image (NOT pages that OCR'd to text) — a
-    // scan whose OCR yields little must not be misclassified as "not a scan".
-    let pages_with_image = per_page.iter().filter(|p| p.is_some()).count();
+    // Must still look like a scan: most pages carry an image.
+    let pages_with_image = per_page.iter().filter(|v| !v.is_empty()).count();
     if page_count > 2 && pages_with_image * 2 < page_count {
         return Err(anyhow::anyhow!(
             "pdfimages: only {pages_with_image}/{page_count} pages had images — not a scanned PDF"
         ));
     }
 
+    // Per-page strategy from the extracted files. Only a page with exactly one
+    // JPEG is safe for the fast path; pages with multiple images (a near-blank
+    // background plus CCITT/JBIG2 stencil masks holding the real text) or a
+    // non-JPEG file (Netpbm produced by `-j`) are rendered instead — otherwise
+    // the OCR engine gets a file it cannot decode (`0x88982F50`).
+    let fast: Vec<bool> = per_page.iter().map(|imgs| is_single_jpeg_file(imgs)).collect();
+    let fast_count = fast.iter().filter(|&&b| b).count();
+    if fast_count == 0 {
+        return Err(anyhow::anyhow!(
+            "pdfimages: no single-JPEG page among {page_count} — using renderer"
+        ));
+    }
+    log::info!(
+        "[PDF] {name:?}: {page_count} pages — {fast_count} single-JPEG (fast), {} rendered",
+        page_count - fast_count
+    );
+
+    let dpi = global_pdf_dpi();
+    let mut out: Vec<Option<String>> = vec![None; page_count];
+
+    // Fast pages: OCR the single JPEG in parallel (cheap).
     use rayon::prelude::*;
-    let pages: Vec<u32> = (1..=page_count as u32).collect();
-    let results: Vec<Option<String>> = pages
+    let fast_idx: Vec<usize> = (0..page_count).filter(|&i| fast[i]).collect();
+    let fast_text: Vec<Option<String>> = fast_idx
         .par_iter()
-        .map(|&page_num| {
-            let page_idx = (page_num - 1) as usize;
-            let (best_path, best_area) = per_page.get(page_idx)?.as_ref()?;
-            if *best_area < MIN_PAGE_IMAGE_AREA {
+        .map(|&idx| {
+            let (img_path, area) = per_page.get(idx)?.first()?;
+            if *area < MIN_PAGE_IMAGE_AREA {
                 return None;
             }
             let started = std::time::Instant::now();
-            match crate::extractor::ocr::ocr_image_with_regions(best_path, engine, lang) {
-                Ok((text, _regions)) => {
+            match crate::extractor::ocr::ocr_image_with_regions(img_path, engine, lang) {
+                Ok((t, _)) => {
                     log::info!(
-                        "[PDF] pdfimages page {page_num}: {} chars in {:.1}s",
-                        text.len(),
-                        started.elapsed().as_secs_f64(),
+                        "[PDF] {name:?} page {}: {} chars in {:.1}s (pdfimages)",
+                        idx + 1,
+                        t.chars().count(),
+                        started.elapsed().as_secs_f64()
                     );
-                    let trimmed = text.trim().to_owned();
-                    if trimmed.is_empty() { None } else { Some(trimmed) }
+                    Some(t)
                 }
                 Err(e) => {
-                    log::warn!("[PDF] pdfimages page {page_num}: {e}");
+                    log::warn!("[PDF] {name:?} page {}: pdfimages OCR failed: {e}", idx + 1);
                     None
                 }
             }
         })
         .collect();
+    for (i, idx) in fast_idx.iter().enumerate() {
+        out[*idx] = fast_text[i]
+            .as_ref()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty());
+    }
+
+    // Rendered pages: `pdftoppm` composites background + stencils correctly.
+    // Run sequentially — each spawns a subprocess, so a 600-page document must
+    // not launch 600 `pdftoppm` processes at once.
+    for (idx, is_fast) in fast.iter().enumerate() {
+        if *is_fast {
+            continue;
+        }
+        let page_num = (idx + 1) as u32;
+        let started = std::time::Instant::now();
+        match ocr_single_pdf_page(path, page_num, dpi, lang, engine) {
+            Some(t) => {
+                log::info!(
+                    "[PDF] {name:?} page {page_num}: {} chars in {:.1}s (render)",
+                    t.chars().count(),
+                    started.elapsed().as_secs_f64()
+                );
+                out[idx] = Some(t);
+            }
+            None => log::warn!("[PDF] {name:?} page {page_num}: render produced no text"),
+        }
+        if let Some(stall) = stall
+            && started.elapsed() >= stall
+        {
+            log::warn!(
+                "[PDF] {name:?}: render stalled on page {page_num} ({:?})",
+                started.elapsed()
+            );
+            break;
+        }
+    }
 
     let mut full_text = String::new();
-    for text in results.into_iter().flatten() {
+    for text in out.into_iter().flatten() {
         if !full_text.is_empty() {
             full_text.push('\n');
         }
@@ -540,15 +578,6 @@ fn output_progress(dir: &Path, stem: &str) -> (u64, u64) {
         }
     }
     (count, bytes)
-}
-
-/// Remove every regular file directly under `dir` (best-effort).
-fn clear_dir(dir: &Path) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for e in entries.flatten() {
-            let _ = std::fs::remove_file(e.path());
-        }
-    }
 }
 
 /// Run one whole-document `pdfimages <fmt> -p` pass into `prefix`. `-p` embeds
@@ -612,11 +641,25 @@ const IMAGE_EXTS: &[&str] = &[
     "jpg", "jpeg", "jpe", "png", "ppm", "pgm", "pbm", "pam", "jp2", "j2k", "tif", "tiff", "bmp",
 ];
 
-/// Group `pdfimages -p` output by page, keeping the largest decodable image on
-/// each 1-based page as `(path, area_px)`. Pages without a usable image are
-/// `None`.
-fn group_images_by_page(dir: &Path, page_count: usize) -> Result<Vec<Option<(PathBuf, u64)>>> {
-    let mut best: Vec<Option<(PathBuf, u64)>> = vec![None; page_count];
+/// True when a page's extracted images are a single JPEG — the only shape that
+/// the fast native path can hand to the OCR engine unchanged.
+fn is_single_jpeg_file(images: &[(PathBuf, u64)]) -> bool {
+    images.len() == 1
+        && images[0]
+            .0
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
+}
+
+/// Group `pdfimages -p` output by page, keeping **all** decodable images on
+/// each 1-based page as `(path, area_px)`, sorted largest-first.
+///
+/// Keeping every image matters: some pages carry the real text in a small
+/// CCITT/JBIG2 stencil while the full-page background is nearly blank, so
+/// "largest image only" silently drops the body.
+fn collect_page_images(dir: &Path, page_count: usize) -> Result<Vec<Vec<(PathBuf, u64)>>> {
+    let mut per_page: Vec<Vec<(PathBuf, u64)>> = vec![Vec::new(); page_count];
     for entry in std::fs::read_dir(dir)?.flatten() {
         let p = entry.path();
         let is_img = p
@@ -642,13 +685,12 @@ fn group_images_by_page(dir: &Path, page_count: usize) -> Result<Vec<Option<(Pat
         let Ok((w, h)) = image::image_dimensions(&p) else {
             continue;
         };
-        let area = w as u64 * h as u64;
-        let slot = &mut best[page - 1];
-        if slot.as_ref().map(|(_, a)| area > *a).unwrap_or(true) {
-            *slot = Some((p, area));
-        }
+        per_page[page - 1].push((p, w as u64 * h as u64));
     }
-    Ok(best)
+    for images in &mut per_page {
+        images.sort_by(|a, b| b.1.cmp(&a.1));
+    }
+    Ok(per_page)
 }
 
 #[cfg(test)]
@@ -668,16 +710,6 @@ mod tests {
         // Non-matching entries are ignored.
         std::fs::write(tmp.path().join("other.txt"), b"xxxxxxxxxx").unwrap();
         assert_eq!(output_progress(tmp.path(), "img"), (2, 12));
-    }
-
-    #[test]
-    fn clear_dir_removes_files_only() {
-        let tmp = TempDir::new("ls_clear_test").unwrap();
-        std::fs::write(tmp.path().join("img-001-000.png"), b"x").unwrap();
-        std::fs::create_dir(tmp.path().join("sub")).unwrap();
-        clear_dir(tmp.path());
-        assert_eq!(output_progress(tmp.path(), "img"), (0, 0));
-        assert!(tmp.path().join("sub").is_dir());
     }
 
     #[test]
@@ -736,9 +768,9 @@ mod tests {
     }
 
     #[test]
-    fn group_images_by_page_picks_largest_and_ignores_out_of_range() {
-        let tmp = TempDir::new("ls_group_test").unwrap();
-        // Page 1 carries two images — the larger must win.
+    fn collect_page_images_keeps_all_images_and_sorts_largest_first() {
+        let tmp = TempDir::new("ls_collect_test").unwrap();
+        // Page 1 carries two images — both must be kept, largest first.
         write_png(&tmp.path().join("img-001-000.png"), 50, 50);
         write_png(&tmp.path().join("img-001-001.png"), 400, 300);
         // Page 2 has no image (only a non-image file).
@@ -748,11 +780,13 @@ mod tests {
         // Out-of-range page must be ignored.
         write_png(&tmp.path().join("img-009-000.png"), 100, 100);
 
-        let grouped = group_images_by_page(tmp.path(), 3).unwrap();
+        let grouped = collect_page_images(tmp.path(), 3).unwrap();
         assert_eq!(grouped.len(), 3);
-        assert_eq!(grouped[0].as_ref().map(|(_, a)| *a), Some(400 * 300));
-        assert!(grouped[1].is_none());
-        assert_eq!(grouped[2].as_ref().map(|(_, a)| *a), Some(200 * 200));
+        assert_eq!(grouped[0].len(), 2, "page 1 must keep both images");
+        assert_eq!(grouped[0][0].1, 400 * 300, "largest image first");
+        assert!(grouped[1].is_empty(), "page 2 has no image");
+        assert_eq!(grouped[2].len(), 1);
+        assert_eq!(grouped[2][0].1, 200 * 200);
     }
 }
 
