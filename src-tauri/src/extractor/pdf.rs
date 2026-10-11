@@ -180,7 +180,10 @@ impl PdfExtractor {
         // yet have a clean text layer — those must not pay for OCR.
         if is_image_based_scan(path, &doc) {
             let watermark_scan = watermark::scan(path);
-            if let Some(text) = try_pdftotext_extract(path)
+            let text_layer = try_pdftotext_extract(path);
+            // Phase 1 diagnostic: classify each page of an image-backed PDF.
+            log_image_scan_page_classes(text_layer.as_deref(), pages.len(), path);
+            if let Some(text) = text_layer
                 && !watermark_dominates_text(watermark_scan.as_ref(), pages.len())
                 && prefer_recovered_text("", &text, pages.len())
             {
@@ -296,6 +299,10 @@ impl PdfExtractor {
                         let all_need_ocr = !class.pages_needing_ocr.is_empty()
                             && (class.pages_needing_ocr.len() * 2 > class.page_count as usize
                                 || is_sparse);
+                        // Phase 1 diagnostic: emit page source classes *before*
+                        // the early return below, so scanned documents are
+                        // classified too (they never reach the later call).
+                        log_page_source_diagnostics(&page_texts, &class.pages_needing_ocr, path);
                         if matches!(class.pdf_type, pdf_inspector::PdfType::Scanned | pdf_inspector::PdfType::ImageBased) || all_need_ocr {
                             if forced_ocr_attempted {
                                 log::info!(
@@ -324,9 +331,12 @@ impl PdfExtractor {
             };
 
         // Phase 1: emit a page-level source diagnostic without changing the
-        // existing document-level selection below. This makes mixed PDFs and
-        // watermark-heavy text layers visible before we enable page routing.
-        log_page_source_diagnostics(&page_texts, &inspector_ocr_pages, path);
+        // existing document-level selection below. (Documents that carry a
+        // pdf-inspector classification are logged earlier, before their early
+        // return.)
+        if merged.len() <= 100 {
+            log_page_source_diagnostics(&page_texts, &inspector_ocr_pages, path);
+        }
 
         let is_wm = is_watermark_text(&page_texts);
         let is_garbled = is_garbled_text(&merged);
@@ -589,6 +599,33 @@ fn selectively_ocr_image_pages(
 ///
 /// This deliberately has no effect on extraction yet. `pdf_inspector` reports
 /// pages that are image/OCR candidates; the local text heuristics identify
+/// Per-page source class (Phase 1 diagnostic — does not change behaviour).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageClass {
+    /// A: no full-page image; text layer is the body.
+    PureText,
+    /// B: full-page image with no usable text layer.
+    Scanned,
+    /// C: full-page image + a sparse/repetitive (watermark-like) text layer —
+    /// the body must come from image OCR, the text layer is evidence only.
+    WatermarkTextPlusScan,
+    /// D: full-page image + a healthy text layer carrying real body text.
+    TextPlusWatermark,
+}
+
+fn classify_page(text: &str, has_image: bool) -> PageClass {
+    if !has_image {
+        return PageClass::PureText;
+    }
+    if text.trim().is_empty() || is_garbled_text(text) {
+        return PageClass::Scanned;
+    }
+    if is_sparse_text_layer(text, 1) || is_repetitive(text) {
+        return PageClass::WatermarkTextPlusScan;
+    }
+    PageClass::TextPlusWatermark
+}
+
 /// pages that are sparse, garbled, or repetitive. The latter are logged as
 /// uncertain rather than silently discarded because a short page can be a
 /// legitimate form or table.
@@ -597,33 +634,57 @@ fn log_page_source_diagnostics(page_texts: &[String], inspector_ocr_pages: &[u32
         return;
     }
     let inspector_set: HashSet<usize> = inspector_ocr_pages.iter().map(|&p| p as usize).collect();
-    let mut pdf_text = 0usize;
-    let mut image_candidates = Vec::new();
-    let mut uncertain = Vec::new();
+    let mut a = 0usize;
+    let mut b = 0usize;
+    let mut c = Vec::new();
+    let mut d = 0usize;
 
     for (index, text) in page_texts.iter().enumerate() {
-        let has_image_candidate = inspector_set.contains(&index);
-        let sparse = is_sparse_text_layer(text, 1);
-        let garbled = is_garbled_text(text);
-        let repetitive = is_repetitive(text);
-        if has_image_candidate || garbled {
-            image_candidates.push(index + 1);
-        } else if sparse || repetitive {
-            uncertain.push(index + 1);
-        } else {
-            pdf_text += 1;
+        match classify_page(text, inspector_set.contains(&index)) {
+            PageClass::PureText => a += 1,
+            PageClass::Scanned => b += 1,
+            PageClass::WatermarkTextPlusScan => c.push(index + 1),
+            PageClass::TextPlusWatermark => d += 1,
         }
     }
 
     log::info!(
-        "[PDF] {:?}: page source diagnostic: total={}, pdf_text={}, image_ocr_candidate={}, uncertain={}, image_pages={:?}, uncertain_pages={:?}",
+        "[PDF] {:?}: page source classes: total={}, A_pure_text={}, B_scanned={}, C_watermark_text+scan={}, D_text+watermark={}, C_pages={:?}",
         path.file_name(),
         page_texts.len(),
-        pdf_text,
-        image_candidates.len(),
-        uncertain.len(),
-        image_candidates.iter().take(20).collect::<Vec<_>>(),
-        uncertain.iter().take(20).collect::<Vec<_>>(),
+        a,
+        b,
+        c.len(),
+        d,
+        c.iter().take(20).collect::<Vec<_>>(),
+    );
+}
+
+/// Phase 1 diagnostic for image-backed PDFs: classify each page from the
+/// poppler text layer (form-feed separated). Pages with no text at all are
+/// class B (pure scan); a missing/short layer means the whole document is B.
+fn log_image_scan_page_classes(text_layer: Option<&str>, page_count: usize, path: &Path) {
+    let page_texts: Vec<String> = text_layer
+        .map(|t| t.split('\x0c').map(|p| p.trim().to_owned()).collect())
+        .unwrap_or_default();
+    let mut a = 0usize;
+    let mut b = 0usize;
+    let mut c: Vec<usize> = Vec::new();
+    let mut d = 0usize;
+    for (index, text) in page_texts.iter().enumerate() {
+        match classify_page(text, true) {
+            PageClass::PureText => a += 1,
+            PageClass::Scanned => b += 1,
+            PageClass::WatermarkTextPlusScan => c.push(index + 1),
+            PageClass::TextPlusWatermark => d += 1,
+        }
+    }
+    log::info!(
+        "[PDF] {:?}: page source classes (image-backed): total={page_count}, text_pages={}, A={a}, B={b}, C={}, D={d}, C_pages={:?}",
+        path.file_name(),
+        page_texts.len(),
+        c.len(),
+        c.iter().take(20).collect::<Vec<_>>(),
     );
 }
 
@@ -1523,5 +1584,23 @@ page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-pp
     fn test_prefer_recovered_text_equal_length_rejected() {
         let text = "Same content for both. ".repeat(50);
         assert!(!prefer_recovered_text(&text, &text, 5));
+    }
+
+    /// Phase 1: the per-page source classifier must separate the four classes.
+    #[test]
+    fn classify_page_distinguishes_abcd() {
+        let body = "上海市浦东新区人民法院民事判决书原告常宏与被告上海万城创业投资有限公司股权确认纠纷一案，本院依法组成合议庭，公开开庭进行了审理。原告委托诉讼代理人到庭参加诉讼，被告经合法传唤未到庭参加诉讼。";
+        // A: no image → text layer is the body.
+        assert_eq!(classify_page(body, false), PageClass::PureText);
+        // B: image + no usable text.
+        assert_eq!(classify_page("", true), PageClass::Scanned);
+        assert_eq!(
+            classify_page("\u{FFFD}\u{FFFD}\u{FFFD}", true),
+            PageClass::Scanned
+        );
+        // C: image + sparse watermark-like text layer.
+        assert_eq!(classify_page("陈骥", true), PageClass::WatermarkTextPlusScan);
+        // D: image + healthy body text.
+        assert_eq!(classify_page(body, true), PageClass::TextPlusWatermark);
     }
 }

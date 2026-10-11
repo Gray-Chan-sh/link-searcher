@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-11：Phase 1 — 逐页来源判定与诊断（不改结果）
+
+- **目标**：把“正文在哪一层”的判断显式化、可观测，为后续“先选源、后清洗”打基础；本阶段**不改变提取结果**。
+- **做法**：`pdf.rs` 新增 `PageClass` 与 `classify_page()`，按页归类：
+  - **A** `PureText`：无整页图 → 文字层即正文；
+  - **B** `Scanned`：有整页图 + 无可信文字层 → 图像 OCR；
+  - **C** `WatermarkTextPlusScan`：有整页图 + 文字层稀疏/重复（水印样）→ 正文必须来自 OCR；
+  - **D** `TextPlusWatermark`：有整页图 + 文字层健康 → 清洗文字层。
+  诊断日志改为输出 A/B/C/D 计数并列出 C 类页码。
+- **测试**：新增 `classify_page_distinguishes_abcd` 单测覆盖四类边界。
+- **涉及文件**：`src-tauri/src/extractor/pdf.rs`。
+
 ## 2026-10-11：Phase 0 — 修复 pdfimages 图像层提取（丢页/丢正文/慢回退）
 
 - **现象**：生产日志今日 `BitmapDecoder::CreateAsync failed (0x88982F50)` **10487 次**、`pdfimages OCR returned empty` 46 次、逐页 `pdftoppm` 慢回退 113 次（单份最多 674 页）；部分扫描件只提取到一部分文字。
