@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-11：Phase 2 — 水印全文级跨页聚类（检测 + 诊断）
+
+- **目标**：补上“纯文字层水印”的判定信号——它没有几何异常，单页无法区分，只能靠**整份文档内、同一归一化位置的重复**识别。
+- **做法**：
+  - `watermark.rs` 的 `PageBoxes` 增加 `width/height`（从 `pdftotext -bbox-layout` 的 `<page width height>` 解析），用于归一化坐标；
+  - 新增 `CrossPageCluster` 与 `cross_page_clusters()`：按“文本 + 归一化位置”聚类，要求出现在 ≥ `max(2, ceil(0.6×页数))` 个页面且位置稳定（容差 0.03）；长度 > 24 字视为正文行排除；
+  - `WatermarkScan` 增加 `clusters` 字段，`scan()` 一并计算；
+  - `pdf.rs` 图像扫描分支输出 `cross-page watermark clusters` 诊断日志。
+- **本阶段只检测、不删除**（避免误伤，先观察命中情况）。
+- **测试**：新增两项单测——同位置重复被检出、位置漂移不误判。
+- **涉及文件**：`src-tauri/src/extractor/pdf/watermark.rs`、`src-tauri/src/extractor/pdf.rs`。
+
 ## 2026-10-11：Phase 1 — 逐页来源判定与诊断（不改结果）
 
 - **目标**：把“正文在哪一层”的判断显式化、可观测，为后续“先选源、后清洗”打基础；本阶段**不改变提取结果**。

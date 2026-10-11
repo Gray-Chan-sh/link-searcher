@@ -183,6 +183,22 @@ impl PdfExtractor {
             let text_layer = try_pdftotext_extract(path);
             // Phase 1 diagnostic: classify each page of an image-backed PDF.
             log_image_scan_page_classes(text_layer.as_deref(), pages.len(), path);
+            // Phase 2 diagnostic (detection only): plain text-layer watermarks
+            // repeat at the same normalized position across pages.
+            if let Some(scan) = watermark_scan.as_ref()
+                && !scan.clusters.is_empty()
+            {
+                log::info!(
+                    "[PDF] {:?}: cross-page watermark clusters: {} (e.g. {:?})",
+                    path.file_name(),
+                    scan.clusters.len(),
+                    scan.clusters
+                        .iter()
+                        .take(5)
+                        .map(|c| format!("{}@{}/{}", c.text, c.pages, c.total_pages))
+                        .collect::<Vec<_>>()
+                );
+            }
             if let Some(text) = text_layer
                 && !watermark_dominates_text(watermark_scan.as_ref(), pages.len())
                 && prefer_recovered_text("", &text, pages.len())

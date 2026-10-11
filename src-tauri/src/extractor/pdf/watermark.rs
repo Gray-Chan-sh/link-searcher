@@ -57,6 +57,26 @@ pub struct LineBox {
 #[derive(Debug, Clone, Default)]
 pub struct PageBoxes {
     pub lines: Vec<LineBox>,
+    /// Page width/height in PDF points (0 when unknown). Used to normalize word
+    /// positions so the same watermark can be compared across pages.
+    pub width: f64,
+    pub height: f64,
+}
+
+/// A text fragment that repeats at (approximately) the same normalized
+/// position across pages. This is the signal a **plain text-layer** watermark
+/// (one with no geometric anomaly) leaves behind; it can only be evaluated
+/// with the whole document.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CrossPageCluster {
+    pub text: String,
+    /// Number of distinct pages the fragment appears on.
+    pub pages: usize,
+    /// Total pages examined.
+    pub total_pages: usize,
+    /// Mean normalized position.
+    pub nx: f64,
+    pub ny: f64,
 }
 
 /// Result of scanning one PDF for a geometric watermark.
@@ -73,6 +93,9 @@ pub struct WatermarkScan {
     pub total_chars: usize,
     /// The removed fragments (for OCR post-filtering and dictionary growth).
     pub tokens: Vec<String>,
+    /// Fragments repeated at the same normalized position across pages — the
+    /// primary signal for a plain text-layer watermark (Phase 2, diagnostic).
+    pub clusters: Vec<CrossPageCluster>,
 }
 
 impl WatermarkScan {
@@ -98,7 +121,88 @@ pub fn scan(path: &Path) -> Option<WatermarkScan> {
     if pages.is_empty() {
         return None;
     }
-    Some(analyze(&pages))
+    let mut result = analyze(&pages);
+    result.clusters = cross_page_clusters(&pages);
+    Some(result)
+}
+
+/// Detect fragments that repeat at the same normalized position across pages.
+///
+/// This is the primary signal for a **plain text-layer watermark** (e.g. a
+/// horizontal `上海小城律师事务所`): it carries no geometric anomaly, so only
+/// document-wide repetition distinguishes it from body text. Detection only —
+/// callers decide whether to remove anything.
+///
+/// A fragment qualifies when it appears on at least `max(2, ceil(0.6×pages))`
+/// distinct pages and its normalized position stays within a small tolerance on
+/// every occurrence.
+pub fn cross_page_clusters(pages: &[PageBoxes]) -> Vec<CrossPageCluster> {
+    use std::collections::HashMap;
+
+    /// Normalized position tolerance (fraction of page width/height).
+    const POS_TOL: f64 = 0.03;
+    /// Minimum fraction of pages a fragment must appear on.
+    const MIN_PAGE_RATIO: f64 = 0.6;
+    /// Fragments longer than this are body lines, not watermarks.
+    const MAX_CHARS: usize = 24;
+
+    let total = pages.len();
+    if total < 2 {
+        return Vec::new();
+    }
+
+    let mut by_text: HashMap<String, Vec<(usize, f64, f64)>> = HashMap::new();
+    for (page_index, page) in pages.iter().enumerate() {
+        let (w, h) = (page.width, page.height);
+        if w <= 0.0 || h <= 0.0 {
+            continue;
+        }
+        for line in &page.lines {
+            let text: String = line
+                .words
+                .iter()
+                .map(|word| word.text.trim())
+                .collect::<Vec<_>>()
+                .join("");
+            let text = text.trim();
+            if text.is_empty() || text.chars().count() > MAX_CHARS {
+                continue;
+            }
+            let Some(first) = line.words.first() else {
+                continue;
+            };
+            by_text
+                .entry(text.to_string())
+                .or_default()
+                .push((page_index, first.x / w, first.y / h));
+        }
+    }
+
+    let min_pages = ((total as f64 * MIN_PAGE_RATIO).ceil() as usize).max(2);
+    let mut out = Vec::new();
+    for (text, occ) in by_text {
+        let distinct: HashSet<usize> = occ.iter().map(|(p, _, _)| *p).collect();
+        if distinct.len() < min_pages {
+            continue;
+        }
+        let n = occ.len() as f64;
+        let nx = occ.iter().map(|(_, x, _)| *x).sum::<f64>() / n;
+        let ny = occ.iter().map(|(_, _, y)| *y).sum::<f64>() / n;
+        let stable = occ
+            .iter()
+            .all(|(_, x, y)| (x - nx).abs() <= POS_TOL && (y - ny).abs() <= POS_TOL);
+        if stable {
+            out.push(CrossPageCluster {
+                text,
+                pages: distinct.len(),
+                total_pages: total,
+                nx,
+                ny,
+            });
+        }
+    }
+    out.sort_by(|a, b| b.pages.cmp(&a.pages).then(a.text.cmp(&b.text)));
+    out
 }
 
 /// Run `pdftotext -bbox-layout` and return its stdout.
@@ -241,6 +345,7 @@ fn analyze_with(pages: &[PageBoxes]) -> WatermarkScan {
         removed_chars,
         total_chars,
         tokens,
+        clusters: Vec::new(),
     }
 }
 
@@ -363,7 +468,10 @@ pub fn filter_text(text: &str, tokens: &[String]) -> String {
 
 fn parse_bbox(xml: &str) -> Vec<PageBoxes> {
     use regex::Regex;
-    let Ok(page_re) = Regex::new(r"(?s)<page\b[^>]*>(.*?)</page>") else {
+    let Ok(page_re) = Regex::new(r#"(?s)<page\s+([^>]*)>(.*?)</page>"#) else {
+        return Vec::new();
+    };
+    let Ok(attr_re) = Regex::new(r#"(width|height)="([-\d.eE+]+)""#) else {
         return Vec::new();
     };
     let Ok(line_re) = Regex::new(r"(?s)<line\b[^>]*>(.*?)</line>") else {
@@ -377,8 +485,17 @@ fn parse_bbox(xml: &str) -> Vec<PageBoxes> {
 
     let mut pages = Vec::new();
     for pm in page_re.captures_iter(xml) {
+        let (mut width, mut height) = (0.0f64, 0.0f64);
+        for am in attr_re.captures_iter(&pm[1]) {
+            let v: f64 = am[2].parse().unwrap_or(0.0);
+            match &am[1] {
+                "width" => width = v,
+                "height" => height = v,
+                _ => {}
+            }
+        }
         let mut lines = Vec::new();
-        for lm in line_re.captures_iter(&pm[1]) {
+        for lm in line_re.captures_iter(&pm[2]) {
             let mut words = Vec::new();
             for wm in word_re.captures_iter(&lm[1]) {
                 let x: f64 = wm[1].parse().unwrap_or(0.0);
@@ -393,7 +510,7 @@ fn parse_bbox(xml: &str) -> Vec<PageBoxes> {
             }
         }
         if !lines.is_empty() {
-            pages.push(PageBoxes { lines });
+            pages.push(PageBoxes { lines, width, height });
         }
     }
     pages
@@ -454,7 +571,7 @@ mod tests {
         for (t, x, y) in wm {
             lines.push(line(&[(t, x, y)]));
         }
-        PageBoxes { lines }
+        PageBoxes { lines, width: 595.0, height: 842.0 }
     }
 
     #[test]
@@ -491,7 +608,7 @@ mod tests {
                 ("正文", 160.0, 100.0 + i as f64 * 12.0),
             ]));
         }
-        let scan = analyze(&[PageBoxes { lines }]);
+        let scan = analyze(&[PageBoxes { lines, width: 595.0, height: 842.0 }]);
         assert!(!scan.found, "horizontal body text must not be flagged");
         assert_eq!(scan.removed_chars, 0);
     }
@@ -503,7 +620,7 @@ mod tests {
         for i in 0..8 {
             lines.push(line(&[("1", 80.0 + i as f64 * 40.0, 300.0)]));
         }
-        let scan = analyze(&[PageBoxes { lines }]);
+        let scan = analyze(&[PageBoxes { lines, width: 595.0, height: 842.0 }]);
         assert!(
             !scan.found,
             "collinear-on-a-row tiny tokens must not be treated as a watermark"
@@ -539,5 +656,49 @@ mod tests {
         assert!(!out.lines().any(|l| l.trim() == "**"));
         // CJK fragments are conservatively kept (could be real content).
         assert!(out.contains("陈骥"), "CJK fragment must not be dropped: {out}");
+    }
+
+    /// Phase 2: a fragment repeated at the same normalized position on most
+    /// pages is detected; page-varying body text is not.
+    #[test]
+    fn cross_page_clusters_find_repeated_position() {
+        // 5 pages: a horizontal watermark line at the same spot, plus unique body.
+        let mut pages = Vec::new();
+        for i in 0..5 {
+            let mut lines = Vec::new();
+            // watermark: horizontal, same normalized position every page
+            lines.push(line(&[("上海小城律师事务所", 200.0, 400.0)]));
+            // body: unique per page
+            lines.push(line(&[("第", 80.0, 100.0), (&format!("{i}页正文内容"), 100.0, 100.0)]));
+            pages.push(PageBoxes { lines, width: 595.0, height: 842.0 });
+        }
+        let clusters = cross_page_clusters(&pages);
+        assert!(
+            clusters.iter().any(|c| c.text == "上海小城律师事务所"),
+            "repeated same-position watermark must be detected: {clusters:?}"
+        );
+        assert!(
+            !clusters.iter().any(|c| c.text.contains("页正文内容")),
+            "page-varying body text must not be flagged"
+        );
+    }
+
+    /// A one-off repeated string at *different* positions on each page is not a
+    /// watermark (position consistency is required).
+    #[test]
+    fn cross_page_clusters_require_position_consistency() {
+        let mut pages = Vec::new();
+        for i in 0..5 {
+            let y = 100.0 + i as f64 * 120.0; // drifts far each page
+            pages.push(PageBoxes {
+                lines: vec![line(&[("律师事务所", 200.0, y)])],
+                width: 595.0,
+                height: 842.0,
+            });
+        }
+        assert!(
+            cross_page_clusters(&pages).is_empty(),
+            "position drift must defeat the cluster"
+        );
     }
 }
