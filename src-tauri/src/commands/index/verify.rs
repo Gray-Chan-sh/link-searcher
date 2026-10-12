@@ -107,7 +107,13 @@ pub(super) fn run_verify_core(
                     }
                 }
                 Err(e) => {
+                    // 上面已经把这份文档从 Tantivy 删掉了；若行仍留在 indexed=1，
+                    // DB 就会声称一份索引里不存在的文档（元凶：heal 反复报"缺失"）。
                     log::warn!("[VERIFY] 重试失败: {}: {e}", rec.path);
+                    if let Err(e2) = tracker::mark_failed(&conn, &file_id, &format!("校验重试失败: {e}")) {
+                        log::warn!("[VERIFY] {file_id}: 标记失败态失败: {e2}");
+                    }
+                    let _ = tracker::mark_dead_content(&conn, &file_id);
                     failed += 1;
                 }
             }

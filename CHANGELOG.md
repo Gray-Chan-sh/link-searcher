@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：追出「Tantivy 反复缺 1 份」的元凶 —— 先删文档、重建失败后不改状态
+
+- **根因（已定位到具体文件）**：`verify` 处理「空内容」文件时会**先删掉它的 Tantivy 文档**（`delete_document_only`）再重建；重建失败时只 `log` + 计数，**行仍留在 `indexed=1`** → DB 声称一份索引里并不存在的文档 → 下一轮 heal 报「缺失 1 份」、重灌、再失败、再报……
+  - 实测链（同一份 **0 字节** docx）：`21:35:20 [VERIFY] 重试失败: …5-俊发二期项目…docx` → `21:58:07` 再次 → `22:10:45 [HEAL] 缺失 1 份 → 重灌失败`。
+  - 同类形态共 **3 处**：`verify`（元凶）、`reextract_missing_content`、`reindex_files` —— 都是「先删文档再重建」，失败后不改状态。
+- **修复**：新增 `mark_failed_after_reindex()`（`commands/index.rs`），三处重建失败时统一把该行**降级为失败态**（`indexed=2`），保持 DB 与索引一致；`verify` 另外补 `mark_dead_content`，使其不再进入校验候选被反复重试。
+  - 与 `aea4f5e`（heal 失败降级）形成双保险：**源头不再制造不一致**，heal 那侧也只是兜底。
+- **测试**：新增 `verify_core_downgrades_failed_retry`（重建失败 → 降级为 `indexed=2` → 不再进入校验候选）；`cargo test --lib` **517 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`commands/index.rs`、`commands/index/verify.rs`。
+
 ## 2026-10-13：修复「重试」按钮无效 —— 新增 retry_failed_files
 
 - **问题**：索引状态页「错误」卡片上的**「重试」按钮点了没反应**。`IndexStatus.tsx::retryFailed` 只调用 `scan()`，而扫描的 `needs_reindex` 对 `indexed=2`（失败）返回 false → **扫描会跳过失败文件**。同时 `tracker::mark_failed_for_reindex()`（把 active 的失败记录重置为待索引）**定义在那里却没有任何调用方**——看起来本就是这个按钮的实现。

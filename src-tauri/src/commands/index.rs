@@ -392,6 +392,25 @@ pub async fn retry_failed_files(
     Ok(reset)
 }
 
+/// 先删了 Tantivy 文档、重建又失败时，DB 仍声称 `indexed=1`，而索引里已经没有该
+/// 文档 —— 完整性自愈会因此反复报「缺失 N 份」（实测元凶）。统一降级为失败态，
+/// 保持 DB 与索引一致；该文件仍可由扫描或「重试」按钮再次尝试。
+fn mark_failed_after_reindex(
+    pool: &Pool<SqliteConnectionManager>,
+    file_id: &str,
+    rel_path: &str,
+    err: &str,
+) {
+    match pool.get() {
+        Ok(conn) => {
+            if let Err(e) = tracker::mark_failed(&conn, file_id, &format!("重建索引失败: {err}")) {
+                log::warn!("[INDEX] {rel_path}: 标记失败态失败: {e}");
+            }
+        }
+        Err(e) => log::warn!("[INDEX] {file_id}: 标记失败态取连接失败: {e}"),
+    }
+}
+
 #[tauri::command]
 pub async fn rebuild_index(
     state: State<'_, AppState>,
@@ -873,6 +892,7 @@ pub async fn reextract_missing_content(
                 Ok(()) => ok += 1,
                 Err(e) => {
                     log::warn!("[REEXTRACT] {rel_path}: {e}");
+                    mark_failed_after_reindex(&db_pool, &file_id, &rel_path, &e.to_string());
                     failed += 1;
                 }
             }
@@ -1015,6 +1035,7 @@ pub async fn reindex_files(
                 }
                 Err(e) => {
                     log::warn!("[REINDEX_FILES] {}: {e}", rec.path);
+                    mark_failed_after_reindex(&db_pool, &file_id, &rec.path, &e.to_string());
                     failed += 1;
                 }
             }
@@ -1405,6 +1426,57 @@ mod tests {
         let rows = missing_embedding_rows(&conn).unwrap();
         assert_eq!(rows.len(), 1, "content re-extracted after the embedding must be selected");
         assert_eq!(rows[0].0, id);
+    }
+
+    /// verify 会**先删掉**旧 Tantivy 文档再重建；若重建失败而 DB 仍留在 indexed=1，
+    /// 索引里就永远没有这份文档 —— 实测这是 heal 每轮都报「缺失 1 份」的元凶。
+    /// 重建失败必须降级为失败态。
+    #[test]
+    fn verify_core_downgrades_failed_retry() {
+        use crate::search::IndexManager;
+        use std::sync::Arc;
+
+        let db_path = std::env::temp_dir().join(format!("verifydown_pool_{}.db", std::process::id()));
+        let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
+        let (fid, indexer) = {
+            let c = pool.get().unwrap();
+            db::init_db(&c).unwrap();
+            db::dir_config::add_dir(
+                &c, std::env::temp_dir().to_str().unwrap(), None, None, None, None, true,
+            )
+            .unwrap();
+            let d_id = db::dir_config::list_dirs(&c).unwrap().remove(0).id;
+            // 磁盘上不存在 + 无内容行 → 命中「空内容」候选，且重建必然失败。
+            let fid = tracker::upsert_file(&c, "verify_missing_on_disk.txt", &d_id, 100, 1, None)
+                .unwrap();
+            tracker::update_indexed(&c, &fid, Some("md5verify")).unwrap();
+            drop(c);
+            let im = Arc::new(std::sync::RwLock::new(IndexManager::create_in_ram()));
+            (fid, Arc::new(crate::indexer::IndexerService::new(pool.clone(), im)))
+        };
+
+        let rpt = run_verify_core(&pool, &indexer, false).unwrap();
+        assert_eq!(rpt.failed, 1, "{rpt:?}");
+
+        let state: i64 = {
+            let c = pool.get().unwrap();
+            c.query_row(
+                "SELECT indexed FROM file_tracking WHERE id=?1",
+                rusqlite::params![fid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(state, 2, "重建失败后必须降级，否则索引里永远缺这份文档");
+
+        // 不再被当作「空内容」候选反复重试。
+        let c = pool.get().unwrap();
+        assert!(
+            tracker::find_empty_content_files(&c).unwrap().is_empty(),
+            "降级后的记录不应再进入校验候选"
+        );
+        drop(c);
+        let _ = std::fs::remove_file(&db_path);
     }
 
     /// End-to-end: run_verify_core re-extracts a file whose stored content is
