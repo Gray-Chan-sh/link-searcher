@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：② 嵌入 keeper —— 提取与回填并行（端到端 −40%）
+
+- **目标**：把「扫描 → 提取 → 回填」从**串行**改为**并行**，缩短端到端时间。回填总量与网关吞吐不变，省掉的是「提取那一段」。
+- **做法**：
+  - `src-tauri/src/indexer.rs`：`IndexerService` 新增 `is_indexing` 标志（`is_indexing()` / `set_indexing()` / `is_indexing_flag()`）与 `ensure_embedding_keepers()`；`batch_index` / `index_file` 由「调度 doc 回填」改为「拉起 keeper 对」。
+  - `src-tauri/src/scanner/mod.rs`：新增 `IndexingScope`（RAII），在 `full_scan` / `incremental_scan` / `startup_scan` 期间置位 —— 扫描一开始就拉起 keeper，退出/取消/嵌套均安全。
+  - `src-tauri/src/commands/index/embeddings.rs`：新增 `ensure_embedding_keepers(db, is_indexing)`，单飞拉起 **doc / chunk 两个 keeper 线程**，各自 drain 自己的队列；靠 ① 的分片锁自然交替，互不饿死。队列空且索引停止后退出（`KeeperTicket` RAII 防 panic 卡死；失败时每轮只记一条 WARN 并 500ms 让位，防热循环/日志刷屏）。
+  - `src-tauri/src/commands/index.rs`：导出 `ensure_embedding_keepers`。
+- **测试**：新增 `keeper_keeps_polling_while_work_or_indexing`；`cargo test --lib` **508 项全过**；`semgrep --severity ERROR` 0 findings。
+- **预期**：全库重建端到端 ≈ `max(提取 7.4h, 回填 10.6h) ≈ 10.6h`（原串行 ≈ 18h，约 **−40%**）；回填本身耗时不变。
+- **说明**：`schedule_backfill_embeddings`（3s 防抖一次性 doc 回填）保留给非索引路径；索引路径已改走 keeper。
+
 ## 2026-10-12：修复向量回填的调度锁（doc 被 chunk 饿死）
 
 - **问题**：单把 `BACKFILL_LOCK` 被 `run_backfill_chunk_embeddings` **整段持有到 backlog 清空**（实测一次全量 chunk 补齐 ≈6 h），把 doc 回填饿死；`schedule_backfill_embeddings` 的守卫只判 `task == "backfill"`，**拦不住 `backfill_chunks`**，于是每次调度都新起一个线程卡在锁上（`TaskGuard` 尚未注册，守卫永远看不到）→ 阻塞线程堆积。后果：新索引的文件 p90 要等 **58 h** 才拿到 doc 向量（38.8% 落在 1–3 天）。

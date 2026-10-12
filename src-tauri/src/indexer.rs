@@ -35,6 +35,11 @@ pub struct IndexerService {
     batch_io_concurrency: AtomicUsize,
     writer_buffer_mb: AtomicUsize,
     cancel_scan: Arc<AtomicBool>,
+    /// True while a scan/indexing pass is running. Owned here (not just in
+    /// `AppState`) so the [`Scanner`](crate::scanner::Scanner) can flip it
+    /// around each scan and the embedding keepers can stay alive across long
+    /// extraction batches instead of exiting between them.
+    is_indexing: Arc<AtomicBool>,
 }
 
 // SAFETY: IndexWriter is `Send` (it holds owned channels + Arc<Mutex<…>>).
@@ -392,6 +397,7 @@ impl IndexerService {
             batch_io_concurrency: AtomicUsize::new(DEFAULT_BATCH_IO_CONCURRENCY),
             writer_buffer_mb: AtomicUsize::new(DEFAULT_WRITER_BUFFER_MB),
             cancel_scan,
+            is_indexing: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -567,7 +573,7 @@ impl IndexerService {
             total as f64 / total_elapsed.as_secs_f64().max(0.001),
         );
 
-        crate::commands::index::schedule_backfill_embeddings(&self.db);
+        crate::commands::index::ensure_embedding_keepers(&self.db, self.is_indexing.clone());
 
         Ok(results)
     }
@@ -669,7 +675,7 @@ impl IndexerService {
 
             log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
 
-            crate::commands::index::schedule_backfill_embeddings(&self.db);
+            self.ensure_embedding_keepers();
 
             // Periodic auto-commit every N successful files (reuse held writer).
             let count = self.commit_counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -794,6 +800,29 @@ impl IndexerService {
     /// Current Tantivy writer memory budget (MB).
     pub fn writer_buffer_mb(&self) -> usize {
         self.writer_buffer_mb.load(Ordering::Relaxed)
+    }
+
+    /// Whether a scan/indexing pass is currently running (see [`Self::is_indexing`]).
+    pub fn is_indexing(&self) -> bool {
+        self.is_indexing.load(Ordering::Acquire)
+    }
+
+    /// Set the indexing-in-progress flag. Used by the scanner (via
+    /// `IndexingScope`) around each scan.
+    pub fn set_indexing(&self, value: bool) {
+        self.is_indexing.store(value, Ordering::Release);
+    }
+
+    /// Shared handle to the indexing flag, for the embedding keepers.
+    pub fn is_indexing_flag(&self) -> Arc<AtomicBool> {
+        self.is_indexing.clone()
+    }
+
+    /// Kick the doc/chunk embedding keepers so extraction and embedding overlap
+    /// instead of running back-to-back. Idempotent — a no-op while keepers are
+    /// already alive.
+    pub fn ensure_embedding_keepers(&self) {
+        crate::commands::index::ensure_embedding_keepers(&self.db, self.is_indexing.clone());
     }
 
     // ------------------------------------------------------------------

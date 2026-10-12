@@ -3,7 +3,7 @@
 
 use std::collections::{hash_map::Entry, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::Context;
 use serde::Serialize;
@@ -222,6 +222,9 @@ pub fn run_backfill_embeddings_public(
 /// before running, so every burst during a long chunk drain spawned another
 /// thread that parked on the lock (a leak, since the blocking thread hadn't
 /// registered its `TaskGuard` yet and the old check looked for `"backfill"`).
+///
+/// Superseded by [`ensure_embedding_keepers`] on the indexing path; kept for
+/// callers that only want a one-shot doc backfill.
 pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
     static PENDING: AtomicBool = AtomicBool::new(false);
 
@@ -236,6 +239,111 @@ pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectio
         }
         PENDING.store(false, Ordering::SeqCst);
     });
+}
+
+/// Number of keeper threads currently alive (0 or 2). `compare_exchange(0, 2)`
+/// admits exactly one pair; each thread decrements on exit, so the last one out
+/// resets the counter and a later call can start a fresh pair.
+static KEEPERS_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Decrements [`KEEPERS_ACTIVE`] on drop, so a panic in a keeper can't strand
+/// the counter above 0 (which would block every future keeper pair forever).
+struct KeeperTicket;
+
+impl Drop for KeeperTicket {
+    fn drop(&mut self) {
+        KEEPERS_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Whether a keeper should keep polling: while it still finds work, or while an
+/// indexing pass is running (it may produce more rows at any moment).
+fn keeper_should_continue(processed: u64, is_indexing: bool) -> bool {
+    processed > 0 || is_indexing
+}
+
+/// Keep doc- and chunk-level embedding running *alongside* a scan instead of
+/// only after it. Two keeper threads each drain their own queue; the
+/// shard-scoped [`BACKFILL_LOCK`] makes them alternate, so neither starves the
+/// other. A keeper polls every second while idle, and exits once its queue is
+/// empty **and** indexing has stopped.
+///
+/// Callers: [`IndexerService::ensure_embedding_keepers`](crate::indexer::IndexerService::ensure_embedding_keepers)
+/// on the scan/watcher path. Idempotent — a no-op while a pair is already alive.
+pub fn ensure_embedding_keepers(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    is_indexing: Arc<AtomicBool>,
+) {
+    if !crate::ai::embedding_enabled() {
+        return;
+    }
+    if KEEPERS_ACTIVE
+        .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return; // a pair is already running
+    }
+
+    let pool_doc = db.clone();
+    let flag_doc = is_indexing.clone();
+    std::thread::spawn(move || {
+        let _ticket = KeeperTicket;
+        log::info!("[AI] 嵌入 keeper 启动（doc）");
+        run_keeper_loop(&pool_doc, &flag_doc, run_backfill_embeddings, "backfill");
+    });
+
+    let pool_chunk = db.clone();
+    let flag_chunk = is_indexing;
+    std::thread::spawn(move || {
+        let _ticket = KeeperTicket;
+        log::info!("[AI] 嵌入 keeper 启动（chunk）");
+        run_keeper_loop(
+            &pool_chunk,
+            &flag_chunk,
+            run_backfill_chunk_embeddings,
+            "backfill_chunks",
+        );
+    });
+}
+
+/// Drain one backfill repeatedly until it has nothing to do and indexing has
+/// stopped. `run` is [`run_backfill_embeddings`] or
+/// [`run_backfill_chunk_embeddings`].
+fn run_keeper_loop(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    is_indexing: &AtomicBool,
+    run: fn(&r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) -> Result<BackfillReport, String>,
+    task: &str,
+) {
+    /// Poll interval when the queue is empty. Freshly committed rows are picked
+    /// up within one poll, so this is only about not hot-looping.
+    const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    let mut logged_error = false;
+    loop {
+        let processed = match run(db) {
+            Ok(r) => {
+                logged_error = false;
+                r.processed
+            }
+            Err(e) => {
+                // Log only the first failure: a gateway-less/disabled AI would
+                // otherwise log once per poll for the whole scan.
+                if !logged_error {
+                    log::warn!("[AI] {task} keeper 暂停: {e}");
+                    logged_error = true;
+                }
+                0
+            }
+        };
+        if !keeper_should_continue(processed, is_indexing.load(Ordering::Acquire)) {
+            log::info!("[AI] 嵌入 keeper 退出（{task} 已排空且索引已停止）");
+            return;
+        }
+        // Always yield between drains: a queue whose rows all keep failing
+        // would otherwise spin, and even a productive drain benefits from
+        // letting fresh rows accumulate.
+        std::thread::sleep(POLL);
+    }
 }
 
 /// Files whose document embedding is missing or stale, with cached extracted
@@ -554,6 +662,17 @@ mod tests {
             "a {}-chunk pass would hold the lock {hold_secs:.0}s — too long",
             super::MAX_CHUNKS_PER_PASS
         );
+    }
+
+    /// A keeper must only stop when BOTH its queue is empty and indexing has
+    /// stopped — otherwise it would exit mid-scan and wait for the next batch.
+    #[test]
+    fn keeper_keeps_polling_while_work_or_indexing() {
+        use super::keeper_should_continue;
+        assert!(keeper_should_continue(1, false), "work found → keep going");
+        assert!(keeper_should_continue(0, true), "idle but indexing → keep waiting");
+        assert!(keeper_should_continue(5, true), "both → keep going");
+        assert!(!keeper_should_continue(0, false), "idle and no scan → exit");
     }
 
     #[test]

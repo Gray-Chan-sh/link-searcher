@@ -685,8 +685,8 @@ pub async fn backfill_embeddings(state: State<'_, AppState>) -> Result<BackfillR
 
 mod embeddings;
 pub use embeddings::{
-    run_backfill_chunk_embeddings_public, run_backfill_embeddings_public,
-    schedule_backfill_embeddings, BackfillReport,
+    ensure_embedding_keepers, run_backfill_chunk_embeddings_public,
+    run_backfill_embeddings_public, schedule_backfill_embeddings, BackfillReport,
 };
 use embeddings::{run_backfill_chunk_embeddings, run_backfill_embeddings};
 

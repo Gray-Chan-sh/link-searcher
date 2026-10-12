@@ -54,6 +54,32 @@ fn should_skip_watcher_event(rec: &FileRecord, mtime: i64, size: u64) -> bool {
     rec.indexed == 1 && rec.mtime == mtime && rec.size == size
 }
 
+/// Marks the indexer as "indexing" for the lifetime of a scan so the embedding
+/// keepers stay alive across long extraction batches (one batch can run for
+/// minutes with nothing newly eligible for embedding). Restores the previous
+/// value on drop, so nested scans and early returns (cancellation) are safe.
+struct IndexingScope<'a> {
+    indexer: &'a IndexerService,
+    previous: bool,
+}
+
+impl<'a> IndexingScope<'a> {
+    fn new(indexer: &'a IndexerService) -> Self {
+        let previous = indexer.is_indexing();
+        indexer.set_indexing(true);
+        // Start embedding with the scan rather than after it: the keepers poll
+        // while indexing and drain each freshly-committed batch as it lands.
+        indexer.ensure_embedding_keepers();
+        Self { indexer, previous }
+    }
+}
+
+impl Drop for IndexingScope<'_> {
+    fn drop(&mut self) {
+        self.indexer.set_indexing(self.previous);
+    }
+}
+
 /// Walks a directory tree, discovers files, and indexes them via
 /// [`IndexerService`].
 pub struct Scanner {
@@ -117,6 +143,7 @@ impl Scanner {
         progress: impl Fn(ScanProgress),
     ) -> Result<ScanResult> {
         let start = Instant::now();
+        let _indexing = IndexingScope::new(&self.indexer);
         let conn = self.db.get().context("failed to get DB connection")?;
 
         let config = dir_config::get_dir(&conn, dir_id)?
@@ -298,6 +325,7 @@ impl Scanner {
         progress: impl Fn(ScanProgress),
     ) -> Result<ScanResult> {
         let start = Instant::now();
+        let _indexing = IndexingScope::new(&self.indexer);
         let conn = self.db.get().context("failed to get DB connection")?;
 
         let last_scan = get_last_scan_time(&conn, dir_id)?;
@@ -437,6 +465,7 @@ impl Scanner {
         progress: impl Fn(ScanProgress),
     ) -> Result<ScanResult> {
         let start = Instant::now();
+        let _indexing = IndexingScope::new(&self.indexer);
         let conn = self.db.get().context("failed to get DB connection")?;
 
         let config = dir_config::get_dir(&conn, dir_id)?
