@@ -550,6 +550,9 @@ get_dir_children,
                     if let Err(e) = crate::db::cleanup_orphan_chunk_embeddings(&conn) {
                         log::error!("[STARTUP] orphan chunk-embedding cleanup failed: {e}");
                     }
+                    if let Err(e) = crate::db::cleanup_orphan_file_rows(&conn) {
+                        log::error!("[STARTUP] orphan doc vector/summary cleanup failed: {e}");
+                    }
                     drop(conn);
                 }
 

@@ -35,13 +35,15 @@ pub(crate) fn run_index_integrity_heal(
     use tantivy::query::AllQuery;
     use tantivy::schema::Value;
 
-    // Refuse (rather than block) a second concurrent heal: automatic hooks
-    // (startup / scan completion / post-removal resume) can now fire twice, and
-    // a redundant full DB↔Tantivy diff is pure waste.
-    let Some(_single) = crate::state::try_acquire_single_flight("heal-index") else {
-        log::info!("[HEAL] 已有一次索引完整性自愈在运行，跳过本次");
-        return Ok(IndexHealReport::default());
-    };
+    // Serialize heal runs process-wide: the automatic hooks (startup / scan
+    // completion / post-removal resume) and a manual trigger must not re-index
+    // concurrently. Serializing (not refusing) keeps a manual trigger working —
+    // the queued run finds nothing to do once the first has healed the drift.
+    static HEAL_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _lock = HEAL_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| "heal lock poisoned".to_string())?;
     let _guard = crate::state::TaskGuard::new("heal-index");
 
     let db_indexed: i64 = {

@@ -20,12 +20,14 @@ pub(super) fn run_verify_core(
     indexer: &std::sync::Arc<crate::indexer::IndexerService>,
     force_dead: bool,
 ) -> Result<VerifyReport, String> {
-    // 同一时刻只允许一次校验：否则"被取消的扫描"和"删除后的续扫"会各起一份并发
-    // 跑，同一批空文件被重复提取两遍（实测 OCR/CPU 翻倍）。
-    let Some(_single) = crate::state::try_acquire_single_flight("verify") else {
-        log::info!("[VERIFY] 已有一次校验在运行，跳过本次");
-        return Ok(VerifyReport { checked: 0, recovered: 0, dead: 0, failed: 0 });
-    };
+    // 同一时刻只允许一次校验：被取消的扫描与删除后的续扫会各起一份维护，
+    // 并发跑会让同一批空文件被重复提取（实测 OCR/CPU 翻倍）。这里用锁**串行**，
+    // 而不是"已在运行就拒绝"——拒绝会让手动触发被静默跳过。
+    static VERIFY_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let _lock = VERIFY_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| "verify lock poisoned".to_string())?;
     let _guard = crate::state::TaskGuard::new("verify");
     let conn = match db_pool.get() {
         Ok(c) => c,

@@ -828,13 +828,8 @@ impl IndexerService {
 
         // Per-`file_id` rows whose owner row is gone (the dir deletes above
         // removed them), then the md5-keyed content that lost its last owner.
-        for sql in [
-            "DELETE FROM doc_embeddings WHERE file_id NOT IN (SELECT id FROM file_tracking)",
-            "DELETE FROM doc_summaries  WHERE file_id NOT IN (SELECT id FROM file_tracking)",
-        ] {
-            if let Err(e) = conn.execute(sql, []) {
-                log::warn!("[INDEX] sweep: {e}");
-            }
+        if let Err(e) = crate::db::cleanup_orphan_file_rows(&conn) {
+            log::warn!("[INDEX] sweep: cleanup_orphan_file_rows: {e}");
         }
         if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
             log::warn!("[INDEX] sweep: cleanup_orphan_content: {e}");

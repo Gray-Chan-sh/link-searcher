@@ -618,6 +618,12 @@ impl Scanner {
                     {
                         tracker::hard_delete_file(&conn, &new_rec.id)?;
                         let _ = self.indexer.delete_document_only(&new_rec.id);
+                        // The tracking row is gone for good: drop its per-file
+                        // vector too, otherwise it lingers forever (the md5-keyed
+                        // cleanups never look at doc_embeddings).
+                        if let Err(e) = tracker::delete_embedding(&conn, &new_rec.id) {
+                            log::warn!("[STARTUP] 移位清理旧 doc 向量失败 {}: {e}", new_rec.id);
+                        }
                         tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
                         log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);
                         moved += 1;

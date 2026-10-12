@@ -1,5 +1,16 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：清理孤儿 doc 向量（移动检测漏删）+ 维护改为串行
+
+- **① 孤儿 `doc_embeddings`（审计发现 58 行）**：`doc_embeddings`/`doc_summaries` 按 `file_id` 键，**没有任何 md5 清理会覆盖它们**。源头是 `startup_scan` 的移动检测：它 `hard_delete_file(new_rec.id)` 删掉 tracking 行、只顺手删了 Tantivy 文档，**没删该 file_id 的 doc 向量** → 永久孤儿。
+  - 新增 `db::cleanup_orphan_file_rows()`（清 `file_id` 已不在 `file_tracking` 的两张表）；
+  - 接入**启动清理**（`lib.rs`，与既有的 `cleanup_orphan_content` / `cleanup_orphan_chunk_embeddings` 并列）；
+  - `sweep_orphan_dirs` 改用该函数（原先是内联 SQL）；
+  - 移动检测处补 `tracker::delete_embedding(&new_rec.id)`，从源头堵住。
+- **② 扫描后维护改为"串行"而非"拒绝"**：59f7893 里用单飞槽"已在运行就拒绝"，有两个问题：(a) **手动触发会被静默跳过**；(b) 并行测试互相抢占，`integrity_heal_reindexes_db_orphans` 全量跑时报错（单独跑通过）。改为 `VERIFY_LOCK` / `HEAL_LOCK` **互斥串行**——同样消除并发重复提取，但不吞掉手动触发，且行为确定。移除了 `state::try_acquire_single_flight`。
+- **测试**：新增 `orphan_file_rows_are_cleaned`、`task_registry_is_name_only`；`cargo test --lib` **514 项全过（连跑两次一致）**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`db/mod.rs`、`indexer.rs`、`scanner/mod.rs`、`lib.rs`、`state.rs`、`commands/index/verify.rs`、`commands/index/integrity.rs`。
+
 ## 2026-10-12：修复删除目录后前端崩溃 —— React #31（Tauri 返回对象被当字符串渲染）
 
 - **现象**：删除目录完成后前端报错 `Minified React error #31 … object with keys {message, stopped_scan, swept_orphan_dirs, resumed_scan}`。后端行为正常（删除确实完成了），崩在渲染返回值上。

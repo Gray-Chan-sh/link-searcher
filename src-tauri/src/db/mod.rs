@@ -465,6 +465,32 @@ pub fn wal_checkpoint_truncate(conn: &Connection) -> Result<(i64, i64, i64)> {
     .context("wal_checkpoint(TRUNCATE) failed")
 }
 
+/// Remove `doc_embeddings` / `doc_summaries` rows whose `file_id` no longer
+/// exists in `file_tracking`.
+///
+/// Both tables are keyed by `file_id`, so any path that drops a tracking row
+/// without also dropping its vector/summary leaves an orphan there **forever** —
+/// the md5-keyed cleanups above never look at these tables. Move detection is the
+/// known source: `startup_scan` hard-deletes the freshly-walked row B and only
+/// removes B's Tantivy document.
+///
+/// Returns the number of rows removed.
+pub fn cleanup_orphan_file_rows(conn: &Connection) -> Result<u64> {
+    let embeddings = conn.execute(
+        "DELETE FROM doc_embeddings WHERE file_id NOT IN (SELECT id FROM file_tracking)",
+        [],
+    )?;
+    let summaries = conn.execute(
+        "DELETE FROM doc_summaries WHERE file_id NOT IN (SELECT id FROM file_tracking)",
+        [],
+    )?;
+    let deleted = (embeddings + summaries) as u64;
+    if deleted > 0 {
+        log::info!("[DB] cleaned up {deleted} orphan doc_embeddings/doc_summaries rows");
+    }
+    Ok(deleted)
+}
+
 /// Rename the dead `auto_backup_enabled`/`auto_backup_interval_days` setting
 /// keys to the names the UI and settings whitelist read. Copies the legacy
 /// value only when the new key is absent, then drops the dead key.
@@ -562,6 +588,51 @@ mod tests {
     fn test_migrations_are_idempotent() {
         let conn = setup_conn();
         run_migrations(&conn).unwrap();
+    }
+
+    /// 按 `file_id` 键的表（doc 向量/摘要）没有任何 md5 清理会覆盖：只要 tracking 行
+    /// 没了，它们就是永久孤儿（移动检测 `hard_delete_file` 曾是源头）。
+    #[test]
+    fn orphan_file_rows_are_cleaned() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at) \
+             VALUES ('keep','k','d1',0,0,'m1','active',1,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO doc_embeddings (file_id,dim,vector,updated_at) VALUES ('keep',1,X'00000000',0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO doc_summaries (file_id,summary,updated_at) VALUES ('keep','s',0)",
+            [],
+        )
+        .unwrap();
+        // 没有对应 tracking 行的残留
+        conn.execute(
+            "INSERT INTO doc_embeddings (file_id,dim,vector,updated_at) VALUES ('ghost',1,X'00000000',0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO doc_summaries (file_id,summary,updated_at) VALUES ('ghost2','s',0)",
+            [],
+        )
+        .unwrap();
+
+        let deleted = cleanup_orphan_file_rows(&conn).unwrap();
+        assert_eq!(deleted, 2, "两条孤儿（一个向量 + 一个摘要）都应清掉");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1, "仍被引用的行必须保留");
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc_summaries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 1);
     }
 
     /// 按 md5 键的块向量必须"共享内容感知"：删掉一个目录后，只要还有别的
