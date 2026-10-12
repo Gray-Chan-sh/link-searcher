@@ -197,12 +197,18 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 
 | 方案 | 做法 | 预期收益 | 风险 / 成本 |
 |---|---|---|---|
-| **① 拆锁 + 分片**（推荐，最高优先） | chunk 回填改成每 ~500 块就释放/让位；doc 不再被饿死 | 修掉"新文件等 1–3 天拿到 doc 向量" | 小；需保证同 md5 块不重复写 |
+| **① 拆锁 + 分片**（✅ 2026-10-12 已实施） | chunk 回填改为**每轮 pass 持有** `BACKFILL_LOCK`（`MAX_CHUNKS_PER_PASS` 4096→512 ≈ 3.6 min/轮）；doc 不再被饿死 | 修掉"新文件等 1–3 天拿到 doc 向量" | 小 |
 | **② 常驻 drain worker** | 单个后台 worker：`doc 小批 → chunk 小批` 交替，扫描开始即启动，drain 到空且扫描结束才退出（替换 3s 防抖一次性快照） | 提取与嵌入真正并行；新内容 doc 向量从"天"→"分钟" | 中；要处理与手动回填命令/`vector_health` 的互斥 |
 | **③ 新内容优先** | `missing_*` 查询 `ORDER BY updated_at DESC` | 刚索引的文件优先出向量 | 小 |
-| **④ 修调度漏判** | `schedule_backfill_embeddings` 守卫改为"任意 backfill 任务在跑即返回" | 阻止阻塞线程堆积 | 小 |
+| **④ 修调度漏判**（✅ 2026-10-12 已实施） | `schedule_backfill_embeddings` 的 `PENDING` 覆盖「防抖 + 等锁 + 运行」整段窗口（原守卫只判 `== "backfill"`，拦不住 `backfill_chunks` → 线程堆积） | 阻止阻塞线程堆积 | 小 |
 | ⑤ 减小 chunk 数 | `CHUNK_SIZE 1,500 → 2,500~3,000`（块数约 −40%） | 直接把 6 h 压到 ~3.5 h | **需先做检索质量对比（尚未评估）** |
 | ⑥ 提升网关吞吐 | 多实例 / 换更强的嵌入服务 | 直接抬高 2,300 tok/s 上限 | 需基础设施投入 |
+
+> **实施记录（2026-10-12，仅 ①+④）**：`src-tauri/src/commands/index/embeddings.rs`
+> - 锁改为**分片持有**（chunk 每轮 pass 获取/释放），`MAX_CHUNKS_PER_PASS` 4096 → 512；
+> - 新增 `DOC_BACKFILL_RUNNING` / `CHUNK_BACKFILL_RUNNING` 单飞标志（RAII `RunningFlag`），防手动命令与调度器并发跑同一份快照；
+> - 调度 `PENDING` 覆盖整段窗口；每轮 pass 打 `[AI] chunk 回填分片: …`。
+> - 效果：**doc 回填最迟 ~4 分钟内可插队**（原为整段 6 h 持锁）；②③ 未做。
 
 **组合预期**（①②③④）：
 

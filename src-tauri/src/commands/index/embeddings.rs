@@ -10,15 +10,42 @@ use serde::Serialize;
 
 use crate::db::tracker;
 
-/// Serializes doc- and chunk-level embedding backfills. Both use the same local
-/// model pool, so running them at once just makes each other slower and makes
-/// progress hard to read. Whichever starts first runs to completion; the other
-/// waits. (Chunk *building* in `db::chunks` isn't gated — it does no inference.)
+/// Serializes doc- and chunk-level embedding backfills. Both use the same
+/// embedding backend, so running them at once only splits the same capacity.
+///
+/// Held per **pass** by the chunk drain (one pass ≈ 3.6 min, see
+/// [`MAX_CHUNKS_PER_PASS`]) so it can't starve the doc pass; the doc pass still
+/// holds it for its whole (short) run. A run-scoped chunk hold was the bug:
+/// one full chunk drain (hours) kept newly indexed files waiting hours-to-days
+/// for their vector (measured p90 = 58 h; see `docs/index-pipeline-eval.md`).
+/// (Chunk *building* in `db::chunks` isn't gated — it does no inference.)
 static BACKFILL_LOCK: Mutex<()> = Mutex::new(());
 
 fn backfill_guard() -> MutexGuard<'static, ()> {
     BACKFILL_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// RAII flag that is always cleared on drop, so an early `return` can never
+/// leave a backfill marked as running.
+struct RunningFlag(&'static AtomicBool);
+
+impl Drop for RunningFlag {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Single-flight guards. Now that [`BACKFILL_LOCK`] is only held per shard,
+/// nothing else stops a manual command and the post-index scheduler from
+/// running the same backfill twice concurrently (duplicate inference + writes).
+static DOC_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
+static CHUNK_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// Chunks embedded per chunk-backfill pass. Bounds memory per selection and —
+/// more importantly — sets how long a single [`BACKFILL_LOCK`] hold lasts:
+/// ≈512 / 2.37 ≈ 3.6 min at the measured remote rate, so a long chunk drain
+/// yields to doc backfill every few minutes instead of holding for hours.
+const MAX_CHUNKS_PER_PASS: usize = 512;
 
 pub(super) fn run_backfill_embeddings(
     db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
@@ -26,6 +53,11 @@ pub(super) fn run_backfill_embeddings(
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    if DOC_BACKFILL_RUNNING.swap(true, Ordering::SeqCst) {
+        log::info!("[AI] doc 向量回填已在运行，跳过本次");
+        return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
+    }
+    let _running = RunningFlag(&DOC_BACKFILL_RUNNING);
     let _serial = backfill_guard();
     let _guard = crate::state::TaskGuard::new("backfill");
     const BATCH: usize = 64;
@@ -182,25 +214,27 @@ pub fn run_backfill_embeddings_public(
     run_backfill_embeddings(db).map(|_| ())
 }
 
-/// Debounced post-index doc-embedding backfill: `SCHEDULED` admits a single
-/// pending run and the 3s delay coalesces watcher/batch bursts.
+/// Debounced post-index doc-embedding backfill: a single pending run is
+/// admitted and the 3s delay coalesces watcher/batch bursts.
+///
+/// `PENDING` stays set across the whole window — debounce, the wait for
+/// [`BACKFILL_LOCK`], and the run itself. Previously it was cleared right
+/// before running, so every burst during a long chunk drain spawned another
+/// thread that parked on the lock (a leak, since the blocking thread hadn't
+/// registered its `TaskGuard` yet and the old check looked for `"backfill"`).
 pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
-    static SCHEDULED: AtomicBool = AtomicBool::new(false);
+    static PENDING: AtomicBool = AtomicBool::new(false);
 
-    if !crate::ai::embedding_enabled() || SCHEDULED.swap(true, Ordering::SeqCst) {
+    if !crate::ai::embedding_enabled() || PENDING.swap(true, Ordering::SeqCst) {
         return;
     }
     let pool = db.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(3));
-        SCHEDULED.store(false, Ordering::SeqCst);
-        // Re-checked after the delay so concurrent schedules don't stack runs.
-        if crate::state::running_task_ids().iter().any(|t| t == "backfill") {
-            return;
-        }
         if let Err(e) = run_backfill_embeddings(&pool) {
             log::warn!("[AI] 调度回填失败: {e}");
         }
+        PENDING.store(false, Ordering::SeqCst);
     });
 }
 
@@ -309,11 +343,12 @@ pub(super) fn run_backfill_chunk_embeddings(
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
-    let _serial = backfill_guard();
+    if CHUNK_BACKFILL_RUNNING.swap(true, Ordering::SeqCst) {
+        log::info!("[AI] chunk 向量回填已在运行，跳过本次");
+        return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
+    }
+    let _running = RunningFlag(&CHUNK_BACKFILL_RUNNING);
     let _guard = crate::state::TaskGuard::new("backfill_chunks");
-    /// Chunks selected per inner pass. Bounds memory per selection and keeps
-    /// progress readable; the outer loop continues until the backlog is gone.
-    const MAX_CHUNKS_PER_PASS: usize = 4096;
     /// Long documents examined per pass.
     const MAX_DOCS_PER_PASS: usize = 500;
     const BATCH: usize = 64;
@@ -333,6 +368,11 @@ pub(super) fn run_backfill_chunk_embeddings(
     let started = std::time::Instant::now();
     let mut tracker = RateTracker::new(started);
     loop {
+        // Hold the data lock per pass, not for the whole drain: one full chunk
+        // backlog can take hours, and a run-scoped hold would keep doc backfill
+        // (and thus newly indexed files' vectors) waiting the entire time.
+        let _pass_serial = backfill_guard();
+        let pass_started = std::time::Instant::now();
         // Only the missing chunks, so every pass makes real progress and an
         // interrupted run resumes without redoing finished work.
         let mut tasks =
@@ -345,6 +385,7 @@ pub(super) fn run_backfill_chunk_embeddings(
         tasks.sort_by_key(|(_, _, t)| t.chars().count());
         let pass_len = tasks.len();
         let mut pass_ok = 0usize;
+        let mut pass_failed = 0usize;
         for group in tasks.chunks(super_group_size()) {
             let texts: Vec<String> = group.iter().map(|(_, _, t)| t.clone()).collect();
             let vecs = crate::ai::embed_batched(&texts, BATCH);
@@ -356,15 +397,25 @@ pub(super) fn run_backfill_chunk_embeddings(
                             Err(e) => {
                                 log::warn!("[AI] upsert_chunk_embedding failed {md5}#{idx}: {e}");
                                 failed += 1;
+                                pass_failed += 1;
                             }
                         }
                     }
-                    None => failed += 1,
+                    None => {
+                        failed += 1;
+                        pass_failed += 1;
+                    }
                 }
             }
             processed += group.len();
             report_progress("backfill_chunks", processed, total_missing, failed, &mut tracker);
         }
+        // Observability + lock-yield proof: one line per pass, so the log shows
+        // the drain is sharded and how long each shard held the data lock.
+        log::info!(
+            "[AI] chunk 回填分片: {pass_len} 块 ({pass_ok} ok, {pass_failed} fail), {:.1}s（本轮持锁结束，doc 回填可插队）",
+            pass_started.elapsed().as_secs_f64(),
+        );
         // A pass that embedded nothing would re-select the same rows forever
         // (e.g. every chunk keeps failing); stop instead of hot-looping.
         if pass_ok == 0 {
@@ -455,6 +506,55 @@ pub struct BackfillReport {
 #[cfg(test)]
 mod tests {
     use super::{collect_missing_chunk_tasks, count_missing_chunks, group_by_md5};
+
+    /// `RunningFlag` must clear on drop even when its scope returns early —
+    /// otherwise an aborted/skipped run leaves the single-flight flag stuck and
+    /// every later backfill is refused.
+    #[test]
+    fn running_flag_clears_on_early_return() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn scope(flag: &'static AtomicBool) -> u32 {
+            if flag.swap(true, Ordering::SeqCst) {
+                return 0; // already running → bail out without holding the flag
+            }
+            let _running = super::RunningFlag(flag);
+            1
+        }
+
+        static F: AtomicBool = AtomicBool::new(false);
+        assert_eq!(scope(&F), 1);
+        assert_eq!(scope(&F), 1, "flag must be reset after the guarded scope ends");
+        assert!(!F.load(Ordering::SeqCst));
+    }
+
+    /// The scheduler's single-flight gate must span the whole debounce+wait+run
+    /// window; clearing it early (as the old `SCHEDULED` did) let every burst
+    /// during a long chunk drain spawn another thread parked on the lock.
+    #[test]
+    fn schedule_pending_flag_spans_full_window() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static P: AtomicBool = AtomicBool::new(false);
+        assert!(!P.swap(true, Ordering::SeqCst), "first schedule is admitted");
+        assert!(P.swap(true, Ordering::SeqCst), "re-schedule while pending is refused");
+        P.store(false, Ordering::SeqCst);
+        assert!(!P.swap(true, Ordering::SeqCst), "schedule admitted again after the run");
+    }
+
+    /// The per-pass chunk cap must stay small enough that one lock hold is
+    /// minutes, not hours — this is the property that keeps doc backfill from
+    /// starving. (Measured throughput ≈ 2.37 chunks/s, so 512 ≈ 3.6 min.)
+    #[test]
+    fn chunk_pass_cap_keeps_lock_hold_short() {
+        const CHUNKS_PER_SEC: f64 = 2.37;
+        const MAX_PASS_SECS: f64 = 15.0 * 60.0;
+        let hold_secs = super::MAX_CHUNKS_PER_PASS as f64 / CHUNKS_PER_SEC;
+        assert!(
+            hold_secs <= MAX_PASS_SECS,
+            "a {}-chunk pass would hold the lock {hold_secs:.0}s — too long",
+            super::MAX_CHUNKS_PER_PASS
+        );
+    }
 
     #[test]
     fn group_by_md5_collapses_duplicate_files() {

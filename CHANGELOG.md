@@ -1,5 +1,16 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：修复向量回填的调度锁（doc 被 chunk 饿死）
+
+- **问题**：单把 `BACKFILL_LOCK` 被 `run_backfill_chunk_embeddings` **整段持有到 backlog 清空**（实测一次全量 chunk 补齐 ≈6 h），把 doc 回填饿死；`schedule_backfill_embeddings` 的守卫只判 `task == "backfill"`，**拦不住 `backfill_chunks`**，于是每次调度都新起一个线程卡在锁上（`TaskGuard` 尚未注册，守卫永远看不到）→ 阻塞线程堆积。后果：新索引的文件 p90 要等 **58 h** 才拿到 doc 向量（38.8% 落在 1–3 天）。
+- **修复**（`src-tauri/src/commands/index/embeddings.rs`）：
+  1. 锁改为**分片持有**：chunk 回填每轮 pass 获取/释放 `BACKFILL_LOCK`，`MAX_CHUNKS_PER_PASS` 4096 → **512**（≈3.6 min/轮）→ doc 回填最迟几分钟内可插队；
+  2. 新增 `DOC_BACKFILL_RUNNING` / `CHUNK_BACKFILL_RUNNING` 单飞标志（RAII `RunningFlag`，提前 return 也复位），防「手动命令 + 调度器」并发跑同一份快照；
+  3. 调度 `PENDING` 覆盖「3s 防抖 + 等锁 + 运行」**整段窗口**，不再堆积线程；
+  4. 每轮 pass 打一行 `[AI] chunk 回填分片: n 块 (ok/fail), Xs`（可观测性）。
+- **测试**：新增 `running_flag_clears_on_early_return`、`schedule_pending_flag_spans_full_window`、`chunk_pass_cap_keeps_lock_hold_short`（`commands::index::embeddings` 8 项全过）。
+- **未做（后续）**：常驻 drain worker、新内容优先排序、doc 侧分片。
+
 ## 2026-10-12：索引流水线瓶颈评估（仅文档）
 
 - **评估文档**：排查「是不是所有文件 OCR/提取完才统一 embedding、两段串行导致太慢」。基于 `app.log`（57 MB）与 `data.db` 时间戳量化后结论为：**主因不是阶段串行，而是回填调度 + 单把 `BACKFILL_LOCK`**（`run_backfill_chunk_embeddings` 持锁到 backlog 清空，把 doc 回填饿死，新文件以「天」为单位拿不到向量）；嵌入吞吐上限在远程 `bge-m3` 网关（≈2,300 tok/s，对 batch/并发不敏感）。
