@@ -109,7 +109,8 @@ export default function DirManager() {
     setResult('')
     try {
       const message = await removeDirectory(pendingRemove.id, purgeData)
-      setResult(message)
+      // Defensive: never hand a non-string to React (that renders as error #31).
+      setResult(typeof message === 'string' && message ? message : t('remove_dir_done'))
       setPhase('done')
     } catch (e) {
       setErrText(e instanceof Error ? e.message : String(e))

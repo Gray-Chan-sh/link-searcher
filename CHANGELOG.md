@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：修复删除目录后前端崩溃 —— React #31（Tauri 返回对象被当字符串渲染）
+
+- **现象**：删除目录完成后前端报错 `Minified React error #31 … object with keys {message, stopped_scan, swept_orphan_dirs, resumed_scan}`。后端行为正常（删除确实完成了），崩在渲染返回值上。
+- **根因**：`client.invoke` 在 **Tauri 模式下直接返回原始命令结果**，`MAPPINGS` 里的 `transform` **只作用于 HTTP 传输**。`remove_dir` 改成返回 `RemoveDirReport` 后，前端把 `{message, …}` 对象当成字符串渲染。
+- **修复**：
+  - `src/api/dirs.ts::removeDir` 归一化两种传输形态（对象 → `message`；字符串原样），并导出 `RemoveDirReport` 类型；
+  - `src/pages/DirManager.tsx` 加防线：非字符串一律回退到「已完成」文案，避免同类形状变化再次崩渲染。
+- **测试**：新增 `src/api/__tests__/removeDirReport.test.ts`（Tauri 对象 / HTTP 字符串 / 异常形态三种情况）；`vitest` **73 项全过**、`tsc -b` 通过、`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src/api/dirs.ts`、`src/pages/DirManager.tsx`、`src/api/__tests__/removeDirReport.test.ts`。
+
 ## 2026-10-12：删除目录三修（取消即时生效 / 维护去重 / 校验上限）+ 弹窗实时阶段
 
 - **A. 扫描后维护去重（修"OCR 跑两遍"）**：`TaskGuard` 只按名字**登记**、`track_task` 幂等，**拦不住并发**。删除流程里「被取消的扫描」与「续扫」各 spawn 了一份维护 → `verify` 并行跑两遍，同一文件被重复提取（实测同一 JPG/PDF 在同一秒各提取一次、每 3–4 秒一条 `[TASK] backfill: 1 补齐`、内存涨到 4.3 GB）。
