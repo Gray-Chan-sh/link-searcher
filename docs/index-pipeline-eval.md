@@ -254,6 +254,23 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 
 > 结论：日常"删除资料库"（`remove_dir`）不会产生幽灵；只有"清理失效目录"（`remove_dir_with_files`）会。修复方式自然是让它也走 `delete_file`/`delete_dir` + `cleanup_orphan_content`（另开任务）。
 
+## 附录 D：md5 与"重跑"的语义（做对照实验前必读）
+
+**md5 只由文件的原始字节决定**（`indexer.rs::extract_and_index_single`；>100 MB 的文件只取头 1 MB + 尾 1 MB 参与计算），与路径、所属目录、`data_dir` **无关**：
+
+| 操作 | md5 值 |
+|---|---|
+| 删除目录再重加同一批文件 | **完全相同** |
+| 复制文件到别的目录 / 别的磁盘 | **完全相同** |
+| 修改文件内容 | 才会变 |
+
+因此，**决定"要不要重新提取"的不是 md5 新不新，而是当前 `data_dir` 的 `content_index` 里有没有这个 md5 的行**：
+
+- **删除再重加（同一 `data_dir`）**：`remove_dir` 删掉了该目录的 `content_index` 行 → **会重新提取**。唯一例外是**被其它目录共享的 md5**——`cleanup_orphan_content` 用的是 `DELETE … WHERE md5 NOT IN (SELECT DISTINCT md5 FROM file_tracking …)`，共享的会被保留 → 这些文件命中缓存、**跳过提取（不 OCR）**。（本库实测共享 28 个内容，占 0.4%。）
+- **独立 `LINK_SEARCHER_DATA_DIR` + 复制子集**：新库 `content_index` 为空 → **全部重新提取**（md5 值与原库相同，但没有缓存行）。
+
+**要点**：所谓"重制后全新"指的是**去重缓存为空**，不是 md5 变化；OCR 是否稳定也不影响 md5（md5 在读原始字节时算出，早于提取），只影响 `content_index.text`——只要缓存行还在就直接复用旧文本、不重跑 OCR。
+
 ## 附录 B：复现查询
 
 ```sql
