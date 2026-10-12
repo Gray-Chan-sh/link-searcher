@@ -1,14 +1,20 @@
+import { useState } from 'react'
 import { useDirs } from '../hooks/useDirs'
-import { addDir } from '../api/dirs'
+import { addDir, type DirConfig } from '../api/dirs'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
-import { confirm } from '../utils/platform'
 
 export default function DirManager() {
   const { t } = useI18n()
   const { dirs, loading, error, addDirectory, removeDirectory, refresh } = useDirs()
+
+  // Directory queued for removal. `confirm()` is a native OK/Cancel dialog with
+  // no room for the "also wipe all data" checkbox, so removal uses this modal.
+  const [pendingRemove, setPendingRemove] = useState<DirConfig | null>(null)
+  const [purgeData, setPurgeData] = useState(false)
+  const [removing, setRemoving] = useState(false)
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
@@ -21,6 +27,22 @@ export default function DirManager() {
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
+  }
+
+  const openRemove = (dir: DirConfig) => {
+    setPendingRemove(dir)
+    setPurgeData(false)
+  }
+
+  const handleRemove = async () => {
+    if (!pendingRemove) return
+    setRemoving(true)
+    try {
+      await removeDirectory(pendingRemove.id, purgeData)
+      setPendingRemove(null)
+    } finally {
+      setRemoving(false)
+    }
   }
 
   return (
@@ -92,19 +114,68 @@ export default function DirManager() {
                 </div>
               </div>
               <button
-                onClick={async () => {
-                  const confirmed = await confirm(t('confirm_remove_dir'), t('remove_dir_title'))
-                  if (confirmed) {
-                    removeDirectory(dir.id)
-                  }
-                }}
+                onClick={() => openRemove(dir)}
                 className="p-1.5 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors shrink-0"
-                  title={t('remove_directory')}
+                title={t('remove_directory')}
               >
                 <TrashIcon className="size-4" />
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      {pendingRemove && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => { if (!removing) setPendingRemove(null) }}
+        >
+          <div
+            className="w-[440px] max-w-full rounded-xl bg-white dark:bg-gray-800 p-5 shadow-xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
+              {t('remove_dir_title')}
+            </h3>
+            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
+              {t('confirm_remove_dir')}
+            </p>
+            <p className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400 break-all">
+              {pendingRemove.path}
+            </p>
+
+            <label className="mt-4 flex items-start gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={purgeData}
+                onChange={e => setPurgeData(e.target.checked)}
+                className="mt-0.5 size-4 shrink-0 accent-red-600"
+              />
+              <span className="text-sm text-gray-700 dark:text-gray-300">
+                {t('remove_dir_purge')}
+                <span className="block text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  {t('remove_dir_purge_hint')}
+                </span>
+              </span>
+            </label>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setPendingRemove(null)}
+                disabled={removing}
+                className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors"
+              >
+                {t('cancel')}
+              </button>
+              <button
+                onClick={handleRemove}
+                disabled={removing}
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg transition-colors"
+              >
+                {t('remove_directory')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

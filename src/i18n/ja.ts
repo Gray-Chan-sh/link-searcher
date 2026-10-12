@@ -308,6 +308,8 @@ const ja: Record<string, string> = {
     remove_directory: 'ディレクトリを削除',
     remove_dir_title: 'ディレクトリを削除',
     confirm_remove_dir: 'このディレクトリを削除しますか？',
+    remove_dir_purge: 'このディレクトリの全データも削除する',
+    remove_dir_purge_hint: '抽出テキスト、チャンク、意味ベクトル、インデックス記録を削除します。再追加時は全新規データとして扱われます（他ディレクトリと共有する内容は再利用されます）。元に戻せません。',
     recursive: '(再帰的)',
     ocr_label: 'OCR: {lang}',
     exts_label: '拡張子: {exts}',

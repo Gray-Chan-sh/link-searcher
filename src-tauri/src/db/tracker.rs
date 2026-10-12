@@ -258,6 +258,26 @@ pub fn delete_files_by_dir(conn: &Connection, dir_id: &str) -> Result<u64> {
     Ok(n as u64)
 }
 
+/// How many *active* files other than `exclude_file_id` share the same content
+/// hash. Content is deduplicated by md5 across directories, so callers must not
+/// drop md5-keyed rows (e.g. `chunk_embeddings`) while another active file still
+/// references that md5.
+pub fn count_other_active_files_with_md5(
+    conn: &Connection,
+    md5: &str,
+    exclude_file_id: &str,
+) -> Result<u64> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_tracking \
+             WHERE md5=?1 AND status='active' AND id<>?2",
+            rusqlite::params![md5, exclude_file_id],
+            |r| r.get(0),
+        )
+        .context("count_other_active_files_with_md5 failed")?;
+    Ok(n as u64)
+}
+
 pub fn migrate_paths_to_relative(conn: &Connection) -> Result<u64> {
     let dirs = crate::db::dir_config::list_dirs(conn)
         .context("failed to list dirs for migration")?;

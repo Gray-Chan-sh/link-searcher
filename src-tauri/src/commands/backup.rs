@@ -782,12 +782,25 @@ pub async fn remove_dir_with_files(state: State<'_, AppState>, dir_id: String) -
     if dir_id.trim().is_empty() {
         return Err("dir_id 不能为空".to_string());
     }
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    let count = crate::db::tracker::delete_files_by_dir(&conn, &dir_id)
+    // 与「删除资料库」共用同一套彻底清理：Tantivy 文档 + file_tracking + 逐文件
+    // 向量/摘要/错误 + md5 键的孤儿内容/块向量。以前这里只删 file_tracking，
+    // 会留下全文索引里的"幽灵"命中。
+    let indexer = state.indexer.clone();
+    let dir_for_purge = dir_id.clone();
+    tokio::task::spawn_blocking(move || indexer.purge_dir_data(&dir_for_purge, true))
+        .await
+        .map_err(|e| format!("purge task failed: {e}"))?
         .map_err(|e| format!("db error: {e}"))?;
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     crate::db::dir_config::remove_dir(&conn, &dir_id)
         .map_err(|e| format!("db error: {e}"))?;
-    log::info!("removed dir {dir_id} and {count} associated files");
+    drop(conn);
+
+    let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
+        dir_id: dir_id.clone(),
+    });
+    log::info!("removed dir {dir_id} and all associated data");
     Ok(())
 }
 

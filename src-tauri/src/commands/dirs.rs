@@ -164,28 +164,46 @@ pub async fn add_dir(
 }
 
 #[tauri::command]
-pub async fn remove_dir(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-    db::dir_config::remove_dir(&conn, &id).map_err(|e| format!("failed to remove directory: {e}"))?;
+pub async fn remove_dir(
+    state: State<'_, AppState>,
+    id: String,
+    purge: Option<bool>,
+) -> Result<(), String> {
+    let purge = purge.unwrap_or(false);
 
-    // Clean up the directory's files from Tantivy index, file_tracking, and content_index.
-    let files = db::tracker::get_files_by_dir(&conn, &id)
-        .map_err(|e| format!("failed to list dir files: {e}"))?;
-    for file in &files {
-        let _ = state.indexer.delete_file(&file.id);
+    // 数据清理：Tantivy 文档 + file_tracking + 逐文件向量/摘要/错误 + md5 键的
+    // 孤儿 content/chunks/chunk 向量。共享内容（其它目录也持有同一 md5）会保留。
+    // `purge=true`（用户勾选"清除所有数据"）额外清扩展名统计并随后 VACUUM。
+    let indexer = state.indexer.clone();
+    let dir_for_purge = id.clone();
+    tokio::task::spawn_blocking(move || indexer.purge_dir_data(&dir_for_purge, purge))
+        .await
+        .map_err(|e| format!("purge task failed: {e}"))?
+        .map_err(|e| format!("failed to clear directory data: {e}"))?;
+
+    {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        db::dir_config::remove_dir(&conn, &id).map_err(|e| format!("failed to remove directory: {e}"))?;
     }
-    conn.execute("DELETE FROM file_tracking WHERE dir_id = ?1", rusqlite::params![id])
-        .map_err(|e| format!("failed to delete file records: {e}"))?;
-    let _ = db::cleanup_orphan_content(&conn);
-
-    drop(conn);
-
-    let _ = state.indexer.commit();
 
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
         dir_id: id.clone(),
     });
 
+    if purge {
+        // 彻底清除后回收空间。1GB 级库的 VACUUM 会短暂阻塞，放后台做，失败仅告警。
+        let pool = state.db.clone();
+        std::thread::spawn(move || match pool.get() {
+            Ok(conn) => {
+                if let Err(e) = crate::db::vacuum(&conn) {
+                    log::warn!("[DIRS] VACUUM after purge failed: {e}");
+                }
+            }
+            Err(e) => log::warn!("[DIRS] VACUUM after purge: db error: {e}"),
+        });
+    }
+
+    log::info!("[DIRS] 移除目录 {id}（purge={purge}）");
     Ok(())
 }
 

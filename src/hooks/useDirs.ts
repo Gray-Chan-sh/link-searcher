@@ -8,7 +8,7 @@ interface UseDirsReturn {
   loading: boolean
   error: string | null
   addDirectory: () => Promise<void>
-  removeDirectory: (id: string) => Promise<void>
+  removeDirectory: (id: string, purge?: boolean) => Promise<void>
   refresh: () => Promise<void>
 }
 
@@ -44,9 +44,9 @@ export function useDirs(): UseDirsReturn {
     }
   }, [refresh])
 
-  const removeDirectory = useCallback(async (id: string) => {
+  const removeDirectory = useCallback(async (id: string, purge = false) => {
     try {
-      await removeDir(id)
+      await removeDir(id, purge)
       await refresh()
     } catch (e) {
       setError(String(e))

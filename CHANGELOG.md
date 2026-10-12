@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：删除目录可「清除所有数据」+ 修块向量误删与幽灵命中
+
+- **新功能**：资料库页删除目录时新增复选框 **「同时清除该目录的所有数据」**（默认不勾）。
+  - 不勾 = 原行为；勾选 = 额外清扩展名统计并后台 `VACUUM`，**重新添加该目录即按全新数据处理**。
+  - 因原生 `confirm()` 放不下复选框，删除确认改为内联弹窗（`src/pages/DirManager.tsx`）；i18n 四语言补齐。
+- **修复 ①（块向量误删）**：`IndexerService::delete_file` 过去**按 md5 无条件**删 `chunk_embeddings`（`indexer.rs`），会连带清掉**其他目录里相同内容文件**的块向量。改为先查 `count_other_active_files_with_md5`，仅当无人引用时才删。
+- **修复 ②（幽灵命中）**：`remove_dir_with_files`（备份页"清理失效目录"）过去只删 `file_tracking`、**不删 Tantivy 文档**，会在全文搜索里留下永久命中。现与「删除资料库」共用同一套清理。
+- **重构**：新增 `IndexerService::purge_dir_data(dir_id, deep)` 统一两条删除路径的清理顺序（Tantivy `delete_by_dir` → 按 file_id 清 `doc_embeddings`/`doc_summaries`/`index_errors` → 删 `file_tracking` →（deep）删 `unsupported_ext_stats` → `cleanup_orphan_content` + **新增** `cleanup_orphan_chunk_embeddings` → commit）。
+- **共享内容语义**：仍是**按内容(md5)去重**——同一内容若在另一个仍被监控的目录里存在，其缓存与向量会保留（重加时复用，不重新 OCR）。
+- **涉及文件**：`indexer.rs`、`db/mod.rs`、`db/tracker.rs`、`commands/dirs.rs`、`commands/backup.rs`、`webapi/routes/dirs.rs`、`src/api/client.ts`、`src/api/dirs.ts`、`src/hooks/useDirs.ts`、`src/pages/DirManager.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/02-add-library.md`。
+- **测试**：新增 `purge_dir_data_clears_dir_but_keeps_shared_content`、`orphan_chunk_embeddings_keep_shared_content`；`cargo test --lib` **510 项全过**，`vitest` 70 项全过，`tsc -b` 通过，`semgrep --severity ERROR` 0 findings。
+
 ## 2026-10-12：② 嵌入 keeper —— 提取与回填并行（端到端 −40%）
 
 - **目标**：把「扫描 → 提取 → 回填」从**串行**改为**并行**，缩短端到端时间。回填总量与网关吞吐不变，省掉的是「提取那一段」。

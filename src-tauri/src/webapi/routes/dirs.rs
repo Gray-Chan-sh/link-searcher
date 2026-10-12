@@ -65,6 +65,8 @@ async fn add_dir_handler(
 #[derive(Deserialize)]
 struct RemoveDirBody {
     id: String,
+    #[serde(default)]
+    purge: bool,
 }
 
 async fn remove_dir_handler(
@@ -72,7 +74,7 @@ async fn remove_dir_handler(
     Json(body): Json<RemoveDirBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::dirs::remove_dir(app_state, body.id)
+    crate::commands::dirs::remove_dir(app_state, body.id, Some(body.purge))
         .await
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "status": "removed" })))

@@ -422,6 +422,25 @@ pub fn cleanup_orphan_content(conn: &Connection) -> Result<u64> {
     Ok(deleted as u64)
 }
 
+/// Remove `chunk_embeddings` rows whose md5 is no longer referenced by any
+/// `file_tracking` row — the chunk-vector counterpart of
+/// [`cleanup_orphan_content`].
+///
+/// Content is shared by hash across directories, so this only deletes vectors
+/// nobody owns any more; a chunk vector survives as long as **any** tracked file
+/// still hashes to its md5. Both directory-removal paths call this so a re-added
+/// directory starts from a clean slate without disturbing shared content.
+pub fn cleanup_orphan_chunk_embeddings(conn: &Connection) -> Result<u64> {
+    let deleted = conn.execute(
+        "DELETE FROM chunk_embeddings WHERE md5 NOT IN (SELECT DISTINCT md5 FROM file_tracking WHERE md5 IS NOT NULL)",
+        [],
+    )?;
+    if deleted > 0 {
+        log::info!("[DB] cleaned up {deleted} orphan chunk_embeddings rows");
+    }
+    Ok(deleted as u64)
+}
+
 /// Run VACUUM to reclaim space and defragment the database file.
 /// This is a no-op on an in-memory database.
 pub fn vacuum(conn: &Connection) -> Result<()> {
@@ -527,6 +546,54 @@ mod tests {
     fn test_migrations_are_idempotent() {
         let conn = setup_conn();
         run_migrations(&conn).unwrap();
+    }
+
+    /// 按 md5 键的块向量必须"共享内容感知"：删掉一个目录后，只要还有别的
+    /// file_tracking 行引用同一 md5，它的 `chunk_embeddings` 就不能被清掉。
+    #[test]
+    fn orphan_chunk_embeddings_keep_shared_content() {
+        let conn = setup_conn();
+        conn.execute(
+            "INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d1','/a',1,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d2','/b',1,0,0)",
+            [],
+        )
+        .unwrap();
+        // f1/f3 共享同一内容，f2 是 d1 独占。
+        for (id, dir, md5) in [("f1", "d1", "shared"), ("f2", "d1", "only1"), ("f3", "d2", "shared")] {
+            conn.execute(
+                "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at) \
+                 VALUES (?1,?2,?3,0,0,?4,'active',1,0,0)",
+                rusqlite::params![id, id, dir, md5],
+            )
+            .unwrap();
+        }
+        // 块向量按 (md5, chunk_index) 唯一：每个内容只插一条。
+        for md5 in ["shared", "only1"] {
+            conn.execute(
+                "INSERT INTO chunk_embeddings (md5,chunk_index,dim,vector,updated_at) VALUES (?1,0,1,X'00000000',0)",
+                rusqlite::params![md5],
+            )
+            .unwrap();
+        }
+
+        // 删除 d1：只有 `only1` 变成孤儿，`shared` 仍被 d2 引用。
+        conn.execute("DELETE FROM file_tracking WHERE dir_id='d1'", []).unwrap();
+        let deleted = cleanup_orphan_chunk_embeddings(&conn).unwrap();
+        assert_eq!(deleted, 1, "只应删除 d1 独占内容的块向量");
+
+        let left: Vec<String> = conn
+            .prepare("SELECT md5 FROM chunk_embeddings ORDER BY md5")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(left, vec!["shared".to_string()], "共享内容的块向量必须保留");
     }
 
     #[test]

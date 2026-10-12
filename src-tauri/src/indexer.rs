@@ -715,14 +715,72 @@ impl IndexerService {
         if let Err(e) = crate::db::tracker::delete_embedding(&conn, file_id) {
             log::warn!("[INDEX] delete_embedding failed {}: {e}", file_id);
         }
-        // 同步清理该文件的 chunk 级嵌入（按 md5 键；若其他活跃文件共享
-        // 该 md5，其块向量会在下一次扫描回填时重建）。
+        // 同步清理该文件的 chunk 级嵌入。块向量按 md5 键、内容在**目录间共享**：
+        // 只有当没有其他活跃文件仍引用该 md5 时才删，否则会连带清掉别的目录里
+        // 相同内容文件的块向量（曾按 md5 无条件删，属缺陷）。
         if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, file_id)
             && let Some(md5) = &rec.md5
-            && let Err(e) = crate::db::tracker::delete_chunk_embeddings(&conn, md5) {
-                log::warn!("[INDEX] delete_chunk_embeddings failed {md5}: {e}");
+        {
+            match crate::db::tracker::count_other_active_files_with_md5(&conn, md5, file_id) {
+                Ok(0) => {
+                    if let Err(e) = crate::db::tracker::delete_chunk_embeddings(&conn, md5) {
+                        log::warn!("[INDEX] delete_chunk_embeddings failed {md5}: {e}");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("[INDEX] md5 reference check failed {md5}: {e}"),
             }
+        }
 
+        Ok(())
+    }
+
+    /// Purge **all data** belonging to `dir_id`: Tantivy documents, `file_tracking`
+    /// rows, and the per-file vectors / summaries / index errors.
+    ///
+    /// Content-keyed rows (`content_index`, `doc_chunks`, `chunk_embeddings`) are
+    /// removed only when their md5 is no longer referenced by any tracked file, so
+    /// content shared with another directory survives (content-based dedup).
+    ///
+    /// `deep` additionally clears the directory's unsupported-extension stats.
+    /// `dir_config` is left untouched — the caller owns that.
+    ///
+    /// Both directory-removal paths go through here so a re-added directory is
+    /// treated as brand-new data (no stale rows, no ghost search hits).
+    pub fn purge_dir_data(&self, dir_id: &str, deep: bool) -> Result<()> {
+        let conn = self.db.get().context("failed to get DB connection")?;
+
+        // Tantivy: one term delete for the whole directory (committed below).
+        self.delete_dir(dir_id)?;
+
+        // Per-`file_id` rows must be cleared *before* file_tracking disappears.
+        for sql in [
+            "DELETE FROM doc_embeddings WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
+            "DELETE FROM doc_summaries  WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
+            "DELETE FROM index_errors   WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
+        ] {
+            if let Err(e) = conn.execute(sql, [dir_id]) {
+                log::warn!("[INDEX] purge_dir_data: {e}");
+            }
+        }
+        conn.execute("DELETE FROM file_tracking WHERE dir_id=?1", [dir_id])
+            .context("purge_dir_data: delete file_tracking failed")?;
+        if deep
+            && let Err(e) = conn.execute("DELETE FROM unsupported_ext_stats WHERE dir_id=?1", [dir_id])
+        {
+            log::warn!("[INDEX] purge_dir_data: unsupported_ext_stats: {e}");
+        }
+
+        // Content-keyed cleanup: only rows whose md5 no longer has any owner.
+        if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
+            log::warn!("[INDEX] purge_dir_data: cleanup_orphan_content: {e}");
+        }
+        if let Err(e) = crate::db::cleanup_orphan_chunk_embeddings(&conn) {
+            log::warn!("[INDEX] purge_dir_data: cleanup_orphan_chunk_embeddings: {e}");
+        }
+
+        drop(conn);
+        self.commit().context("failed to commit after dir purge")?;
         Ok(())
     }
 
@@ -1107,6 +1165,82 @@ mod tests {
         let c = svc.db.get().unwrap();
         let rec = crate::db::tracker::get_file_by_id(&c, &fid).unwrap().unwrap();
         assert_eq!(rec.indexed, 0, "should not be marked as indexed");
+    }
+
+    /// 删除目录要能"彻底清空该目录的数据"，同时**保留与其他目录共享的内容**：
+    /// Tantivy 文档、file_tracking、doc 向量/摘要/错误按 file_id 清；md5 键的
+    /// content/chunks/块向量只在无人引用时才清。重加该目录即全新处理。
+    #[test]
+    fn purge_dir_data_clears_dir_but_keeps_shared_content() {
+        let (svc, fid) = setup(); // dir 'd1' + fid(/tmp/test.txt)
+        let path = tmp_file("purge_a.txt", "purge dir data shared content marker");
+        svc.index_file(&fid, &path, "d1", None).unwrap();
+        svc.commit().unwrap();
+
+        let shared_md5 = {
+            let conn = svc.db.get().unwrap();
+            crate::db::tracker::get_file_by_id(&conn, &fid).unwrap().unwrap().md5.unwrap()
+        };
+
+        {
+            let conn = svc.db.get().unwrap();
+            conn.execute(
+                "INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d2','/tmp2',1,0,0)",
+                [],
+            )
+            .unwrap();
+            // d2 里放一份**相同内容**（共享 md5），另在 d1 放一份独占内容。
+            let fid_shared = crate::db::tracker::upsert_file(&conn, "/tmp2/dup.txt", "d2", 1000, 42, Some(&shared_md5)).unwrap();
+            let fid_only = crate::db::tracker::upsert_file(&conn, "/tmp/only.txt", "d1", 1000, 42, Some("only1")).unwrap();
+            for f in [&fid, &fid_shared, &fid_only] {
+                crate::db::tracker::upsert_embedding(&conn, f, &[1.0, 2.0]).unwrap();
+            }
+            let md5s = [shared_md5.clone(), "only1".to_string()];
+            for md5 in &md5s {
+                crate::db::tracker::upsert_chunk_embedding(&conn, md5, 0, &[1.0]).unwrap();
+            }
+            crate::db::tracker::store_content(&conn, &shared_md5, "shared body", false, None).unwrap();
+            crate::db::tracker::store_content(&conn, "only1", "only body", false, None).unwrap();
+            conn.execute(
+                "INSERT INTO doc_summaries (file_id,summary,updated_at) VALUES (?1,'s',0)",
+                [&fid],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO unsupported_ext_stats (ext,count,dir_id,updated_at) VALUES ('xyz',1,'d1',0)",
+                [],
+            )
+            .unwrap();
+        }
+
+        svc.purge_dir_data("d1", true).unwrap();
+
+        let conn = svc.db.get().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='d1'"), 0, "d1 的追踪行应清空");
+        assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='d2'"), 1, "d2 不受影响");
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM doc_embeddings WHERE file_id='{fid}'")), 0, "d1 的 doc 向量应清空");
+        assert_eq!(count("SELECT COUNT(*) FROM doc_summaries"), 0, "摘要应按 file_id 清空");
+        assert_eq!(count("SELECT COUNT(*) FROM content_index WHERE md5='only1'"), 0, "独占内容应删除");
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM content_index WHERE md5='{shared_md5}'")), 1, "共享内容必须保留");
+        assert_eq!(count("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='only1'"), 0, "独占内容的块向量应删除");
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='{shared_md5}'")), 1, "共享内容的块向量必须保留");
+        assert_eq!(count("SELECT COUNT(*) FROM unsupported_ext_stats WHERE dir_id='d1'"), 0, "purge 应清扩展名统计");
+
+        // Tantivy：该目录的文档应不再可搜。
+        svc.commit().unwrap();
+        let mgr = svc.index_manager.read().unwrap(); // nosemgrep: rust-rwlock-read-unwrap
+        let reader = mgr.reader().unwrap();
+        let searcher = reader.searcher();
+        let schema = build_schema();
+        let content = schema.get_field("content").unwrap();
+        let parser = tantivy::query::QueryParser::for_index(mgr.index(), vec![content]);
+        let top = searcher
+            .search(&parser.parse_query("marker").unwrap(), &tantivy::collector::TopDocs::with_limit(10))
+            .unwrap();
+        assert_eq!(top.len(), 0, "purge 后该目录文档不应再被搜到（否则是幽灵命中）");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

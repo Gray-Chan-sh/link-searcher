@@ -232,24 +232,23 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 
 ---
 
-## 附录 A：删除目录的两条路径（本次不改）
+## 附录 A：删除目录的两条路径（✅ 2026-10-12 已统一）
 
-前端有**两个**删除入口，清理范围不同：
+前端有**两个**删除入口，现已共用同一套彻底清理（`IndexerService::purge_dir_data`）：
 
-| 入口 | 命令 | Tantivy 文档 | file_tracking | content_index / doc_chunks | doc_embeddings | chunk_embeddings | doc_summaries / index_errors |
-|---|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| 资料库页「删除资料库」 | `remove_dir`（`commands/dirs.rs:167`） | ✅ 逐文件 | ✅ | ✅（`cleanup_orphan_content`） | ✅（按 file_id） | ✅（**按 md5**） | ❌ 孤儿残留 |
-| 备份/迁移页「清理失效目录」 | `remove_dir_with_files`（`commands/backup.rs:781`） | ❌ **不删** | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 入口 | 命令 | Tantivy 文档 | file_tracking | content_index / doc_chunks | doc_embeddings | chunk_embeddings | doc_summaries / index_errors | 扩展名统计 |
+|---|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
+| 资料库页「删除资料库」 | `remove_dir(id, purge)` | ✅ `delete_by_dir` | ✅ | ✅ 孤儿感知 | ✅ 按 file_id | ✅ **孤儿感知** | ✅ | `purge=true` 时清 |
+| 备份/迁移页「清理失效目录」 | `remove_dir_with_files` | ✅ `delete_by_dir` | ✅ | ✅ 孤儿感知 | ✅ 按 file_id | ✅ **孤儿感知** | ✅ | ✅ |
 
 要点：
 
-1. `remove_dir` 逐个文件调用 `indexer.delete_file`（`indexer.rs:695`）：删 Tantivy 文档 → `mark_deleted` → 删 `doc_embeddings`（file_id）→ 删 `chunk_embeddings`（**md5**）；随后 `DELETE FROM file_tracking WHERE dir_id` 与 `cleanup_orphan_content`（清 `content_index`、`doc_chunks`），最后 `commit()`。
-   - 副作用：按 md5 删块向量会**波及其他目录里内容相同（同 md5）的文件**（其块向量会在下次回填时重建）。
-   - `doc_summaries`（file_id 键）与 `index_errors`（file_id 键）**不清理** → 孤儿行，仅占空间（AI 摘要走 `LEFT JOIN doc_summaries ON ds.file_id = f.id`，孤儿不参与）。
-2. `remove_dir_with_files` 只删 `file_tracking` + `dir_config`，**不删 Tantivy 文档、不清理任何内容/向量表** → 会产生"幽灵"（见附录 C）。
-3. `doc_embeddings` / `chunk_embeddings` 在第二条路径下无清理入口，长期只增不减。
+1. `purge_dir_data(dir_id, deep)`（`indexer.rs`）一次做完：Tantivy `delete_by_dir` → 按 file_id 清 `doc_embeddings`/`doc_summaries`/`index_errors` → 删 `file_tracking` →（`deep`）删 `unsupported_ext_stats` → `cleanup_orphan_content` + `cleanup_orphan_chunk_embeddings` → `commit()`。
+2. **孤儿感知**：`content_index`/`doc_chunks`/`chunk_embeddings` 按 md5 键、内容在**目录间共享**，所以只在"没有任何 file_tracking 再引用该 md5"时才删。`IndexerService::delete_file` 里过去**按 md5 无条件删块向量**的缺陷已修（改为先查 `count_other_active_files_with_md5`）。
+3. 资料库页的删除对话框新增**「同时清除该目录的所有数据」**复选框（默认不勾）：勾选后额外清扩展名统计并后台 `VACUUM`，重加该目录即全新处理；不勾则保持原行为。UI 从原生 `confirm()`（放不下复选框）改为内联弹窗（`pages/DirManager.tsx`）。
+4. HTTP API 同步：`DELETE /api/dirs` body 增加 `purge`（`webapi/routes/dirs.rs`）。
 
-## 附录 C：什么是"幽灵命中"
+## 附录 C：什么是"幽灵命中"（✅ 已修复）
 
 **定义**：Tantivy 索引里存在某文档，但 DB 中没有对应的活跃 `file_tracking` 行（或该行已 `status='deleted'`）——此时搜索结果里**仍会出现这个文件**，点开可能报错或文件已不在。
 
@@ -258,11 +257,9 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 - **全文（BM25）**：结果直接由 Tantivy 文档构造（`search/searcher.rs:332`），**不回查 DB** → 没有 DB 行也会被返回。
 - **语义（向量）**：候选在回填结果前会用 `get_file_by_id` 校验（`commands/search.rs:358`，取不到就跳过）→ 幽灵被过滤。
 
-**触发条件**：`remove_dir_with_files`（备份页"清理失效目录"）只删 `file_tracking`，Tantivy 文档保留 → 该目录下的文件在**全文搜索**中持续命中，直到重建索引。
+**旧触发条件**：`remove_dir_with_files` 只删 `file_tracking`、保留 Tantivy 文档 → 全文搜索持续命中；重加同一路径会让同一文件出现两条。
 
-**与"重加"叠加**：该路径删后再重加同一路径，新 `file_id` 会再写一份 Tantivy 文档，旧的幽灵文档仍在 → **同一文件在全文搜索里可能出现两条**。
-
-> 结论：日常"删除资料库"（`remove_dir`）不会产生幽灵；只有"清理失效目录"（`remove_dir_with_files`）会。修复方式自然是让它也走 `delete_file`/`delete_dir` + `cleanup_orphan_content`（另开任务）。
+> **已修复**：两条删除路径现在都走 `purge_dir_data`（含 Tantivy `delete_by_dir`），不会再留幽灵。
 
 ## 附录 D：md5 与"重跑"的语义（做对照实验前必读）
 

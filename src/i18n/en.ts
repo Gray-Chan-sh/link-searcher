@@ -312,6 +312,8 @@ const en: Record<string, string> = {
     remove_directory: 'Remove directory',
     remove_dir_title: 'Remove Directory',
     confirm_remove_dir: 'Remove this directory?',
+    remove_dir_purge: 'Also clear all data for this directory',
+    remove_dir_purge_hint: 'Deletes extracted content, chunks, semantic vectors and index records, so re-adding the directory is treated as brand-new data (content shared with other directories is still reused). This cannot be undone.',
     recursive: '(recursive)',
     ocr_label: 'OCR: {lang}',
     exts_label: 'Exts: {exts}',

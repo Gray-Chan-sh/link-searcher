@@ -312,6 +312,8 @@ const zh: Record<string, string> = {
     remove_directory: '移除目录',
     remove_dir_title: '删除资料库',
     confirm_remove_dir: '确认删除此目录？',
+    remove_dir_purge: '同时清除该目录的所有数据',
+    remove_dir_purge_hint: '删除提取内容、分块、语义向量与索引记录；之后重新添加该目录将作为全新数据处理（与其他目录共享的内容仍会复用）。不可撤销。',
     recursive: '(递归)',
     ocr_label: 'OCR：{lang}',
     exts_label: '扩展名：{exts}',

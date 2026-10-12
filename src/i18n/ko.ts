@@ -308,6 +308,8 @@ const ko: Record<string, string> = {
     remove_directory: '디렉터리 제거',
     remove_dir_title: '디렉터리 제거',
     confirm_remove_dir: '이 디렉터리를 제거하시겠습니까?',
+    remove_dir_purge: '이 디렉터리의 모든 데이터도 삭제',
+    remove_dir_purge_hint: '추출 텍스트, 청크, 의미 벡터, 인덱스 기록을 삭제합니다. 다시 추가하면 완전히 새 데이터로 처리됩니다(다른 디렉터리와 공유된 내용은 재사용됨). 되돌릴 수 없습니다.',
     recursive: '(재귀)',
     ocr_label: 'OCR: {lang}',
     exts_label: '확장자: {exts}',
