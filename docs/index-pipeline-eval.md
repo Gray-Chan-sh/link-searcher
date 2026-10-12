@@ -222,12 +222,37 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 
 ---
 
-## 附录 A：顺带发现的两个数据一致性问题（本次不改）
+## 附录 A：删除目录的两条路径（本次不改）
 
-1. **删除目录的两条路径清理范围不一致**：
-   - `commands/dirs.rs:167 remove_dir`：清 Tantivy + `file_tracking` + `cleanup_orphan_content`，但 **不清 `chunk_embeddings` / `doc_embeddings`**（`db/mod.rs:407` 只清 `content_index` 与 `doc_chunks`）→ 残留孤儿向量、DB 膨胀。
-   - `commands/backup.rs:781 remove_dir_with_files`：只删 `file_tracking` + `dir_config`，**连 Tantivy 文档都不删** → 可能留下"幽灵"全文命中。
-2. **`doc_embeddings` / `chunk_embeddings` 没有清理入口**，长期只会增长。
+前端有**两个**删除入口，清理范围不同：
+
+| 入口 | 命令 | Tantivy 文档 | file_tracking | content_index / doc_chunks | doc_embeddings | chunk_embeddings | doc_summaries / index_errors |
+|---|---|:--:|:--:|:--:|:--:|:--:|:--:|
+| 资料库页「删除资料库」 | `remove_dir`（`commands/dirs.rs:167`） | ✅ 逐文件 | ✅ | ✅（`cleanup_orphan_content`） | ✅（按 file_id） | ✅（**按 md5**） | ❌ 孤儿残留 |
+| 备份/迁移页「清理失效目录」 | `remove_dir_with_files`（`commands/backup.rs:781`） | ❌ **不删** | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+要点：
+
+1. `remove_dir` 逐个文件调用 `indexer.delete_file`（`indexer.rs:695`）：删 Tantivy 文档 → `mark_deleted` → 删 `doc_embeddings`（file_id）→ 删 `chunk_embeddings`（**md5**）；随后 `DELETE FROM file_tracking WHERE dir_id` 与 `cleanup_orphan_content`（清 `content_index`、`doc_chunks`），最后 `commit()`。
+   - 副作用：按 md5 删块向量会**波及其他目录里内容相同（同 md5）的文件**（其块向量会在下次回填时重建）。
+   - `doc_summaries`（file_id 键）与 `index_errors`（file_id 键）**不清理** → 孤儿行，仅占空间（AI 摘要走 `LEFT JOIN doc_summaries ON ds.file_id = f.id`，孤儿不参与）。
+2. `remove_dir_with_files` 只删 `file_tracking` + `dir_config`，**不删 Tantivy 文档、不清理任何内容/向量表** → 会产生"幽灵"（见附录 C）。
+3. `doc_embeddings` / `chunk_embeddings` 在第二条路径下无清理入口，长期只增不减。
+
+## 附录 C：什么是"幽灵命中"
+
+**定义**：Tantivy 索引里存在某文档，但 DB 中没有对应的活跃 `file_tracking` 行（或该行已 `status='deleted'`）——此时搜索结果里**仍会出现这个文件**，点开可能报错或文件已不在。
+
+**成因（两条检索路径行为不同）**：
+
+- **全文（BM25）**：结果直接由 Tantivy 文档构造（`search/searcher.rs:332`），**不回查 DB** → 没有 DB 行也会被返回。
+- **语义（向量）**：候选在回填结果前会用 `get_file_by_id` 校验（`commands/search.rs:358`，取不到就跳过）→ 幽灵被过滤。
+
+**触发条件**：`remove_dir_with_files`（备份页"清理失效目录"）只删 `file_tracking`，Tantivy 文档保留 → 该目录下的文件在**全文搜索**中持续命中，直到重建索引。
+
+**与"重加"叠加**：该路径删后再重加同一路径，新 `file_id` 会再写一份 Tantivy 文档，旧的幽灵文档仍在 → **同一文件在全文搜索里可能出现两条**。
+
+> 结论：日常"删除资料库"（`remove_dir`）不会产生幽灵；只有"清理失效目录"（`remove_dir_with_files`）会。修复方式自然是让它也走 `delete_file`/`delete_dir` + `cleanup_orphan_content`（另开任务）。
 
 ## 附录 B：复现查询
 
