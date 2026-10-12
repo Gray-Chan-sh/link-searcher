@@ -1,5 +1,12 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：构建目标改为仅 MSI（跳过 NSIS 下载）
+
+- `src-tauri/tauri.conf.json`：`bundle.targets` 由 `"all"` → `["msi"]`。
+- **原因**：Windows 上 `"all"` 会同时打 MSI 和 NSIS，而 NSIS 需要从 GitHub 下载 `nsis-3.11.zip`，国内经常超时卡住（实测停在 `Downloading .../nsis-3.11.zip`）。MSI 足以分发。
+- 需要 NSIS 时可临时覆盖而不改文件：`npm run tauri:build -- --bundles nsis`。
+- 已核对目标名合法：`tauri-utils 2.9.3` 的 `BundleType::Msi`（`rename_all = "lowercase"`）→ `"msi"`。
+
 ## 2026-10-12：删除目录可「清除所有数据」+ 修块向量误删与幽灵命中
 
 - **新功能**：资料库页删除目录时新增复选框 **「同时清除该目录的所有数据」**（默认不勾）。
