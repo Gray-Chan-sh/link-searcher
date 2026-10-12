@@ -47,6 +47,12 @@ static CHUNK_BACKFILL_RUNNING: AtomicBool = AtomicBool::new(false);
 /// yields to doc backfill every few minutes instead of holding for hours.
 const MAX_CHUNKS_PER_PASS: usize = 512;
 
+/// Minimum interval between "yield to doc" attempts inside the chunk drain.
+/// Guards against re-loading the (heavy, text-bearing) doc queue on every pass
+/// when those rows keep failing to embed; normal passes are ~3.5 min, so this
+/// only matters for pathologically short passes.
+const DOC_YIELD_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub(super) fn run_backfill_embeddings(
     db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
 ) -> Result<BackfillReport, String> {
@@ -378,6 +384,29 @@ pub(super) fn missing_embedding_rows(
     rows.collect::<rusqlite::Result<Vec<_>>>().context("collect missing-embedding rows")
 }
 
+/// Cheap `EXISTS` probe for the doc-backfill queue (same predicate as
+/// [`missing_embedding_rows`], but it never loads the text bodies).
+///
+/// The chunk drain uses it before each pass to yield to doc embedding, so newly
+/// indexed files get their vector without waiting for the whole (hours-long)
+/// chunk backlog — and without paying for a full `missing_embedding_rows` scan
+/// just to discover there is nothing to do.
+pub(super) fn has_missing_doc_embeddings(conn: &rusqlite::Connection) -> anyhow::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM file_tracking ft
+             JOIN content_index ci ON ft.md5 = ci.md5
+             LEFT JOIN doc_embeddings e ON e.file_id = ft.id
+             WHERE ft.indexed = 1 AND ft.status = 'active'
+               AND (e.file_id IS NULL OR e.updated_at < ci.indexed_at)
+         )",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .map(|n| n != 0)
+    .context("query has_missing_doc_embeddings")
+}
+
 /// Collapse `(file_id, md5, text)` rows by md5: duplicate files (same content)
 /// become one `(text, file_ids)` entry so the text is embedded once and the
 /// resulting vector is written to every file_id.
@@ -445,6 +474,10 @@ pub(super) fn existing_chunk_indexes(conn: &rusqlite::Connection, md5: &str) -> 
 ///
 /// Chunks from all selected docs are flattened and embedded in bulk so the
 /// engine's replica pool can parallelize across batches.
+///
+/// Before each pass it **yields to doc embedding** (see
+/// [`has_missing_doc_embeddings`]) so newly indexed files get a searchable
+/// vector without waiting for the whole chunk backlog to drain.
 pub(super) fn run_backfill_chunk_embeddings(
     db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
 ) -> Result<BackfillReport, String> {
@@ -475,7 +508,32 @@ pub(super) fn run_backfill_chunk_embeddings(
     let mut failed = 0usize;
     let started = std::time::Instant::now();
     let mut tracker = RateTracker::new(started);
+    // 上一轮让位 doc 回填的时间点（见循环内的说明）。
+    let mut last_doc_yield = std::time::Instant::now()
+        .checked_sub(DOC_YIELD_MIN_INTERVAL)
+        .unwrap_or_else(std::time::Instant::now);
     loop {
+        // 让位 doc 回填：新索引的文件先拿到向量，再继续补 chunk。
+        //
+        // 必须在**循环内**做：本函数是 drain-to-empty，一次调用会一直循环到缺块
+        // 清空（扫描期间可能数小时），在调用点之前让位不起作用。doc 回填内部自己
+        // 持 BACKFILL_LOCK，所以这里必须在取 pass 锁**之前**调用，否则死锁。
+        if last_doc_yield.elapsed() >= DOC_YIELD_MIN_INTERVAL {
+            let has_doc_work = match has_missing_doc_embeddings(&conn) {
+                Ok(v) => v,
+                Err(e) => {
+                    log::debug!("[AI] 检查 doc 回填队列失败: {e}");
+                    false
+                }
+            };
+            if has_doc_work {
+                last_doc_yield = std::time::Instant::now();
+                if let Err(e) = run_backfill_embeddings(db) {
+                    log::warn!("[AI] chunk 回填让位 doc 失败: {e}");
+                }
+            }
+        }
+
         // Hold the data lock per pass, not for the whole drain: one full chunk
         // backlog can take hours, and a run-scoped hold would keep doc backfill
         // (and thus newly indexed files' vectors) waiting the entire time.
@@ -614,6 +672,33 @@ pub struct BackfillReport {
 #[cfg(test)]
 mod tests {
     use super::{collect_missing_chunk_tasks, count_missing_chunks, group_by_md5};
+
+    /// The doc-yield probe must report exactly the predicate
+    /// `missing_embedding_rows` uses — and must go false once the vector exists.
+    #[test]
+    fn has_missing_doc_embeddings_tracks_doc_queue() {
+        use super::has_missing_doc_embeddings;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::init_db(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO dir_config (id,path,recursive,created_at,updated_at) VALUES ('d1','/a',1,0,0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at) \
+             VALUES ('f1','p1','d1',0,0,'m1','active',1,0,0)",
+            [],
+        )
+        .unwrap();
+        crate::db::tracker::store_content(&conn, "m1", "body text", false, None).unwrap();
+
+        assert!(has_missing_doc_embeddings(&conn).unwrap(), "有内容但无 doc 向量 → 应报告有活");
+
+        crate::db::tracker::upsert_embedding(&conn, "f1", &[1.0, 2.0]).unwrap();
+        assert!(!has_missing_doc_embeddings(&conn).unwrap(), "补上向量后应报告无活");
+    }
 
     /// `RunningFlag` must clear on drop even when its scope returns early —
     /// otherwise an aborted/skipped run leaves the single-flight flag stuck and

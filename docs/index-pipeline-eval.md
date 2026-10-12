@@ -212,6 +212,8 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 > **② 已实施**：`ensure_embedding_keepers(db, is_indexing)` 在扫描期间常驻 **doc / chunk 两个 keeper 线程**，靠 ① 的分片锁交替 drain；`IndexerService` 新增 `is_indexing` 标志，`Scanner` 用 `IndexingScope`（RAII）在 `full_scan`/`incremental_scan`/`startup_scan` 期间置位并在扫描开始时拉起 keeper。
 > → **提取与回填并行**，端到端由 ≈18 h 降到 ≈10.6 h（约 **−40%**）；回填本身耗时不变。
 >
+> **① 补充（2026-10-12，实测后）**：分片锁仍不够——chunk drain 释放后**立刻**重取（每轮 ~213 s），doc 18.7 分钟抢不到锁。已在 `run_backfill_chunk_embeddings` 的**每轮循环内、取锁前**加"先补一轮 doc"（`has_missing_doc_embeddings` + 30s 节流），doc 延迟上限降到 **≈3.5 分钟**（一轮 chunk pass）。
+>
 > **③ 未做**（`ORDER BY updated_at DESC` 新内容优先）；**⑤/⑥ 未做**。
 
 **组合预期**（①②③④）：

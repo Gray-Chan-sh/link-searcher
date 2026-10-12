@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：chunk 回填让位 doc 回填（修 doc 向量饥饿）
+
+- **问题**：`run_backfill_chunk_embeddings` 是 drain-to-empty 循环。① 只把锁改成"每轮 pass 释放"，但 chunk keeper 释放后**立刻重新获取**（每轮持锁 ~213s），实测 **18.7 分钟**内 doc 回填一次都没抢到锁 → 新索引文件的 doc 向量从设计的"分钟级"退化为"十几分钟～几十分钟"（观测：`缺 doc 向量` 250→744，`doc 向量 +0`）。
+- **修复**：在 chunk drain 的**每轮循环内、取 pass 锁之前**，先探测是否有缺 doc 向量的文件（新增 `has_missing_doc_embeddings`，`EXISTS` 探测、不加载正文），有则先跑一轮 doc 回填。
+  - 必须写在**循环内部**：本函数是 drain-to-empty，调用点在循环外不起作用（一次调用会独占数小时）。
+  - 必须在取 pass 锁**之前**调用：doc 回填内部自己持 `BACKFILL_LOCK`，否则死锁。
+  - 加 `DOC_YIELD_MIN_INTERVAL = 30s` 节流，避免 doc 队列持续失败时每轮都重扫全量缺行（带正文，很重）。
+- **测试**：新增 `has_missing_doc_embeddings_tracks_doc_queue`；`cargo test --lib` **511 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/index/embeddings.rs`。
+
 ## 2026-10-12：构建目标改为仅 MSI（跳过 NSIS 下载）
 
 - `src-tauri/tauri.conf.json`：`bundle.targets` 由 `"all"` → `["msi"]`。
