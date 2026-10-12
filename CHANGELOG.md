@@ -1,5 +1,16 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：修复「重试」按钮无效 —— 新增 retry_failed_files
+
+- **问题**：索引状态页「错误」卡片上的**「重试」按钮点了没反应**。`IndexStatus.tsx::retryFailed` 只调用 `scan()`，而扫描的 `needs_reindex` 对 `indexed=2`（失败）返回 false → **扫描会跳过失败文件**。同时 `tracker::mark_failed_for_reindex()`（把 active 的失败记录重置为待索引）**定义在那里却没有任何调用方**——看起来本就是这个按钮的实现。
+- **影响**：失败文件永远无法从 UI 重试（本次修的 15 个"图片内存上限"文件也补不上）。
+- **修复**：
+  - 新增 Tauri 命令 `retry_failed_files`（`commands/index.rs`）：先用 `mark_failed_for_reindex` 重置失败记录（返回重置数量），再拉起一次扫描（复用 `ScanWorker`；已有扫描在跑时只重置、不重复起）；
+  - 注册到 `lib.rs`、新增 HTTP 路由 `POST /api/index/retry-failed`（返回 `reset` 数量）；
+  - 前端 `api/index.ts` 新增 `retryFailedFiles()`、`client.ts` 补映射，`IndexStatus.tsx` 的 `retryFailed` 改调它并显示结果（`index_retry_failed_started` / `index_retry_failed_none`，四语言）。
+- **测试**：新增 `test_mark_failed_for_reindex_resets_only_active_failures`（只重置 active 失败记录，已索引/已删除不动）；`cargo test --lib` **516 项全过**、`vitest` 73 项全过（`clientMissingMapping` 保证新命令有 HTTP 映射）、`tsc -b` 通过、`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`commands/index.rs`、`lib.rs`、`webapi/routes/index.rs`、`db/tracker.rs`(测试)、`src/api/index.ts`、`src/api/client.ts`、`src/pages/IndexStatus.tsx`、`src/i18n/{zh,en,ja,ko}.ts`。
+
 ## 2026-10-13：修复 heal 反复重灌失败；放宽大图 OCR 解码上限
 
 - **② "Tantivy 每次启动都缺 1 份"（真因）**：`run_index_integrity_heal` 的重灌失败分支只 `log` + 计数，**不改变行状态** → 该行仍是 `indexed=1` 且 Tantivy 里没有文档 → 每轮 heal（每次启动/扫描）都把它列为"缺失"、重试、再失败。实测：`22:10:45 缺失 1 份` → `22:10:56 重灌失败 <某合同文件>` → `完成: 缺失 1, 成功 0, 失败 1`，多天来形状完全一样。

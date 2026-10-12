@@ -972,6 +972,32 @@ mod tests {
         assert_eq!(get_files_needing_index(&conn, 10).unwrap().len(), 2);
     }
 
+    /// 「重试失败文件」的核心：把 active 的 `indexed=2` 重置为待索引并清空错误，
+    /// 其它状态（已索引、已删除）不受影响。普通扫描对 `indexed=2` 会跳过
+    /// （`needs_reindex` 返回 false），所以没有这一步「重试」就是空操作。
+    #[test]
+    fn test_mark_failed_for_reindex_resets_only_active_failures() {
+        let conn = db();
+        let failed = upsert_file(&conn, "/failed.txt", "d1", 1000, 1, None).unwrap();
+        mark_failed(&conn, &failed, "boom").unwrap();
+        let ok = upsert_file(&conn, "/ok.txt", "d1", 1000, 2, None).unwrap();
+        update_indexed(&conn, &ok, Some("m-ok")).unwrap();
+        let deleted = upsert_file(&conn, "/gone.txt", "d1", 1000, 3, None).unwrap();
+        mark_failed(&conn, &deleted, "boom").unwrap();
+        mark_deleted(&conn, &deleted).unwrap();
+
+        let n = mark_failed_for_reindex(&conn).unwrap();
+        assert_eq!(n, 1, "只有 active 的失败记录应被重置");
+
+        let r = get_file_by_id(&conn, &failed).unwrap().unwrap();
+        assert_eq!(r.indexed, 0, "失败记录应回到待索引");
+        assert_eq!(r.error_msg, None, "错误信息应清空");
+        let r = get_file_by_id(&conn, &ok).unwrap().unwrap();
+        assert_eq!(r.indexed, 1, "已索引记录不受影响");
+        let r = get_file_by_id(&conn, &deleted).unwrap().unwrap();
+        assert_eq!(r.indexed, 2, "已删除记录不参与重试");
+    }
+
     #[test]
     fn test_dead_content_lifecycle() {
         let conn = db();

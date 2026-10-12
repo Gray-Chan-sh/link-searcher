@@ -451,6 +451,8 @@ const zh: Record<string, string> = {
     index_verify_done: '✓ 验证完成: 检查 {checked}，恢复 {recovered}，空内容 {dead}，失败 {failed}',
     index_reextract_done: '✓ 已重提取 {ok} 个{failedSuffix}',
     index_no_missing: '✓ 无缺失内容',
+    index_retry_failed_started: '✓ 已重置 {n} 个失败文件，正在重新索引',
+    index_retry_failed_none: '✓ 没有需要重试的失败文件',
 
     // Backup
     tab_backup: '备份',

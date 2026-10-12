@@ -447,6 +447,8 @@ const ko: Record<string, string> = {
     index_verify_done: '✓ 검증 완료: 확인 {checked}, 복원 {recovered}, 빈 {dead}, 실패 {failed}',
     index_reextract_done: '✓ 재추출 {ok}개{failedSuffix}',
     index_no_missing: '✓ 누락된 콘텐츠 없음',
+    index_retry_failed_started: '✓ 실패한 파일 {n}개를 재설정했습니다. 다시 인덱싱 중',
+    index_retry_failed_none: '✓ 다시 시도할 실패 파일이 없습니다',
 
     // Backup
     tab_backup: '백업',

@@ -447,6 +447,8 @@ const ja: Record<string, string> = {
     index_verify_done: '✓ 検証完了: 確認 {checked}、復元 {recovered}、空 {dead}、失敗 {failed}',
     index_reextract_done: '✓ 再抽出 {ok} 件{failedSuffix}',
     index_no_missing: '✓ 欠落コンテンツなし',
+    index_retry_failed_started: '✓ 失敗した {n} 件をリセットしました。再インデックス中',
+    index_retry_failed_none: '✓ 再試行する失敗ファイルはありません',
 
     // Backup
     tab_backup: 'バックアップ',

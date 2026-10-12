@@ -95,6 +95,10 @@ const MAPPINGS: Record<string, Mapping> = {
   check_index_health: { method: 'GET', path: '/api/index/health' },
   trigger_scan: { method: 'POST', path: '/api/scan/trigger' },
   cancel_scan: { method: 'POST', path: '/api/scan/cancel' },
+  retry_failed_files: {
+    method: 'POST', path: '/api/index/retry-failed',
+    transform: (d) => (d as { reset?: number } | null)?.reset ?? 0,
+  },
   // Server reads body field "file_id" (snake_case).
   reindex_file: (a) => ({ method: 'POST', path: '/api/reindex', body: { file_id: a.fileId } }),
   rebuild_index: { method: 'POST', path: '/api/index/rebuild' },

@@ -345,6 +345,53 @@ fn clear_index_tables(conn: &rusqlite::Connection) {
     }
 }
 
+/// Retry files whose indexing failed.
+///
+/// A plain scan **skips** failed records — `needs_reindex` returns false for
+/// `indexed=2` — which is why the UI's "重试" button (which only triggered a
+/// scan) did nothing. Reset them to pending first, then kick a scan so they are
+/// picked up immediately.
+///
+/// Returns the number of records reset.
+#[tauri::command]
+pub async fn retry_failed_files(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<u64, String> {
+    let reset = {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        tracker::mark_failed_for_reindex(&conn).map_err(|e| format!("{e}"))?
+    };
+    if reset == 0 {
+        log::info!("[INDEX] 重试失败文件：没有需要重置的记录");
+        return Ok(0);
+    }
+
+    // Kick a scan so the reset files are retried now.
+    if state
+        .is_scanning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        let worker = ScanWorker {
+            app,
+            db: state.db.clone(),
+            scanner: state.scanner.clone(),
+            indexer: state.indexer.clone(),
+            is_scanning: state.is_scanning.clone(),
+            cancel_scan: state.cancel_scan.clone(),
+            scan_delta: state.scan_delta.clone(),
+            logs_dir: state.data_dir.join("logs"),
+        };
+        tokio::task::spawn_blocking(move || worker.run(None));
+    } else {
+        log::warn!("[INDEX] 重试失败文件：已有扫描在进行，重置后的记录将由该扫描处理");
+    }
+
+    log::info!("[INDEX] 重试失败文件：已重置 {reset} 个记录，开始重新索引");
+    Ok(reset)
+}
+
 #[tauri::command]
 pub async fn rebuild_index(
     state: State<'_, AppState>,

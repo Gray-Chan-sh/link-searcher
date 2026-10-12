@@ -182,6 +182,13 @@ export async function cancelScan(): Promise<void> {
   return client.invoke('cancel_scan')
 }
 
+/** Reset failed records to pending and re-index them. Returns how many records
+ *  were reset (0 = nothing to retry). A plain scan skips failed files, so this
+ *  is the only way to retry them. */
+export async function retryFailedFiles(): Promise<number> {
+  return client.invoke<number>('retry_failed_files')
+}
+
 export interface IndexError {
   file_id: string
   file_path: string

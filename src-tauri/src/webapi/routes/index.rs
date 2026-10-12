@@ -27,6 +27,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/index/reindex-batch", post(reindex_files_handler))
         .route("/api/index/reextract", post(reextract_handler))
         .route("/api/index/verify", post(verify_handler))
+        .route("/api/index/retry-failed", post(retry_failed_handler))
         .route("/api/index/errors", get(errors_handler))
         .route("/api/index/integrity", get(integrity_handler))
         .route(
@@ -365,12 +366,27 @@ async fn verify_handler(
     ))
 }
 
+/// Reset failed records to pending and kick a scan (see
+/// `commands::index::retry_failed_files`).
+async fn retry_failed_handler(
+    State(state): State<ApiState>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let app = state.app_handle.clone();
+    let reset = tauri::async_runtime::block_on(async {
+        let st = app.state::<AppState>();
+        crate::commands::index::retry_failed_files(st, app.clone()).await
+    })
+    .map_err(|e| ApiError { error: e })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "status": "started", "reset": reset })),
+    ))
+}
+
 #[derive(Deserialize)]
 struct LimitQuery {
     limit: Option<usize>,
-}
-
-async fn errors_handler(
+}async fn errors_handler(
     State(state): State<ApiState>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Vec<tracker::IndexError>>, ApiError> {

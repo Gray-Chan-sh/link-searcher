@@ -2,7 +2,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, retryFailedFiles, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
@@ -30,7 +30,7 @@ function formatTime(ts: number | null, t: (k: string) => string): string {
 export default function IndexStatus() {
   const { t } = useI18n()
   const navigate = useNavigate()
-  const { status, loading, error, scan, rebuild } = useIndexStatus()
+  const { status, loading, error, scan, rebuild, refresh } = useIndexStatus()
   const [duplicates, setDuplicates] = useState<DuplicateGroup[]>([])
   const [dupesLoading, setDupesLoading] = useState(false)
   const [llmCapable, setLlmCapable] = useState(false)
@@ -216,9 +216,16 @@ export default function IndexStatus() {
   }
 
   const retryFailed = async () => {
+    setBackfillMsg(null)
     setRetrying(true)
     try {
-      await scan()
+      const reset = await retryFailedFiles()
+      setBackfillMsg(
+        reset > 0 ? t('index_retry_failed_started', { n: reset }) : t('index_retry_failed_none'),
+      )
+      await refresh()
+    } catch (e) {
+      setBackfillMsg(String(e))
     } finally {
       setRetrying(false)
     }

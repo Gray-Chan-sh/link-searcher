@@ -451,6 +451,8 @@ const en: Record<string, string> = {
     index_verify_done: '✓ Verification done: checked {checked}, recovered {recovered}, empty {dead}, failed {failed}',
     index_reextract_done: '✓ Re-extracted {ok}{failedSuffix}',
     index_no_missing: '✓ No missing content',
+    index_retry_failed_started: '✓ Reset {n} failed files, re-indexing now',
+    index_retry_failed_none: '✓ No failed files to retry',
 
     // Backup
     tab_backup: 'Backup',
