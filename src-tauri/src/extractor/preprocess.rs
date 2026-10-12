@@ -27,7 +27,7 @@ const TARGET_LONGEST_SIDE: u32 = 1000;
 /// Returns `Some(temp_png_path)` when the image was upscaled, `None` when the
 /// original is already large enough. Caller MUST delete the returned temp file.
 pub fn preprocess_for_ocr(input_path: &Path) -> Result<Option<PathBuf>> {
-    let img = image::open(input_path).context("failed to load image for preprocessing")?;
+    let img = super::open_image_relaxed(input_path).context("failed to load image for preprocessing")?;
 
     let (w, h) = img.dimensions();
     let longest = w.max(h);

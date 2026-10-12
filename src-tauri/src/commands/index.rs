@@ -1483,6 +1483,58 @@ mod tests {
         let _ = (&keep_a, &keep_b, &d_id);
     }
 
+    /// 无法恢复的记录必须**离开**"indexed=1 但 Tantivy 缺失"的候选集，否则每次
+    /// 启动/扫描都会重试并再次失败（实测：同一份文档反复报 `缺失 1 份, 成功 0, 失败 1`）。
+    #[test]
+    fn integrity_heal_downgrades_unrecoverable_rows() {
+        use crate::search::IndexManager;
+        use std::sync::Arc;
+
+        let db_path = std::env::temp_dir().join(format!("healdown_pool_{}.db", std::process::id()));
+        let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
+        let (fid, indexer) = {
+            let c = pool.get().unwrap();
+            db::init_db(&c).unwrap();
+            let d = db::dir_config::add_dir(
+                &c, std::env::temp_dir().to_str().unwrap(), None, None, None, None, true,
+            )
+            .unwrap();
+            // 磁盘上不存在，但 DB 标为已索引 → heal 无论如何都重灌不了。
+            let fid = tracker::upsert_file(&c, "definitely_not_on_disk_xyz.pdf", &d.id, 100, 10, None)
+                .unwrap();
+            c.execute(
+                "UPDATE file_tracking SET indexed=1, md5='deadbeef' WHERE id=?1",
+                rusqlite::params![fid],
+            )
+            .unwrap();
+            drop(c);
+            let im = Arc::new(std::sync::RwLock::new(IndexManager::create_in_ram()));
+            (fid, Arc::new(crate::indexer::IndexerService::new(pool.clone(), im)))
+        };
+
+        let rpt = run_index_integrity_heal(&pool, &indexer).unwrap();
+        assert_eq!(rpt.healed, 0, "{rpt:?}");
+        assert_eq!(rpt.failed, 1, "无法恢复的文件应计入失败: {rpt:?}");
+
+        let state: i64 = {
+            let c = pool.get().unwrap();
+            c.query_row(
+                "SELECT indexed FROM file_tracking WHERE id=?1",
+                rusqlite::params![fid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(state, 2, "应降级为失败态，否则每轮 heal 都会重试同一份");
+
+        // 收敛：第二轮不再把它当作缺失项。
+        let rpt2 = run_index_integrity_heal(&pool, &indexer).unwrap();
+        assert_eq!(rpt2.db_indexed, 0, "失败态行不再计入 indexed=1: {rpt2:?}");
+        assert_eq!(rpt2.failed, 0, "{rpt2:?}");
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
     /// 同一 file_id 在 Tantivy 出现多份（heal 与在途批量索引竞争所致）→
     /// heal 删除全部副本并补写一份，最终每文件唯一。
     #[test]

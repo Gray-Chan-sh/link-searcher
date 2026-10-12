@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：修复 heal 反复重灌失败；放宽大图 OCR 解码上限
+
+- **② "Tantivy 每次启动都缺 1 份"（真因）**：`run_index_integrity_heal` 的重灌失败分支只 `log` + 计数，**不改变行状态** → 该行仍是 `indexed=1` 且 Tantivy 里没有文档 → 每轮 heal（每次启动/扫描）都把它列为"缺失"、重试、再失败。实测：`22:10:45 缺失 1 份` → `22:10:56 重灌失败 <某合同文件>` → `完成: 缺失 1, 成功 0, 失败 1`，多天来形状完全一样。
+  - 现改为**失败即降级**：调用 `tracker::mark_failed`（→ `indexed=2`），该行离开"indexed=1 但缺文档"的候选集，进入正常失败文件路径（受 `fail_count` 上限约束，仍可手动重试）。同一处理覆盖"目录配置不存在""文件已不在磁盘""重复文件补写失败"三个分支。
+- **③ 大图 OCR 失败（15 个文件）**：`windows_ocr` / `preprocess` / `ocr` 的预处理都用 `image::open`，受 `image` crate 默认 **512 MiB 解码上限**限制，大尺寸扫描件 / 手机照片直接 `Memory limit exceeded`，且属解码期失败、无回退可言。新增 `extractor::open_image_relaxed()`（上限放宽到 2 GiB，仍保留一道防线防异常文件吃爆内存），三处改用。
+  - 兼容坑：`extractor/mod.rs` 内有 `mod image;`（本地模块）会遮蔽外部 `image` crate → 该函数内必须写 `::image::…` 全路径。
+- **③ 其余失败文件不可修**：150 个里 53 个 PDF 无法解析（无 OCR 兜底）、41 个"文档无文本内容（损坏/加密）"、6 个图片解码损坏、若干 `.doc` FIB 损坏 / zip 不可读 —— **文件本身不可用**；已有 `fail_count < 3` 限制不会反复重试。
+- **测试**：新增 `integrity_heal_downgrades_unrecoverable_rows`（无法恢复 → 降级为失败态 → 第二轮 heal 收敛、不再重复报缺失）；`cargo test --lib` **515 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`commands/index/integrity.rs`、`commands/index.rs`(测试)、`extractor/mod.rs`、`extractor/windows_ocr.rs`、`extractor/preprocess.rs`、`extractor/ocr.rs`、`extractor/image.rs`。
+
 ## 2026-10-12：清理孤儿 doc 向量（移动检测漏删）+ 维护改为串行
 
 - **① 孤儿 `doc_embeddings`（审计发现 58 行）**：`doc_embeddings`/`doc_summaries` 按 `file_id` 键，**没有任何 md5 清理会覆盖它们**。源头是 `startup_scan` 的移动检测：它 `hard_delete_file(new_rec.id)` 删掉 tracking 行、只顺手删了 Tantivy 文档，**没删该 file_id 的 doc 向量** → 永久孤儿。

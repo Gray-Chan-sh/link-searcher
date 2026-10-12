@@ -154,6 +154,22 @@ pub(crate) fn run_index_integrity_heal(
     let mut healed = 0u64;
     let mut failed = 0u64;
     let missing_total = missing.len() as u64;
+    // Downgrades need a DB handle outside the short per-block scopes above.
+    let heal_conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+    /// A record we cannot restore must **leave** the "indexed=1 but absent from
+    /// Tantivy" candidate set, otherwise every future heal retries it and fails
+    /// again — observed in the field as `缺失 1 份` reported on every startup,
+    /// always the same document, `成功 0 失败 1`. Downgrading to `indexed=2`
+    /// hands it to the normal failed-file path (`fail_count` capped, manual
+    /// retry still available).
+    fn downgrade(conn: &rusqlite::Connection, file_id: &str, rel_path: &str, reason: &str) {
+        log::warn!("[HEAL] {rel_path}: 无法恢复，标记失败态（{reason}）");
+        if let Err(e) =
+            crate::db::tracker::mark_failed(conn, file_id, &format!("完整性自愈失败: {reason}"))
+        {
+            log::warn!("[HEAL] {file_id}: 标记失败态失败: {e}");
+        }
+    }
     for (i, file_id) in missing.iter().enumerate() {
         let done = i as u64 + 1;
         if done % 200 == 0 || done == missing_total {
@@ -161,14 +177,16 @@ pub(crate) fn run_index_integrity_heal(
         }
         let (dir_id, rel_path) = &by_id[file_id];
         let Some(root) = dir_roots.get(dir_id) else {
-            log::warn!("[HEAL] {rel_path}: dir_config {dir_id} 不存在，跳过");
+            downgrade(&heal_conn, file_id, rel_path, "目录配置不存在");
             failed += 1;
             continue;
         };
         let full_path = std::path::Path::new(root).join(rel_path);
         if !full_path.exists() {
-            // File gone from disk — leave it for the scanner to mark deleted.
-            log::debug!("[HEAL] {rel_path} 已不在磁盘，跳过（等待扫描标删）");
+            // File gone from disk — the next clean scan marks it deleted; until
+            // then the downgrade keeps it out of the heal's candidate set.
+            log::debug!("[HEAL] {rel_path} 已不在磁盘");
+            downgrade(&heal_conn, file_id, rel_path, "文件已不在磁盘");
             failed += 1;
             continue;
         }
@@ -178,7 +196,7 @@ pub(crate) fn run_index_integrity_heal(
         match indexer.index_file(file_id, &full_path, dir_id, None) {
             Ok(()) => healed += 1,
             Err(e) => {
-                log::warn!("[HEAL] 重灌失败 {rel_path}: {e}");
+                downgrade(&heal_conn, file_id, rel_path, &e.to_string());
                 failed += 1;
             }
         }
@@ -203,12 +221,14 @@ pub(crate) fn run_index_integrity_heal(
         for id in &dup_ids {
             let (dir_id, rel_path) = &by_id[id];
             let Some(root) = dir_roots.get(dir_id) else {
+                downgrade(&heal_conn, id, rel_path, "目录配置不存在");
                 failed += 1;
                 continue;
             };
             let full_path = std::path::Path::new(root).join(rel_path);
             if !full_path.exists() {
-                log::debug!("[HEAL] {rel_path} 已不在磁盘，跳过重复补写");
+                log::debug!("[HEAL] {rel_path} 已不在磁盘");
+                downgrade(&heal_conn, id, rel_path, "文件已不在磁盘");
                 failed += 1;
                 continue;
             }
@@ -218,7 +238,7 @@ pub(crate) fn run_index_integrity_heal(
                     log::info!("[HEAL] 重复文件已归一: {rel_path}");
                 }
                 Err(e) => {
-                    log::warn!("[HEAL] 重复文件补写失败 {rel_path}: {e}");
+                    downgrade(&heal_conn, id, rel_path, &e.to_string());
                     failed += 1;
                 }
             }

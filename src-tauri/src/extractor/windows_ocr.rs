@@ -83,7 +83,8 @@ const WIN_OCR_MAX_DIM: u32 = 4000;
 /// Returns the original path when no resize is needed; temp BMP otherwise.
 fn resize_for_ocr(path: &Path) -> Result<std::path::PathBuf, String> {
     use image::GenericImageView;
-    let img = image::open(path).map_err(|e| format!("Failed to load image for resize: {e}"))?;
+    let img = crate::extractor::open_image_relaxed(path)
+        .map_err(|e| format!("Failed to load image for resize: {e}"))?;
     let (w, h) = img.dimensions();
     if w <= WIN_OCR_MAX_DIM && h <= WIN_OCR_MAX_DIM {
         return Ok(path.to_path_buf());

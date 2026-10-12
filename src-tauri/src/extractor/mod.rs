@@ -38,6 +38,24 @@ pub fn scan_cancelled() -> bool {
     SCAN_CANCEL.get().is_some_and(|f| f.load(Ordering::Acquire))
 }
 
+/// Decode an image with a **relaxed** memory limit.
+///
+/// `image::open` applies the crate default guard (`max_alloc` = 512 MiB), which
+/// made OCR fail outright on large local scans / phone photos with
+/// `Memory limit exceeded` — 15 files in the field, and it also aborts the whole
+/// decode so no fallback helps. These are files the user explicitly asked us to
+/// index, so raise the ceiling to 2 GiB: enough for real documents while still
+/// leaving a guard against a pathological file exhausting memory.
+pub fn open_image_relaxed(path: &Path) -> ::image::ImageResult<::image::DynamicImage> {
+    // NOTE: `::image` (leading `::`) is required — this module declares a local
+    // `mod image;`, which would otherwise shadow the crate name here.
+    let mut reader = ::image::ImageReader::open(path)?;
+    let mut limits = ::image::Limits::default();
+    limits.max_alloc = Some(2 * 1024 * 1024 * 1024);
+    reader.limits(limits);
+    reader.decode()
+}
+
 use anyhow::Result;
 
 pub fn sanitize_text(text: &str) -> String {

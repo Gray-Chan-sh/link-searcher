@@ -81,7 +81,7 @@ fn ocr_gate() -> &'static OcrGate {
 /// Pipeline: grayscale → 2x enlargement → Gaussian denoising → adaptive binarization → morphological opening.
 /// Outputs a white-background, black-text image optimized for Tesseract.
 pub fn preprocess_image(input_path: &Path) -> Result<PathBuf> {
-    let img = image::open(input_path).context("failed to load image for preprocessing")?;
+    let img = super::open_image_relaxed(input_path).context("failed to load image for preprocessing")?;
     let gray = img.to_luma8();
 
     let enlarged = image::imageops::resize(

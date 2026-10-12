@@ -22,7 +22,7 @@ impl ImageExtractor {
 #[cfg(test)]
 impl Extractor for ImageExtractor {
     fn extract(&self, path: &Path) -> Result<String> {
-        let img = image::open(path).context("failed to load image")?;
+        let img = super::open_image_relaxed(path).context("failed to load image")?;
         super::paddleocr::recognize_from_image(&img)
     }
 }
