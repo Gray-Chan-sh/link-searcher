@@ -20,6 +20,12 @@ pub(super) fn run_verify_core(
     indexer: &std::sync::Arc<crate::indexer::IndexerService>,
     force_dead: bool,
 ) -> Result<VerifyReport, String> {
+    // 同一时刻只允许一次校验：否则"被取消的扫描"和"删除后的续扫"会各起一份并发
+    // 跑，同一批空文件被重复提取两遍（实测 OCR/CPU 翻倍）。
+    let Some(_single) = crate::state::try_acquire_single_flight("verify") else {
+        log::info!("[VERIFY] 已有一次校验在运行，跳过本次");
+        return Ok(VerifyReport { checked: 0, recovered: 0, dead: 0, failed: 0 });
+    };
     let _guard = crate::state::TaskGuard::new("verify");
     let conn = match db_pool.get() {
         Ok(c) => c,
@@ -33,6 +39,24 @@ pub(super) fn run_verify_core(
             && let Ok(dead) = tracker::find_dead_files(&conn) {
                 candidates.extend(dead);
             }
+        // 按 md5 去重：重复文件共享同一份内容，重复提取纯属浪费（empty 内容的
+        // md5 一样，提取一次即可对所有副本生效）。再做每轮上限，避免一次校验
+        // 在几百个空文件上长时间跑 OCR。
+        const MAX_VERIFY_PER_RUN: usize = 200;
+        {
+            let mut seen = std::collections::HashSet::new();
+            candidates.retain(|r| match &r.md5 {
+                Some(md5) => seen.insert(md5.clone()),
+                None => seen.insert(r.id.clone()),
+            });
+        }
+        if candidates.len() > MAX_VERIFY_PER_RUN {
+            log::info!(
+                "[VERIFY] 本轮候选 {} 个，按上限 {} 处理，其余留待下一轮",
+                candidates.len(), MAX_VERIFY_PER_RUN
+            );
+            candidates.truncate(MAX_VERIFY_PER_RUN);
+        }
         let mut checked = 0u64;
         let mut recovered = 0u64;
         let mut dead = 0u64;

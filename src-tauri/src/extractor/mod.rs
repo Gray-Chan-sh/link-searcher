@@ -13,8 +13,30 @@ mod text;
 
 use std::io::Read;
 use std::path::Path;
-use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 use unicode_normalization::UnicodeNormalization;
+
+/// The active scan's cancel flag, registered once at bootstrap.
+///
+/// Deep extraction loops must bail out when the user cancels a scan or removes a
+/// directory: a PDF's per-page OCR can run for minutes on a scanned document,
+/// and `remove_dir` waits for the running scan to stop before purging (measured:
+/// **421 s** waiting on a single 44-page PDF). Extraction happens far below the
+/// scanner, so instead of threading a `&AtomicBool` through every signature we
+/// register **the very same `Arc`** the scanner uses — it can never go stale.
+static SCAN_CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Register the process-wide scan-cancel flag (idempotent; first call wins).
+pub fn register_scan_cancel(flag: Arc<AtomicBool>) {
+    let _ = SCAN_CANCEL.set(flag);
+}
+
+/// True when the active scan has been asked to stop. `false` when no scan
+/// infrastructure is registered (e.g. unit tests).
+pub fn scan_cancelled() -> bool {
+    SCAN_CANCEL.get().is_some_and(|f| f.load(Ordering::Acquire))
+}
 
 use anyhow::Result;
 

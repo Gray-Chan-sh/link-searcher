@@ -5,8 +5,18 @@ import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
+import { isTauri } from '../utils/platform'
 
 type RemovePhase = 'confirm' | 'running' | 'done' | 'error'
+
+/** Machine-readable stage keys emitted by `remove_dir`. */
+const STAGE_KEYS: Record<string, string> = {
+  stopping_scan: 'remove_stage_stopping_scan',
+  purging: 'remove_stage_purging',
+  sweeping: 'remove_stage_sweeping',
+  removing: 'remove_stage_removing',
+  resuming: 'remove_stage_resuming',
+}
 
 export default function DirManager() {
   const { t } = useI18n()
@@ -20,14 +30,47 @@ export default function DirManager() {
   const [result, setResult] = useState('')
   const [errText, setErrText] = useState('')
   const [elapsed, setElapsed] = useState(0)
+  const [stage, setStage] = useState('')
+  const [stageDetail, setStageDetail] = useState('')
 
-  // The removal can legitimately take minutes (it waits for an in-flight scan to
+  // The removal can legitimately take a while (it waits for an in-flight scan to
   // stop, then re-indexes the remaining directories), so show a live counter
   // instead of a frozen dialog.
   useEffect(() => {
     if (phase !== 'running') return
     const id = setInterval(() => setElapsed(s => s + 1), 1000)
     return () => clearInterval(id)
+  }, [phase])
+
+  // Live stage/status from the backend (removal stages) plus the normal scan
+  // progress events while the resume scan runs.
+  useEffect(() => {
+    if (phase !== 'running' || !isTauri()) return
+    let offStage: (() => void) | undefined
+    let offScan: (() => void) | undefined
+    let cancelled = false
+    void (async () => {
+      const { listen } = await import('@tauri-apps/api/event')
+      const a = await listen<{ stage: string; detail: string }>('remove-dir-progress', e => {
+        setStage(e.payload.stage)
+        setStageDetail(e.payload.detail ?? '')
+      })
+      const b = await listen<{ current: number; total: number }>('scan-progress', e => {
+        setStageDetail(e.payload.total > 0 ? `${e.payload.current}/${e.payload.total}` : `${e.payload.current}`)
+      })
+      if (cancelled) {
+        a()
+        b()
+        return
+      }
+      offStage = a
+      offScan = b
+    })()
+    return () => {
+      cancelled = true
+      offStage?.()
+      offScan?.()
+    }
   }, [phase])
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -198,7 +241,11 @@ export default function DirManager() {
               <div className="mt-4 flex items-start gap-3">
                 <span className="mt-0.5 size-4 shrink-0 animate-spin rounded-full border-2 border-gray-300 border-t-red-600" />
                 <div className="text-sm text-gray-700 dark:text-gray-300">
-                  <div>{t('remove_dir_running')}<span className="ml-2 font-mono text-xs text-gray-500">{mmss}</span></div>
+                  <div className="flex items-center gap-2">
+                    <span>{stage ? t(STAGE_KEYS[stage] ?? 'remove_dir_running') : t('remove_dir_running')}</span>
+                    {stageDetail && <span className="font-mono text-xs text-gray-500">{stageDetail}</span>}
+                    <span className="font-mono text-xs text-gray-400">{mmss}</span>
+                  </div>
                   <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
                     {t('remove_dir_running_hint')}
                   </p>

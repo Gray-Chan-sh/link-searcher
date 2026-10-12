@@ -260,6 +260,13 @@ impl PdfExtractor {
         log::info!("[PDF] {:?}: {} pages, extracting text", path.file_name(), pages.len());
         let mut page_texts: Vec<String> = Vec::new();
         for page_num in &pages {
+            if crate::extractor::scan_cancelled() {
+                log::info!(
+                    "[PDF] {:?}: 扫描已取消, 停止逐页文本提取（已完成 {}/{} 页）",
+                    path.file_name(), page_texts.len(), pages.len()
+                );
+                break;
+            }
             let page_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 doc.extract_text(&[*page_num])
             }));
@@ -416,6 +423,13 @@ impl PdfExtractor {
                 for (i, &needs) in needs_ocr.iter().enumerate() {
                     if !needs {
                         continue;
+                    }
+                    if crate::extractor::scan_cancelled() {
+                        log::info!(
+                            "[PDF] {:?}: 扫描已取消, 停止混合逐页 OCR（已完成 {done}/{ocr_count} 页）",
+                            path.file_name()
+                        );
+                        break;
                     }
                     let page_num = pages[i];
                     let started = std::time::Instant::now();

@@ -144,6 +144,38 @@ pub fn untrack_task(task: &str) {
     }
 }
 
+/// Names of tasks currently holding a single-flight slot.
+fn single_flight_registry() -> &'static Mutex<Vec<String>> {
+    static R: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    R.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+/// RAII single-flight guard for a long-running task.
+///
+/// [`TaskGuard`] only *records* a task name — `track_task` is idempotent, so two
+/// concurrent runs of the same task both proceed. That happened in the field:
+/// the cancelled scan and its post-removal resume each spawned their own
+/// post-scan maintenance, so `verify` ran twice and re-extracted every empty
+/// file twice. Use this when a second concurrent run must be refused.
+pub struct SingleFlight(&'static str);
+
+impl Drop for SingleFlight {
+    fn drop(&mut self) {
+        let mut reg = single_flight_registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.retain(|n| n != self.0);
+    }
+}
+
+/// Claim the single-flight slot for `name`, or `None` when it is already held.
+pub fn try_acquire_single_flight(name: &'static str) -> Option<SingleFlight> {
+    let mut reg = single_flight_registry().lock().unwrap_or_else(|e| e.into_inner());
+    if reg.iter().any(|n| n == name) {
+        return None;
+    }
+    reg.push(name.to_string());
+    Some(SingleFlight(name))
+}
+
 pub fn running_task_ids() -> Vec<String> {
     task_registry().lock().map(|t| t.clone()).unwrap_or_default()
 }
@@ -266,6 +298,25 @@ mod tests {
             assert!(running_task_ids().contains(&"reextract".to_string()));
         }
         assert!(!running_task_ids().contains(&"reextract".to_string()));
+    }
+
+    /// A task name is only *recorded* (idempotent), so it can't stop a second
+    /// concurrent run — that's what the single-flight slot is for.
+    #[test]
+    fn single_flight_refuses_concurrent_holder() {
+        let first = try_acquire_single_flight("verify-test");
+        assert!(first.is_some(), "first claim wins");
+        assert!(
+            try_acquire_single_flight("verify-test").is_none(),
+            "second concurrent claim must be refused"
+        );
+        // A different task is unaffected.
+        assert!(try_acquire_single_flight("heal-test").is_some());
+        drop(first);
+        assert!(
+            try_acquire_single_flight("verify-test").is_some(),
+            "slot is released on drop"
+        );
     }
 
     #[test]

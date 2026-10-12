@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：删除目录三修（取消即时生效 / 维护去重 / 校验上限）+ 弹窗实时阶段
+
+- **A. 扫描后维护去重（修"OCR 跑两遍"）**：`TaskGuard` 只按名字**登记**、`track_task` 幂等，**拦不住并发**。删除流程里「被取消的扫描」与「续扫」各 spawn 了一份维护 → `verify` 并行跑两遍，同一文件被重复提取（实测同一 JPG/PDF 在同一秒各提取一次、每 3–4 秒一条 `[TASK] backfill: 1 补齐`、内存涨到 4.3 GB）。
+  - 新增 `state::try_acquire_single_flight`（RAII 单飞槽）；`run_verify_core` 与 `run_index_integrity_heal` 改为**已在运行即拒绝**（heal 原先是互斥锁阻塞，现改为拒绝，省掉一次重复的全量 DB↔Tantivy diff）。
+- **B. 取消即时生效（修"删除等 7 分钟"）**：新增 `extractor::scan_cancelled()`，读取 bootstrap 注册的**同一个** `cancel_scan` Arc（不会失同步）。在 PDF 的**逐页 OCR 主循环**、渲染页循环、fast-JPEG 并行分支，以及 `pdf.rs` 的逐页文本提取与混合 OCR 循环里**每页前检查一次** → 删除时的等待从"把整篇 OCR 跑完"（实测 **421 s**，一个 44 页扫描件）降到"最多一页"（秒级）。
+- **C. 校验去重与上限**：`run_verify_core` 候选**按 md5 去重**（重复文件共享同一份内容，提取一次即对所有副本生效），并加每轮上限 `MAX_VERIFY_PER_RUN = 200`（超出部分留待下一轮），避免一次校验在几百个空文件上长时间跑 OCR。
+- **D. 删除弹窗实时阶段**：后端在 `stopping_scan / purging / sweeping / removing / resuming` 各阶段 emit `remove-dir-progress { stage, detail }`；弹窗显示本地化阶段名 + 具体状态（等待秒数、清理计数、续扫的 `current/total`）以及计时。
+- **测试**：新增 `single_flight_refuses_concurrent_holder`；`cargo test --lib` **513 项全过**、`vitest` 70 项全过、`tsc -b` 通过、`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`extractor/mod.rs`、`extractor/pdf.rs`、`extractor/pdf/ocr.rs`、`boot.rs`、`state.rs`、`commands/index/verify.rs`、`commands/index/integrity.rs`、`commands/dirs.rs`、`src/pages/DirManager.tsx`、`src/i18n/{zh,en,ja,ko}.ts`。
+
 ## 2026-10-12：删除目录时停止扫描、清残留、自动续扫（前台等待 + 完成提示）
 
 - **问题**：`remove_dir` **不取消正在运行的扫描** → 删除后扫描继续往该目录写数据，产生孤儿 `content_index`/`doc_chunks` 与幽灵 Tantivy 文档（实测删除后数分钟就出现 28 行孤儿、11 行 doc_chunks 孤儿）。另外删除是同步等待、弹窗无任何进度，加上即时 `VACUUM` 独占写锁 ~39 s，看起来像"卡死"。

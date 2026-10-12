@@ -78,6 +78,15 @@ pub(super) fn run_pdf_ocr_pipeline(
         let mut stalled = false;
 
         for page_num in 1..=page_count {
+            // 取消即停：一页 OCR 可能要几秒~几十秒，44 页的扫描件会让"删除目录"
+            // 白等好几分钟。已经产出的页保留，直接退出循环。
+            if crate::extractor::scan_cancelled() {
+                log::info!(
+                    "[PDF] {:?}: 扫描已取消, 停止逐页 OCR（已完成 {}/{} 页）",
+                    path.file_name(), page_num - 1, page_count
+                );
+                break;
+            }
             pages_attempted += 1;
             let page_idx = page_num - 1;
             let page_started = Instant::now();
@@ -489,6 +498,9 @@ pub fn ocr_pdf_via_pdfimages(
     let fast_text: Vec<Option<String>> = fast_idx
         .par_iter()
         .map(|&idx| {
+            if crate::extractor::scan_cancelled() {
+                return None;
+            }
             let (img_path, area) = per_page.get(idx)?.first()?;
             if *area < MIN_PAGE_IMAGE_AREA {
                 return None;
@@ -524,6 +536,12 @@ pub fn ocr_pdf_via_pdfimages(
     for (idx, is_fast) in fast.iter().enumerate() {
         if *is_fast {
             continue;
+        }
+        if crate::extractor::scan_cancelled() {
+            log::info!(
+                "[PDF] {name:?}: 扫描已取消, 停止渲染页 OCR（已完成 {idx}/{page_count} 页）"
+            );
+            break;
         }
         let page_num = (idx + 1) as u32;
         let started = std::time::Instant::now();

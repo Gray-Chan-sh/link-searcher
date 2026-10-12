@@ -177,6 +177,23 @@ pub struct RemoveDirReport {
     pub resumed_scan: bool,
 }
 
+/// Live stage/status of a directory removal, surfaced to the delete dialog so it
+/// can show what is happening instead of a bare spinner.
+#[derive(Serialize, Clone)]
+pub struct RemoveDirProgress {
+    /// Stable machine-readable stage key; the frontend maps it to a label.
+    pub stage: String,
+    /// Free-form detail (elapsed seconds, counts, scan progress, …).
+    pub detail: String,
+}
+
+fn emit_progress(app: &AppHandle, stage: &str, detail: impl Into<String>) {
+    let _ = app.emit(
+        "remove-dir-progress",
+        RemoveDirProgress { stage: stage.to_string(), detail: detail.into() },
+    );
+}
+
 /// Ask any running scan to stop and wait until it really has.
 ///
 /// Cancellation is cooperative (checked once per file / per batch), so a
@@ -186,6 +203,7 @@ pub struct RemoveDirReport {
 ///
 /// Returns `true` when a scan was actually stopped.
 async fn wait_for_scan_to_stop(
+    app: &AppHandle,
     is_scanning: &std::sync::atomic::AtomicBool,
     cancel_scan: &std::sync::atomic::AtomicBool,
 ) -> bool {
@@ -194,10 +212,12 @@ async fn wait_for_scan_to_stop(
     }
     log::info!("[DIRS] 有扫描在进行：先取消并等待其退出…");
     cancel_scan.store(true, Ordering::SeqCst);
+    emit_progress(app, "stopping_scan", "0s");
 
     let started = std::time::Instant::now();
     let mut warned = false;
     while is_scanning.load(Ordering::SeqCst) {
+        emit_progress(app, "stopping_scan", format!("{:.0}s", started.elapsed().as_secs_f64()));
         if !warned && started.elapsed().as_secs() >= 60 {
             log::warn!("[DIRS] 等待扫描退出已超过 60s（可能正在提取大文件/扫描件）…");
             warned = true;
@@ -218,10 +238,11 @@ pub async fn remove_dir(
     let purge = purge.unwrap_or(false);
 
     // ① 停止正在进行的扫描并等它真正退出（否则它会继续往这个目录写数据）。
-    let stopped_scan = wait_for_scan_to_stop(&state.is_scanning, &state.cancel_scan).await;
+    let stopped_scan = wait_for_scan_to_stop(&app, &state.is_scanning, &state.cancel_scan).await;
 
     // ② 数据清理：Tantivy 文档 + file_tracking + 逐文件向量/摘要/错误 + md5 键的
     //    孤儿 content/chunks/chunk 向量。共享内容（其它目录也持有同一 md5）会保留。
+    emit_progress(&app, "purging", "");
     let indexer = state.indexer.clone();
     let dir_for_purge = id.clone();
     tokio::task::spawn_blocking(move || indexer.purge_dir_data(&dir_for_purge, purge))
@@ -231,6 +252,7 @@ pub async fn remove_dir(
 
     // ③ 收尾 sweep：取消是合作式的，扫描可能在被叫停前又写进了一点数据，且会留下
     //    dir_id 已不在 dir_config 的孤儿行。这里统一清掉，确保没有幽灵命中。
+    emit_progress(&app, "sweeping", "");
     let indexer_sweep = state.indexer.clone();
     let swept_orphan_dirs = tokio::task::spawn_blocking(move || indexer_sweep.sweep_orphan_dirs())
         .await
@@ -239,6 +261,7 @@ pub async fn remove_dir(
 
     // ④ 移除监控配置，并把刚释放的空间从 WAL 里收回（不用 VACUUM：它会重写整个库
     //    并长时间独占写锁，实测让应用冻结约 40s）。
+    emit_progress(&app, "removing", "");
     let remaining_dirs = {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
         db::dir_config::remove_dir(&conn, &id)
@@ -259,7 +282,7 @@ pub async fn remove_dir(
 
     // ⑤ 续跑：被中止的扫描对**其它目录**继续做完，用户不需要再手动点扫描。
     //    走的就是 trigger_scan 用的同一段代码（ScanWorker）；因为 needs_reindex 会
-    //    跳过未变更的文件，代价只有一次遍历。
+    //    跳过未变更的文件，代价只有一次遍历。进度通过 scan-progress 事件透出。
     let mut resumed_scan = false;
     if stopped_scan
         && remaining_dirs > 0
@@ -268,6 +291,7 @@ pub async fn remove_dir(
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     {
+        emit_progress(&app, "resuming", "");
         let worker = crate::commands::index::ScanWorker {
             app,
             db: state.db.clone(),

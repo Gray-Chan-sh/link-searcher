@@ -52,6 +52,10 @@ pub fn bootstrap_core(data_dir: &Path) -> Result<Bootstrap> {
     let index_manager = Arc::new(RwLock::new(IndexManager::open_or_create(&index_dir)?));
 
     let cancel_scan = Arc::new(AtomicBool::new(false));
+    // Let deep extraction loops (PDF per-page OCR) observe cancellation, so a
+    // cancelled scan / removed directory doesn't have to wait minutes for one
+    // document to finish.
+    crate::extractor::register_scan_cancel(cancel_scan.clone());
     let indexer = Arc::new(IndexerService::with_cancel(
         pool.clone(),
         index_manager.clone(),
