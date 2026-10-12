@@ -811,9 +811,6 @@ impl IndexerService {
             rows.collect::<rusqlite::Result<Vec<_>>>()
                 .context("collect orphan dir ids")?
         };
-        if ids.is_empty() {
-            return Ok(0);
-        }
 
         for dir_id in &ids {
             if let Err(e) = self.delete_dir(dir_id) {
@@ -848,7 +845,9 @@ impl IndexerService {
 
         drop(conn);
         self.commit().context("failed to commit after orphan sweep")?;
-        log::info!("[INDEX] sweep: 清理了 {} 个已移除目录的残留数据", ids.len());
+        if !ids.is_empty() {
+            log::info!("[INDEX] sweep: 清理了 {} 个已移除目录的残留数据", ids.len());
+        }
         Ok(ids.len() as u64)
     }
 

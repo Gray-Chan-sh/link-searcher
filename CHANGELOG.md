@@ -12,6 +12,7 @@
 - **重构**：从 `trigger_scan` 抽出 `ScanWorker`，命令与"续扫"共用同一段扫描逻辑（进度事件、会话日志、扫描后维护），避免两份实现漂移。
 - **前端**（`src/pages/DirManager.tsx`）：删除弹窗在**执行期间不可关闭**（禁用遮罩点击、隐藏取消按钮），显示 spinner + **实时计时** + 阶段说明；**全部完成后**展示后端返回的结果（含"已停止扫描 / 已继续索引其它目录"）并给出「关闭」；失败则显示错误原因。
 - **接口**：`remove_dir` 返回 `RemoveDirReport { message, stopped_scan, swept_orphan_dirs, resumed_scan }`；HTTP `DELETE /api/dirs` 同步返回这些字段。
+- **补漏（同日）**：`sweep_orphan_dirs` 不再在"无孤儿目录"时提前返回，因此仍会执行 md5 键的孤儿清理；启动流程（`lib.rs`）在原有 `cleanup_orphan_content` 之外补上 `cleanup_orphan_chunk_embeddings`——此前**孤儿 `chunk_embeddings` 永远不会被清理**（实测残留 78 行）。
 - **测试**：新增 `sweep_orphan_dirs_removes_leftovers_but_keeps_configured_dirs`；`cargo test --lib` **512 项全过**、`vitest` 70 项全过、`tsc -b` 通过、`semgrep --severity ERROR` 0 findings。
 - **涉及文件**：`indexer.rs`、`db/mod.rs`、`commands/dirs.rs`、`commands/index.rs`、`webapi/routes/dirs.rs`、`src/api/client.ts`、`src/api/dirs.ts`、`src/hooks/useDirs.ts`、`src/pages/DirManager.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/02-add-library.md`。
 
