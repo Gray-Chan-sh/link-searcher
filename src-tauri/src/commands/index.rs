@@ -1,12 +1,17 @@
-use std::sync::atomic::Ordering;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::db;
 use crate::db::tracker;
 use crate::extractor::ocr;
-use crate::scanner::{ScanProgress, ScanResult};
+use crate::indexer::IndexerService;
+use crate::scanner::{ScanProgress, ScanResult, Scanner};
 use crate::search::IndexManager;
 use crate::state::{AppState, ScanDelta};
 
@@ -93,57 +98,39 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
     })
 }
 
-#[tauri::command]
-pub async fn trigger_scan(
-    state: State<'_, AppState>,
-    dir_id: Option<String>,
-    app: AppHandle,
-) -> Result<(), String> {
-    if state
-        .is_scanning
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("a scan is already in progress".to_string());
-    }
+/// Everything one scan pass needs. Extracted from [`trigger_scan`] so the
+/// post-removal resume runs *exactly* the same code (progress events, session
+/// log, post-scan maintenance) instead of duplicating the loop.
+///
+/// The caller must already have claimed `is_scanning` (compare_exchange
+/// false→true); [`ScanWorker::run`] clears `is_scanning`/`cancel_scan` on every
+/// exit path.
+pub(crate) struct ScanWorker {
+    pub app: AppHandle,
+    pub db: Pool<SqliteConnectionManager>,
+    pub scanner: Arc<Scanner>,
+    pub indexer: Arc<IndexerService>,
+    pub is_scanning: Arc<AtomicBool>,
+    pub cancel_scan: Arc<AtomicBool>,
+    pub scan_delta: Arc<Mutex<ScanDelta>>,
+    pub logs_dir: PathBuf,
+}
 
-    // Check OCR engine status before starting scan
-    {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        let ocr_setting: String = conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_else(|_| "PaddleOCR".to_string());
-        // Drop connection before the long-running scan
-        drop(conn);
+impl ScanWorker {
+    /// `dir_id = None` scans every configured directory (full scan);
+    /// `Some(id)` scans that one incrementally.
+    pub fn run(self, dir_id: Option<String>) {
+        let ScanWorker {
+            app: app_clone,
+            db: db_pool,
+            scanner,
+            indexer,
+            is_scanning,
+            cancel_scan,
+            scan_delta,
+            logs_dir,
+        } = self;
 
-        if ocr_setting != "None"
-            && !match ocr_setting.as_str() {
-                "PaddleOCR" => true,     // built-in, always available
-                "Tesseract" => ocr::is_tesseract_available(),
-                _ => !ocr::detect_available_engines().is_empty(),
-            }
-        {
-            state.is_scanning.store(false, Ordering::SeqCst);
-            return Err(
-                "OCR 引擎不可用，请在设置页面检查 OCR 引擎配置".to_string(),
-            );
-        }
-    }
-
-    let is_scanning = state.is_scanning.clone();
-    let cancel_scan = state.cancel_scan.clone();
-    let scanner = state.scanner.clone();
-    let db_pool = state.db.clone();
-    let indexer = state.indexer.clone();
-    let app_clone = app.clone();
-    let scan_delta = state.scan_delta.clone();
-    let logs_dir = state.data_dir.join("logs");
-
-    tokio::task::spawn_blocking(move || {
         cancel_scan.store(false, Ordering::Release);
         let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
         let conn = match db_pool.get() {
@@ -289,7 +276,61 @@ pub async fn trigger_scan(
         std::thread::spawn(move || {
             let _ = run_index_integrity_heal(&db_pool_h, &indexer_h);
         });
-    });
+    }
+}
+
+#[tauri::command]
+pub async fn trigger_scan(
+    state: State<'_, AppState>,
+    dir_id: Option<String>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if state
+        .is_scanning
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("a scan is already in progress".to_string());
+    }
+
+    // Check OCR engine status before starting scan
+    {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let ocr_setting: String = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "PaddleOCR".to_string());
+        // Drop connection before the long-running scan
+        drop(conn);
+
+        if ocr_setting != "None"
+            && !match ocr_setting.as_str() {
+                "PaddleOCR" => true,     // built-in, always available
+                "Tesseract" => ocr::is_tesseract_available(),
+                _ => !ocr::detect_available_engines().is_empty(),
+            }
+        {
+            state.is_scanning.store(false, Ordering::SeqCst);
+            return Err(
+                "OCR 引擎不可用，请在设置页面检查 OCR 引擎配置".to_string(),
+            );
+        }
+    }
+
+    let worker = ScanWorker {
+        app,
+        db: state.db.clone(),
+        scanner: state.scanner.clone(),
+        indexer: state.indexer.clone(),
+        is_scanning: state.is_scanning.clone(),
+        cancel_scan: state.cancel_scan.clone(),
+        scan_delta: state.scan_delta.clone(),
+        logs_dir: state.data_dir.join("logs"),
+    };
+    tokio::task::spawn_blocking(move || worker.run(dir_id));
 
     Ok(())
 }

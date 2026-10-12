@@ -784,6 +784,74 @@ impl IndexerService {
         Ok(())
     }
 
+    /// Remove data left behind by directories that are no longer configured.
+    ///
+    /// A scan's cancellation is cooperative, so while a directory is being
+    /// removed the in-flight scan can still `upsert` its rows and write Tantivy
+    /// documents for a `dir_id` whose `dir_config` row is already gone. This
+    /// sweeps every such orphan `dir_id` (plus per-`file_id` vectors and
+    /// content-keyed rows left without an owner) so a removed directory leaves
+    /// no ghost search hits.
+    ///
+    /// Returns the number of orphan `dir_id`s swept.
+    pub fn sweep_orphan_dirs(&self) -> Result<u64> {
+        let conn = self.db.get().context("failed to get DB connection")?;
+
+        let ids: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT ft.dir_id FROM file_tracking ft \
+                     LEFT JOIN dir_config dc ON dc.id = ft.dir_id \
+                     WHERE dc.id IS NULL",
+                )
+                .context("prepare orphan dir ids")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .context("query orphan dir ids")?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .context("collect orphan dir ids")?
+        };
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        for dir_id in &ids {
+            if let Err(e) = self.delete_dir(dir_id) {
+                log::warn!("[INDEX] sweep: 删除 {dir_id} 的 Tantivy 文档失败: {e}");
+            }
+            for sql in [
+                "DELETE FROM file_tracking WHERE dir_id=?1",
+                "DELETE FROM unsupported_ext_stats WHERE dir_id=?1",
+            ] {
+                if let Err(e) = conn.execute(sql, [dir_id.as_str()]) {
+                    log::warn!("[INDEX] sweep: {dir_id}: {e}");
+                }
+            }
+        }
+
+        // Per-`file_id` rows whose owner row is gone (the dir deletes above
+        // removed them), then the md5-keyed content that lost its last owner.
+        for sql in [
+            "DELETE FROM doc_embeddings WHERE file_id NOT IN (SELECT id FROM file_tracking)",
+            "DELETE FROM doc_summaries  WHERE file_id NOT IN (SELECT id FROM file_tracking)",
+        ] {
+            if let Err(e) = conn.execute(sql, []) {
+                log::warn!("[INDEX] sweep: {e}");
+            }
+        }
+        if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
+            log::warn!("[INDEX] sweep: cleanup_orphan_content: {e}");
+        }
+        if let Err(e) = crate::db::cleanup_orphan_chunk_embeddings(&conn) {
+            log::warn!("[INDEX] sweep: cleanup_orphan_chunk_embeddings: {e}");
+        }
+
+        drop(conn);
+        self.commit().context("failed to commit after orphan sweep")?;
+        log::info!("[INDEX] sweep: 清理了 {} 个已移除目录的残留数据", ids.len());
+        Ok(ids.len() as u64)
+    }
+
     /// Remove a Tantivy document without touching file_tracking (used when a
     /// moved file's freshly-walked record is superseded by the old one).
     pub fn delete_document_only(&self, file_id: &str) -> Result<()> {
@@ -1241,6 +1309,49 @@ mod tests {
         assert_eq!(top.len(), 0, "purge 后该目录文档不应再被搜到（否则是幽灵命中）");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 删除目录时扫描可能还在写（取消是合作式的），取消生效前写进来的行会留下
+    /// "孤儿 dir_id"（dir_config 里已不存在）。sweep_orphan_dirs 必须把它们连同
+    /// 行/文档/向量一起清掉，且**不动**仍在配置里的目录。
+    #[test]
+    fn sweep_orphan_dirs_removes_leftovers_but_keeps_configured_dirs() {
+        let (svc, fid) = setup(); // 'd1' + fid
+        {
+            let conn = svc.db.get().unwrap();
+            // 模拟"扫描仍在跑、目录已被移除"
+            conn.execute(
+                "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at) \
+                 VALUES ('ghost','ghost.txt','gone-dir',0,0,'ghostmd5','active',1,0,0)",
+                [],
+            )
+            .unwrap();
+            crate::db::tracker::upsert_embedding(&conn, "ghost", &[1.0]).unwrap();
+            crate::db::tracker::upsert_chunk_embedding(&conn, "ghostmd5", 0, &[1.0]).unwrap();
+            crate::db::tracker::store_content(&conn, "ghostmd5", "ghost body", false, None).unwrap();
+            conn.execute(
+                "INSERT INTO doc_chunks (md5,chunk_index,start_char,end_char,text) VALUES ('ghostmd5',0,0,10,'ghost')",
+                [],
+            )
+            .unwrap();
+            // 仍在配置里的目录（d1）的数据必须留下
+            crate::db::tracker::update_indexed(&conn, &fid, Some("keepmd5")).unwrap();
+            crate::db::tracker::store_content(&conn, "keepmd5", "keep body", false, None).unwrap();
+        }
+
+        let swept = svc.sweep_orphan_dirs().unwrap();
+        assert_eq!(swept, 1, "应清扫 1 个孤儿 dir_id");
+
+        let conn = svc.db.get().unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='gone-dir'"), 0, "孤儿行应删除");
+        assert_eq!(count("SELECT COUNT(*) FROM doc_embeddings WHERE file_id='ghost'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM doc_chunks WHERE md5='ghostmd5'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='ghostmd5'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM content_index WHERE md5='ghostmd5'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM file_tracking"), 1, "只剩仍在配置里的目录");
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM file_tracking WHERE id='{fid}'")), 1);
+        assert_eq!(count("SELECT COUNT(*) FROM content_index WHERE md5='keepmd5'"), 1);
     }
 
     #[test]

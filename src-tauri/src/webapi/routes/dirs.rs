@@ -73,11 +73,17 @@ async fn remove_dir_handler(
     State(state): State<ApiState>,
     Json(body): Json<RemoveDirBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_handle = state.app_handle.clone();
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::dirs::remove_dir(app_state, body.id, Some(body.purge))
+    let report = crate::commands::dirs::remove_dir(app_state, app_handle, body.id, Some(body.purge))
         .await
         .map_err(|e| ApiError { error: e })?;
-    Ok(Json(serde_json::json!({ "status": "removed" })))
+    Ok(Json(serde_json::json!({
+        "status": "removed",
+        "message": report.message,
+        "swept_orphan_dirs": report.swept_orphan_dirs,
+        "resumed_scan": report.resumed_scan,
+    })))
 }
 
 #[derive(Deserialize)]

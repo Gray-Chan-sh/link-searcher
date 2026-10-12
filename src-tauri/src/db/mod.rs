@@ -449,6 +449,22 @@ pub fn vacuum(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Fold the WAL back into the main database file and truncate it.
+///
+/// Used after a directory purge **instead of** [`vacuum`]: VACUUM rewrites the
+/// whole (multi-GB) database and held the write lock for ~40 s in the field,
+/// which made the app look frozen. A WAL checkpoint reclaims the space that was
+/// just freed much more cheaply.
+///
+/// Returns SQLite's `(busy, wal_pages, checkpointed_pages)`; `busy == 1` means
+/// another connection blocked the truncation — harmless, it checkpoints later.
+pub fn wal_checkpoint_truncate(conn: &Connection) -> Result<(i64, i64, i64)> {
+    conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
+    .context("wal_checkpoint(TRUNCATE) failed")
+}
+
 /// Rename the dead `auto_backup_enabled`/`auto_backup_interval_days` setting
 /// keys to the names the UI and settings whitelist read. Copies the legacy
 /// value only when the new key is absent, then drops the dead key.

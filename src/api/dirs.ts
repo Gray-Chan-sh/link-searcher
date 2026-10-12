@@ -18,8 +18,11 @@ export async function addDir(path: string, alias?: string, recursive?: boolean):
   return client.invoke<DirConfig>('add_dir', { path, alias, recursive })
 }
 
-export async function removeDir(id: string, purge = false): Promise<void> {
-  return client.invoke('remove_dir', { id, purge })
+/** Remove a monitored directory. Returns a human-readable summary (the dialog
+ *  stays open until the backend has stopped scanning, purged the data, swept
+ *  leftovers and resumed indexing the remaining directories). */
+export async function removeDir(id: string, purge = false): Promise<string> {
+  return client.invoke<string>('remove_dir', { id, purge })
 }
 
 function normNode(n: DirTreeNode): DirTreeNode {

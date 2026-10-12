@@ -1,10 +1,12 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useDirs } from '../hooks/useDirs'
 import { addDir, type DirConfig } from '../api/dirs'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
+
+type RemovePhase = 'confirm' | 'running' | 'done' | 'error'
 
 export default function DirManager() {
   const { t } = useI18n()
@@ -14,7 +16,19 @@ export default function DirManager() {
   // no room for the "also wipe all data" checkbox, so removal uses this modal.
   const [pendingRemove, setPendingRemove] = useState<DirConfig | null>(null)
   const [purgeData, setPurgeData] = useState(false)
-  const [removing, setRemoving] = useState(false)
+  const [phase, setPhase] = useState<RemovePhase>('confirm')
+  const [result, setResult] = useState('')
+  const [errText, setErrText] = useState('')
+  const [elapsed, setElapsed] = useState(0)
+
+  // The removal can legitimately take minutes (it waits for an in-flight scan to
+  // stop, then re-indexes the remaining directories), so show a live counter
+  // instead of a frozen dialog.
+  useEffect(() => {
+    if (phase !== 'running') return
+    const id = setInterval(() => setElapsed(s => s + 1), 1000)
+    return () => clearInterval(id)
+  }, [phase])
 
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault()
@@ -32,18 +46,35 @@ export default function DirManager() {
   const openRemove = (dir: DirConfig) => {
     setPendingRemove(dir)
     setPurgeData(false)
+    setPhase('confirm')
+    setResult('')
+    setErrText('')
+    setElapsed(0)
+  }
+
+  const closeRemove = () => {
+    // Never closable while the backend is working.
+    if (phase === 'running') return
+    setPendingRemove(null)
   }
 
   const handleRemove = async () => {
     if (!pendingRemove) return
-    setRemoving(true)
+    setPhase('running')
+    setElapsed(0)
+    setErrText('')
+    setResult('')
     try {
-      await removeDirectory(pendingRemove.id, purgeData)
-      setPendingRemove(null)
-    } finally {
-      setRemoving(false)
+      const message = await removeDirectory(pendingRemove.id, purgeData)
+      setResult(message)
+      setPhase('done')
+    } catch (e) {
+      setErrText(e instanceof Error ? e.message : String(e))
+      setPhase('error')
     }
   }
+
+  const mmss = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`
 
   return (
     <div className="h-full p-6" onDrop={handleDrop} onDragOver={handleDragOver}>
@@ -128,52 +159,91 @@ export default function DirManager() {
       {pendingRemove && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-          onClick={() => { if (!removing) setPendingRemove(null) }}
+          onClick={closeRemove}
         >
           <div
-            className="w-[440px] max-w-full rounded-xl bg-white dark:bg-gray-800 p-5 shadow-xl"
+            className="w-[460px] max-w-full rounded-xl bg-white dark:bg-gray-800 p-5 shadow-xl"
             onClick={e => e.stopPropagation()}
           >
             <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">
               {t('remove_dir_title')}
             </h3>
-            <p className="mt-2 text-sm text-gray-600 dark:text-gray-300">
-              {t('confirm_remove_dir')}
-            </p>
             <p className="mt-1 text-xs font-mono text-gray-500 dark:text-gray-400 break-all">
               {pendingRemove.path}
             </p>
 
-            <label className="mt-4 flex items-start gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={purgeData}
-                onChange={e => setPurgeData(e.target.checked)}
-                className="mt-0.5 size-4 shrink-0 accent-red-600"
-              />
-              <span className="text-sm text-gray-700 dark:text-gray-300">
-                {t('remove_dir_purge')}
-                <span className="block text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-                  {t('remove_dir_purge_hint')}
-                </span>
-              </span>
-            </label>
+            {phase === 'confirm' && (
+              <>
+                <p className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+                  {t('confirm_remove_dir')}
+                </p>
+                <label className="mt-4 flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={purgeData}
+                    onChange={e => setPurgeData(e.target.checked)}
+                    className="mt-0.5 size-4 shrink-0 accent-red-600"
+                  />
+                  <span className="text-sm text-gray-700 dark:text-gray-300">
+                    {t('remove_dir_purge')}
+                    <span className="block text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      {t('remove_dir_purge_hint')}
+                    </span>
+                  </span>
+                </label>
+              </>
+            )}
+
+            {phase === 'running' && (
+              <div className="mt-4 flex items-start gap-3">
+                <span className="mt-0.5 size-4 shrink-0 animate-spin rounded-full border-2 border-gray-300 border-t-red-600" />
+                <div className="text-sm text-gray-700 dark:text-gray-300">
+                  <div>{t('remove_dir_running')}<span className="ml-2 font-mono text-xs text-gray-500">{mmss}</span></div>
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {t('remove_dir_running_hint')}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {phase === 'done' && (
+              <div className="mt-4 rounded-lg bg-green-50 dark:bg-green-900/20 px-3 py-2 text-sm text-green-700 dark:text-green-300">
+                {result || t('remove_dir_done')}
+              </div>
+            )}
+
+            {phase === 'error' && (
+              <div className="mt-4 rounded-lg bg-red-50 dark:bg-red-900/20 px-3 py-2 text-sm text-red-700 dark:text-red-300">
+                <div className="font-medium">{t('remove_dir_failed')}</div>
+                <div className="mt-1 break-all">{errText}</div>
+              </div>
+            )}
 
             <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setPendingRemove(null)}
-                disabled={removing}
-                className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50 transition-colors"
-              >
-                {t('cancel')}
-              </button>
-              <button
-                onClick={handleRemove}
-                disabled={removing}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-50 rounded-lg transition-colors"
-              >
-                {t('remove_directory')}
-              </button>
+              {phase === 'confirm' && (
+                <>
+                  <button
+                    onClick={closeRemove}
+                    className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition-colors"
+                  >
+                    {t('cancel')}
+                  </button>
+                  <button
+                    onClick={handleRemove}
+                    className="px-4 py-2 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                  >
+                    {t('remove_directory')}
+                  </button>
+                </>
+              )}
+              {(phase === 'done' || phase === 'error') && (
+                <button
+                  onClick={closeRemove}
+                  className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+                >
+                  {t('close')}
+                </button>
+              )}
             </div>
           </div>
         </div>

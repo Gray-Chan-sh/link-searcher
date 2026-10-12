@@ -246,9 +246,14 @@ p50 = **801 min（13.4 h）**，p75 = 3,570 min，max = 66.9 h。
 要点：
 
 1. `purge_dir_data(dir_id, deep)`（`indexer.rs`）一次做完：Tantivy `delete_by_dir` → 按 file_id 清 `doc_embeddings`/`doc_summaries`/`index_errors` → 删 `file_tracking` →（`deep`）删 `unsupported_ext_stats` → `cleanup_orphan_content` + `cleanup_orphan_chunk_embeddings` → `commit()`。
-2. **孤儿感知**：`content_index`/`doc_chunks`/`chunk_embeddings` 按 md5 键、内容在**目录间共享**，所以只在"没有任何 file_tracking 再引用该 md5"时才删。`IndexerService::delete_file` 里过去**按 md5 无条件删块向量**的缺陷已修（改为先查 `count_other_active_files_with_md5`）。
-3. 资料库页的删除对话框新增**「同时清除该目录的所有数据」**复选框（默认不勾）：勾选后额外清扩展名统计并后台 `VACUUM`，重加该目录即全新处理；不勾则保持原行为。UI 从原生 `confirm()`（放不下复选框）改为内联弹窗（`pages/DirManager.tsx`）。
-4. HTTP API 同步：`DELETE /api/dirs` body 增加 `purge`（`webapi/routes/dirs.rs`）。
+2. **删除流程还会先停扫描、再收尾、再续扫**（2026-10-12）：
+   - `remove_dir` 先 `cancel_scan` 并**等待扫描真正退出**（取消是合作式的，慢文件可能几分钟），否则扫描会继续往被删目录写数据；
+   - 之后 `sweep_orphan_dirs()` 清掉 `dir_config` 中已不存在的 `dir_id` 的一切残留（这是"取消晚生效"窗口的兜底）；
+   - 最后用 `ScanWorker` **自动续扫剩余目录**，用户不需要手动再点扫描；
+   - `purge=true` 时只做 `PRAGMA wal_checkpoint(TRUNCATE)`，不再用 VACUUM（VACUUM 会重写整库并独占写锁 ~40s）。
+3. **孤儿感知**：`content_index`/`doc_chunks`/`chunk_embeddings` 按 md5 键、内容在**目录间共享**，所以只在"没有任何 file_tracking 再引用该 md5"时才删。`IndexerService::delete_file` 里过去**按 md5 无条件删块向量**的缺陷已修（改为先查 `count_other_active_files_with_md5`）。
+4. 资料库页的删除对话框新增**「同时清除该目录的所有数据」**复选框（默认不勾）：勾选后额外清扩展名统计并回收 WAL 空间，重加该目录即全新处理；不勾则保持原行为。UI 从原生 `confirm()`（放不下复选框）改为内联弹窗（`pages/DirManager.tsx`），**执行期间不可关闭**并显示进度，完成后提示结果。
+5. HTTP API 同步：`DELETE /api/dirs` body 增加 `purge`，响应返回 `message`/`swept_orphan_dirs`/`resumed_scan`（`webapi/routes/dirs.rs`）。
 
 ## 附录 C：什么是"幽灵命中"（✅ 已修复）
 

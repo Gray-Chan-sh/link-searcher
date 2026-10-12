@@ -163,17 +163,65 @@ pub async fn add_dir(
     })
 }
 
+/// Report returned to the frontend so the delete dialog can tell the user
+/// exactly what happened (and stay open until then).
+#[derive(Serialize)]
+pub struct RemoveDirReport {
+    /// Human-readable summary, shown to the user.
+    pub message: String,
+    /// An in-flight scan was cancelled and waited for before purging.
+    pub stopped_scan: bool,
+    /// Orphan `dir_id`s left behind by that scan and swept afterwards.
+    pub swept_orphan_dirs: u64,
+    /// A scan was restarted to finish the remaining directories.
+    pub resumed_scan: bool,
+}
+
+/// Ask any running scan to stop and wait until it really has.
+///
+/// Cancellation is cooperative (checked once per file / per batch), so a
+/// pathological PDF can delay it by minutes. `remove_dir` **must** wait: purging
+/// data while the scan is still writing recreates the very rows we are deleting
+/// (orphan `content_index`, ghost Tantivy documents).
+///
+/// Returns `true` when a scan was actually stopped.
+async fn wait_for_scan_to_stop(
+    is_scanning: &std::sync::atomic::AtomicBool,
+    cancel_scan: &std::sync::atomic::AtomicBool,
+) -> bool {
+    if !is_scanning.load(Ordering::SeqCst) {
+        return false;
+    }
+    log::info!("[DIRS] 有扫描在进行：先取消并等待其退出…");
+    cancel_scan.store(true, Ordering::SeqCst);
+
+    let started = std::time::Instant::now();
+    let mut warned = false;
+    while is_scanning.load(Ordering::SeqCst) {
+        if !warned && started.elapsed().as_secs() >= 60 {
+            log::warn!("[DIRS] 等待扫描退出已超过 60s（可能正在提取大文件/扫描件）…");
+            warned = true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    log::info!("[DIRS] 扫描已退出（等待 {:.1}s）", started.elapsed().as_secs_f64());
+    true
+}
+
 #[tauri::command]
 pub async fn remove_dir(
     state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
     purge: Option<bool>,
-) -> Result<(), String> {
+) -> Result<RemoveDirReport, String> {
     let purge = purge.unwrap_or(false);
 
-    // 数据清理：Tantivy 文档 + file_tracking + 逐文件向量/摘要/错误 + md5 键的
-    // 孤儿 content/chunks/chunk 向量。共享内容（其它目录也持有同一 md5）会保留。
-    // `purge=true`（用户勾选"清除所有数据"）额外清扩展名统计并随后 VACUUM。
+    // ① 停止正在进行的扫描并等它真正退出（否则它会继续往这个目录写数据）。
+    let stopped_scan = wait_for_scan_to_stop(&state.is_scanning, &state.cancel_scan).await;
+
+    // ② 数据清理：Tantivy 文档 + file_tracking + 逐文件向量/摘要/错误 + md5 键的
+    //    孤儿 content/chunks/chunk 向量。共享内容（其它目录也持有同一 md5）会保留。
     let indexer = state.indexer.clone();
     let dir_for_purge = id.clone();
     tokio::task::spawn_blocking(move || indexer.purge_dir_data(&dir_for_purge, purge))
@@ -181,30 +229,77 @@ pub async fn remove_dir(
         .map_err(|e| format!("purge task failed: {e}"))?
         .map_err(|e| format!("failed to clear directory data: {e}"))?;
 
-    {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        db::dir_config::remove_dir(&conn, &id).map_err(|e| format!("failed to remove directory: {e}"))?;
-    }
+    // ③ 收尾 sweep：取消是合作式的，扫描可能在被叫停前又写进了一点数据，且会留下
+    //    dir_id 已不在 dir_config 的孤儿行。这里统一清掉，确保没有幽灵命中。
+    let indexer_sweep = state.indexer.clone();
+    let swept_orphan_dirs = tokio::task::spawn_blocking(move || indexer_sweep.sweep_orphan_dirs())
+        .await
+        .map_err(|e| format!("sweep task failed: {e}"))?
+        .map_err(|e| format!("failed to sweep orphan data: {e}"))?;
 
+    // ④ 移除监控配置，并把刚释放的空间从 WAL 里收回（不用 VACUUM：它会重写整个库
+    //    并长时间独占写锁，实测让应用冻结约 40s）。
+    let remaining_dirs = {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        db::dir_config::remove_dir(&conn, &id)
+            .map_err(|e| format!("failed to remove directory: {e}"))?;
+        if purge {
+            match crate::db::wal_checkpoint_truncate(&conn) {
+                Ok((busy, log_pages, done)) => {
+                    log::info!("[DIRS] WAL checkpoint: busy={busy} log={log_pages} done={done}");
+                }
+                Err(e) => log::warn!("[DIRS] WAL checkpoint failed: {e}"),
+            }
+        }
+        db::dir_config::list_dirs(&conn).map(|d| d.len()).unwrap_or(0)
+    };
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StopWatch {
         dir_id: id.clone(),
     });
 
-    if purge {
-        // 彻底清除后回收空间。1GB 级库的 VACUUM 会短暂阻塞，放后台做，失败仅告警。
-        let pool = state.db.clone();
-        std::thread::spawn(move || match pool.get() {
-            Ok(conn) => {
-                if let Err(e) = crate::db::vacuum(&conn) {
-                    log::warn!("[DIRS] VACUUM after purge failed: {e}");
-                }
-            }
-            Err(e) => log::warn!("[DIRS] VACUUM after purge: db error: {e}"),
-        });
+    // ⑤ 续跑：被中止的扫描对**其它目录**继续做完，用户不需要再手动点扫描。
+    //    走的就是 trigger_scan 用的同一段代码（ScanWorker）；因为 needs_reindex 会
+    //    跳过未变更的文件，代价只有一次遍历。
+    let mut resumed_scan = false;
+    if stopped_scan
+        && remaining_dirs > 0
+        && state
+            .is_scanning
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    {
+        let worker = crate::commands::index::ScanWorker {
+            app,
+            db: state.db.clone(),
+            scanner: state.scanner.clone(),
+            indexer: state.indexer.clone(),
+            is_scanning: state.is_scanning.clone(),
+            cancel_scan: state.cancel_scan.clone(),
+            scan_delta: state.scan_delta.clone(),
+            logs_dir: state.data_dir.join("logs"),
+        };
+        resumed_scan = true;
+        tokio::task::spawn_blocking(move || worker.run(None))
+            .await
+            .map_err(|e| format!("resume scan task failed: {e}"))?;
     }
 
-    log::info!("[DIRS] 移除目录 {id}（purge={purge}）");
-    Ok(())
+    log::info!(
+        "[DIRS] 移除目录 {id}（purge={purge}, 停止扫描={stopped_scan}, sweep={swept_orphan_dirs}, 续扫={resumed_scan}）"
+    );
+    let mut message = format!("已移除目录并清理数据（清理残留目录 {swept_orphan_dirs} 个）");
+    if stopped_scan {
+        message.push_str("；已停止正在进行的扫描");
+    }
+    if resumed_scan {
+        message.push_str("；已继续索引其它目录");
+    }
+    Ok(RemoveDirReport {
+        message,
+        stopped_scan,
+        swept_orphan_dirs,
+        resumed_scan,
+    })
 }
 
 #[tauri::command]

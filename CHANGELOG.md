@@ -1,5 +1,20 @@
 # Link-Searcher 变更日志
 
+## 2026-10-12：删除目录时停止扫描、清残留、自动续扫（前台等待 + 完成提示）
+
+- **问题**：`remove_dir` **不取消正在运行的扫描** → 删除后扫描继续往该目录写数据，产生孤儿 `content_index`/`doc_chunks` 与幽灵 Tantivy 文档（实测删除后数分钟就出现 28 行孤儿、11 行 doc_chunks 孤儿）。另外删除是同步等待、弹窗无任何进度，加上即时 `VACUUM` 独占写锁 ~39 s，看起来像"卡死"。
+- **修复**（`commands/dirs.rs::remove_dir`）改为按序完成、**全程前台等待**：
+  1. **停止扫描并等待其真正退出**（新增 `wait_for_scan_to_stop`：`cancel_scan = true` + 轮询 `is_scanning`；取消是合作式的，慢文件/扫描件可能延迟几分钟，>60 s 记 WARN）；
+  2. `purge_dir_data`（Tantivy `delete_by_dir` + 各表 + md5 键的孤儿内容/向量）；
+  3. **新增 `IndexerService::sweep_orphan_dirs()`**：清掉 `dir_config` 中已不存在的 `dir_id` 的一切残留（行 + Tantivy 文档 + 孤儿 `content_index`/`doc_chunks`/`chunk_embeddings`）——覆盖"取消生效前又写进来的数据"；
+  4. 删除 `dir_config`；`purge=true` 时只做 **`PRAGMA wal_checkpoint(TRUNCATE)`**（替代 VACUUM：回收空间且不再冻结应用）；
+  5. **自动续扫**：若确实中止过扫描且还有其它目录 → 用同一段扫描代码继续扫描剩余目录（`needs_reindex` 会跳过未变更文件，代价只有一次遍历），用户不需要再手点扫描。
+- **重构**：从 `trigger_scan` 抽出 `ScanWorker`，命令与"续扫"共用同一段扫描逻辑（进度事件、会话日志、扫描后维护），避免两份实现漂移。
+- **前端**（`src/pages/DirManager.tsx`）：删除弹窗在**执行期间不可关闭**（禁用遮罩点击、隐藏取消按钮），显示 spinner + **实时计时** + 阶段说明；**全部完成后**展示后端返回的结果（含"已停止扫描 / 已继续索引其它目录"）并给出「关闭」；失败则显示错误原因。
+- **接口**：`remove_dir` 返回 `RemoveDirReport { message, stopped_scan, swept_orphan_dirs, resumed_scan }`；HTTP `DELETE /api/dirs` 同步返回这些字段。
+- **测试**：新增 `sweep_orphan_dirs_removes_leftovers_but_keeps_configured_dirs`；`cargo test --lib` **512 项全过**、`vitest` 70 项全过、`tsc -b` 通过、`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`indexer.rs`、`db/mod.rs`、`commands/dirs.rs`、`commands/index.rs`、`webapi/routes/dirs.rs`、`src/api/client.ts`、`src/api/dirs.ts`、`src/hooks/useDirs.ts`、`src/pages/DirManager.tsx`、`src/i18n/{zh,en,ja,ko}.ts`、`docs/02-add-library.md`。
+
 ## 2026-10-12：chunk 回填让位 doc 回填（修 doc 向量饥饿）
 
 - **问题**：`run_backfill_chunk_embeddings` 是 drain-to-empty 循环。① 只把锁改成"每轮 pass 释放"，但 chunk keeper 释放后**立刻重新获取**（每轮持锁 ~213s），实测 **18.7 分钟**内 doc 回填一次都没抢到锁 → 新索引文件的 doc 向量从设计的"分钟级"退化为"十几分钟～几十分钟"（观测：`缺 doc 向量` 250→744，`doc 向量 +0`）。

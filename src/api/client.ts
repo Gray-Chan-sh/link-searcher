@@ -116,7 +116,12 @@ const MAPPINGS: Record<string, Mapping> = {
     transform: (data) => (data as Record<string, unknown>)?.dirs ?? data ?? [],
   },
   add_dir: (a) => ({ method: 'POST', path: '/api/dirs', body: a }),
-  remove_dir: (a) => ({ method: 'DELETE', path: '/api/dirs', body: { id: a.id, purge: a.purge ?? false } }),
+  remove_dir: (a) => ({
+    method: 'DELETE', path: '/api/dirs',
+    body: { id: a.id, purge: a.purge ?? false },
+    // Both transports return the same report shape; the dialog only shows `message`.
+    transform: (d) => (d as { message?: string } | null)?.message ?? '',
+  }),
   update_dir: (a) => ({ method: 'PUT', path: '/api/dirs', body: a }),
   get_dir_tree: { method: 'GET', path: '/api/dirs/tree' },
   get_dir_children: { method: 'GET', path: '/api/dirs/children' },
