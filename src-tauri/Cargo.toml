@@ -138,8 +138,10 @@ opt-level = 3
 # 业务代码（workspace 本 crate）仍保留完整调试信息。
 debug = false
 
-# release 用 thin LTO：跨 codegen-unit 内联，产物更小、运行时略快。
-# 选 thin 而不是 fat：收益接近但构建时间短得多（本项目 exe 主要体积来自
-# 静态链接的推理栈：onnxruntime/sherpa-onnx + tract，无法靠 LTO 消掉）。
+# release 不开 LTO：实测 `lto = "thin"` 对体积**没有帮助**（.text 62.2 → 62.9 MB，
+# 85.3 MB 的 exe 相比 107.5 MB 的缩减全部来自去掉内嵌字体），却让首次打包多花约
+# 6 分钟（改 lto 会迫使全部依赖重编一次）、之后每次多 1~2 分钟。本项目 exe 的体积
+# 来自静态链接的推理栈（onnxruntime/sherpa-onnx + tract + tantivy），LTO 消不掉，
+# 热点也在这些依赖内部。将来若真要压榨运行时性能再考虑打开。
 [profile.release]
-lto = "thin"
+# lto = "thin"   # 2026-10-13 实测无体积收益，已移除

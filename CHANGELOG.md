@@ -1,5 +1,13 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：回退 P3.2 —— 实测 `lto = "thin"` 无体积收益，移除
+
+- 上一条为瘦身加了 `[profile.release] lto = "thin"`。**实测结论：exe 一点没变小** —— `.text` 62.2 → 62.9 MB（反而略增），107.5 MB → 85.3 MB 的缩减**全部来自去掉内嵌字体**；代价是首次 release 打包 **+6 分钟**（改 `lto` 会迫使全部依赖重编一次），之后每次 +1~2 分钟。
+- 原因：本项目 exe 的体积来自静态链接的推理栈（onnxruntime/sherpa-onnx + tract + tantivy），LTO 消不掉；热点同样在这些依赖内部，跨 crate 内联收益有限。
+- **已移除该节**，并在 `Cargo.toml` 留注释写明"2026-10-13 实测无收益"，避免以后有人再试一遍。
+- 顺带：本次按"**先提交、后打包**"的顺序重新出包，使二进制里的版本号不再带 `-dirty`（`build.rs` 的 `git_dirty()` 在干净工作树下为 false）。
+- **涉及文件**：`src-tauri/Cargo.toml`。
+
 ## 2026-10-13：构建与产物第二轮瘦身（P2+P3）——回收 63 GB、exe -21%、MSI -40%
 
 - **P2.1 清理构建垃圾**：删除 `target/debug/incremental`（**53 GB**，181 个会话目录）以及 3 个"已不再生成"的旧产物（静态库 **2,420 MB** / dll 24 MB / 其 pdb 141 MB，debug 与 release 各一份）。`target/debug` **101.2 GB → 38.2 GB**，D 盘可用 +33.7 GB。
