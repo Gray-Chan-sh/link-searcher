@@ -32,6 +32,11 @@ export interface IndexStatus {
   running_tasks: string[]
   briefs: TaskBrief[]
   task_progress: TaskProgress[]
+  // 自适应并发（内存压力降级）：当前档位与生效值
+  load_level: 'normal' | 'soft' | 'hard' | 'paused'
+  load_page_window: number
+  load_ocr_permits: number
+  load_doc_permits: number
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {

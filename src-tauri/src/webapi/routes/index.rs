@@ -129,6 +129,7 @@ async fn index_status_handler(
 
     let is_scanning = app_state.is_scanning.load(Ordering::Relaxed);
     let is_rebuilding = app_state.is_rebuilding.load(Ordering::Relaxed);
+    let load = crate::load::current_limits();
 
     Ok(Json(serde_json::json!({
         "total": total,
@@ -137,6 +138,10 @@ async fn index_status_handler(
         "failed": failed,
         "is_scanning": is_scanning,
         "is_rebuilding": is_rebuilding,
+        "load_level": crate::load::level().as_str(),
+        "load_page_window": load.page_window,
+        "load_ocr_permits": load.ocr_permits,
+        "load_doc_permits": load.doc_permits,
         "recent_errors": errors,
     })))
 }

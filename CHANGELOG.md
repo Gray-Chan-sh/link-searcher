@@ -1,5 +1,27 @@
 # Link-Searcher 变更日志
 
+## 2026-10-14：自适应并发闸门 —— 内存压力下优雅降级 / 升级
+
+- **背景（实测）**：3 篇大扫描件并行重提取时本进程 WS **7.1 GB（峰值 8.9 GB）**；31.4 GB 机器上只剩 ~12 GB 可用、提交量 28.6/44.5 GB。而 Windows 下的失败方式都不可接受：
+  ① 物理内存耗尽 → 换页 → **不报错**但每页 OCR 从秒级变成分钟级、整机像卡死；
+  ② 提交上限耗尽 → `VirtualAlloc` 失败 → Rust 走 `handle_alloc_error` → **abort()**（不是 panic，`extractor/pdf.rs` 里的 `catch_unwind` **兜不住**）→ 索引中途硬崩；
+  ③ 更早的中间态：ONNX 建 session 失败 → 该页静默无文字，而文档**照样被标 `indexed=1`**（最阴的一种）。
+- **修复**：新增 `src-tauri/src/load.rs`。独立采样线程（默认 5s）读**本进程 WS** 与**系统已用内存**（新增依赖 `sysinfo`，仅启用 `system` 特性），按设置阈值分四档并驱动三把闸门：
+  | 档位 | 页窗口 | OCR 许可 | 在飞文档 |
+  |---|---|---|---|
+  | Normal（正常） | 4 | 8 | 不限（= 原行为） |
+  | Soft（软降级） | 2 | 4 | 6 |
+  | Hard（硬降级） | 1 | 2 | 4 |
+  | Paused（暂停派发） | 0（不派发新页） | 0（新推理等待） | 0（新文档等待） |
+  **降快升慢**：恶化立即降档（可一步到暂停）；恢复需连续 `load_upgrade_samples`（默认 12 次 ≈ 1 分钟）平静才升**一档**，防抖动。每次变化打一条可归因日志：
+  `[LOAD] 档位 正常 → 软降级（本进程 6.3GB，系统已用 87%，阈值 …）：页窗口 4→2，OCR 许可 8→4，并发文档 不限→6`
+- **绝不静默丢正文**：页派发被暂停打断时递增 `pause_epoch`，`extract_and_index_single` 结束前比对世代号——变了就**判失败、稍后重试**，绝不把"只 OCR 了一半"的内容当成功写进索引（对应上面第 ③ 种失败）。
+- **执行器**（只降并发，**不动图像分辨率**，不牺牲识别质量）：`run_pages_windowed` 派发前读 `load::page_window()`（原 `PAGE_OCR_WINDOW` 常量降为默认值/上限）；`paddleocr::with_engine` 每次推理前取 OCR 许可；`indexer` 两条入口（批处理 `par_iter`、`index_file`）**在取 DB 连接之前**取文档许可——放在连接之后会把连接池占满，正是此前 55 次 `DB conn: timed out waiting for connection` 的成因。
+- **设置与可观测**：15 个键进 `app_settings`（阈值 / 采样间隔 / 恢复样本数 / 各档并发数），**改完即时生效**（采样线程每轮重读设置）；设置页新增「自适应并发（内存压力）」分组（开关 + 进程软/硬/暂停 MB + 系统软/硬/暂停 %）；索引状态页与 Web API `/api/index/status` 增加 `load_level`/`load_page_window`/`load_ocr_permits`/`load_doc_permits`；支持 `LINK_SEARCHER_LOAD_FORCE=normal|soft|hard|paused` 手工压档（验证/运维用）。
+- **测试**：`load.rs` 新增 10 个单测（分级取最差信号、阈值倒置与离谱值的夹紧、降快升慢与计数清零、许可闸门暂停时阻塞/恢复后放行、文档许可上限与释放）；闸门测试用**局部 Gate 实例**，避免并行测试互相干扰（实测会被别的用例的 `apply_level` 放行）。`cargo test --lib` **537 passed**（1 例 `ai::tests::gateways_unconfigured_report_not_ok` 在全量并行下偶发失败、单独重跑通过，与本改动无关）；`npx tsc -b` 0 错误；`semgrep --severity ERROR` **0 findings**。
+- ⚠️ **需重启应用生效**。
+- **涉及文件**：`src-tauri/src/load.rs`（新）、`indexer.rs`、`lib.rs`、`db/mod.rs`、`commands/settings.rs`、`commands/index.rs`、`extractor/pdf.rs`、`extractor/pdf/ocr.rs`、`extractor/paddleocr.rs`、`webapi/routes/index.rs`、`Cargo.toml`；前端 `pages/Settings.tsx`、`pages/IndexStatus.tsx`、`components/settings/IndexTab.tsx`、`api/index.ts`、`api/client.ts`、`i18n/{zh,en,ja,ko}.ts`。
+
 ## 2026-10-14：OCR 每文档「计时汇总」日志（让每一轮都能自带归因）
 
 - **背景**：这轮跑到早上（22:33→04:46，6.2h，只完成 4,796 个文件 = **0.21 文件/s**，历史基线 1.10）事后要靠外部脚本拼凑"时间去哪了"——日志只记了 `attempted N/M pages, got text K, stalled`，**没有用时、没有有效页速、也不知道并发窗口有没有真的被用满**。

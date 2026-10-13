@@ -1,7 +1,7 @@
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import type { OcrEngineStatus, OcrTestResult } from '../../api/settings'
-import { Section, SelectField, NumberField, filterGuide } from './SettingsFields'
+import { Section, SelectField, NumberField, ToggleField, filterGuide } from './SettingsFields'
 
 const OCR_LANGS = [
   { value: 'eng', label: 'English' },
@@ -25,15 +25,20 @@ interface IndexTabProps {
   ocrLang: string
   ocrPdfDpi: string
   ocrStallTimeout: string
+  /** 自适应并发（内存压力降级/升级）的全部设置项。 */
+  loadSettings: Record<string, string>
   onTestOcr: () => void
   onChangeOcrEngine: (engineType: string) => void
   onChangeOcrLang: (lang: string) => void
   onChangeOcrPdfDpi: (dpi: string) => void
   onChangeOcrStallTimeout: (seconds: string) => void
+  onChangeLoadSetting: (key: string, value: string) => void
 }
 
-export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, ocrPdfDpi, ocrStallTimeout, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onChangeOcrPdfDpi, onChangeOcrStallTimeout }: IndexTabProps) {
+export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, ocrLang, ocrPdfDpi, ocrStallTimeout, loadSettings, onTestOcr, onChangeOcrEngine, onChangeOcrLang, onChangeOcrPdfDpi, onChangeOcrStallTimeout, onChangeLoadSetting }: IndexTabProps) {
   const { t } = useI18n()
+  const loadNum = (key: string, dflt: number) => Number.parseInt(loadSettings[key] ?? String(dflt), 10) || dflt
+  const setLoad = (key: string) => (v: number) => onChangeLoadSetting(key, String(v))
 
   return (
     <div className="space-y-6">
@@ -129,6 +134,67 @@ export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, oc
         <p className="text-xs text-gray-500 dark:text-gray-400">
           {t('ocr_stall_timeout_hint')}
         </p>
+      </Section>
+
+      <Section title={t('adaptive_load')}>
+        <ToggleField
+          label={t('adaptive_load')}
+          checked={loadSettings['adaptive_load_enabled'] !== '0'}
+          onChange={v => onChangeLoadSetting('adaptive_load_enabled', v ? '1' : '0')}
+        />
+        <p className="text-xs text-gray-500 dark:text-gray-400">
+          {t('adaptive_load_hint')}
+        </p>
+        <div className="mt-3 space-y-3">
+          <NumberField
+            label={t('load_process_soft_mb')}
+            value={loadNum('load_process_soft_mb', 6000)}
+            onChange={setLoad('load_process_soft_mb')}
+            min={500}
+            max={60000}
+            step={500}
+          />
+          <NumberField
+            label={t('load_process_hard_mb')}
+            value={loadNum('load_process_hard_mb', 8500)}
+            onChange={setLoad('load_process_hard_mb')}
+            min={500}
+            max={60000}
+            step={500}
+          />
+          <NumberField
+            label={t('load_process_pause_mb')}
+            value={loadNum('load_process_pause_mb', 10500)}
+            onChange={setLoad('load_process_pause_mb')}
+            min={500}
+            max={60000}
+            step={500}
+          />
+          <NumberField
+            label={t('load_system_soft_pct')}
+            value={loadNum('load_system_soft_pct', 85)}
+            onChange={setLoad('load_system_soft_pct')}
+            min={10}
+            max={99}
+            step={1}
+          />
+          <NumberField
+            label={t('load_system_hard_pct')}
+            value={loadNum('load_system_hard_pct', 90)}
+            onChange={setLoad('load_system_hard_pct')}
+            min={10}
+            max={99}
+            step={1}
+          />
+          <NumberField
+            label={t('load_system_pause_pct')}
+            value={loadNum('load_system_pause_pct', 95)}
+            onChange={setLoad('load_system_pause_pct')}
+            min={10}
+            max={99}
+            step={1}
+          />
+        </div>
       </Section>
     </div>
   )

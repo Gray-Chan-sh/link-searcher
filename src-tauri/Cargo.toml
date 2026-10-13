@@ -73,6 +73,9 @@ bzip2 = "0.6.1"
 xz2 = "0.1.7"
 hound = "3.5.1"
 pdf-inspector = "1"
+# Memory/进程用量采样（自适应并发闸门用）。只取 "system"：System 内存与进程 WS，
+# 不需要 disk/network/component/user 那几个特性。
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 sherpa-onnx = "1.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
 # POC: pure-Rust legacy .doc (Word 97-2003) extraction; docx feature unneeded

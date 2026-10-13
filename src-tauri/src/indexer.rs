@@ -131,6 +131,10 @@ impl IndexerService {
             .unwrap_or("")
             .to_string();
 
+        // 记录"页派发被内存压力打断"的世代号：提取结束时若变了，说明这份内容只拿到
+        // 一部分页（见下方 truncated_since 的判定）。
+        let epoch0 = crate::load::pause_epoch();
+
         const MAX_FILE_SIZE: u64 = 1024 * 1024 * 100;
         const CHUNK_SIZE: u64 = 1024 * 1024;
 
@@ -290,6 +294,17 @@ impl IndexerService {
                     }
                 }
             };
+            // 内存压力把页派发打断时，这份内容只是"一部分页"：**不能**当成成功落库
+            // （那就是静默丢正文），直接判失败让扫描稍后重试。
+            if crate::load::truncated_since(epoch0) {
+                log::warn!("[LOAD] {file_name}: 内存压力暂停，本次提取只完成部分页 → 判失败稍后重试");
+                return Err((
+                    job.file_id.clone(),
+                    format!(
+                        "内存压力暂停（自适应降级）: {file_name} 仅完成部分页，稍后重试"
+                    ),
+                ));
+            }
             let char_count = extracted.0.chars().count();
             log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
             let mut qmeta = extracted.1.clone();
@@ -444,6 +459,11 @@ impl IndexerService {
                         if self.cancel_scan.load(Ordering::Acquire) {
                             return Err((job.file_id.clone(), "scan cancelled".to_string()));
                         }
+                        // 自适应并发闸门：限制同时展开的文档数（每篇 PDF 在内存里持有
+                        // 对象图 + 页位图）。必须放在取 DB 连接**之前**——限流/暂停时若
+                        // 已持有连接去等待，会把连接池占满（实测过 55 次
+                        // "DB conn: timed out waiting for connection" 失败）。
+                        let _doc_permit = crate::load::acquire_doc();
                         let conn = match db.get() {
                             Ok(c) => c,
                             Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
@@ -632,6 +652,8 @@ impl IndexerService {
             .unwrap_or("")
             .to_string();
 
+        // 自适应并发闸门（与批处理同一把）：先拿许可，再取 DB 连接。
+        let _doc_permit = crate::load::acquire_doc();
         let conn = self.db.get().context("failed to get DB connection")?;
 
         // Compute relative path for index storage.

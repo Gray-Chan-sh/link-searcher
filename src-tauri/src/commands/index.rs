@@ -55,6 +55,11 @@ pub struct IndexStatus {
     pub briefs: Vec<crate::state::TaskBrief>,
     /// live progress of running tasks (e.g. vector backfill), for UI bars.
     pub task_progress: Vec<crate::state::TaskProgress>,
+    /// 自适应并发（内存压力）：当前档位 + 生效值，供状态页显示。
+    pub load_level: String,
+    pub load_page_window: usize,
+    pub load_ocr_permits: usize,
+    pub load_doc_permits: usize,
 }
 
 #[derive(Clone, Serialize)]
@@ -82,6 +87,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
     let ocred = db::tracker::get_ocred_count(&conn).map_err(|e| format!("ocred error: {e}"))?;
     let total_images = db::tracker::get_total_image_files(&conn).map_err(|e| format!("images error: {e}"))?;
     let last_scan = get_last_scan(&conn);
+    let load = crate::load::current_limits();
     Ok(IndexStatus {
         total_files: stats.total,
         indexed: stats.indexed,
@@ -90,6 +96,10 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         ocred,
         total_images,
         last_scan,
+        load_level: crate::load::level().as_str().to_string(),
+        load_page_window: load.page_window,
+        load_ocr_permits: load.ocr_permits,
+        load_doc_permits: load.doc_permits,
         is_scanning: state.is_scanning.load(Ordering::Acquire),
         scan_delta: Some({ let d = state.scan_delta.lock().unwrap_or_else(|e| e.into_inner()); d.clone() }),
         running_tasks: crate::state::running_task_ids(),

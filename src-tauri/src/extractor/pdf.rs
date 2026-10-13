@@ -62,6 +62,12 @@ fn try_pdftotext_extract(path: &Path) -> Option<String> {
 pub struct PdfExtractor;
 
 mod ocr;
+
+/// The configured (maximum) page-OCR window — exposed so the adaptive load gate
+/// can use it as its Normal-level value without reaching into the private module.
+pub(crate) fn default_page_window() -> usize {
+    ocr::PAGE_OCR_WINDOW
+}
 pub use ocr::{ocr_pdf_via_pdfimages, ocr_pdf_via_pdftoppm};
 use ocr::{merge_page_texts, ocr_single_pdf_page, page_needs_ocr, run_pages_windowed, run_pdf_ocr_pipeline};
 

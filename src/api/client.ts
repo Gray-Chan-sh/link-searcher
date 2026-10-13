@@ -90,6 +90,10 @@ const MAPPINGS: Record<string, Mapping> = {
       running_tasks: [],
       briefs: [],
       task_progress: [],
+      load_level: (d.load_level as 'normal' | 'soft' | 'hard' | 'paused') ?? 'normal',
+      load_page_window: (d.load_page_window as number) ?? 0,
+      load_ocr_permits: (d.load_ocr_permits as number) ?? 0,
+      load_doc_permits: (d.load_doc_permits as number) ?? 0,
     };
   }},
   check_index_health: { method: 'GET', path: '/api/index/health' },

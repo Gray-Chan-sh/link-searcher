@@ -7,6 +7,7 @@ pub mod db;
 pub mod deps;
 pub mod extractor;
 pub mod indexer;
+pub mod load;
 pub mod logs;
 pub mod process;
 pub mod scanner;
@@ -513,6 +514,12 @@ get_dir_children,
                 if !ocr_ok {
                     log::error!("[STARTUP] PaddleOCR 引擎不可用，图片 OCR 将无法工作");
                 }
+
+                // 自适应并发（内存压力优雅降级/升级）：独立线程采样本进程 WS 与系统
+                // 已用内存，压力升高时收紧页窗口 / OCR 许可 / 在飞文档数，平静后逐级
+                // 升回；到暂停档则停止派发新页（在飞页跑完），避免 Windows 侧
+                // 分配失败直接 abort 或换页拖垮整机。
+                crate::load::start_supervisor(db_pool.clone());
 
                 log::info!("[STARTUP] 开始扫描 {} 个目录", dirs.len());
                 slog.write_line(&format!("[STARTUP] 开始扫描 {} 个目录", dirs.len()));

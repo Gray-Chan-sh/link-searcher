@@ -161,6 +161,9 @@ fn with_engine<F, T>(f: F) -> Result<T, String>
 where
     F: FnOnce(&OcrEngine) -> Result<T, String>,
 {
+    // 自适应并发闸门：一次调用 = 一张页图的整轮推理，正是内存/CPU 的大头。
+    // 压力升高时这里排队（而不是失败），暂停档则等待恢复。
+    let _permit = crate::load::acquire_ocr();
     engine_pool()?.with_engine(f)
 }
 

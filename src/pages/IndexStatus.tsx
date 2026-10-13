@@ -601,6 +601,12 @@ export default function IndexStatus() {
               <dl className="space-y-2 text-sm">
                 <InfoRow label={t('last_scan')} value={formatTime(status.last_scan, t)} />
                 <InfoRow label={t('status')} value={status.is_scanning ? `${t('scanning')}...` : t('idle')} />
+                <InfoRow
+                  label={t('load_level')}
+                  value={status.load_level === 'normal'
+                    ? t('load_level_normal')
+                    : `${t(`load_level_${status.load_level}`)} · ${status.load_page_window}/${status.load_ocr_permits}${status.load_doc_permits > 0 ? `/${status.load_doc_permits}` : ''}`}
+                />
                 <InfoRow label={t('total_indexed')} value={`${status.indexed} / ${status.total_files}`} />
               </dl>
             </div>

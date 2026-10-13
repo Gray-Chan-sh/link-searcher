@@ -50,7 +50,7 @@ fn render_longest_side(path: &Path, dpi: u32) -> u32 {
 /// while the global OCR gate (8 slots on this machine, 6 physical cores) sat
 /// idle and the session averaged 12% CPU. Four keeps one document inside half
 /// the gate, so parallel documents still make progress.
-const PAGE_OCR_WINDOW: usize = 4;
+pub(super) const PAGE_OCR_WINDOW: usize = 4;
 
 /// Outcome of a windowed page-OCR pass (see [`run_pages_windowed`]).
 pub(super) struct PageOcrOutcome {
@@ -62,6 +62,8 @@ pub(super) struct PageOcrOutcome {
     pub(super) stalled: bool,
     /// The scan was cancelled mid-pass.
     pub(super) cancelled: bool,
+    /// Memory pressure hit `Paused`: dispatching stopped before every page ran.
+    pub(super) paused: bool,
     /// Highest number of pages that were in flight at the same time.
     pub(super) peak_concurrency: usize,
 }
@@ -98,7 +100,8 @@ pub(super) fn run_pages_windowed(
     let stop = AtomicBool::new(false);
     let stalled = AtomicBool::new(false);
     let cancelled = AtomicBool::new(false);
-    let window = PAGE_OCR_WINDOW.min(pages.len().max(1));
+    let paused = AtomicBool::new(false);
+    let window = crate::load::page_window().max(1).min(pages.len().max(1));
     // 进度以「自本轮开始以来的单调时刻」记录 —— 不能用每页各自的耗时（各 worker 之间
     // 不可比，相减会下溢：debug 直接 panic，实测就是它让单测偶发失败的）。
     let pass_started = Instant::now();
@@ -116,6 +119,19 @@ pub(super) fn run_pages_windowed(
                 if is_cancelled() {
                     cancelled.store(true, Ordering::Relaxed);
                     stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+                // 内存压力到暂停档：不再派发新页（在飞页照常跑完）。调用方据此把该文档
+                // 判为失败并稍后重试，绝不把「只 OCR 了一半」的内容当成成功写进索引。
+                if crate::load::is_paused() {
+                    paused.store(true, Ordering::Relaxed);
+                    stop.store(true, Ordering::Relaxed);
+                    crate::load::note_paused_in_pass();
+                    log::warn!(
+                        "[LOAD] 内存压力过高（暂停档）：停止派发剩余页（已尝试 {}/{} 页），本次提取判失败稍后重试",
+                        attempted.load(Ordering::Relaxed),
+                        pages.len()
+                    );
                     break;
                 }
                 let slot = next.fetch_add(1, Ordering::Relaxed);
@@ -178,6 +194,7 @@ pub(super) fn run_pages_windowed(
         attempted: attempted.load(Ordering::Relaxed),
         stalled: stalled.load(Ordering::Relaxed),
         cancelled: cancelled.load(Ordering::Relaxed),
+        paused: paused.load(Ordering::Relaxed),
         peak_concurrency: peak.load(Ordering::Relaxed),
     }
 }
