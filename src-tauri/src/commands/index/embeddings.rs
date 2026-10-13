@@ -550,6 +550,9 @@ pub(super) fn run_backfill_chunk_embeddings(
         // Length-sort so `BatchLongest` padding stays short.
         tasks.sort_by_key(|(_, _, t)| t.chars().count());
         let pass_len = tasks.len();
+        // 进度分母随扫描增长：已完成 + 本轮实测的剩余缺口。用启动时的快照作分母，
+        // 扫描期间新增的块会让读数出现 48/24 这种 >100%（实测）。
+        let pass_total = processed + count_missing_chunks(&conn).unwrap_or(pass_len);
         let mut pass_ok = 0usize;
         let mut pass_failed = 0usize;
         for group in tasks.chunks(super_group_size()) {
@@ -574,7 +577,7 @@ pub(super) fn run_backfill_chunk_embeddings(
                 }
             }
             processed += group.len();
-            report_progress("backfill_chunks", processed, total_missing, failed, &mut tracker);
+            report_progress("backfill_chunks", processed, pass_total, failed, &mut tracker);
         }
         // Observability + lock-yield proof: one line per pass, so the log shows
         // the drain is sharded and how long each shard held the data lock.

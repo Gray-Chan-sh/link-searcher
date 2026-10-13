@@ -1,5 +1,13 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：修复回填进度分母（出现 48/24 这类 >100% 读数）
+
+- **现象**：扫描期间日志/UI 出现 `回填进度: 33/24`、`48/24`——分子超过分母。
+- **根因**：chunk 回填的进度分母是**回填启动那一刻**的 `count_missing_chunks()` 快照；扫描不断产生新块，而 `processed` 跨轮累加，于是超过快照分母。
+- **修复**：分母改为**每轮重算**的 `processed + count_missing_chunks()`（已完成 + 当前实际缺口），读数始终 ≤100% 且随扫描推进自动增长。doc 回填是一次性快照、不受影响。
+- **测试**：`cargo test --lib` **517 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/commands/index/embeddings.rs`。
+
 ## 2026-10-13：删除后再清一次孤儿；mark_failed 加一次重试
 
 - **① 删除期间残留的孤儿块向量（实测每次约 150 行 / 8 个 md5 / 0.6 MB）**：删除目录时 **chunk keeper 仍在运行**（用的是 purge **之前**的 `doc_chunks` 快照），会把已被清掉内容的块向量重新写回；而那次 sweep 已经跑完，于是留下无人引用的 `chunk_embeddings`（无害，下一次启动才被清）。
