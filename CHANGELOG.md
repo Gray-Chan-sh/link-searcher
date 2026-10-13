@@ -1,5 +1,24 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：修复"每次构建都全量重编"——build.rs 的 rerun-if-changed 指向了不存在的路径
+
+- **根因（实测）**：`src-tauri/build.rs` 声明 `cargo:rerun-if-changed=.git/HEAD`（及 `.git/refs/heads`），但 `rerun-if-changed` 的路径以**包根 `src-tauri/`** 为基准，`.git` 实际在仓库根 `D:\link-searcher\.git`，因此该路径**不存在**。cargo 的规则是"声明了但文件不存在 = 永远脏"（cargo 原话：``Dirty link-searcher v1.2.2 (D:\link-searcher\src-tauri): the file `.git/HEAD` is missing``），于是**每次构建都重跑 build.rs** → 它输出的 `GIT_VERSION` 又让整个 lib 指纹失效 → **全量重编 + 重链接**。连"无改动"的 `cargo build` 都要 **2m15s~2m26s**，`cargo check`/`cargo test` 同样每次白付一次全量编译。
+- **修复（`build.rs`）**：新增 `watch_git_files()`，只声明**真实存在**的 git 文件（`../.git/HEAD` + 由 HEAD 解析出的当前分支 ref），不存在就一条都不声明（源码包/无 `.git` 环境不会退化成"永远脏"）；故意**不**监听 `.git/index`——`git status`/`git add` 都会刷新它，否则每次查看状态都会触发一次全量重编（代价只是 `-dirty` 后缀改为在提交/切分支时刷新）。
+- **顺带修掉两处构建浪费（`Cargo.toml`）**：
+  1. `crate-type = ["lib", "cdylib", "staticlib"]` → `["lib"]`：桌面端只用 rlib（`src/main.rs` 就是普通调用 lib），`cdylib`/`staticlib` 是 Tauri 移动端模板遗留；实测每次构建都会额外重写 **2,420 MB** 的 `link_searcher_lib.lib` + 24 MB `.dll`（连无改动构建也写）。
+  2. 新增 `[profile.dev] debug = 1`：业务代码调试信息由全量降到行号级（panic/日志仍有 file:line），`liblink_searcher_lib.rlib` **1,113 MB → 313 MB（-72%）**、`link_searcher.pdb` **281 MB → 150 MB（-46%）**。
+- **实测收益**（Ryzen 5 5600H / 12 逻辑核 / SSD）：
+
+  | 场景 | 改前 | 改后 |
+  |---|---|---|
+  | `cargo build` 无改动 | 2m15s / 2m26s | **1.0s** |
+  | `cargo check --lib` 无改动 | 55.7s | **1.0s** |
+  | 改一行源码后 `cargo build` | 68.0s | **28.5s（-58%）** |
+  | `cargo test --lib` | 每次全量重编 | 首次 73s 跑完 519 项，之后秒级 |
+
+- **验证**：`cargo test --lib` **519 passed / 0 failed / 2 ignored**；`semgrep --severity ERROR` **0 findings**；`tauri.conf.json` 未引用 dll/staticlib（`bundle.targets=["msi"]` + 图标），MSI 打包不受影响。
+- **涉及文件**：`src-tauri/build.rs`、`src-tauri/Cargo.toml`。
+
 ## 2026-10-13：拆掉「批次屏障」——走查不再等批次，慢文件不再让 13 个线程空等
 
 - **问题（实测）**：`batch_index` 阻塞走查直到整批（250 文件）提取完。一个病态扫描件（88 页 PDF，实测 **489 s**）会让其余 **13 个提取线程空等** —— 同一批次速率差 **19 倍**（0.5 文件/s 卡住 vs 9.5 文件/s 正常）；整轮扫描平均只用了 **13%** 的 12 逻辑核（≈1.6 核）。

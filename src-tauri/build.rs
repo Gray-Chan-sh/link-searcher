@@ -53,6 +53,36 @@ fn embed_test_manifest() {
     println!("cargo:rustc-link-arg-tests=/MANIFESTUAC:NO");
 }
 
+/// 声明「哪些 git 文件变了才需要重跑本脚本」。
+///
+/// ⚠️ `cargo:rerun-if-changed` 的路径以**包根（`src-tauri/`）**为基准，而 `.git`
+/// 在上一层的仓库根。原来写的 `.git/HEAD` 因此根本不存在，而 cargo 的规则是
+/// **声明了但文件不存在 = 永远脏** —— 于是这个脚本每次构建都重跑，它输出的
+/// `GIT_VERSION` 又让整个 lib 的指纹失效，连"无改动"的构建都要全量重编
+/// （实测 2m15s，本应 <1s）。
+///
+/// 只声明真实存在的路径，这样从没有 `.git` 的源码包里构建时也不会退化成"永远脏"。
+///
+/// 故意**不**监听 `.git/index`：`git status`/`git add` 都会刷新它，会把每次查看
+/// 状态都变成一次全量重编。代价是版本号里的 `-dirty` 后缀只在提交/切分支时刷新。
+fn watch_git_files() {
+    let git = std::path::Path::new("../.git");
+    let mut watched = vec![git.join("HEAD")];
+    // 提交号在 ref 文件里；HEAD 只是指向它的名字。
+    if let Ok(head) = std::fs::read_to_string(git.join("HEAD")) {
+        if let Some(reference) = head.trim().strip_prefix("ref: ") {
+            watched.push(git.join(reference));
+        }
+    }
+    for path in watched {
+        if path.exists() {
+            let normalized = path.to_string_lossy().replace('\\', "/");
+            println!("cargo:rerun-if-changed={normalized}");
+        }
+    }
+    println!("cargo:rerun-if-changed=build.rs");
+}
+
 fn main() {
     #[cfg(windows)]
     embed_test_manifest();
@@ -69,8 +99,7 @@ fn main() {
 
     println!("cargo:rustc-env=GIT_VERSION={version}");
     println!("cargo:rustc-env=GIT_COMMIT_TIME={}", time.trim());
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/refs/heads");
+    watch_git_files();
 
     // Copy poppler binaries into resources for app-bundle packaging
     let bin_dir = std::path::PathBuf::from("poppler-bin");

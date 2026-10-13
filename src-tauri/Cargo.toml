@@ -7,7 +7,12 @@ edition = "2024"
 
 [lib]
 name = "link_searcher_lib"
-crate-type = ["lib", "cdylib", "staticlib"]
+# 桌面端只需要 rlib（src/main.rs 就是普通地调用这个 lib）。
+# "cdylib"/"staticlib" 是 Tauri 移动端模板的遗留物，代价是每次构建都额外产出一个
+# 2.4 GB 的 .lib 静态库 + 一个 .dll（实测 target/debug/deps/link_searcher_lib.lib
+# = 2420 MB，连"无改动"的构建也会重写它，白吃磁盘 IO 与构建时间）。
+# 将来要出 Android/iOS 包时再把 "cdylib", "staticlib" 加回来。
+crate-type = ["lib"]
 
 # Web API HTTP 冒烟测试需要在**进程主线程**构造真实 Wry AppHandle
 # （tao 在 Windows 禁止非主线程创建事件循环），所以关掉 libtest harness。
@@ -115,6 +120,13 @@ ab_glyph = "0.2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# 业务代码（本 crate）的调试信息降到「行号级」：
+# dev 默认 debug=2（全量）会把 rlib/pdb 撑到 GB 级并显著拖慢链接（实测
+# link_searcher_lib.pdb 289 MB）。=1 仍保留 file:line 级回溯（panic 与日志够用），
+# 只是调试器里看不到局部变量值。
+[profile.dev]
+debug = 1
 
 # Debug 模式下所有第三方依赖开 O3，业务代码保持 O0 可调试
 # tract-core/tract-linalg/tokenizers 等重度计算依赖由此获得 SIMD 加速
