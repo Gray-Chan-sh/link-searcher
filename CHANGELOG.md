@@ -1,5 +1,16 @@
 # Link-Searcher 变更日志
 
+## 2026-10-14：OCR 每文档「计时汇总」日志（让每一轮都能自带归因）
+
+- **背景**：这轮跑到早上（22:33→04:46，6.2h，只完成 4,796 个文件 = **0.21 文件/s**，历史基线 1.10）事后要靠外部脚本拼凑"时间去哪了"——日志只记了 `attempted N/M pages, got text K, stalled`，**没有用时、没有有效页速、也不知道并发窗口有没有真的被用满**。
+- **改动**：`run_pages_windowed` 增加**峰值并发观测**（`PageOcrOutcome::peak_concurrency`，worker 进出时 `fetch_add/fetch_max/fetch_sub`），并在三个 OCR 站点的汇总日志里补上 `用时 + 页/分 + 峰值并发`：
+  - 站点① `run_pdf_ocr_pipeline`：`per-page OCR completed: attempted N/M pages, got text for K pages, 123.4s (8.2 pages/min), peak concurrency 4, stalled=false`
+  - 站点② `run_pdfimages_ocr`：新增 `rendered-page OCR completed: K/N pages with text, …, peak concurrency N, stalled=…`
+  - 站点③ `pdf.rs` 混合拼接：`per-page OCR complete, N chars, …, peak concurrency N`（部分失败分支也带上峰值并发）。
+- **用途**：以后任何一轮都能**直接从日志**算出每篇文档的耗时/有效页速/是否被看门狗中止/窗口利用率，不用再事后靠 CPU 采样与 DB 反推。
+- **测试**：`windowed_pages_dispatch_each_page_once_and_respect_window` 增加断言（上报峰值并发必须 >1 且 ≤ `PAGE_OCR_WINDOW`）；4 个 `windowed_pages_*` 单测通过；`semgrep --severity ERROR` **0 findings**。
+- **涉及文件**：`src-tauri/src/extractor/pdf/ocr.rs`、`src-tauri/src/extractor/pdf.rs`。
+
 ## 2026-10-13：修复页级并行里的两个缺陷（进度下溢 panic + 看门狗误判中止）
 
 - **缺陷 1（真 bug）进度计算下溢**：最初用「每页各自的耗时」相减来算"距上次进展的间隔"，但各 worker 的耗时**互相不可比** → 相减会**下溢**（debug 直接 panic、release 静默错值），表现为 worker 线程 panic（`ocr.rs`）后测试失败。改为用「**自本轮开始以来的单调时刻**」（`pass_started.elapsed()`）并配 `saturating_sub`。

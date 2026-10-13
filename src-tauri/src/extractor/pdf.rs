@@ -427,6 +427,7 @@ impl PdfExtractor {
                     .map(|(i, _)| i)
                     .collect();
                 let need_pages: Vec<u32> = need_idx.iter().map(|&i| pages[i]).collect();
+                let pass_t0 = std::time::Instant::now();
                 let outcome = run_pages_windowed(
                     &need_pages,
                     None,
@@ -467,12 +468,20 @@ impl PdfExtractor {
                 }
                 if ocr_pages.len() == ocr_count {
                     let merged_text = merge_page_texts(&page_texts, &ocr_pages);
-                    log::info!("[PDF] {:?}: per-page OCR complete, {} chars", path.file_name(), merged_text.len());
+                    let secs = pass_t0.elapsed().as_secs_f64().max(0.001);
+                    log::info!(
+                        "[PDF] {:?}: per-page OCR complete, {} chars, {:.1}s ({:.1} pages/min), peak concurrency {}",
+                        path.file_name(),
+                        merged_text.len(),
+                        secs,
+                        ocr_count as f64 * 60.0 / secs,
+                        outcome.peak_concurrency
+                    );
                     return Ok((merged_text, true));
                 }
                 log::warn!(
-                    "[PDF] {:?}: per-page OCR partially failed ({}/{}), falling back to whole-document OCR",
-                    path.file_name(), ocr_pages.len(), ocr_count
+                    "[PDF] {:?}: per-page OCR partially failed ({}/{}), falling back to whole-document OCR (peak concurrency {})",
+                    path.file_name(), ocr_pages.len(), ocr_count, outcome.peak_concurrency
                 );
             }
         }

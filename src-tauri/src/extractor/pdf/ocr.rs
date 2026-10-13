@@ -62,6 +62,8 @@ pub(super) struct PageOcrOutcome {
     pub(super) stalled: bool,
     /// The scan was cancelled mid-pass.
     pub(super) cancelled: bool,
+    /// Highest number of pages that were in flight at the same time.
+    pub(super) peak_concurrency: usize,
 }
 
 /// OCR `pages` with at most [`PAGE_OCR_WINDOW`] pages in flight.
@@ -101,6 +103,9 @@ pub(super) fn run_pages_windowed(
     // 不可比，相减会下溢：debug 直接 panic，实测就是它让单测偶发失败的）。
     let pass_started = Instant::now();
     let last_progress = AtomicU64::new(0);
+    // 观测：实际同时进行的页数（窗口是否真的被用满）。只用于日志归因。
+    let live = AtomicUsize::new(0);
+    let peak = AtomicUsize::new(0);
 
     std::thread::scope(|scope| {
         for _ in 0..window {
@@ -118,7 +123,10 @@ pub(super) fn run_pages_windowed(
                 attempted.fetch_add(1, Ordering::Relaxed);
 
                 let started = Instant::now();
+                let now_live = live.fetch_add(1, Ordering::Relaxed) + 1;
+                peak.fetch_max(now_live, Ordering::Relaxed);
                 let text = ocr_page(page);
+                live.fetch_sub(1, Ordering::Relaxed);
                 if text.is_some() {
                     let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
                     guard[slot] = text;
@@ -170,6 +178,7 @@ pub(super) fn run_pages_windowed(
         attempted: attempted.load(Ordering::Relaxed),
         stalled: stalled.load(Ordering::Relaxed),
         cancelled: cancelled.load(Ordering::Relaxed),
+        peak_concurrency: peak.load(Ordering::Relaxed),
     }
 }
 
@@ -212,6 +221,7 @@ pub(super) fn run_pdf_ocr_pipeline(
         let dpi = global_pdf_dpi();
         let stall = global_ocr_stall_timeout();
         let all_pages: Vec<u32> = (1..=page_count as u32).collect();
+        let pass_t0 = Instant::now();
         let outcome = run_pages_windowed(&all_pages, stall, Some(5), crate::extractor::scan_cancelled, |page| {
             let started = Instant::now();
             let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
@@ -241,9 +251,11 @@ pub(super) fn run_pdf_ocr_pipeline(
             .filter_map(|(idx, text)| text.map(|t| (idx, t)))
             .collect();
 
+        let pass_secs = pass_t0.elapsed().as_secs_f64().max(0.001);
         log::info!(
-            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, stalled={}",
-            path.file_name(), outcome.attempted, page_count, ocr_pages.len(), outcome.stalled
+            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}",
+            path.file_name(), outcome.attempted, page_count, ocr_pages.len(),
+            pass_secs, ocr_pages.len() as f64 * 60.0 / pass_secs, outcome.peak_concurrency, outcome.stalled
         );
 
         if !ocr_pages.is_empty() {
@@ -657,6 +669,7 @@ pub fn ocr_pdf_via_pdfimages(
         .filter(|&i| !fast[i])
         .map(|i| (i + 1) as u32)
         .collect();
+    let pass_t0 = std::time::Instant::now();
     let outcome = run_pages_windowed(&render_pages, stall, None, crate::extractor::scan_cancelled, |page| {
         let started = std::time::Instant::now();
         let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
@@ -675,6 +688,21 @@ pub fn ocr_pdf_via_pdfimages(
             "[PDF] {name:?}: 扫描已取消, 停止渲染页 OCR（已完成 {}/{} 页）",
             outcome.texts.iter().filter(|t| t.is_some()).count(),
             render_pages.len()
+        );
+    }
+    {
+        // 每文档计时汇总：以后任何一轮都能直接从日志算出「这篇花了多久、拿到了几页、
+        // 窗口有没有真的用满」，不用事后靠外部采样拼凑。
+        let got = outcome.texts.iter().filter(|t| t.is_some()).count();
+        let secs = pass_t0.elapsed().as_secs_f64().max(0.001);
+        log::info!(
+            "[PDF] {name:?}: rendered-page OCR completed: {}/{} pages with text, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}",
+            got,
+            render_pages.len(),
+            secs,
+            got as f64 * 60.0 / secs,
+            outcome.peak_concurrency,
+            outcome.stalled
         );
     }
     for (slot, text) in outcome.texts.into_iter().enumerate() {
@@ -869,6 +897,12 @@ mod tests {
             peak.load(Ordering::SeqCst) > 1,
             "窗口应当真的并行，实测峰值 {}",
             peak.load(Ordering::SeqCst)
+        );
+        // 上报的峰值并发要能被日志归因用（不能恒为 0/1）。
+        assert!(
+            outcome.peak_concurrency > 1 && outcome.peak_concurrency <= PAGE_OCR_WINDOW,
+            "上报的峰值并发 {} 应当 >1 且 ≤ 窗口 {PAGE_OCR_WINDOW}",
+            outcome.peak_concurrency
         );
     }
 
