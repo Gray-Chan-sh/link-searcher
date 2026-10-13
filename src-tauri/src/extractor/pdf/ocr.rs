@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -70,9 +70,13 @@ pub(super) struct PageOcrOutcome {
 /// mirror the serial loops this replaces:
 /// - cancellation is checked before each **new** page; pages already in flight
 ///   finish, so their text is never thrown away;
-/// - `stall` is a per-page budget: a page exceeding it marks the pass stalled and
-///   stops further dispatch (in-flight pages still finish). It is a progress
-///   watchdog, not a wall-clock budget for the whole pass;
+/// - `stall` is a **progress** watchdog, not a per-page timeout: *any* page that
+///   finishes counts as progress and the budget is scaled by the window (pages run
+///   concurrently, so one page legitimately takes ~`window`× longer — measured
+///   171 s dense pages under a 4-wide window). Only a pass that produces no
+///   finished page for `stall × window` stops dispatching (in-flight pages still
+///   finish and keep their results); a page that merely exceeds `stall` is logged
+///   as slow and the pass continues;
 /// - `give_up_after` stops the pass once that many pages have been attempted and
 ///   **none** produced text (the original "first 5 blank pages" guard, which is
 ///   what keeps a text-less scan from rendering all of its pages).
@@ -80,6 +84,10 @@ pub(super) fn run_pages_windowed(
     pages: &[u32],
     stall: Option<Duration>,
     give_up_after: Option<usize>,
+    // Injected so tests are deterministic: the real callers pass
+    // `crate::extractor::scan_cancelled`, but that is a process-global flag which
+    // other (parallel) tests can set, making tests flaky.
+    is_cancelled: impl Fn() -> bool + Sync,
     ocr_page: impl Fn(u32) -> Option<String> + Sync,
 ) -> PageOcrOutcome {
     let slots: Mutex<Vec<Option<String>>> = Mutex::new(vec![None; pages.len()]);
@@ -89,6 +97,10 @@ pub(super) fn run_pages_windowed(
     let stalled = AtomicBool::new(false);
     let cancelled = AtomicBool::new(false);
     let window = PAGE_OCR_WINDOW.min(pages.len().max(1));
+    // 进度以「自本轮开始以来的单调时刻」记录 —— 不能用每页各自的耗时（各 worker 之间
+    // 不可比，相减会下溢：debug 直接 panic，实测就是它让单测偶发失败的）。
+    let pass_started = Instant::now();
+    let last_progress = AtomicU64::new(0);
 
     std::thread::scope(|scope| {
         for _ in 0..window {
@@ -96,7 +108,7 @@ pub(super) fn run_pages_windowed(
                 if stop.load(Ordering::Relaxed) {
                     break;
                 }
-                if crate::extractor::scan_cancelled() {
+                if is_cancelled() {
                     cancelled.store(true, Ordering::Relaxed);
                     stop.store(true, Ordering::Relaxed);
                     break;
@@ -112,11 +124,26 @@ pub(super) fn run_pages_windowed(
                     guard[slot] = text;
                 }
 
+                let elapsed = started.elapsed();
+                // 进度看门狗：**任何一页完成**都算进展。用「自本轮开始以来的单调时刻」
+                // 而不是「本页耗时」——各 worker 的耗时互相不可比，相减会下溢（debug
+                // 直接 panic，这正是实测到的单测偶发失败原因）。
+                let now_ms = pass_started.elapsed().as_millis() as u64;
+                let prev_ms = last_progress.swap(now_ms, Ordering::Relaxed);
+                let gap_ms = now_ms.saturating_sub(prev_ms);
                 if let Some(stall) = stall {
-                    let elapsed = started.elapsed();
                     if elapsed >= stall {
                         log::warn!(
-                            "[PDF] page {page} took {elapsed:?} (>= stall {stall:?}) — stopping page dispatch"
+                            "[PDF] page {page} took {elapsed:?} (>= stall {stall:?}) — slow, but the pass is still progressing"
+                        );
+                    }
+                    // 预算按窗口放大：并发下单页必然更慢（实测 4 并发下密集页 171s）。
+                    // 只有「连续预算时长内一页都没完成」才算卡死——按单页耗时判定会在
+                    // 188 页扫描件上于第 14 页就误判中止（2026-10-13 实测）。
+                    let budget = stall * window as u32;
+                    if gap_ms >= budget.as_millis() as u64 {
+                        log::warn!(
+                            "[PDF] 连续 {gap_ms} ms 没有任何一页完成（>= {budget:?}）——判定卡死，停止派发"
                         );
                         stalled.store(true, Ordering::Relaxed);
                         stop.store(true, Ordering::Relaxed);
@@ -185,7 +212,7 @@ pub(super) fn run_pdf_ocr_pipeline(
         let dpi = global_pdf_dpi();
         let stall = global_ocr_stall_timeout();
         let all_pages: Vec<u32> = (1..=page_count as u32).collect();
-        let outcome = run_pages_windowed(&all_pages, stall, Some(5), |page| {
+        let outcome = run_pages_windowed(&all_pages, stall, Some(5), crate::extractor::scan_cancelled, |page| {
             let started = Instant::now();
             let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
             // 这一路径原本整段无日志（188 页的扫描件十几分钟一行不写，看起来像卡死），
@@ -630,7 +657,7 @@ pub fn ocr_pdf_via_pdfimages(
         .filter(|&i| !fast[i])
         .map(|i| (i + 1) as u32)
         .collect();
-    let outcome = run_pages_windowed(&render_pages, stall, None, |page| {
+    let outcome = run_pages_windowed(&render_pages, stall, None, crate::extractor::scan_cancelled, |page| {
         let started = std::time::Instant::now();
         let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
         match text.as_deref() {
@@ -814,7 +841,7 @@ mod tests {
         let live = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
 
-        let outcome = run_pages_windowed(&pages, None, None, |page| {
+        let outcome = run_pages_windowed(&pages, None, None, || false, |page| {
             calls.fetch_add(1, Ordering::SeqCst);
             let now = live.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
@@ -852,7 +879,7 @@ mod tests {
 
         let pages: Vec<u32> = (1..=50).collect();
         let calls = AtomicUsize::new(0);
-        let outcome = run_pages_windowed(&pages, None, Some(5), |_| {
+        let outcome = run_pages_windowed(&pages, None, Some(5), || false, |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(5));
             None
@@ -865,11 +892,12 @@ mod tests {
         assert!(n <= 5 + PAGE_OCR_WINDOW, "放弃后不应再多派发，实测 {n}");
     }
 
-    /// 整本都超预算（卡死的文档）→ 只跑完在飞的那批就停，已产出的结果保留。
+    /// 连续 `stall × window` 内一页都没完成（真卡死）→ 停止派发，已产出结果保留。
+    /// 注意判定的是**进展**，不是单页耗时：并发下单页变慢不算卡死。
     #[test]
     fn windowed_pages_stall_stops_dispatch_but_keeps_results() {
         let pages: Vec<u32> = (1..=40).collect();
-        let outcome = run_pages_windowed(&pages, Some(Duration::from_millis(10)), None, |page| {
+        let outcome = run_pages_windowed(&pages, Some(Duration::from_millis(10)), None, || false, |page| {
             // 每一页都超过 10ms 预算：整本卡死的情形。
             std::thread::sleep(Duration::from_millis(50));
             Some(format!("page-{page}"))
@@ -982,5 +1010,22 @@ mod tests {
         assert_eq!(grouped[2].len(), 1);
         assert_eq!(grouped[2][0].1, 200 * 200);
     }
-}
 
+    /// 取消检查在派发新页之前生效（判定为真 → 一页都不派发）。
+    #[test]
+    fn windowed_pages_honours_cancellation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pages: Vec<u32> = (1..=10).collect();
+        let calls = AtomicUsize::new(0);
+        let outcome = run_pages_windowed(&pages, None, None, || true, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Some("x".to_string())
+        });
+
+        assert!(outcome.cancelled, "必须报告已取消");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "取消后不应派发任何页");
+        assert!(outcome.texts.iter().all(|t| t.is_none()));
+        assert_eq!(outcome.attempted, 0);
+    }
+}

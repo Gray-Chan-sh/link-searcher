@@ -427,23 +427,29 @@ impl PdfExtractor {
                     .map(|(i, _)| i)
                     .collect();
                 let need_pages: Vec<u32> = need_idx.iter().map(|&i| pages[i]).collect();
-                let outcome = run_pages_windowed(&need_pages, None, None, |page| {
-                    let started = std::time::Instant::now();
-                    let text = ocr_single_pdf_page(path, page, dpi, lang, &engine);
-                    match text.as_deref() {
-                        Some(t) => log::info!(
-                            "[PDF] {:?}: mixed OCR page {page}: {} chars in {:.1}s",
-                            path.file_name(),
-                            t.chars().count(),
-                            started.elapsed().as_secs_f64()
-                        ),
-                        None => log::warn!(
-                            "[PDF] {:?}: mixed OCR page {page} produced no text",
-                            path.file_name()
-                        ),
-                    }
-                    text
-                });
+                let outcome = run_pages_windowed(
+                    &need_pages,
+                    None,
+                    None,
+                    crate::extractor::scan_cancelled,
+                    |page| {
+                        let started = std::time::Instant::now();
+                        let text = ocr_single_pdf_page(path, page, dpi, lang, &engine);
+                        match text.as_deref() {
+                            Some(t) => log::info!(
+                                "[PDF] {:?}: mixed OCR page {page}: {} chars in {:.1}s",
+                                path.file_name(),
+                                t.chars().count(),
+                                started.elapsed().as_secs_f64()
+                            ),
+                            None => log::warn!(
+                                "[PDF] {:?}: mixed OCR page {page} produced no text",
+                                path.file_name()
+                            ),
+                        }
+                        text
+                    },
+                );
                 if outcome.cancelled {
                     log::info!(
                         "[PDF] {:?}: 扫描已取消, 停止混合逐页 OCR（已完成 {}/{} 页）",
