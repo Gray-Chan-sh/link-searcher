@@ -1,5 +1,13 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：拆掉「批次屏障」——走查不再等批次，慢文件不再让 13 个线程空等
+
+- **问题（实测）**：`batch_index` 阻塞走查直到整批（250 文件）提取完。一个病态扫描件（88 页 PDF，实测 **489 s**）会让其余 **13 个提取线程空等** —— 同一批次速率差 **19 倍**（0.5 文件/s 卡住 vs 9.5 文件/s 正常）；整轮扫描平均只用了 **13%** 的 12 逻辑核（≈1.6 核）。
+- **修复**：新增 `scanner::BatchPipeline` —— 走查把批次交给**后台线程**执行，窗口深度 2（有界背压），多个批次**共享同一个 Rayon 池**（总提取并发仍等于配置上限，不会过订阅）；`finish()` 在删除检测/返回前汇总所有批次；`Drop` 兜底 join，取消路径提前返回也不会留下后台写入。
+- **顺带说明档位**：激进档在本机（12 逻辑核 / SSD）算出 `concurrency=14`，已经**超过逻辑核数**；所以"没用满系统"的瓶颈从来不是档位，而是**批次屏障 + 单文件串行 OCR**。
+- **测试**：新增 `test_full_scan_pipelines_multiple_batches`（600 文件跨 3 批，计数不丢且全部写入索引）；`cargo test --lib` **519 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`src-tauri/src/scanner/mod.rs`。
+
 ## 2026-10-13：缓解提取与回填并发时的 SQLite 写竞争
 
 - **现象**（实测本会话）：扫描与 chunk 回填并发时，`mark_extracted` 重试 **7/7 全部失败**、`store_content` 重试 **15/22 失败**、`doc_chunks write failed` 3 次，另有 `store_content retry` 22 次。
