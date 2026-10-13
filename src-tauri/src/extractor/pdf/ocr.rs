@@ -19,9 +19,13 @@ use super::{
 
 /// Upper bound on the longest side (px) of a rendered page. Oversized pages
 /// (e.g. a 3000×4000pt scan) would otherwise rasterize to >200 Mpx — slow and
-/// above the OCR engine's image-decode limit. 2500px ≈ 214 DPI for A4, and the
-/// OCR preprocessor normalizes the longest side to ~1000px anyway.
-const MAX_RENDER_LONGEST_SIDE: u32 = 2500;
+/// above the OCR engine's image-decode limit.
+///
+/// Aliases [`crate::extractor::preprocess::MAX_LONGEST_SIDE`] so a rendered page
+/// is never larger than what the OCR pipeline would keep: rendering 2500px only
+/// to have the preprocessor shrink it again would waste the render (subprocess +
+/// PNG decode) for nothing.
+const MAX_RENDER_LONGEST_SIDE: u32 = crate::extractor::preprocess::MAX_LONGEST_SIDE;
 const MIN_RENDER_LONGEST_SIDE: u32 = 1000;
 
 /// The largest image on a page smaller than this is an icon/logo, not a scan.
