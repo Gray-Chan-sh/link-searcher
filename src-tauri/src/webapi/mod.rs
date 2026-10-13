@@ -62,7 +62,7 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     for event_name in BRIDGED_EVENTS {
         let tx = event_tx.clone();
         app_handle.listen_any(*event_name, move |event| {
-            log::info!("[WEBAPI-BRIDGE] forwarded event {} payload_chars={}", event_name, event.payload().len());
+                log::debug!("[WEBAPI-BRIDGE] forwarded event {} payload_chars={}", event_name, event.payload().len());
             // No subscribers / lagged receiver: drop silently.
             let _ = tx.send((event_name.to_string(), event.payload().to_string()));
         });

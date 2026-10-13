@@ -63,7 +63,7 @@ pub struct PdfExtractor;
 
 mod ocr;
 pub use ocr::{ocr_pdf_via_pdfimages, ocr_pdf_via_pdftoppm};
-use ocr::{merge_page_texts, ocr_single_pdf_page, page_needs_ocr, run_pdf_ocr_pipeline};
+use ocr::{merge_page_texts, ocr_single_pdf_page, page_needs_ocr, run_pages_windowed, run_pdf_ocr_pipeline};
 
 /// Check whether most pages contain large embedded images (area ≥100K px²).
 /// Returns true for scanned PDFs with an image per page, false for text-based
@@ -418,39 +418,45 @@ impl PdfExtractor {
                     path.file_name(), ocr_count, page_count
                 );
                 let dpi = global_pdf_dpi();
-                let mut ocr_pages = HashMap::new();
-                let mut done = 0usize;
-                for (i, &needs) in needs_ocr.iter().enumerate() {
-                    if !needs {
-                        continue;
-                    }
-                    if crate::extractor::scan_cancelled() {
-                        log::info!(
-                            "[PDF] {:?}: 扫描已取消, 停止混合逐页 OCR（已完成 {done}/{ocr_count} 页）",
-                            path.file_name()
-                        );
-                        break;
-                    }
-                    let page_num = pages[i];
+                // 只对需要 OCR 的页跑，并用有界窗口并发（每页一个 pdftoppm 子进程，
+                // 见 `ocr::PAGE_OCR_WINDOW`）：原来串行时几百页的文档会静默几分钟，像卡死。
+                let need_idx: Vec<usize> = needs_ocr
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, needs)| **needs)
+                    .map(|(i, _)| i)
+                    .collect();
+                let need_pages: Vec<u32> = need_idx.iter().map(|&i| pages[i]).collect();
+                let outcome = run_pages_windowed(&need_pages, None, None, |page| {
                     let started = std::time::Instant::now();
-                    match ocr_single_pdf_page(path, pages[i], dpi, lang, &engine) {
-                        Some(text) => {
-                            ocr_pages.insert(i, text);
-                        }
+                    let text = ocr_single_pdf_page(path, page, dpi, lang, &engine);
+                    match text.as_deref() {
+                        Some(t) => log::info!(
+                            "[PDF] {:?}: mixed OCR page {page}: {} chars in {:.1}s",
+                            path.file_name(),
+                            t.chars().count(),
+                            started.elapsed().as_secs_f64()
+                        ),
                         None => log::warn!(
-                            "[PDF] {:?}: mixed OCR page {page_num} produced no text",
+                            "[PDF] {:?}: mixed OCR page {page} produced no text",
                             path.file_name()
                         ),
                     }
-                    done += 1;
-                    // Progress heartbeat: the loop is otherwise silent for
-                    // hundreds of pages, which looks like a hang.
-                    if done % 25 == 0 || done == ocr_count {
-                        log::info!(
-                            "[PDF] {:?}: mixed OCR progress {done}/{ocr_count} pages ({:.1}s last page)",
-                            path.file_name(),
-                            started.elapsed().as_secs_f64()
-                        );
+                    text
+                });
+                if outcome.cancelled {
+                    log::info!(
+                        "[PDF] {:?}: 扫描已取消, 停止混合逐页 OCR（已完成 {}/{} 页）",
+                        path.file_name(),
+                        outcome.texts.iter().filter(|t| t.is_some()).count(),
+                        ocr_count
+                    );
+                }
+                // 以 `needs_ocr` 中的下标为键（与 `page_texts` 对齐）。
+                let mut ocr_pages = HashMap::new();
+                for (slot, text) in outcome.texts.into_iter().enumerate() {
+                    if let Some(t) = text {
+                        ocr_pages.insert(need_idx[slot], t);
                     }
                 }
                 if ocr_pages.len() == ocr_count {

@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -39,6 +41,111 @@ fn render_longest_side(path: &Path, dpi: u32) -> u32 {
         .unwrap_or(MAX_RENDER_LONGEST_SIDE);
     target.clamp(MIN_RENDER_LONGEST_SIDE, MAX_RENDER_LONGEST_SIDE)
 }
+/// How many pages of **one** document may be OCR'd concurrently.
+///
+/// Each rendered page spawns its own `pdftoppm` subprocess, so this must stay
+/// small (a 600-page document must not launch 600 processes at once) — but 1 is
+/// far too small. Measured 2026-10-13: `保利股份2014年年报.pdf` (188 scanned
+/// pages, render path) spent ~29 s per page on a single thread ≈ **91 minutes**,
+/// while the global OCR gate (8 slots on this machine, 6 physical cores) sat
+/// idle and the session averaged 12% CPU. Four keeps one document inside half
+/// the gate, so parallel documents still make progress.
+const PAGE_OCR_WINDOW: usize = 4;
+
+/// Outcome of a windowed page-OCR pass (see [`run_pages_windowed`]).
+pub(super) struct PageOcrOutcome {
+    /// One slot per input page, in the same order: `None` = no text produced.
+    pub(super) texts: Vec<Option<String>>,
+    /// How many pages were actually handed to `ocr_page`.
+    pub(super) attempted: usize,
+    /// The stall watchdog tripped, or `give_up_after` fired: dispatch stopped.
+    pub(super) stalled: bool,
+    /// The scan was cancelled mid-pass.
+    pub(super) cancelled: bool,
+}
+
+/// OCR `pages` with at most [`PAGE_OCR_WINDOW`] pages in flight.
+///
+/// Pure scheduling — `ocr_page` does the work and its own logging. Semantics
+/// mirror the serial loops this replaces:
+/// - cancellation is checked before each **new** page; pages already in flight
+///   finish, so their text is never thrown away;
+/// - `stall` is a per-page budget: a page exceeding it marks the pass stalled and
+///   stops further dispatch (in-flight pages still finish). It is a progress
+///   watchdog, not a wall-clock budget for the whole pass;
+/// - `give_up_after` stops the pass once that many pages have been attempted and
+///   **none** produced text (the original "first 5 blank pages" guard, which is
+///   what keeps a text-less scan from rendering all of its pages).
+pub(super) fn run_pages_windowed(
+    pages: &[u32],
+    stall: Option<Duration>,
+    give_up_after: Option<usize>,
+    ocr_page: impl Fn(u32) -> Option<String> + Sync,
+) -> PageOcrOutcome {
+    let slots: Mutex<Vec<Option<String>>> = Mutex::new(vec![None; pages.len()]);
+    let next = AtomicUsize::new(0);
+    let attempted = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let stalled = AtomicBool::new(false);
+    let cancelled = AtomicBool::new(false);
+    let window = PAGE_OCR_WINDOW.min(pages.len().max(1));
+
+    std::thread::scope(|scope| {
+        for _ in 0..window {
+            scope.spawn(|| loop {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if crate::extractor::scan_cancelled() {
+                    cancelled.store(true, Ordering::Relaxed);
+                    stop.store(true, Ordering::Relaxed);
+                    break;
+                }
+                let slot = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&page) = pages.get(slot) else { break };
+                attempted.fetch_add(1, Ordering::Relaxed);
+
+                let started = Instant::now();
+                let text = ocr_page(page);
+                if text.is_some() {
+                    let mut guard = slots.lock().unwrap_or_else(|e| e.into_inner());
+                    guard[slot] = text;
+                }
+
+                if let Some(stall) = stall {
+                    let elapsed = started.elapsed();
+                    if elapsed >= stall {
+                        log::warn!(
+                            "[PDF] page {page} took {elapsed:?} (>= stall {stall:?}) — stopping page dispatch"
+                        );
+                        stalled.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                        continue;
+                    }
+                }
+                if let Some(limit) = give_up_after {
+                    let anywhere = slots
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .any(|t| t.is_some());
+                    if !anywhere && attempted.load(Ordering::Relaxed) >= limit {
+                        stalled.store(true, Ordering::Relaxed);
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+
+    PageOcrOutcome {
+        texts: slots.into_inner().unwrap_or_else(|e| e.into_inner()),
+        attempted: attempted.load(Ordering::Relaxed),
+        stalled: stalled.load(Ordering::Relaxed),
+        cancelled: cancelled.load(Ordering::Relaxed),
+    }
+}
+
 pub(super) fn run_pdf_ocr_pipeline(
     path: &Path,
     page_count: usize,
@@ -76,59 +183,40 @@ pub(super) fn run_pdf_ocr_pipeline(
             path.file_name(), page_count, global_ocr_stall_timeout()
         );
         let dpi = global_pdf_dpi();
-        let mut ocr_pages = HashMap::new();
         let stall = global_ocr_stall_timeout();
-        let mut pages_attempted = 0usize;
-        let mut stalled = false;
-
-        for page_num in 1..=page_count {
-            // 取消即停：一页 OCR 可能要几秒~几十秒，44 页的扫描件会让"删除目录"
-            // 白等好几分钟。已经产出的页保留，直接退出循环。
-            if crate::extractor::scan_cancelled() {
-                log::info!(
-                    "[PDF] {:?}: 扫描已取消, 停止逐页 OCR（已完成 {}/{} 页）",
-                    path.file_name(), page_num - 1, page_count
-                );
-                break;
-            }
-            pages_attempted += 1;
-            let page_idx = page_num - 1;
-            let page_started = Instant::now();
-            match ocr_single_pdf_page(path, page_num as u32, dpi, lang, engine) {
-                Some(p_text) => {
-                    ocr_pages.insert(page_idx, p_text);
-                }
-                None => {
-                    // Give up only if the first few pages all fail to render —
-                    // avoids aborting a scan that has blank/failed pages before
-                    // real content.
-                    if ocr_pages.is_empty() && pages_attempted >= 5 {
-                        log::warn!(
-                            "[PDF] {:?}: aborting per-page OCR — first {pages_attempted} pages yielded no text",
-                            path.file_name()
-                        );
-                        break;
-                    }
-                }
-            }
-            // Progress watchdog: every page that returns advances the loop, so a
-            // slow-but-working machine is fine. Only a single page that blows the
-            // stall budget is treated as stuck. `None` disables the guard.
-            if let Some(stall) = stall {
-                if page_started.elapsed() >= stall {
-                    stalled = true;
-                    log::warn!(
-                        "[PDF] {:?}: per-page OCR stalled — page {page_num} took {:?} (>= {:?}), stopping at {}/{}",
-                        path.file_name(), page_started.elapsed(), stall, page_num, page_count
-                    );
-                    break;
-                }
-            }
+        let all_pages: Vec<u32> = (1..=page_count as u32).collect();
+        let outcome = run_pages_windowed(&all_pages, stall, Some(5), |page| {
+            let started = Instant::now();
+            let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
+            // 这一路径原本整段无日志（188 页的扫描件十几分钟一行不写，看起来像卡死），
+            // 现在按页 INFO，与 pdfimages 路径保持同样的可观测性。
+            log::info!(
+                "[PDF] {:?} page {page}: {} chars in {:.1}s (render)",
+                path.file_name(),
+                text.as_deref().map(|t| t.chars().count()).unwrap_or(0),
+                started.elapsed().as_secs_f64()
+            );
+            text
+        });
+        if outcome.cancelled {
+            log::info!(
+                "[PDF] {:?}: 扫描已取消, 停止逐页 OCR（已完成 {}/{} 页）",
+                path.file_name(),
+                outcome.texts.iter().filter(|t| t.is_some()).count(),
+                page_count
+            );
         }
+        // 0-based 页号 → 文本，与 `merge_page_texts` 的约定一致。
+        let ocr_pages: HashMap<usize, String> = outcome
+            .texts
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, text)| text.map(|t| (idx, t)))
+            .collect();
 
         log::info!(
             "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, stalled={}",
-            path.file_name(), pages_attempted, page_count, ocr_pages.len(), stalled
+            path.file_name(), outcome.attempted, page_count, ocr_pages.len(), outcome.stalled
         );
 
         if !ocr_pages.is_empty() {
@@ -535,39 +623,36 @@ pub fn ocr_pdf_via_pdfimages(
     }
 
     // Rendered pages: `pdftoppm` composites background + stencils correctly.
-    // Run sequentially — each spawns a subprocess, so a 600-page document must
-    // not launch 600 `pdftoppm` processes at once.
-    for (idx, is_fast) in fast.iter().enumerate() {
-        if *is_fast {
-            continue;
-        }
-        if crate::extractor::scan_cancelled() {
-            log::info!(
-                "[PDF] {name:?}: 扫描已取消, 停止渲染页 OCR（已完成 {idx}/{page_count} 页）"
-            );
-            break;
-        }
-        let page_num = (idx + 1) as u32;
+    // Bounded window rather than strictly serial — each page spawns its own
+    // `pdftoppm` subprocess (see [`PAGE_OCR_WINDOW`]); running these one at a
+    // time is what made a 188-page scan take ~91 minutes on a single thread.
+    let render_pages: Vec<u32> = (0..page_count)
+        .filter(|&i| !fast[i])
+        .map(|i| (i + 1) as u32)
+        .collect();
+    let outcome = run_pages_windowed(&render_pages, stall, None, |page| {
         let started = std::time::Instant::now();
-        match ocr_single_pdf_page(path, page_num, dpi, lang, engine) {
-            Some(t) => {
-                log::info!(
-                    "[PDF] {name:?} page {page_num}: {} chars in {:.1}s (render)",
-                    t.chars().count(),
-                    started.elapsed().as_secs_f64()
-                );
-                out[idx] = Some(t);
-            }
-            None => log::warn!("[PDF] {name:?} page {page_num}: render produced no text"),
+        let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
+        match text.as_deref() {
+            Some(t) => log::info!(
+                "[PDF] {name:?} page {page}: {} chars in {:.1}s (render)",
+                t.chars().count(),
+                started.elapsed().as_secs_f64()
+            ),
+            None => log::warn!("[PDF] {name:?} page {page}: render produced no text"),
         }
-        if let Some(stall) = stall
-            && started.elapsed() >= stall
-        {
-            log::warn!(
-                "[PDF] {name:?}: render stalled on page {page_num} ({:?})",
-                started.elapsed()
-            );
-            break;
+        text
+    });
+    if outcome.cancelled {
+        log::info!(
+            "[PDF] {name:?}: 扫描已取消, 停止渲染页 OCR（已完成 {}/{} 页）",
+            outcome.texts.iter().filter(|t| t.is_some()).count(),
+            render_pages.len()
+        );
+    }
+    for (slot, text) in outcome.texts.into_iter().enumerate() {
+        if let Some(t) = text {
+            out[render_pages[slot] as usize - 1] = Some(t);
         }
     }
 
@@ -719,6 +804,91 @@ fn collect_page_images(dir: &Path, page_count: usize) -> Result<Vec<Vec<(PathBuf
 
 #[cfg(test)]
 mod tests {
+    /// 有界窗口：每页恰好派发一次、结果按输入顺序对齐、并发不超过窗口。
+    #[test]
+    fn windowed_pages_dispatch_each_page_once_and_respect_window() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pages: Vec<u32> = (1..=20).collect();
+        let calls = AtomicUsize::new(0);
+        let live = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+
+        let outcome = run_pages_windowed(&pages, None, None, |page| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+            peak.fetch_max(now, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(15));
+            live.fetch_sub(1, Ordering::SeqCst);
+            Some(format!("page-{page}"))
+        });
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            20,
+            "每页必须恰好派发一次"
+        );
+        assert_eq!(outcome.attempted, 20);
+        assert!(!outcome.stalled && !outcome.cancelled);
+        assert_eq!(outcome.texts.len(), 20, "结果槽必须与输入页对齐");
+        assert_eq!(outcome.texts[0].as_deref(), Some("page-1"));
+        assert_eq!(outcome.texts[19].as_deref(), Some("page-20"));
+        assert!(
+            peak.load(Ordering::SeqCst) <= PAGE_OCR_WINDOW,
+            "并发峰值 {} 必须 ≤ PAGE_OCR_WINDOW ({PAGE_OCR_WINDOW})",
+            peak.load(Ordering::SeqCst)
+        );
+        assert!(
+            peak.load(Ordering::SeqCst) > 1,
+            "窗口应当真的并行，实测峰值 {}",
+            peak.load(Ordering::SeqCst)
+        );
+    }
+
+    /// 一页都出不了文字时（`give_up_after`）尽早停，别把整本扫描件渲染一遍。
+    #[test]
+    fn windowed_pages_gives_up_when_nothing_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pages: Vec<u32> = (1..=50).collect();
+        let calls = AtomicUsize::new(0);
+        let outcome = run_pages_windowed(&pages, None, Some(5), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(5));
+            None
+        });
+
+        assert!(outcome.stalled, "全部无文字时必须触发放弃");
+        assert!(outcome.texts.iter().all(|t| t.is_none()));
+        let n = calls.load(Ordering::SeqCst);
+        assert!(n >= 5, "至少尝试 5 页才放弃，实测 {n}");
+        assert!(n <= 5 + PAGE_OCR_WINDOW, "放弃后不应再多派发，实测 {n}");
+    }
+
+    /// 整本都超预算（卡死的文档）→ 只跑完在飞的那批就停，已产出的结果保留。
+    #[test]
+    fn windowed_pages_stall_stops_dispatch_but_keeps_results() {
+        let pages: Vec<u32> = (1..=40).collect();
+        let outcome = run_pages_windowed(&pages, Some(Duration::from_millis(10)), None, |page| {
+            // 每一页都超过 10ms 预算：整本卡死的情形。
+            std::thread::sleep(Duration::from_millis(50));
+            Some(format!("page-{page}"))
+        });
+
+        assert!(outcome.stalled, "超预算必须触发 stall");
+        assert!(
+            outcome.attempted >= PAGE_OCR_WINDOW,
+            "第一窗口应当已经派发出去，实测 {}",
+            outcome.attempted
+        );
+        assert!(
+            outcome.attempted <= PAGE_OCR_WINDOW * 2,
+            "stall 后只应跑完在飞的页，实测 {}",
+            outcome.attempted
+        );
+        assert_eq!(outcome.texts[0].as_deref(), Some("page-1"), "在飞页结果要保留");
+    }
+
     use super::*;
 
     fn write_png(path: &Path, w: u32, h: u32) {
