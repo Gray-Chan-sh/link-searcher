@@ -360,6 +360,36 @@ pub fn ocr_image(image_path: &Path, lang: &str, engine: Option<OcrEngineType>) -
     ocr_image_with_engine(image_path, &e, lang)
 }
 
+/// System font used to render the OCR self-test text, if one is available.
+///
+/// Chosen at runtime instead of being embedded: see [`create_test_image`].
+fn test_image_font() -> Option<ab_glyph::FontArc> {
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\calibri.ttf",
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Helvetica.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+    } else {
+        &[
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        ]
+    };
+    candidates.iter().find_map(|path| {
+        // FontArc::try_from_slice 要求 &'static（它自己的文档如此），运行时读入的
+        // 数据必须走 try_from_vec（内部会拷一份）。
+        let bytes = std::fs::read(path).ok()?;
+        ab_glyph::FontArc::try_from_vec(bytes).ok()
+    })
+}
+
 /// Generate a simple test pattern PNG image for OCR engine validation.
 ///
 /// Generate a test image containing known text ("Hello OCR 123").
@@ -367,7 +397,7 @@ pub fn ocr_image(image_path: &Path, lang: &str, engine: Option<OcrEngineType>) -
 /// The image is 400×100 pixels with black text on a white background,
 /// clear enough for any OCR engine to recognize.
 pub fn create_test_image() -> Result<Vec<u8>> {
-    use ab_glyph::{FontArc, PxScale};
+    use ab_glyph::PxScale;
 
     let mut img = image::RgbaImage::new(400, 100);
 
@@ -376,21 +406,25 @@ pub fn create_test_image() -> Result<Vec<u8>> {
         *pixel = image::Rgba([255u8, 255u8, 255u8, 255u8]);
     }
 
-    // Try to draw text using a built-in font
-    let font_data: &[u8] = include_bytes!("../../../assets/Arial Unicode.ttf");
-    if let Ok(font) = FontArc::try_from_slice(font_data) {
-        let scale = PxScale::from(32.0);
-        imageproc::drawing::draw_text_mut(
-            &mut img,
-            image::Rgba([0u8, 0u8, 0u8, 255u8]),
-            20, 30,
-            scale,
-            &font,
-            "Hello OCR 123",
-        );
-    } else {
+    // Draw the test text with a system font.
+    //
+    // 曾经用 `include_bytes!` 内嵌 `assets/Arial Unicode.ttf`：那个 22.2 MB 的字体
+    // 占掉整个 exe 的 21%，只为了在这里画一句 "Hello OCR 123"。现在改为运行时读
+    // 系统字体；读不到就退回几何图案（`draw_h12_pattern`），不影响自检可用性。
+    match test_image_font() {
+        Some(font) => {
+            let scale = PxScale::from(32.0);
+            imageproc::drawing::draw_text_mut(
+                &mut img,
+                image::Rgba([0u8, 0u8, 0u8, 255u8]),
+                20, 30,
+                scale,
+                &font,
+                "Hello OCR 123",
+            );
+        }
         // Fallback: draw a recognizable pattern when font is unavailable
-        draw_h12_pattern(&mut img);
+        None => draw_h12_pattern(&mut img),
     }
 
     let dyn_img = image::DynamicImage::from(img);

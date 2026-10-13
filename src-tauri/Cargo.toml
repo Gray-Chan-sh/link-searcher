@@ -137,3 +137,9 @@ opt-level = 3
 # 关掉依赖调试信息可大幅降低内存/磁盘，且不影响运行时性能；
 # 业务代码（workspace 本 crate）仍保留完整调试信息。
 debug = false
+
+# release 用 thin LTO：跨 codegen-unit 内联，产物更小、运行时略快。
+# 选 thin 而不是 fat：收益接近但构建时间短得多（本项目 exe 主要体积来自
+# 静态链接的推理栈：onnxruntime/sherpa-onnx + tract，无法靠 LTO 消掉）。
+[profile.release]
+lto = "thin"

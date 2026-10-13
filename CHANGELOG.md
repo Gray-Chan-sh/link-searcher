@@ -1,5 +1,29 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：构建与产物第二轮瘦身（P2+P3）——回收 63 GB、exe -21%、MSI -40%
+
+- **P2.1 清理构建垃圾**：删除 `target/debug/incremental`（**53 GB**，181 个会话目录）以及 3 个"已不再生成"的旧产物（静态库 **2,420 MB** / dll 24 MB / 其 pdb 141 MB，debug 与 release 各一份）。`target/debug` **101.2 GB → 38.2 GB**，D 盘可用 +33.7 GB。
+  - 注：`incremental` 会在后续 dev 构建中重新增长（本 workspace 只有 1 个 crate，增量收益有限）；若不想再涨可在 `[build]` 加 `incremental = false`。
+- **P2.2 Defender 排除项**：本机当前进程**非管理员**，无法自动添加；需在**管理员 PowerShell**执行
+  `Add-MpPreference -ExclusionPath 'D:\link-searcher\src-tauri\target', "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"`
+  并 `Add-MpPreference -ExclusionProcess 'rustc.exe','cargo.exe','link.exe'`（预计再省 20~40% 构建时间）。
+- **P2.3 `jobs 4 → 8`**（`src-tauri/.cargo/config.toml`）：原注释基于 16 GB 机器，本机 31.4 GB 实测峰值约 10 GB。**只对冷编译 / 依赖重编 / release 打包有效** —— 本 workspace 只有 1 个 crate，日常"改一行"仍只有 1 次 rustc，并行度帮不上忙。
+- **P3.1 去掉内嵌字体（-22.2 MB）**：`extractor/ocr.rs` 的 `create_test_image()` 原先 `include_bytes!("../../../assets/Arial Unicode.ttf")` 把 **22.2 MB** 字体整个编进二进制，只为在 400×100 的自检图上画一句 `"Hello OCR 123"` —— 占 release exe 的 **21%**。现改为**运行时读系统字体**（Windows/macOS/Linux 各一组候选路径，用 `FontArc::try_from_vec`；注意 `try_from_slice` 要求 `&'static`，运行时数据不能用），读不到就退回原有的 `draw_h12_pattern()` 几何图案。`assets/Arial Unicode.ttf` **保留**：`tests/ocr_eval.rs` 仍在用它，且那只会进测试二进制，不进 exe。
+- **P3.2 `[profile.release] lto = "thin"`**：⚠️ **实测体积无变化**（`.text` 62.2 → 62.9 MB，exe 的减少全部来自字体）。收益仅剩运行时跨 crate 内联，代价是首次 release 打包 **+6 分钟**（`lto` 一改会迫使全部依赖重编一次），之后每次 release 约 +1~2 分钟。**若更看重打包速度，删掉这一节即可**（一行）。
+- **实测结果**：
+
+  | 指标 | 改前 | 改后 |
+  |---|---|---|
+  | release exe | 107.5 MB | **85.3 MB（-21%）** |
+  | release `.rdata` | 42.0 MB | **19.2 MB**（-22.8 MB ≈ 那份字体） |
+  | **MSI 安装包** | 56.1 MB | **33.5 MB（-40%）** |
+  | debug exe | 135.3 MB | **110.2 MB（-25.1 MB）** |
+  | `target/debug` | 101.2 GB | **38.2 GB** |
+  | release 打包总耗时 | ~6 分钟 | 12.4 分钟（含 LTO 迫使的依赖重编） |
+
+- **验证**：`cargo test --lib` **519 passed / 0 failed / 2 ignored**；`semgrep --severity ERROR` **0 findings**；实跑 `npm run tauri:build` 通过并产出新 MSI 33.5 MB —— 同时验证了上一轮 `crate-type = ["lib"]` 不影响桌面打包。
+- **涉及文件**：`src-tauri/Cargo.toml`、`src-tauri/.cargo/config.toml`、`src-tauri/src/extractor/ocr.rs`。
+
 ## 2026-10-13：修复"每次构建都全量重编"——build.rs 的 rerun-if-changed 指向了不存在的路径
 
 - **根因（实测）**：`src-tauri/build.rs` 声明 `cargo:rerun-if-changed=.git/HEAD`（及 `.git/refs/heads`），但 `rerun-if-changed` 的路径以**包根 `src-tauri/`** 为基准，`.git` 实际在仓库根 `D:\link-searcher\.git`，因此该路径**不存在**。cargo 的规则是"声明了但文件不存在 = 永远脏"（cargo 原话：``Dirty link-searcher v1.2.2 (D:\link-searcher\src-tauri): the file `.git/HEAD` is missing``），于是**每次构建都重跑 build.rs** → 它输出的 `GIT_VERSION` 又让整个 lib 指纹失效 → **全量重编 + 重链接**。连"无改动"的 `cargo build` 都要 **2m15s~2m26s**，`cargo check`/`cargo test` 同样每次白付一次全量编译。
