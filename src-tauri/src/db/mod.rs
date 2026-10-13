@@ -542,9 +542,9 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("ocr_stall_timeout_secs", "120"),
         // 自适应并发（内存压力降级/升级）：阈值与各档并发数
         ("adaptive_load_enabled", "1"),
-        ("load_process_soft_mb", "6000"),
-        ("load_process_hard_mb", "8500"),
-        ("load_process_pause_mb", "10500"),
+        ("load_process_soft_pct", "40"),
+        ("load_process_hard_pct", "55"),
+        ("load_process_pause_pct", "70"),
         ("load_system_soft_pct", "85"),
         ("load_system_hard_pct", "90"),
         ("load_system_pause_pct", "95"),

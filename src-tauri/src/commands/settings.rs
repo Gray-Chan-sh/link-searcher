@@ -12,9 +12,9 @@ const ALLOWED_KEYS: &[&str] = &[
     "ocr_stall_timeout_secs",
     // 自适应并发（内存压力降级/升级）
     "adaptive_load_enabled",
-    "load_process_soft_mb",
-    "load_process_hard_mb",
-    "load_process_pause_mb",
+    "load_process_soft_pct",
+    "load_process_hard_pct",
+    "load_process_pause_pct",
     "load_system_soft_pct",
     "load_system_hard_pct",
     "load_system_pause_pct",

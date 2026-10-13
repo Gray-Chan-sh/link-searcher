@@ -147,28 +147,28 @@ export function IndexTab({ ocrEngines, ocrTesting, ocrResult, selectedEngine, oc
         </p>
         <div className="mt-3 space-y-3">
           <NumberField
-            label={t('load_process_soft_mb')}
-            value={loadNum('load_process_soft_mb', 6000)}
-            onChange={setLoad('load_process_soft_mb')}
-            min={500}
-            max={60000}
-            step={500}
+            label={t('load_process_soft_pct')}
+            value={loadNum('load_process_soft_pct', 40)}
+            onChange={setLoad('load_process_soft_pct')}
+            min={5}
+            max={95}
+            step={5}
           />
           <NumberField
-            label={t('load_process_hard_mb')}
-            value={loadNum('load_process_hard_mb', 8500)}
-            onChange={setLoad('load_process_hard_mb')}
-            min={500}
-            max={60000}
-            step={500}
+            label={t('load_process_hard_pct')}
+            value={loadNum('load_process_hard_pct', 55)}
+            onChange={setLoad('load_process_hard_pct')}
+            min={5}
+            max={95}
+            step={5}
           />
           <NumberField
-            label={t('load_process_pause_mb')}
-            value={loadNum('load_process_pause_mb', 10500)}
-            onChange={setLoad('load_process_pause_mb')}
-            min={500}
-            max={60000}
-            step={500}
+            label={t('load_process_pause_pct')}
+            value={loadNum('load_process_pause_pct', 70)}
+            onChange={setLoad('load_process_pause_pct')}
+            min={5}
+            max={95}
+            step={5}
           />
           <NumberField
             label={t('load_system_soft_pct')}

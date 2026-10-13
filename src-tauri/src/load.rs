@@ -103,16 +103,23 @@ pub struct Sample {
     pub process_ws_mb: u64,
     /// Whole-system memory in use (RAM + page file), percent of total.
     pub system_used_pct: u64,
+    /// Installed physical memory, MB — the process thresholds are relative to it
+    /// (an absolute MB budget would throttle a 32GB box that is perfectly fine,
+    /// or be unreachable on a 16GB one).
+    pub total_mb: u64,
 }
 
 /// User-tunable thresholds and concurrency floors (all from `app_settings`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LoadSettings {
     pub enabled: bool,
-    /// Process working-set thresholds (MB): soft → hard → pause.
-    pub process_soft_mb: u64,
-    pub process_hard_mb: u64,
-    pub process_pause_mb: u64,
+    /// Process working-set thresholds, **percent of installed RAM**:
+    /// soft → hard → pause. (Measured: 3 big scans in parallel peak at ~10GB on
+    /// a 31GB box while 12GB stays free — an absolute MB budget would degrade a
+    /// healthy machine, while a percentage scales with the host.)
+    pub process_soft_pct: u64,
+    pub process_hard_pct: u64,
+    pub process_pause_pct: u64,
     /// System memory-in-use thresholds (percent): soft → hard → pause.
     pub system_soft_pct: u64,
     pub system_hard_pct: u64,
@@ -135,9 +142,9 @@ impl Default for LoadSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            process_soft_mb: 6000,
-            process_hard_mb: 8500,
-            process_pause_mb: 10500,
+            process_soft_pct: 40,
+            process_hard_pct: 55,
+            process_pause_pct: 70,
             system_soft_pct: 85,
             system_hard_pct: 90,
             system_pause_pct: 95,
@@ -173,9 +180,9 @@ impl LoadSettings {
         let d = Self::default();
         let mut s = Self {
             enabled: flag(map, "adaptive_load_enabled", d.enabled),
-            process_soft_mb: num(map, "load_process_soft_mb", d.process_soft_mb),
-            process_hard_mb: num(map, "load_process_hard_mb", d.process_hard_mb),
-            process_pause_mb: num(map, "load_process_pause_mb", d.process_pause_mb),
+            process_soft_pct: num(map, "load_process_soft_pct", d.process_soft_pct),
+            process_hard_pct: num(map, "load_process_hard_pct", d.process_hard_pct),
+            process_pause_pct: num(map, "load_process_pause_pct", d.process_pause_pct),
             system_soft_pct: num(map, "load_system_soft_pct", d.system_soft_pct),
             system_hard_pct: num(map, "load_system_hard_pct", d.system_hard_pct),
             system_pause_pct: num(map, "load_system_pause_pct", d.system_pause_pct),
@@ -189,8 +196,11 @@ impl LoadSettings {
             upgrade_samples: num(map, "load_upgrade_samples", d.upgrade_samples as u64).clamp(1, 720) as u32,
         };
         // Keep the ladder monotonic even if the user typed nonsense.
-        s.process_hard_mb = s.process_hard_mb.max(s.process_soft_mb);
-        s.process_pause_mb = s.process_pause_mb.max(s.process_hard_mb);
+        s.process_hard_pct = s.process_hard_pct.max(s.process_soft_pct);
+        s.process_pause_pct = s.process_pause_pct.max(s.process_hard_pct);
+        s.process_soft_pct = s.process_soft_pct.min(95);
+        s.process_hard_pct = s.process_hard_pct.min(96);
+        s.process_pause_pct = s.process_pause_pct.min(97);
         s.system_hard_pct = s.system_hard_pct.max(s.system_soft_pct);
         s.system_pause_pct = s.system_pause_pct.max(s.system_hard_pct);
         s.soft_page_window = s.soft_page_window.clamp(1, MAX_PAGE_WINDOW);
@@ -207,11 +217,13 @@ impl LoadSettings {
         if !self.enabled {
             return Level::Normal;
         }
-        let proc = if sample.process_ws_mb >= self.process_pause_mb {
+        let total = sample.total_mb.max(1);
+        let pct_of = |p: u64| total.saturating_mul(p) / 100;
+        let proc = if sample.process_ws_mb >= pct_of(self.process_pause_pct) {
             Some(Level::Paused)
-        } else if sample.process_ws_mb >= self.process_hard_mb {
+        } else if sample.process_ws_mb >= pct_of(self.process_hard_pct) {
             Some(Level::Hard)
-        } else if sample.process_ws_mb >= self.process_soft_mb {
+        } else if sample.process_ws_mb >= pct_of(self.process_soft_pct) {
             Some(Level::Soft)
         } else {
             None
@@ -520,7 +532,11 @@ pub fn sample() -> Sample {
         }
         None => 0,
     };
-    Sample { process_ws_mb, system_used_pct }
+    Sample {
+        process_ws_mb,
+        system_used_pct,
+        total_mb: total / 1024 / 1024,
+    }
 }
 
 /// Load the settings row map from the DB (missing keys fall back to defaults).
@@ -583,15 +599,16 @@ pub fn start_supervisor(db: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
                     let after = settings.limits_for(next);
                     apply_level(next, &settings);
                     log::info!(
-                        "[LOAD] 档位 {} → {}（本进程 {:.1}GB，系统已用 {}%，阈值 {}/{}/{}MB 与 {}/{}/{}%）\
+                        "[LOAD] 档位 {} → {}（本进程 {:.1}GB / 物理 {:.0}GB，系统已用 {}%；阈值 进程 {}/{}/{}%，系统 {}/{}/{}%）\
                          ：页窗口 {}→{}，OCR 许可 {}→{}，并发文档 {}→{}",
                         current.as_label(),
                         next.as_label(),
                         s.process_ws_mb as f64 / 1024.0,
+                        s.total_mb as f64 / 1024.0,
                         s.system_used_pct,
-                        settings.process_soft_mb,
-                        settings.process_hard_mb,
-                        settings.process_pause_mb,
+                        settings.process_soft_pct,
+                        settings.process_hard_pct,
+                        settings.process_pause_pct,
                         settings.system_soft_pct,
                         settings.system_hard_pct,
                         settings.system_pause_pct,
@@ -652,32 +669,33 @@ mod tests {
         LoadSettings::default()
     }
 
+    /// 32GB 机器 → 进程阈值 40/55/70% = 13,107 / 18,022 / 22,937MB
     fn sample(ws_mb: u64, pct: u64) -> Sample {
-        Sample { process_ws_mb: ws_mb, system_used_pct: pct }
+        Sample { process_ws_mb: ws_mb, system_used_pct: pct, total_mb: 32768 }
     }
 
     #[test]
     fn classify_is_normal_when_everything_is_calm() {
         let s = settings();
         assert_eq!(s.classify(&sample(1000, 30)), Level::Normal);
-        assert_eq!(s.classify(&sample(5999, 84)), Level::Normal);
+        assert_eq!(s.classify(&sample(13000, 84)), Level::Normal);
     }
 
     #[test]
     fn classify_degrades_on_either_signal() {
         let s = settings();
-        assert_eq!(s.classify(&sample(6000, 30)), Level::Soft, "进程软阈值");
+        assert_eq!(s.classify(&sample(13107, 30)), Level::Soft, "进程软阈值（40% of 32GB）");
         assert_eq!(s.classify(&sample(1000, 85)), Level::Soft, "系统软阈值");
-        assert_eq!(s.classify(&sample(8600, 30)), Level::Hard, "进程硬阈值");
+        assert_eq!(s.classify(&sample(18022, 30)), Level::Hard, "进程硬阈值（55%）");
         assert_eq!(s.classify(&sample(1000, 91)), Level::Hard, "系统硬阈值");
-        assert_eq!(s.classify(&sample(10600, 10)), Level::Paused, "进程暂停阈值");
+        assert_eq!(s.classify(&sample(22937, 10)), Level::Paused, "进程暂停阈值（70%）");
         assert_eq!(s.classify(&sample(10, 96)), Level::Paused, "系统暂停阈值");
     }
 
     #[test]
     fn classify_uses_the_worst_signal() {
         let s = settings();
-        assert_eq!(s.classify(&sample(9999, 30)), Level::Hard);
+        assert_eq!(s.classify(&sample(19000, 30)), Level::Hard);
         assert_eq!(s.classify(&sample(10, 99)), Level::Paused);
     }
 
@@ -709,16 +727,17 @@ mod tests {
     #[test]
     fn settings_map_parses_and_clamps_nonsense() {
         let mut map = std::collections::HashMap::new();
-        map.insert("load_process_soft_mb".to_string(), "9000".to_string());
-        map.insert("load_process_hard_mb".to_string(), "500".to_string()); // inverted
+        map.insert("load_process_soft_pct".to_string(), "70".to_string());
+        map.insert("load_process_hard_pct".to_string(), "20".to_string()); // inverted
         map.insert("load_soft_ocr_permits".to_string(), "999".to_string()); // absurd
         map.insert("load_hard_ocr_permits".to_string(), "7".to_string());
         map.insert("adaptive_load_enabled".to_string(), "0".to_string());
         map.insert("load_sample_secs".to_string(), "0".to_string());
         let s = LoadSettings::from_map(&map);
         assert!(!s.enabled);
-        assert!(s.process_hard_mb >= s.process_soft_mb, "硬阈值必须 ≥ 软阈值");
-        assert!(s.process_pause_mb >= s.process_hard_mb);
+        assert!(s.process_hard_pct >= s.process_soft_pct, "硬阈值必须 ≥ 软阈值");
+        assert!(s.process_pause_pct >= s.process_hard_pct);
+        assert!(s.process_soft_pct <= 95, "软阈值不得离谱到无法触发系统信号");
         assert!(s.soft_ocr_permits <= MAX_OCR_PERMITS);
         assert!(s.hard_ocr_permits <= s.soft_ocr_permits, "硬档不得高于软档");
         assert!(s.sample_secs >= 1);
@@ -728,7 +747,7 @@ mod tests {
     fn degrade_immediately_recover_slowly() {
         let s = LoadSettings { upgrade_samples: 3, ..settings() };
         // 正常 → 硬：一步到位，不留缓冲
-        let (lvl, streak) = next_level(Level::Normal, &sample(9000, 20), &s, 0);
+        let (lvl, streak) = next_level(Level::Normal, &sample(19000, 20), &s, 0);
         assert_eq!(lvl, Level::Hard);
         assert_eq!(streak, 0);
         // 硬 → 正常：必须连续多个平静样本，且每次只升一档
@@ -749,7 +768,7 @@ mod tests {
         let (lvl, streak) = next_level(Level::Hard, &sample(100, 20), &s, 0);
         assert_eq!(streak, 1);
         // 刚平静一次又回到硬档阈值 → 计数清零、不升档
-        let (lvl, streak) = next_level(lvl, &sample(8600, 20), &s, streak);
+        let (lvl, streak) = next_level(lvl, &sample(19000, 20), &s, streak);
         assert_eq!(lvl, Level::Hard, "仍在硬档压力下不得升档");
         assert_eq!(streak, 0, "计数必须清零");
     }
@@ -757,7 +776,7 @@ mod tests {
     #[test]
     fn pause_escalates_and_recovers_in_steps() {
         let s = settings();
-        let (lvl, _) = next_level(Level::Soft, &sample(11000, 20), &s, 0);
+        let (lvl, _) = next_level(Level::Soft, &sample(23000, 20), &s, 0);
         assert_eq!(lvl, Level::Paused, "暂停阈值直达");
         let (lvl, _) = next_level(lvl, &sample(10, 10), &s, s.upgrade_samples);
         assert_eq!(lvl, Level::Hard, "恢复只升一档");
@@ -831,6 +850,7 @@ mod tests {
     fn sampling_reads_plausible_numbers() {
         let s = super::sample();
         assert!(s.process_ws_mb > 0, "本进程 WS 应当可读，实测 {}", s.process_ws_mb);
+        assert!(s.total_mb > 1024, "物理内存应当可读，实测 {}MB", s.total_mb);
         assert!(s.system_used_pct <= 100);
     }
 }

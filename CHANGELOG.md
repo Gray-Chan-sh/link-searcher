@@ -16,8 +16,9 @@
   **降快升慢**：恶化立即降档（可一步到暂停）；恢复需连续 `load_upgrade_samples`（默认 12 次 ≈ 1 分钟）平静才升**一档**，防抖动。每次变化打一条可归因日志：
   `[LOAD] 档位 正常 → 软降级（本进程 6.3GB，系统已用 87%，阈值 …）：页窗口 4→2，OCR 许可 8→4，并发文档 不限→6`
 - **绝不静默丢正文**：页派发被暂停打断时递增 `pause_epoch`，`extract_and_index_single` 结束前比对世代号——变了就**判失败、稍后重试**，绝不把"只 OCR 了一半"的内容当成功写进索引（对应上面第 ③ 种失败）。
+- **阈值按物理内存百分比**（默认 进程 40/55/70%、系统 85/90/95%）：实测 3 篇大扫描件并行时**本进程 8.8GB、峰值 10.2GB**，而 31.4GB 机器当时仍有 **12GB 空闲**——若用固定 MB 阈值，会在"其实很健康"的机器上误降档；百分比随本机容量自动缩放（16GB 机器 → 6.4/8.8/11.2GB），另有系统级信号兜底。
 - **执行器**（只降并发，**不动图像分辨率**，不牺牲识别质量）：`run_pages_windowed` 派发前读 `load::page_window()`（原 `PAGE_OCR_WINDOW` 常量降为默认值/上限）；`paddleocr::with_engine` 每次推理前取 OCR 许可；`indexer` 两条入口（批处理 `par_iter`、`index_file`）**在取 DB 连接之前**取文档许可——放在连接之后会把连接池占满，正是此前 55 次 `DB conn: timed out waiting for connection` 的成因。
-- **设置与可观测**：15 个键进 `app_settings`（阈值 / 采样间隔 / 恢复样本数 / 各档并发数），**改完即时生效**（采样线程每轮重读设置）；设置页新增「自适应并发（内存压力）」分组（开关 + 进程软/硬/暂停 MB + 系统软/硬/暂停 %）；索引状态页与 Web API `/api/index/status` 增加 `load_level`/`load_page_window`/`load_ocr_permits`/`load_doc_permits`；支持 `LINK_SEARCHER_LOAD_FORCE=normal|soft|hard|paused` 手工压档（验证/运维用）。
+- **设置与可观测**：15 个键进 `app_settings`（阈值 / 采样间隔 / 恢复样本数 / 各档并发数），**改完即时生效**（采样线程每轮重读设置）；设置页新增「自适应并发（内存压力）」分组（开关 + 本进程占物理内存软/硬/暂停 % + 系统已用软/硬/暂停 %）；索引状态页与 Web API `/api/index/status` 增加 `load_level`/`load_page_window`/`load_ocr_permits`/`load_doc_permits`；支持 `LINK_SEARCHER_LOAD_FORCE=normal|soft|hard|paused` 手工压档（验证/运维用）。
 - **测试**：`load.rs` 新增 10 个单测（分级取最差信号、阈值倒置与离谱值的夹紧、降快升慢与计数清零、许可闸门暂停时阻塞/恢复后放行、文档许可上限与释放）；闸门测试用**局部 Gate 实例**，避免并行测试互相干扰（实测会被别的用例的 `apply_level` 放行）。`cargo test --lib` **537 passed**（1 例 `ai::tests::gateways_unconfigured_report_not_ok` 在全量并行下偶发失败、单独重跑通过，与本改动无关）；`npx tsc -b` 0 错误；`semgrep --severity ERROR` **0 findings**。
 - ⚠️ **需重启应用生效**。
 - **涉及文件**：`src-tauri/src/load.rs`（新）、`indexer.rs`、`lib.rs`、`db/mod.rs`、`commands/settings.rs`、`commands/index.rs`、`extractor/pdf.rs`、`extractor/pdf/ocr.rs`、`extractor/paddleocr.rs`、`webapi/routes/index.rs`、`Cargo.toml`；前端 `pages/Settings.tsx`、`pages/IndexStatus.tsx`、`components/settings/IndexTab.tsx`、`api/index.ts`、`api/client.ts`、`i18n/{zh,en,ja,ko}.ts`。
