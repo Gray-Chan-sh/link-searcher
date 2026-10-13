@@ -301,28 +301,19 @@ impl IndexerService {
             // 一条路），否则 content_index.ocr_used 对 PDF 永远是 0，质量审计
             // 与"哪些文件是 OCR 出来的"统计全部失真。
             let ocr_used = extracted.1.ocr_used || ocr_used;
-            if let Err(e) = crate::db::tracker::store_content_with_quality(
-                conn,
-                &hash,
-                &extracted.0,
-                ocr_used,
-                None,
-                Some(&quality),
-            ) {
-                log::warn!("[INDEX] store_content retry for {}: {e}", job.file_id);
-                if let Err(e2) = crate::db::tracker::store_content_with_quality(
+            if retry_busy("store_content", &job.file_id, || {
+                crate::db::tracker::store_content_with_quality(
                     conn,
                     &hash,
                     &extracted.0,
                     ocr_used,
                     None,
                     Some(&quality),
-                ) {
-                    log::warn!(
-                        "[INDEX] store_content retry FAILED for {}: {e2} (quality 将丢失，backfill 可补回)",
-                        job.file_id
-                    );
-                }
+                )
+            })
+            .is_none()
+            {
+                log::warn!("[INDEX] {}: 内容未落库（quality 将丢失，backfill 可补回）", job.file_id);
             }
             extracted.0
         };
@@ -340,8 +331,12 @@ impl IndexerService {
             match crate::db::chunks::get_chunks(conn, &hash) {
                 Ok(existing) if existing.is_empty() => {
                     let chunks = crate::db::chunks::chunk_text(&text);
-                    if let Err(e) = crate::db::chunks::replace_chunks(conn, &hash, &chunks) {
-                        log::warn!("[INDEX] doc_chunks write failed {}: {e}", job.file_id);
+                    if retry_busy("replace_chunks", &job.file_id, || {
+                        crate::db::chunks::replace_chunks(conn, &hash, &chunks)
+                    })
+                    .is_none()
+                    {
+                        log::warn!("[INDEX] {}: doc_chunks 未写入", job.file_id);
                     }
                 }
                 Ok(_) => {}
@@ -352,12 +347,15 @@ impl IndexerService {
         }
 
         // CRITICAL: mark_extracted must succeed for Phase 1 progress visibility.
-        // If SQLite is busy (parallel writes), retry once.
-        if let Err(e) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
-            log::warn!("[INDEX] mark_extracted retry for {}: {e}", job.file_id);
-            if let Err(e2) = crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash)) {
-                log::warn!("[INDEX] mark_extracted retry FAILED for {}: {e2} (Phase 1 进度将不可见，下次扫描会重试)", job.file_id);
-            }
+        if retry_busy("mark_extracted", &job.file_id, || {
+            crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash))
+        })
+        .is_none()
+        {
+            log::warn!(
+                "[INDEX] {}: Phase 1 进度将不可见（下次扫描会重试）",
+                job.file_id
+            );
         }
 
         Ok(ExtractedData {
@@ -981,6 +979,33 @@ impl IndexerService {
     }
 }
 
+/// Retry a DB write that races with the other parallel writers (the batch
+/// extractor's 8–14 threads plus the embedding keepers).
+///
+/// A single *immediate* retry just hits the same `SQLITE_BUSY`: measured 7/7
+/// `mark_extracted` retries and 15/22 `store_content` retries failing while a
+/// scan overlapped the chunk keeper. Back off briefly between attempts instead.
+///
+/// Returns `None` when every attempt failed; the caller logs the consequence.
+fn retry_busy<T>(what: &str, file_id: &str, mut op: impl FnMut() -> Result<T>) -> Option<T> {
+    const ATTEMPTS: u32 = 3;
+    let mut delay = std::time::Duration::from_millis(50);
+    for attempt in 1..=ATTEMPTS {
+        match op() {
+            Ok(v) => return Some(v),
+            Err(e) if attempt == ATTEMPTS => {
+                log::warn!("[INDEX] {what} 连续 {ATTEMPTS} 次失败 {file_id}: {e}");
+            }
+            Err(e) => {
+                log::warn!("[INDEX] {what} 重试 {attempt}/{ATTEMPTS} {file_id}: {e}");
+                std::thread::sleep(delay);
+                delay *= 4;
+            }
+        }
+    }
+    None
+}
+
 fn is_plausible_text_fallback(text: &str, file_ext: &str) -> bool {
     if text.is_empty() {
         return false;
@@ -1373,6 +1398,29 @@ mod tests {
         assert_eq!(top.len(), 0, "deleted doc should not be found");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 并发写竞争下的重试要有**退避**：立即重试会撞同一把锁（实测 7/7、15/22 失败）。
+    #[test]
+    fn retry_busy_backs_off_then_gives_up() {
+        let mut n = 0;
+        let ok = retry_busy("unit", "f1", || -> Result<u8> {
+            n += 1;
+            if n < 3 {
+                anyhow::bail!("database is locked");
+            }
+            Ok(7)
+        });
+        assert_eq!(ok, Some(7), "前两次失败后第三次应成功");
+        assert_eq!(n, 3);
+
+        let mut k = 0;
+        let failed: Option<u8> = retry_busy("unit", "f2", || -> Result<u8> {
+            k += 1;
+            anyhow::bail!("database is locked")
+        });
+        assert!(failed.is_none(), "一直失败要返回 None");
+        assert_eq!(k, 3, "最多尝试 3 次");
     }
 
     #[test]

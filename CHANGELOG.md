@@ -1,5 +1,16 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：缓解提取与回填并发时的 SQLite 写竞争
+
+- **现象**（实测本会话）：扫描与 chunk 回填并发时，`mark_extracted` 重试 **7/7 全部失败**、`store_content` 重试 **15/22 失败**、`doc_chunks write failed` 3 次，另有 `store_content retry` 22 次。
+- **根因**：14 个提取线程 + chunk keeper（~2.4 块/s）同时写库；`busy_timeout=5000`，且**重试是立即重试**（等于撞同一把锁）。
+- **后果**：少数文件内容行未落库（拿不到语义向量，且下次 verify 会把它们当"空内容"重做）；`mark_extracted` 失败的行留 `indexed=0`，下次扫描重复提取。
+- **修复**：
+  1. `PRAGMA busy_timeout` 5000 → **15000**（写都是短事务，等待成本可忽略，避免直接失败）；
+  2. 新增 `retry_busy()`（50ms → 200ms 退避、最多 3 次），`store_content` / `replace_chunks` / `mark_extracted` 三处统一改用（原先是"立即重试一次"）。
+- **测试**：新增 `retry_busy_backs_off_then_gives_up`（两次失败后成功；一直失败最多尝试 3 次）；`cargo test --lib` **518 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`db/mod.rs`、`indexer.rs`。
+
 ## 2026-10-13：修复回填进度分母（出现 48/24 这类 >100% 读数）
 
 - **现象**：扫描期间日志/UI 出现 `回填进度: 33/24`、`48/24`——分子超过分母。

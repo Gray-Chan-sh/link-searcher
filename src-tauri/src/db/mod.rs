@@ -29,7 +29,7 @@ impl CustomizeConnection<Connection, rusqlite::Error> for PragmaCustomizer {
              PRAGMA temp_store=MEMORY;\
              PRAGMA wal_autocheckpoint=1000;\
              PRAGMA journal_size_limit=67108864;\
-             PRAGMA busy_timeout=5000;",
+             PRAGMA busy_timeout=15000;",
         )
     }
 }
