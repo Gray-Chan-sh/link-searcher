@@ -403,7 +403,9 @@ fn mark_failed_after_reindex(
 ) {
     match pool.get() {
         Ok(conn) => {
-            if let Err(e) = tracker::mark_failed(&conn, file_id, &format!("重建索引失败: {err}")) {
+            if let Err(e) =
+                tracker::mark_failed_retry(&conn, file_id, &format!("重建索引失败: {err}"))
+            {
                 log::warn!("[INDEX] {rel_path}: 标记失败态失败: {e}");
             }
         }

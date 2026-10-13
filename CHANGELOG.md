@@ -1,5 +1,14 @@
 # Link-Searcher 变更日志
 
+## 2026-10-13：删除后再清一次孤儿；mark_failed 加一次重试
+
+- **① 删除期间残留的孤儿块向量（实测每次约 150 行 / 8 个 md5 / 0.6 MB）**：删除目录时 **chunk keeper 仍在运行**（用的是 purge **之前**的 `doc_chunks` 快照），会把已被清掉内容的块向量重新写回；而那次 sweep 已经跑完，于是留下无人引用的 `chunk_embeddings`（无害，下一次启动才被清）。
+  - 修复：`remove_dir` 在**续扫结束之后再跑一次 `sweep_orphan_dirs`**（孤儿目录 + md5 键的内容/块向量 + `file_id` 键的向量/摘要）。keeper 可能仍在排空，所以这是尽力而为；**启动清理仍是最终保证**（代码注释已写明）。
+- **② 降级偶发失败导致多跑一轮 heal**：实测 `标记失败态失败: mark_failed failed`（SQLite 忙），该行多留一轮 indexed=1，heal 需要再跑一次才收敛。
+  - 修复：新增 `tracker::mark_failed_retry`（失败后 120 ms 重试一次，与 `mark_extracted` 既有做法一致）；`mark_failed_after_reindex`、heal 的 `downgrade`、verify 的失败分支统一改用。
+- **测试**：`cargo test --lib` **517 项全过**；`semgrep --severity ERROR` 0 findings。
+- **涉及文件**：`commands/dirs.rs`、`commands/index.rs`、`commands/index/integrity.rs`、`commands/index/verify.rs`、`db/tracker.rs`。
+
 ## 2026-10-13：追出「Tantivy 反复缺 1 份」的元凶 —— 先删文档、重建失败后不改状态
 
 - **根因（已定位到具体文件）**：`verify` 处理「空内容」文件时会**先删掉它的 Tantivy 文档**（`delete_document_only`）再重建；重建失败时只 `log` + 计数，**行仍留在 `indexed=1`** → DB 声称一份索引里并不存在的文档 → 下一轮 heal 报「缺失 1 份」、重灌、再失败、再报……

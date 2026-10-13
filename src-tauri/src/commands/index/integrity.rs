@@ -165,7 +165,7 @@ pub(crate) fn run_index_integrity_heal(
     fn downgrade(conn: &rusqlite::Connection, file_id: &str, rel_path: &str, reason: &str) {
         log::warn!("[HEAL] {rel_path}: 无法恢复，标记失败态（{reason}）");
         if let Err(e) =
-            crate::db::tracker::mark_failed(conn, file_id, &format!("完整性自愈失败: {reason}"))
+            crate::db::tracker::mark_failed_retry(conn, file_id, &format!("完整性自愈失败: {reason}"))
         {
             log::warn!("[HEAL] {file_id}: 标记失败态失败: {e}");
         }

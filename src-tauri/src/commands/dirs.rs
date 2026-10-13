@@ -308,6 +308,17 @@ pub async fn remove_dir(
             .map_err(|e| format!("resume scan task failed: {e}"))?;
     }
 
+    // ⑥ 收尾（二次）：删除期间嵌入 keeper 可能仍在用 purge 之前的快照写块向量
+    //    （实测每次删除会残留 ~150 行无人引用的 chunk_embeddings）。续扫结束后
+    //    再清一次孤儿。keeper 可能仍在排空，所以这是尽力而为；启动清理是最终保证。
+    let indexer_final = state.indexer.clone();
+    match tokio::task::spawn_blocking(move || indexer_final.sweep_orphan_dirs()).await {
+        Ok(Ok(n)) if n > 0 => log::info!("[DIRS] 收尾清理了 {n} 个残留目录的数据"),
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => log::warn!("[DIRS] 收尾清理失败: {e}"),
+        Err(e) => log::warn!("[DIRS] 收尾清理任务失败: {e}"),
+    }
+
     log::info!(
         "[DIRS] 移除目录 {id}（purge={purge}, 停止扫描={stopped_scan}, sweep={swept_orphan_dirs}, 续扫={resumed_scan}）"
     );

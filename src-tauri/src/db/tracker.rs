@@ -493,6 +493,24 @@ pub fn mark_failed(conn: &Connection, file_id: &str, error: &str) -> Result<()> 
     Ok(())
 }
 
+/// [`mark_failed`] with one retry.
+///
+/// The indexer, the embedding keepers and the integrity heal all write
+/// concurrently, so a single `SQLITE_BUSY` would leave the row in the wrong
+/// state — observed in the field as `标记失败态失败: mark_failed failed`, which
+/// cost a whole extra heal round. Mirrors the retry `mark_extracted` already has.
+pub fn mark_failed_retry(conn: &Connection, file_id: &str, error: &str) -> Result<()> {
+    match mark_failed(conn, file_id, error) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            log::warn!("[DB] mark_failed retry for {file_id}: {first}");
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            mark_failed(conn, file_id, error)
+                .map_err(|second| anyhow::anyhow!("mark_failed failed twice: {first}; {second}"))
+        }
+    }
+}
+
 pub fn mark_extracted(conn: &Connection, file_id: &str, md5: Option<&str>) -> Result<()> {
     let n = conn
         .execute(
