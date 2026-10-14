@@ -270,9 +270,9 @@ pub(super) fn run_pdf_ocr_pipeline(
 
         let pass_secs = pass_t0.elapsed().as_secs_f64().max(0.001);
         log::info!(
-            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}",
+            "[PDF] {:?}: per-page OCR completed: attempted {}/{} pages, got text for {} pages, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}, paused={}",
             path.file_name(), outcome.attempted, page_count, ocr_pages.len(),
-            pass_secs, ocr_pages.len() as f64 * 60.0 / pass_secs, outcome.peak_concurrency, outcome.stalled
+            pass_secs, ocr_pages.len() as f64 * 60.0 / pass_secs, outcome.peak_concurrency, outcome.stalled, outcome.paused
         );
 
         if !ocr_pages.is_empty() {
@@ -713,13 +713,14 @@ pub fn ocr_pdf_via_pdfimages(
         let got = outcome.texts.iter().filter(|t| t.is_some()).count();
         let secs = pass_t0.elapsed().as_secs_f64().max(0.001);
         log::info!(
-            "[PDF] {name:?}: rendered-page OCR completed: {}/{} pages with text, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}",
+            "[PDF] {name:?}: rendered-page OCR completed: {}/{} pages with text, {:.1}s ({:.1} pages/min), peak concurrency {}, stalled={}, paused={}",
             got,
             render_pages.len(),
             secs,
             got as f64 * 60.0 / secs,
             outcome.peak_concurrency,
-            outcome.stalled
+            outcome.stalled,
+            outcome.paused
         );
     }
     for (slot, text) in outcome.texts.into_iter().enumerate() {

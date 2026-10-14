@@ -44,13 +44,14 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     }
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
-        // Phase-1 batch extraction holds a connection for the whole extraction
-        // (including minutes of OCR), and its concurrency is 12 — so 12 alone
-        // leaves no headroom for the scanner, watcher, embedding backfill, or
-        // UI queries, which then fail with "timed out waiting for connection".
-        // Keep a 2× margin.
-        .max_size(24)
-        .connection_timeout(std::time::Duration::from_secs(30))
+        // 实测（2026-10-14 小城 XC 全量重建）：Phase-1 提取 worker 在整个提取期持有连接
+        // （含几分钟的 OCR），并发 14，加上 embedding keeper、Web API、自适应采样线程与
+        // 扫描/监控线程后，24 个连接**不够**——本轮出现 **108 次**
+        // "DB conn: timed out waiting for connection"，并直接造成 **108 个文件失败**。
+        // 提到 48（≈3× 提取并发）并把等待上限从 30s 放宽到 60s：让等不到的线程"等"而不是
+        // "失败"（超时即判失败是这轮 60% 失败的成因）。
+        .max_size(48)
+        .connection_timeout(std::time::Duration::from_secs(60))
         .connection_customizer(Box::new(PragmaCustomizer))
         .build(manager)
         .context("failed to create connection pool")?;
@@ -555,7 +556,8 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("load_hard_ocr_permits", "2"),
         ("load_hard_doc_permits", "4"),
         ("load_sample_secs", "5"),
-        ("load_upgrade_samples", "12"),
+        ("load_upgrade_samples", "24"),
+        ("load_recovery_margin_pct", "5"),
         ("embed_parallelism", "0"),
         ("embed_adaptive", "1"),
         ("scheduled_scan_time", "02:00"),

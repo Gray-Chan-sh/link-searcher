@@ -26,6 +26,7 @@ const ALLOWED_KEYS: &[&str] = &[
     "load_hard_doc_permits",
     "load_sample_secs",
     "load_upgrade_samples",
+    "load_recovery_margin_pct",
     "max_results",
     "exclude_patterns",
     "scan_time",

@@ -76,15 +76,6 @@ impl Level {
         }
     }
 
-    fn worse(self) -> Self {
-        match self {
-            Level::Normal => Level::Soft,
-            Level::Soft => Level::Hard,
-            Level::Hard => Level::Paused,
-            Level::Paused => Level::Paused,
-        }
-    }
-
     fn better(self) -> Self {
         match self {
             Level::Normal => Level::Normal,
@@ -136,6 +127,10 @@ pub struct LoadSettings {
     pub sample_secs: u64,
     /// Consecutive calm samples required before stepping one level back up.
     pub upgrade_samples: u32,
+    /// Hysteresis band: a sample must be this many percentage points *better*
+    /// than the current level's threshold to count as "calm" (prevents the
+    /// level from flapping around a threshold — measured 59 switches in one run).
+    pub recovery_margin_pct: u64,
 }
 
 impl Default for LoadSettings {
@@ -148,12 +143,15 @@ impl Default for LoadSettings {
             system_soft_pct: 85,
             system_hard_pct: 90,
             system_pause_pct: 95,
-            soft_page_window: 2,
-            soft_ocr_permits: 4,
+            soft_page_window: 3,
+            soft_ocr_permits: 8,
             soft_doc_permits: 6,
-            hard_page_window: 1,
-            hard_ocr_permits: 2,
+            hard_page_window: 2,
+            hard_ocr_permits: 6,
             hard_doc_permits: 4,
+            // 回滞带：只有样本明显优于当前档阈值（低 margin 个百分点）才允许升档，
+            // 否则会像实测那样在阈值上下反复切换（本轮 59 次）。
+            recovery_margin_pct: 5,
             sample_secs: 5,
             upgrade_samples: 12,
         }
@@ -194,6 +192,7 @@ impl LoadSettings {
             hard_doc_permits: num(map, "load_hard_doc_permits", d.hard_doc_permits as u64) as usize,
             sample_secs: num(map, "load_sample_secs", d.sample_secs).clamp(1, 600),
             upgrade_samples: num(map, "load_upgrade_samples", d.upgrade_samples as u64).clamp(1, 720) as u32,
+            recovery_margin_pct: num(map, "load_recovery_margin_pct", d.recovery_margin_pct).min(30),
         };
         // Keep the ladder monotonic even if the user typed nonsense.
         s.process_hard_pct = s.process_hard_pct.max(s.process_soft_pct);
@@ -214,11 +213,19 @@ impl LoadSettings {
 
     /// Which level this sample implies (worst signal wins).
     pub fn classify(&self, sample: &Sample) -> Level {
+        self.classify_with_margin(sample, 0)
+    }
+
+    /// Classify with a hysteresis margin: every threshold is relaxed by `margin`
+    /// percentage points, so a sample must be *clearly* below a threshold to be
+    /// considered calm. Used for the upgrade decision only.
+    pub fn classify_with_margin(&self, sample: &Sample, margin: u64) -> Level {
         if !self.enabled {
             return Level::Normal;
         }
         let total = sample.total_mb.max(1);
-        let pct_of = |p: u64| total.saturating_mul(p) / 100;
+        let pct_of = |p: u64| total.saturating_mul(p.saturating_sub(margin).max(1)) / 100;
+        let sys_of = |p: u64| p.saturating_sub(margin).max(1);
         let proc = if sample.process_ws_mb >= pct_of(self.process_pause_pct) {
             Some(Level::Paused)
         } else if sample.process_ws_mb >= pct_of(self.process_hard_pct) {
@@ -228,11 +235,11 @@ impl LoadSettings {
         } else {
             None
         };
-        let sys = if sample.system_used_pct >= self.system_pause_pct {
+        let sys = if sample.system_used_pct >= sys_of(self.system_pause_pct) {
             Some(Level::Paused)
-        } else if sample.system_used_pct >= self.system_hard_pct {
+        } else if sample.system_used_pct >= sys_of(self.system_hard_pct) {
             Some(Level::Hard)
-        } else if sample.system_used_pct >= self.system_soft_pct {
+        } else if sample.system_used_pct >= sys_of(self.system_soft_pct) {
             Some(Level::Soft)
         } else {
             None
@@ -290,11 +297,15 @@ pub fn page_window_default() -> usize {
 }
 
 /// Default OCR concurrency: the engine pool size (one engine per core, max 8).
+///
+/// Must mirror `extractor::paddleocr`'s `available_parallelism().clamp(1, 8)` —
+/// it used to clamp to 16, so the status API/logs advertised 12 permits on a
+/// 12-core box while the pool only ever had 8 engines.
 pub fn ocr_permits_default() -> usize {
     std::thread::available_parallelism()
         .map(|p| p.get())
         .unwrap_or(2)
-        .clamp(1, MAX_OCR_PERMITS)
+        .clamp(1, 8)
 }
 
 /// Absolute ceilings, so a bad setting cannot make the app explode.
@@ -318,8 +329,16 @@ pub fn next_level(
         return (target, 0);
     }
     if target < current {
-        // Calm again: only step back up one level at a time, and only after
-        // the streak, so a transient dip cannot cause flapping.
+        // Calm again: only step back up one level at a time, and only after the
+        // streak. The **hysteresis band** matters here: the sample must be
+        // clearly below the current level's threshold (by `recovery_margin_pct`)
+        // — otherwise a value hovering exactly at the threshold flips the level
+        // back and forth (measured: 59 switches in one run, each one halving the
+        // page window and OCR permits).
+        let relaxed = settings.classify_with_margin(sample, settings.recovery_margin_pct);
+        if relaxed >= current {
+            return (current, 0);
+        }
         let streak = calm_streak + 1;
         if streak >= settings.upgrade_samples {
             return (current.better(), 0);
@@ -391,6 +410,7 @@ impl Gate {
     }
 
     fn acquire(&self, kind: Kind) -> Permit<'_> {
+        let deadline = Instant::now() + Duration::from_secs(30);
         let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let max = match kind {
@@ -409,6 +429,14 @@ impl Gate {
             }
             if max > 0 && in_use.load(Ordering::Relaxed) < max {
                 in_use.fetch_add(1, Ordering::Relaxed);
+                return Permit { gate: self, kind };
+            }
+            // 等太久必须放行：阻塞式闸门曾把一个"卡住的文档"放大成整条流水线停摆
+            // （2026-10-14 实测：Hard 档 4 个文档许可被占满 → 25 分钟零进展）。
+            // 放行时同样计数（drop 时会减回去），并把这件事记进日志。
+            if Instant::now() >= deadline {
+                in_use.fetch_add(1, Ordering::Relaxed);
+                log::warn!("[LOAD] 并发闸门等待超过 30s → 强制放行（防止死锁，闸门被卡住时不应拖死全局）");
                 return Permit { gate: self, kind };
             }
             let (g, _timeout) = self
@@ -561,17 +589,20 @@ pub fn start_supervisor(db: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) {
             let mut current = Level::Normal;
             let mut streak: u32 = 0;
             let mut announced: Option<(Level, Limits)> = None;
+            let mut settings = LoadSettings::default();
+            let mut ticks: u32 = 0;
             loop {
-                let conn = match db.get() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        log::warn!("[LOAD] 读取设置失败（连接池）: {e}");
-                        std::thread::sleep(Duration::from_secs(30));
-                        continue;
+                // 设置每 ~60s 重读一次（12 × 采样间隔）：实测每 5s 读一次会与提取
+                // 流水线抢连接池（本轮 47 次 "读取设置失败（连接池）"）。压力采样仍每轮都做。
+                if ticks.is_multiple_of(12) {
+                    match db.get() {
+                        Ok(conn) => {
+                            settings = read_settings(&conn);
+                        }
+                        Err(e) => log::warn!("[LOAD] 读取设置失败（沿用上次的值）: {e}"),
                     }
-                };
-                let settings = read_settings(&conn);
-                drop(conn);
+                }
+                ticks = ticks.wrapping_add(1);
 
                 if let Some(forced) = forced_level() {
                     // Manual override (tests / ops): keep the gate pinned there.
@@ -714,9 +745,11 @@ mod tests {
         let paused = s.limits_for(Level::Paused);
 
         assert!(soft.page_window < n.page_window);
-        assert!(hard.page_window <= soft.page_window);
-        assert!(soft.ocr_permits < n.ocr_permits);
-        assert!(hard.ocr_permits <= soft.ocr_permits);
+        assert!(hard.page_window < soft.page_window);
+        // OCR 许可：软档现在等于正常档（8 = 引擎池上限，实测降到 4 会白吃 ~30% 吞吐），
+        // 所以只要求"不高于"；硬档必须真的更小。
+        assert!(soft.ocr_permits <= n.ocr_permits);
+        assert!(hard.ocr_permits < soft.ocr_permits);
         assert!(hard.ocr_permits >= 1, "硬档也不能为 0（0 表示暂停）");
         assert_eq!(n.doc_permits, 0, "正常档不限制在飞文档");
         assert!(soft.doc_permits > hard.doc_permits);
@@ -844,6 +877,17 @@ mod tests {
         let _b = g.acquire(Kind::Doc);
         let _c = g.acquire(Kind::Doc);
         assert_eq!(g.page_window.load(Ordering::Relaxed), page_window_default());
+    }
+
+    #[test]
+    fn hysteresis_band_stops_flapping_at_the_threshold() {
+        // 32GB 机器、进程阈值 40/55/70%、回滞带 5 个百分点 → 软阈值实际要求 <35%（11,468MB）
+        let s = LoadSettings { upgrade_samples: 1, recovery_margin_pct: 5, ..settings() };
+        let (lvl, streak) = next_level(Level::Soft, &sample(13100, 30), &s, 0);
+        assert_eq!(lvl, Level::Soft, "贴着阈值（13,100MB ≥ 35%）不算平静，必须留在软档");
+        assert_eq!(streak, 0);
+        let (lvl, _) = next_level(Level::Soft, &sample(11000, 30), &s, 0);
+        assert_eq!(lvl, Level::Normal, "明显低于回滞带（11,000MB < 11,468MB）才允许升档");
     }
 
     #[test]
