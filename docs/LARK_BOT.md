@@ -5,6 +5,10 @@
 >
 > 关联文档：[`EXTENSION_IDEAS.md`](./EXTENSION_IDEAS.md)（扩展机制与功能清单，本方案属其
 > "D. 对外集成类"）。本文只记录已探明的技术事实、可行方案与待确认项，**不含代码改动计划**。
+>
+> **2026-10-15 接口核对修订**：`POST /api/chat/ask/stream` 不存在 → 流式应为
+> `POST /api/ai/conversation/ask/stream`；`/api/ai/events*` 是普通 GET 而非 SSE；
+> §4.3 耦合点计数 11 个文件/~85 处 → 12 个 route 模块/71 处。方案 A/B 的可行性结论不变。
 
 ---
 
@@ -76,15 +80,21 @@ lark-cli event consume im.message.receive_v1 --as bot
 
 | 能力 | 路由 |
 |---|---|
-| 提问 | `POST /api/chat/ask` |
-| 流式回答 | `/api/chat/ask/stream` |
-| 会话 列/建/载/存/删 | `/api/chat/sessions*` |
+| 提问（单轮，非流式） | `POST /api/chat/ask` |
+| 多轮会话提问（非流式） | `POST /api/ai/conversation/ask` |
+| **流式回答**（SSE，按 session 推流） | `POST /api/ai/conversation/ask/stream` |
+| 智能搜索流式（SSE） | `POST /api/ai/smart-search/stream` |
+| 会话 列/建/载/存/删/导出 | `/api/chat/sessions*`（含 `POST /api/chat/sessions/{id}/export`） |
 | 摘要 | `POST /api/ai/summarize` |
-| 智能搜索 | `POST /api/ai/smart-search` |
+| 智能搜索（非流式） | `POST /api/ai/smart-search` |
 | 网关测试 | `GET /api/ai/gateways/test` |
 | 取消生成 | `POST /api/ai/cancel` |
-| 推理过程事件 | `/api/ai/events`、`/ai/events/turn` |
+| 推理过程事件 | `GET /api/ai/events?session_id=`、`GET /api/ai/events/turn`（**普通 JSON，非 SSE**，读已落库事件） |
 | 能力探测 | `GET /api/ai/capabilities` |
+
+> ⚠️ **不存在 `POST /api/chat/ask/stream`**（2026-10-15 核对修正）。要流式只能走上面两条
+> `/stream`（SSE）；`/api/ai/events*` 是普通 GET，只能轮询已落库事件，不能当进度推送用。
+> 对应的实现约束见 §八「慢回答的体验」。
 
 → 多轮会话可天然映射到飞书：**每个群 / 每个私聊绑一个 session id**。
 
@@ -152,7 +162,7 @@ lark-cli event consume im.message.receive_v1 --as bot
 | `spawn_server(app_handle: tauri::AppHandle)` | `webapi/mod.rs:48` |
 | 在 Tauri setup 内调用：`webapi::spawn_server(app.handle().clone())` | `lib.rs:424` |
 | `ApiState.app_handle: tauri::AppHandle` | `webapi/state.rs:6` |
-| `state.app_handle.state::<AppState>()` | 11 个 route 文件，**~85 处** |
+| `state.app_handle.state::<AppState>()` | 12 个 route 模块（+ `webapi/session.rs`），**71 处** |
 | **`AppHandle` 被传进 `commands::*` 当参数** | 如 `commands::dirs::remove_dir(app_state, app_handle, ...)` |
 | `app_handle.emit(...)` 发进度事件 | index/ai 路由 |
 | `listen_any` 事件桥 + `async_runtime::spawn` | `webapi/mod.rs:62-69, 107` |
@@ -246,7 +256,7 @@ link-searcher --data-dir D:\data serve
 ```
 
 好处：routes / commands / 事件 emit / WebUI 静态文件**全部不用改**；
-webapi 拿到的仍是真 `AppHandle`，~85 处调用与 `commands::*` 签名一个字不动。
+webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一个字不动。
 
 改动面：
 
@@ -338,7 +348,7 @@ webapi 拿到的仍是真 `AppHandle`，~85 处调用与 `commands::*` 签名一
 
 | 问题 | 说明 | 做法 |
 |---|---|---|
-| **慢回答的体验** | RAG 要几秒到几十秒；飞书有消息长度、卡片更新次数、QPS 限制 | 先回"处理中"卡片 → 用 patch 逐步更新（`/api/events` SSE 或 `/api/ai/events` 现成可用） |
+| **慢回答的体验** | RAG 要几秒到几十秒；飞书有消息长度、卡片更新次数、QPS 限制 | 先回"处理中"卡片 → 用 patch 逐步更新。**能用的 SSE 只有两条**：`POST /api/ai/conversation/ask/stream`（按 session 推流）与全局 `GET /api/events`（含 `ai-chunk`/`ai-progress`/`ai-done`）。`/api/ai/events` 是普通 GET，只能轮询已落库事件 |
 | **幂等** | 事件可能重投（官方文档明确提到订阅泄漏会导致重复投递） | 按 `message_id` 去重，否则重复回答 |
 | **离线感知** | GUI 退出/重启时 webapi 不可用，机器人会"静默失联" | 健康检查 + 向指定群告警 |
 

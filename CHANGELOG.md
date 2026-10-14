@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书接入文档接口核对修订（纯文档，未改代码）
+
+> 背景：按用户要求逐条核对 `docs/LARK_BOT.md` 里的「文件:行号 + 路由」引用与代码实际是否一致。20 多处引用全部指对文件，但发现 1 处**实质性错误**（会误导 P1 实现）与 2 处计数不准，均已修正。
+
+- **`POST /api/chat/ask/stream` 不存在**（原 §3.2 写成流式回答）：实测 `webapi/routes/ai.rs:24-52` 无此路由，`/api/chat/ask` 是**非流式**单轮（`src/api/client.ts:139`）。真正的流式 SSE 是 `POST /api/ai/conversation/ask/stream`（`ai.rs:44-47`，前端 `client.ts:147` 在用）与 `POST /api/ai/smart-search/stream`（`ai.rs:36-39`）。
+- **`/api/ai/events`、`/ai/events/turn` 不是 SSE**（原 §8 让机器人订阅它们推流）：二者是普通 `GET` JSON，从 DB 读**已落库**推理事件（`ai.rs:70-79`、`87-96`）。SSE 只有 `GET /api/events`（`routes/events.rs:16`，转发 `ai-chunk`/`ai-progress`/`ai-done`）与上述两条 `/stream`。§3.2 表格与 §8 已按此改写，并补上遗漏的 `POST /api/ai/conversation/ask`、`POST /api/chat/sessions/{id}/export`。
+- **计数修正**：§4.3「11 个 route 文件 / ~85 处 `state.app_handle.state::<AppState>()`」→ 实测 **12 个 route 模块**（+`webapi/session.rs`）**71 处**；§5.2 同步改为 71。结论（解耦代价过大、方案 B 走"无窗口 Tauri 实例"而非解耦）方向不变。
+- **核对为真、未改动**：`lark-cli 1.0.96` 版本/路径、`auth status=not_configured`、就绪标记 `[event] ready event_key=`、退出码 0/1/2/3/4-5、`--quiet` 隐藏丢失诊断、`kill -9` 泄漏 minutes/vc/board 订阅、`files.rs:37-39` 三条唯一 stub、`static_files` SPA fallback、`mod.rs` 的 `BRIDGED_EVENTS`(12)/`spawn_server:48`/`listen_any:62-69`、`state.rs:6`、`resolve_token:148` 优先级、`settings_bind` 默认 `0.0.0.0`、`lib.rs:408-427/424/625-673/706`、`Cargo.toml:30/32`、`capabilities/default.json:25`、前端 autostart 零调用、`search/mod.rs:153` 与 `84-96`、`db/mod.rs` WAL+`busy_timeout=15000`、`boot.rs:1-4`、`main.rs:4-29`、`EXTENSION_IDEAS.md:89,93`。顺带核实"90+ 路由"= **94 条 `.route()` 注册（约 97 个方法）**，成立。
+- **未做**：无代码改动，未跑 `cargo check` / `npx tsc`（文档变更）。
+
 ## 2026-10-15：扩展功能想法 + 飞书机器人接入设计（纯文档，未改代码）
 
 > 背景：讨论"用已有数据还能做什么"，把结论固化进仓库，避免只留在对话里。两份文档均标注「未评审 · 非承诺」，结论一律带代码出处，供后续排期取用。
@@ -11,8 +21,8 @@
   - **同文档多版本 → 确认"最终版"**：先讲明项目是**镜像不是版本库**（原地覆盖 = 旧内容随 `cleanup_orphan_content` 消失）；`scanner/mod.rs:695-758` 的**移动检测会折叠同族**（同名同大小只留一条）；方案是**分族 → 证据加权打分 → 用户裁定**，最强信号是正文里的"修订记录/版本记录"表（LLM + `anydoc`/`calamine`/`lopdf` 抽取）。
 - **新增 `docs/LARK_BOT.md`**（飞书机器人接入设计）：
   - **免公网**：走长连接（`lark-cli 1.0.96` 的 event bus 守护进程，`event consume <EventKey>` 输出 NDJSON），已验证本机安装、当前 `not_configured`；记录就绪标记/退出码/「不要 `kill -9`」等子进程契约。
-  - **能力边界**：webapi **90+ 路由**，AI 聊天**全功能**（`/api/chat/ask` + 流式 + sessions CRUD + `/api/ai/events`）；`static_files.rs` 连完整前端一起发 → 机器人只需"能问答 + 能给链接"；明确不可用的仅 `webapi/routes/files.rs:37-39` 三条 `desktop_only_stub`。
-  - **两套部署形态**：**A 要求"开机 + GUI 常驻"**——webapi 默认开（`lib.rs:408-427`）、关窗口隐藏到托盘（`lib.rs:706`）、托盘有退出（`lib.rs:625-673`）都已具备，几乎零改动；待补 4 个小缺口（**autostart 插件装了但前端零调用**、webapi 默认绑 `0.0.0.0`、token 读 `config.json`、离线告警），并列出 4 条运行契约（需登录会话、不能休眠、GUI 必须常驻、重启期短暂离线）。**B headless `serve`**——`bootstrap_core` 本就 Tauri-free（`boot.rs:1-4`）、`main.rs:4-29` 已有参数分发点，做法是"无窗口 Tauri 实例"而非解耦（`ApiState.app_handle` + `commands::*` 吃 `AppHandle`，~85 处，解耦代价过大）；硬约束是**GUI 与 headless 必须互斥**（`search/mod.rs:153` writer 二次打开报错、`search/mod.rs:85-96` schema 不符会 `remove_dir_all` 索引）→ 需 data_dir 独占锁，而 `tauri-plugin-single-instance` 不按 data_dir 区分故不够用；平台限制：Windows 可无窗口，**Linux 无头跑不起来**（tao 需 X11）。
+  - **能力边界**：webapi **90+ 路由**，AI 聊天**全功能**（`/api/chat/ask` 单轮 + `/api/ai/conversation/ask/stream` 流式 SSE + sessions CRUD + `/api/ai/events` 轮询已落库事件）；`static_files.rs` 连完整前端一起发 → 机器人只需"能问答 + 能给链接"；明确不可用的仅 `webapi/routes/files.rs:37-39` 三条 `desktop_only_stub`。
+  - **两套部署形态**：**A 要求"开机 + GUI 常驻"**——webapi 默认开（`lib.rs:408-427`）、关窗口隐藏到托盘（`lib.rs:706`）、托盘有退出（`lib.rs:625-673`）都已具备，几乎零改动；待补 4 个小缺口（**autostart 插件装了但前端零调用**、webapi 默认绑 `0.0.0.0`、token 读 `config.json`、离线告警），并列出 4 条运行契约（需登录会话、不能休眠、GUI 必须常驻、重启期短暂离线）。**B headless `serve`**——`bootstrap_core` 本就 Tauri-free（`boot.rs:1-4`）、`main.rs:4-29` 已有参数分发点，做法是"无窗口 Tauri 实例"而非解耦（`ApiState.app_handle` + `commands::*` 吃 `AppHandle`，71 处，解耦代价过大）；硬约束是**GUI 与 headless 必须互斥**（`search/mod.rs:153` writer 二次打开报错、`search/mod.rs:85-96` schema 不符会 `remove_dir_all` 索引）→ 需 data_dir 独占锁，而 `tauri-plugin-single-instance` 不按 data_dir 区分故不够用；平台限制：Windows 可无窗口，**Linux 无头跑不起来**（tao 需 X11）。
   - **安全与数据边界**（标注"不解决不建议做"）：外发白名单、只回摘要不回原文、外发前脱敏、群/用户白名单、app_secret 不硬编码。
 - **`docs/EXTENSION_IDEAS.md` 的「D. 对外集成类」链接到 `docs/LARK_BOT.md`**。
 - **未做**：无任何代码改动；未跑 `cargo check` / `npx tsc`（文档变更，无代码路径）；`semgrep --severity ERROR`（custom + owasp-top-ten + secrets，124 规则 / 446 文件）**0 findings（0 blocking）**。
