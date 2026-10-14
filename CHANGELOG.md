@@ -31,6 +31,13 @@
 - **`docs/EXTENSION_IDEAS.md` 的「D. 对外集成类」链接到 `docs/LARK_BOT.md`**。
 - **未做**：无任何代码改动；未跑 `cargo check` / `npx tsc`（文档变更，无代码路径）；`semgrep --severity ERROR`（custom + owasp-top-ten + secrets，124 规则 / 446 文件）**0 findings（0 blocking）**。
 
+## 2026-10-15：页窗口改「全局预算」——修批尾/小批只有半速
+
+- **实测证据**：`PAGE_OCR_WINDOW = 4` 是**每文档**上限，而引擎闸门是 8 → 文档数 ≥2 时能打满（**24~44 页/分**），只剩 1 篇时只用 4 个槽（**13~20 页/分，腰斩**）。批尾与**小批**（如失败回收的 124 个文件那批）全程处在"文档数少"的状态，因此整轮被拖慢——这也是全量跑 11.5 小时里被低估的一块。
+- **修复**（`load.rs` + `extractor/pdf/ocr.rs`）：新增 `ACTIVE_PASSES`（在飞逐页 pass 计数，RAII `PassGuard`）与 `page_window_for_pass()`：**把全局页预算（= 引擎闸门 8）按在飞 pass 数均分，下限仍是配置的页窗口**——单文档自动吃满 8，两文档各 4，暂停档仍为 0。内存上限不变（8 页 × 单页位图 ≈ 200MB）。
+- **测试**：新增 `page_window_scales_with_active_passes`（1 pass→8、2 pass→4、低于下限用下限、计数 0 视为 1、暂停→0）；`cargo test --lib load::tests` **21 passed**。
+- **涉及文件**：`src-tauri/src/load.rs`、`src-tauri/src/extractor/pdf/ocr.rs`。
+
 ## 2026-10-15：修「界面无响应」——IPC 被连接池饿死 + 前端无循环保护
 
 - **现象（实测取证）**：索引高峰期窗口被 Windows 标成"无响应"，但后台照常产出（页 42~44/分、Web API 秒回 JSON）。决定性证据：最近 10 分钟前端 `[FILES]` 查询 **0 次**；扫描结束后后台 CPU 增量 **0.0s**，而 WebView2 **20 秒烧 7.4s（≈37% 一核）且仍不发任何请求** → 前端陷在忙循环里，无法自愈。

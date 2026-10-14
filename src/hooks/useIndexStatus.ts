@@ -85,12 +85,13 @@ export function useIndexStatus(): UseIndexStatusReturn {
     }
   }, [refresh])
 
-  // Adaptive polling: 5s while scanning, 30s when idle. Stops entirely once the
-  // status endpoint keeps failing, and resumes on the next manual action.
+  // Adaptive polling: 10s while scanning, 30s when idle. 索引期间不再 5 秒一次：
+  // 高频轮询会在流水线满载时放大排队（2026-10-15 实测界面因此被拖成"无响应"），
+  // 10 秒对用户完全够用，压力减半。giveUp 后完全停止，下次手动操作自动恢复。
   useEffect(() => {
     if (giveUp) return
     void refresh()
-    const interval = setInterval(refresh, (status?.is_scanning ?? false) ? 5_000 : 30_000)
+    const interval = setInterval(refresh, (status?.is_scanning ?? false) ? 10_000 : 30_000)
     return () => clearInterval(interval)
   }, [refresh, status?.is_scanning, giveUp])
 

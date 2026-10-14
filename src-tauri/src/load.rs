@@ -504,6 +504,46 @@ pub fn current_limits() -> Limits {
     }
 }
 
+/// Number of page-OCR passes currently running (one per document).
+///
+/// 2026-10-15 实测：`PAGE_OCR_WINDOW` 是**每文档**上限，而引擎闸门是 8 —— 文档数 ≥2 时
+/// 能打满（24~44 页/分），只剩 1 篇时只用 4 个槽（13~20 页/分，**腰斩**）。批尾与
+/// 小批（如失败回收的 124 个文件）全程都处在"文档数少"的状态，因此整轮被拖慢。
+static ACTIVE_PASSES: AtomicUsize = AtomicUsize::new(0);
+
+/// RAII：进入一次逐页 OCR pass（每文档一次），退出自动递减。
+pub struct PassGuard;
+
+impl Drop for PassGuard {
+    fn drop(&mut self) {
+        ACTIVE_PASSES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+pub fn begin_page_pass() -> PassGuard {
+    ACTIVE_PASSES.fetch_add(1, Ordering::Relaxed);
+    PassGuard
+}
+
+/// 纯函数：把全局页预算（= 引擎闸门）按在飞 pass 数均分，下限为配置的页窗口。
+/// 文档少时自动放大，单文档也能吃满闸门（内存上限仍是 闸门 × 单页位图 ≈ 200MB）。
+fn window_for(base: usize, gate: usize, passes: usize) -> usize {
+    if base == 0 {
+        return 0; // 暂停档：不派发新页
+    }
+    let gate = gate.max(1);
+    (gate / passes.max(1)).max(base).min(gate)
+}
+
+/// 本次 pass 可用的页窗口（替代直接读 `page_window()`）。
+pub fn page_window_for_pass() -> usize {
+    window_for(
+        page_window(),
+        ocr_permits_default(),
+        ACTIVE_PASSES.load(Ordering::Relaxed),
+    )
+}
+
 /// Take one OCR slot (one page-image inference). Blocks while `Paused`.
 pub fn acquire_ocr() -> Permit<'static> {
     gate().acquire(Kind::Ocr)
@@ -888,6 +928,16 @@ mod tests {
         assert_eq!(streak, 0);
         let (lvl, _) = next_level(Level::Soft, &sample(11000, 30), &s, 0);
         assert_eq!(lvl, Level::Normal, "明显低于回滞带（11,000MB < 11,468MB）才允许升档");
+    }
+
+    #[test]
+    fn page_window_scales_with_active_passes() {
+        // 单文档吃满闸门；两文档均分；低于下限时用下限；暂停档不派发。
+        assert_eq!(window_for(4, 8, 1), 8);
+        assert_eq!(window_for(4, 8, 2), 4);
+        assert_eq!(window_for(4, 8, 3), 4, "均分低于下限时用下限");
+        assert_eq!(window_for(4, 8, 0), 8, "计数为 0 视为 1");
+        assert_eq!(window_for(0, 8, 1), 0, "暂停档不派发新页");
     }
 
     #[test]

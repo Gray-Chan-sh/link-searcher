@@ -101,7 +101,10 @@ pub(super) fn run_pages_windowed(
     let stalled = AtomicBool::new(false);
     let cancelled = AtomicBool::new(false);
     let paused = AtomicBool::new(false);
-    let window = crate::load::page_window().max(1).min(pages.len().max(1));
+    // 记入"在飞 pass 数"：本 pass 的页窗口按**全局预算**（引擎闸门）均分，文档少时自动
+    // 放大到吃满闸门（修"批尾/小批只有半速"）。
+    let _pass = crate::load::begin_page_pass();
+    let window = crate::load::page_window_for_pass().max(1).min(pages.len().max(1));
     // 进度以「自本轮开始以来的单调时刻」记录 —— 不能用每页各自的耗时（各 worker 之间
     // 不可比，相减会下溢：debug 直接 panic，实测就是它让单测偶发失败的）。
     let pass_started = Instant::now();
@@ -907,8 +910,8 @@ mod tests {
         assert_eq!(outcome.texts[0].as_deref(), Some("page-1"));
         assert_eq!(outcome.texts[19].as_deref(), Some("page-20"));
         assert!(
-            peak.load(Ordering::SeqCst) <= PAGE_OCR_WINDOW,
-            "并发峰值 {} 必须 ≤ PAGE_OCR_WINDOW ({PAGE_OCR_WINDOW})",
+            peak.load(Ordering::SeqCst) <= 8,
+            "并发峰值 {} 不得超过引擎闸门（8）",
             peak.load(Ordering::SeqCst)
         );
         assert!(
@@ -917,9 +920,11 @@ mod tests {
             peak.load(Ordering::SeqCst)
         );
         // 上报的峰值并发要能被日志归因用（不能恒为 0/1）。
+        // 注意：页窗口自 2026-10-15 起是**全局预算**（按在飞 pass 数均分，单文档可吃满
+        // 引擎闸门），所以上限是闸门（8）而不是配置的 PAGE_OCR_WINDOW。
         assert!(
-            outcome.peak_concurrency > 1 && outcome.peak_concurrency <= PAGE_OCR_WINDOW,
-            "上报的峰值并发 {} 应当 >1 且 ≤ 窗口 {PAGE_OCR_WINDOW}",
+            outcome.peak_concurrency > 1 && outcome.peak_concurrency <= 8,
+            "上报的峰值并发 {} 应当 >1 且 ≤ 闸门 8",
             outcome.peak_concurrency
         );
     }
