@@ -9,6 +9,10 @@
 > **2026-10-15 接口核对修订**：`POST /api/chat/ask/stream` 不存在 → 流式应为
 > `POST /api/ai/conversation/ask/stream`；`/api/ai/events*` 是普通 GET 而非 SSE；
 > §4.3 耦合点计数 11 个文件/~85 处 → 12 个 route 模块/71 处。方案 A/B 的可行性结论不变。
+>
+> **2026-10-15 可行性/跨平台补录**：新增 §5.1「3 条隐性硬前提」（单用户 IP 会话租约 → 机器人必须
+> 同机、自启须带 data_dir、导证书校验）、§5.3「跨平台可用性」、§8 卡片更新次数上限与会话续租、
+> §9 的 P0.5 验证阶段，并补全 §10 待确认项。
 
 ---
 
@@ -208,14 +212,26 @@ restore-completed / dep-progress / dep-install-done
    插件已装、权限已授（`autostart:default`），但在 `src/` 全局搜 `autostart`（含 import 路径）
    **零命中** → 前端从未调用 `enable()` / `isEnabled()`。
    → 需在设置页加开关（`@tauri-apps/plugin-autostart`）。
-2. **webapi 默认绑 `0.0.0.0`**
+2. **webapi 默认绑 `0.0.0.0`**（对机器人而言这是**硬前提**，不只是"建议"）
    `settings_bind()` 默认值即 `"0.0.0.0"`（`webapi/mod.rs:225-236`）→ **默认对局域网开放**。
-   个人隐私库这个默认偏激进，建议引导用户显式选择（同机机器人用 `127.0.0.1` 即可）。
+   个人隐私库这个默认偏激进；更要紧的是 webapi 有**单用户 IP 会话租约**（见下方「隐性硬前提 ①」），
+   机器人**必须**与 webapi 同机走 `127.0.0.1`，不能走局域网 IP。
 3. **token 从哪读**（不用改代码）
    `resolve_token()`（`webapi/mod.rs:148`）优先级 **env `LS_WEB_API_TOKEN` > `config.json` > DB >
    首次生成**，并始终回写 `config.json` → 机器人直接读该文件。
 4. **"退出"是唯一死法**
    托盘「退出」→ `app.exit(0)` → webapi 与机器人一起死。可接受，但机器人侧要能**感知离线并告警**。
+
+**另外 3 条隐性硬前提（不满足则方案 A 直接不可用）**：
+
+| # | 硬前提 | 依据 / 后果 |
+|---|---|---|
+| ① | 机器人**必须与 webapi 同机**（走 `127.0.0.1`） | `webapi/session.rs:96-118` + `routes/mod.rs:66-69`：`session_guard` 挂在**整个** `/api/*`（token 之外的第二道锁），**同一时刻全网只允许一个活跃会话**，按来源 IP 判定。同机 → 与用户浏览器同 IP → `Renewed`，互不冲突 ✅；**异 IP 未超时 → 403**（`session.rs:214-228`），且**任何通过鉴权的请求都会续租**（`session.rs:109-112`）→ 机器人会**持续霸占**会话，把浏览器一直挡在 403（桌面端踢出后机器人立刻重新占用） |
+| ② | 自启命令必须带上 data_dir | autostart 是 HKCU Run key，拉起时无参数 → 只会读 `config.json` 的默认 data_dir；用户若靠 `--data-dir` 指定库，自启会指向**错的库** |
+| ③ | 机器人 HTTP 客户端要**跳过自签名证书校验** | webapi 是自签 TLS（`webapi/tls.rs`）；SAN 虽已含 `127.0.0.1`（`tls.rs:14-18`），但 CA 不受信 |
+
+> 另有 1 条长连接期约束：机器人若订阅 `GET /api/events`（SSE）做进度卡片，**SSE 期间不续租**，
+> 必须自己周期发 `POST /api/session/ping`，否则默认 **600s** 租约到期被 403（`session.rs:33,109-112`）。
 
 **必须接受的 4 条运行契约**（要写进用户说明）：
 
@@ -289,6 +305,42 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 
 → 若目标机器是 **Linux NAS**，方案 B 不成立，只能做"真解耦"（工作量远大于方案 A/B）。
 
+### 5.3 跨平台可用性
+
+**结论：核心链路（webapi + bot + `lark-cli`）三平台都能跑；
+真正的跨平台短板在「交付与常驻形态」，不在功能本身。**
+
+**① 应用本体：代码真跨平台，但交付只配了 Windows**
+
+| 层 | 跨平台证据 | 交付状态 |
+|---|---|---|
+| Rust 应用 | 三平台 cfg 分叉齐全：`process.rs`（Win `CREATE_NO_WINDOW`／mac `path_helper`／Linux PATH 刷新）、`deps/commands.rs:117-148`（winget／brew／apt）、三套 OCR（mac Vision／win OCR／paddleocr） | ✅ 可编译 |
+| 打包 | — | ⚠️ `tauri.conf.json:30` `"targets": ["msi"]` **只有 MSI**；`bundle.macOS.infoPlist` 已配但**无 dmg / deb / appimage**，且**无 CI**（无 `.github/workflows`） |
+
+→ 即"跨平台可编译"≠"跨平台可交付"。要支持 macOS/Linux 装机，需补打包 target 与构建流程。
+
+**② `lark-cli` 本体：官方支持三平台**
+
+- package.json 声明 `os: [darwin, linux, win32]`、`cpu: [x64, arm64, riscv64]`
+- 它是**原生二进制**（`bin/lark-cli.exe`，Windows 上 49 MB），`scripts/run.js` 只是 Node 薄壳
+  → **可直连原生二进制，不必让用户装 Node**（对打包友好）
+- 定位可执行文件可复用现成基础设施：`process.rs` 的 `new()` / `probe_ok()` / `windows_exe_name()`
+
+**③ ⚠️ 一条跨平台共有的运维风险：`lark-cli` 会自更新**
+
+`scripts/run.js` 里专门处理了 "crashed self-update left `.old`" → 说明存在自更新路径。
+自更新会替换二进制（正在运行的 `consume` 可能受影响），且是**联网行为**，与内网/离线机器冲突。
+
+**④ 方案 A 跨平台**
+
+| 平台 | autostart | 托盘 | 结论 |
+|---|---|---|---|
+| **Windows** | HKCU Run key | ✅ | ✅ 参考实现 |
+| macOS | LaunchAgent（`lib.rs:89` 已配 `MacosLauncher::LaunchAgent`） | ✅ | ⚠️ 需登录会话；关窗口已按 macOS 处理（`lib.rs:709-716`） |
+| Linux | autostart `.desktop`，**需桌面会话** | 依赖 GTK 托盘 | ⚠️ 无桌面会话则整套不成立（退化成方案 B，而 B 在 Linux 又不可行） |
+
+**⑤ 方案 B 跨平台**：见 §5.2 平台限制表（Windows 可、Linux 不可、macOS 与方案 A 差别不大）。
+
 ---
 
 ## 六、能干什么（功能清单）
@@ -344,13 +396,15 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 
 ---
 
-## 八、另外三个必须处理的技术点
+## 八、另外几个必须处理的技术点
 
 | 问题 | 说明 | 做法 |
 |---|---|---|
 | **慢回答的体验** | RAG 要几秒到几十秒；飞书有消息长度、卡片更新次数、QPS 限制 | 先回"处理中"卡片 → 用 patch 逐步更新。**能用的 SSE 只有两条**：`POST /api/ai/conversation/ask/stream`（按 session 推流）与全局 `GET /api/events`（含 `ai-chunk`/`ai-progress`/`ai-done`）。`/api/ai/events` 是普通 GET，只能轮询已落库事件 |
 | **幂等** | 事件可能重投（官方文档明确提到订阅泄漏会导致重复投递） | 按 `message_id` 去重，否则重复回答 |
 | **离线感知** | GUI 退出/重启时 webapi 不可用，机器人会"静默失联" | 健康检查 + 向指定群告警 |
+| **卡片更新次数上限** | 卡住 P1 的真实限制 | `card.action.trigger` 的 token **有效期 30 分钟、最多更新 2 次**（`lark-cli event schema card.action.trigger` 原文）；飞书对单条消息的卡片更新次数另有限制。**不能每个 SSE chunk 都 patch 一次** → 必须**节流合并**（按时间或 token 数批量更新），否则必然超限 |
+| **会话续租** | 机器人是长时间常驻进程 | 见 §5.1「隐性硬前提」：同机 `127.0.0.1` + 周期 `POST /api/session/ping`，否则 600s 后被 403 |
 
 ---
 
@@ -358,11 +412,12 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 
 | 阶段 | 内容 | 前置 |
 |---|---|---|
-| **P0** | `lark-cli config init` 建自建应用并授权；`event consume` 拿到 `im.message.receive_v1` 样本，确认字段 | 管理员审批 scopes |
-| **P1** | 白名单群里 @机器人提问 → `/api/chat/ask` → 回卡片；**autostart 开关**补上；只回摘要 | 数据边界规则定好 |
+| **P0** | `lark-cli config init` 建自建应用并授权；`event consume` 拿到 `im.message.receive_v1` 样本，确认字段 | 管理员审批 scopes **+ 控制台勾开事件**（`im.message.receive_v1` 属 "Required Console Events"，非订阅即用） |
+| **P0.5**（验证地基，1~2 天，不动代码） | 打掉三个不确定项：<br>① `event consume im.message.receive_v1 --dry-run` 确认身份（`--as bot/user`）与前置<br>② 同机 `curl` 实测 webapi 单会话租约对机器人是否友好（§5.1 硬前提 ①）<br>③ `event consume card.action.trigger` 确认 **`callback` 类型**在长连接下可消费 | P0 |
+| **P1** | 白名单群里 @机器人提问 → `POST /api/ai/conversation/ask/stream`（SSE）→ **节流更新**卡片；**autostart 开关**补上（带 data_dir）；只回摘要 | 数据边界规则定好 |
 | **P2** | 文件 / 语音 / 图片入站（下载 → 监控目录 → 自动入库 → 回执） | P1 稳定 |
-| **P3** | 定时摘要 + 出口（写飞书文档/表格）+ 卡片回调 | — |
-| **P4**（可选） | headless `serve` 模式（方案 B），用于无 GUI 的机器 | 明确目标机器平台 |
+| **P3** | 定时摘要 + 出口（写飞书文档/表格）+ 卡片回调 | P0.5 ③ 已验证 `card.action.trigger` 可用 |
+| **P4**（可选） | headless `serve` 模式（方案 B），用于无 GUI 的机器 | 明确目标机器平台；**先做 Windows 无窗口 spike** |
 
 ---
 
@@ -374,3 +429,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 - [ ] **身份**：`--as bot` 还是 `--as user`（后者权限更大更敏感）？
 - [ ] **访问控制**：哪些群 / 哪些人可用？
 - [ ] 是否接受"GUI 与 headless 互斥"，还是要求共存（需只读 headless + 禁用写路由）？
+- [ ] **跨平台范围**：只发 Windows（现状只有 MSI），还是也要 macOS/Linux 装机？（要后者需补打包 target 与 CI）
+- [ ] **机器人部署位置**：确认与 webapi **同机**（`127.0.0.1`）？（异机 → 单会话租约会互踢，见 §5.1 硬前提 ①）
+- [ ] **`lark-cli` 的取得方式**：随包分发（+49 MB，需按 target triple 打包）还是要求用户自装？（注意其**自更新**行为，§5.3 ③）
+- [ ] **`card.action.trigger` 的长连接支持**：P3 卡片回调的唯一技术不确定项，建议 P0.5 先验

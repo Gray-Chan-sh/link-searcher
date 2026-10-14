@@ -1,13 +1,17 @@
 # Link-Searcher 变更日志
 
-## 2026-10-15：飞书接入文档接口核对修订（纯文档，未改代码）
+## 2026-10-15：飞书接入文档核对修订 + 可行性/跨平台补录（纯文档，未改代码）
 
-> 背景：按用户要求逐条核对 `docs/LARK_BOT.md` 里的「文件:行号 + 路由」引用与代码实际是否一致。20 多处引用全部指对文件，但发现 1 处**实质性错误**（会误导 P1 实现）与 2 处计数不准，均已修正。
+> 背景：按用户要求核对 `docs/LARK_BOT.md` 的（a）「文件:行号 + 路由」引用与代码实际是否一致、（b）方案本身在**本仓库**能否落地、（c）**跨平台**可用性。20 多处引用全部指对文件；发现 1 处**实质性错误**（会误导 P1 实现）、2 处计数不准，以及 3 条文档未写全的**可行性硬前提**，均已补入。
 
 - **`POST /api/chat/ask/stream` 不存在**（原 §3.2 写成流式回答）：实测 `webapi/routes/ai.rs:24-52` 无此路由，`/api/chat/ask` 是**非流式**单轮（`src/api/client.ts:139`）。真正的流式 SSE 是 `POST /api/ai/conversation/ask/stream`（`ai.rs:44-47`，前端 `client.ts:147` 在用）与 `POST /api/ai/smart-search/stream`（`ai.rs:36-39`）。
 - **`/api/ai/events`、`/ai/events/turn` 不是 SSE**（原 §8 让机器人订阅它们推流）：二者是普通 `GET` JSON，从 DB 读**已落库**推理事件（`ai.rs:70-79`、`87-96`）。SSE 只有 `GET /api/events`（`routes/events.rs:16`，转发 `ai-chunk`/`ai-progress`/`ai-done`）与上述两条 `/stream`。§3.2 表格与 §8 已按此改写，并补上遗漏的 `POST /api/ai/conversation/ask`、`POST /api/chat/sessions/{id}/export`。
 - **计数修正**：§4.3「11 个 route 文件 / ~85 处 `state.app_handle.state::<AppState>()`」→ 实测 **12 个 route 模块**（+`webapi/session.rs`）**71 处**；§5.2 同步改为 71。结论（解耦代价过大、方案 B 走"无窗口 Tauri 实例"而非解耦）方向不变。
 - **核对为真、未改动**：`lark-cli 1.0.96` 版本/路径、`auth status=not_configured`、就绪标记 `[event] ready event_key=`、退出码 0/1/2/3/4-5、`--quiet` 隐藏丢失诊断、`kill -9` 泄漏 minutes/vc/board 订阅、`files.rs:37-39` 三条唯一 stub、`static_files` SPA fallback、`mod.rs` 的 `BRIDGED_EVENTS`(12)/`spawn_server:48`/`listen_any:62-69`、`state.rs:6`、`resolve_token:148` 优先级、`settings_bind` 默认 `0.0.0.0`、`lib.rs:408-427/424/625-673/706`、`Cargo.toml:30/32`、`capabilities/default.json:25`、前端 autostart 零调用、`search/mod.rs:153` 与 `84-96`、`db/mod.rs` WAL+`busy_timeout=15000`、`boot.rs:1-4`、`main.rs:4-29`、`EXTENSION_IDEAS.md:89,93`。顺带核实"90+ 路由"= **94 条 `.route()` 注册（约 97 个方法）**，成立。
+- **补录 3 条可行性硬前提**（§5.1）：① **机器人必须与 webapi 同机走 `127.0.0.1`**——`webapi/session.rs:96-118` + `routes/mod.rs:66-69` 的 `session_guard` 挂在**整个** `/api/*`，**全网同一时刻只允许一个活跃会话**且按来源 IP 判定；异 IP 未超时即 403（`session.rs:214-228`），且任何通过鉴权的请求都续租（`session.rs:109-112`）→ 异机会持续霸占会话、把浏览器挡在 403（原文档只把它写成"建议绑 127.0.0.1"）。② **自启须带 data_dir**（HKCU Run key 无参数 → 会读错库）。③ **机器人需跳过自签 TLS 校验**。另补 1 条：SSE 期间不续租，须周期 `POST /api/session/ping`（默认 600s，`session.rs:33`）。
+- **补录 §5.3「跨平台可用性」**：应用本体三平台 cfg 分叉齐全（`process.rs`／`deps/commands.rs:117-148` winget/brew/apt／三套 OCR）→ **可编译**；但 `tauri.conf.json:30` `"targets": ["msi"]` **只有 MSI**、无 dmg/deb/appimage、**无 CI** → 交付只覆盖 Windows。`lark-cli` 官方声明 `os: darwin/linux/win32` × `cpu: x64/arm64/riscv64`，且是**原生二进制**（`bin/lark-cli.exe` 49 MB，`scripts/run.js` 只是 Node 薄壳）→ **可直连二进制、不必装 Node**，定位可复用 `process.rs`。另记其**自更新**行为（`run.js` 处理 `.old` 残留）为跨平台共有运维风险。
+- **§8 新增两条技术点**：**卡片更新次数上限**（`card.action.trigger` token 有效 30 分钟、**最多更新 2 次**，`lark-cli event schema` 原文 → 流式 patch 必须节流合并）与**会话续租**。
+- **§9 新增 P0.5 验证阶段**，并修正 P1 的路由（`/api/chat/ask` → `POST /api/ai/conversation/ask/stream` + 节流）；P0 前置补"控制台勾开事件"（`im.message.receive_v1` 属 Required Console Events）；§10 待确认项补 4 条（跨平台范围、机器人同机、lark-cli 取得方式/自更新、`card.action.trigger` 长连接支持）。
 - **未做**：无代码改动，未跑 `cargo check` / `npx tsc`（文档变更）。
 
 ## 2026-10-15：扩展功能想法 + 飞书机器人接入设计（纯文档，未改代码）
