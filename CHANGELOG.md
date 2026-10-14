@@ -1,5 +1,22 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：扩展功能想法 + 飞书机器人接入设计（纯文档，未改代码）
+
+> 背景：讨论"用已有数据还能做什么"，把结论固化进仓库，避免只留在对话里。两份文档均标注「未评审 · 非承诺」，结论一律带代码出处，供后续排期取用。
+
+- **新增 `docs/EXTENSION_IDEAS.md`**：
+  - **可"按需安装"的扩展机制**：形态对比（sidecar / 编译期 feature / Tauri 插件·WASM），倾向 **sidecar + `plugins/` + `manifest.json`**，抄项目里三个现成先例（`deps/catalog.rs` 按需下载、`webapi` 可选开关、`cli.rs` 同 core 另一入口）；并写明只读契约（SQLite `mode=ro`、Tantivy 只开 reader、`app_settings.schema_version` 守卫、不按字段序号读 Tantivy——`search/schema.rs:84` 的 `md5` 必须最后加即历史教训）。
+  - **其它可开发扩展功能**：数据出口 / 治理质检 / 洞察 / 对外集成四类；投入产出比最高的三个是 OpenAI 兼容端点、结构化字段抽取、敏感信息扫描（后者是其它导出类扩展的前置安全闸门）。
+  - **词库导出**（用全文 + jieba 词频构建输入法词库）：只导出「输入法没有的词」（用目标输入法原词库做**词面差集**）；频次用 `df≥2` + `tf≥3` 硬门槛再按 `tf×df` 排名（`tf-idf` 要避开）；拼音（`pinyin` crate，多音字有误差）与五笔（纯算法词码，需字码表）两条路线取舍。
+  - **同文档多版本 → 确认"最终版"**：先讲明项目是**镜像不是版本库**（原地覆盖 = 旧内容随 `cleanup_orphan_content` 消失）；`scanner/mod.rs:695-758` 的**移动检测会折叠同族**（同名同大小只留一条）；方案是**分族 → 证据加权打分 → 用户裁定**，最强信号是正文里的"修订记录/版本记录"表（LLM + `anydoc`/`calamine`/`lopdf` 抽取）。
+- **新增 `docs/LARK_BOT.md`**（飞书机器人接入设计）：
+  - **免公网**：走长连接（`lark-cli 1.0.96` 的 event bus 守护进程，`event consume <EventKey>` 输出 NDJSON），已验证本机安装、当前 `not_configured`；记录就绪标记/退出码/「不要 `kill -9`」等子进程契约。
+  - **能力边界**：webapi **90+ 路由**，AI 聊天**全功能**（`/api/chat/ask` + 流式 + sessions CRUD + `/api/ai/events`）；`static_files.rs` 连完整前端一起发 → 机器人只需"能问答 + 能给链接"；明确不可用的仅 `webapi/routes/files.rs:37-39` 三条 `desktop_only_stub`。
+  - **两套部署形态**：**A 要求"开机 + GUI 常驻"**——webapi 默认开（`lib.rs:408-427`）、关窗口隐藏到托盘（`lib.rs:706`）、托盘有退出（`lib.rs:625-673`）都已具备，几乎零改动；待补 4 个小缺口（**autostart 插件装了但前端零调用**、webapi 默认绑 `0.0.0.0`、token 读 `config.json`、离线告警），并列出 4 条运行契约（需登录会话、不能休眠、GUI 必须常驻、重启期短暂离线）。**B headless `serve`**——`bootstrap_core` 本就 Tauri-free（`boot.rs:1-4`）、`main.rs:4-29` 已有参数分发点，做法是"无窗口 Tauri 实例"而非解耦（`ApiState.app_handle` + `commands::*` 吃 `AppHandle`，~85 处，解耦代价过大）；硬约束是**GUI 与 headless 必须互斥**（`search/mod.rs:153` writer 二次打开报错、`search/mod.rs:85-96` schema 不符会 `remove_dir_all` 索引）→ 需 data_dir 独占锁，而 `tauri-plugin-single-instance` 不按 data_dir 区分故不够用；平台限制：Windows 可无窗口，**Linux 无头跑不起来**（tao 需 X11）。
+  - **安全与数据边界**（标注"不解决不建议做"）：外发白名单、只回摘要不回原文、外发前脱敏、群/用户白名单、app_secret 不硬编码。
+- **`docs/EXTENSION_IDEAS.md` 的「D. 对外集成类」链接到 `docs/LARK_BOT.md`**。
+- **未做**：无任何代码改动；未跑 `cargo check` / `npx tsc`（文档变更，无代码路径）；`semgrep --severity ERROR`（custom + owasp-top-ten + secrets，124 规则 / 446 文件）**0 findings（0 blocking）**。
+
 ## 2026-10-15：修小城 XC 全量重建暴露的 5 个问题（连接池/死锁/抖动/降档过狠/采样抢连接）
 
 > 背景：2026-10-14 08:58 → 20:32 用新程序重跑 XC 小城（清空数据后从头 OCR）。结果：**7,611/7,791 已索引（97.7%）**、**16,218 页 OCR**、一致性全绿（缺向量/孤儿/待提取 全 0），但暴露 5 个问题，本条一次修完。
