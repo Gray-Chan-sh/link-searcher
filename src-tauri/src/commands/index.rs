@@ -80,17 +80,46 @@ fn get_last_scan(conn: &rusqlite::Connection) -> Option<i64> {
         .flatten()
 }
 
-/// 2026-10-15 实测：提取流水线的 worker 在整个提取期持有 DB 连接，池被占满时界面的
-/// `get_index_status` 只能等（当时等待上限 60 秒）→ 界面 IPC 排队、窗口被 Windows 标成
-/// "无响应"。现在界面查询**最多等 2 秒**，拿不到连接就立刻返回错误，由前端
-/// （`useIndexStatus` 的 8 秒硬超时 + 连续失败即停止轮询）快速失败并重试，
-/// 绝不让界面跟着流水线排 60 秒。
+/// 界面专用的只读连接：与提取流水线**不共用连接池**。
+///
+/// 2026-10-15 实测：提取 worker 在整个提取期（含几分钟 OCR）持有连接，池被占满时界面
+/// 的状态查询只能排队，窗口被 Windows 标成"无响应"（WebView 还在空转烧 CPU）。给界面
+/// 一条**独立连接**，状态查询就永远有路可走，不必等流水线释放。
+static UI_CONN: std::sync::OnceLock<std::sync::Mutex<Option<rusqlite::Connection>>> =
+    std::sync::OnceLock::new();
+
+fn ui_conn_guard() -> std::sync::MutexGuard<'static, Option<rusqlite::Connection>> {
+    let cell = UI_CONN.get_or_init(|| std::sync::Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.is_none() {
+        let path = crate::config::load_config().data_dir.join("data.db");
+        match rusqlite::Connection::open(&path) {
+            Ok(conn) => {
+                // 只读查询 + 短等待：界面宁可失败也不阻塞。
+                let _ = conn.execute_batch("PRAGMA busy_timeout=2000;");
+                *guard = Some(conn);
+            }
+            Err(e) => log::warn!("[UI] 打开界面专用连接失败: {e}"),
+        }
+    }
+    guard
+}
+
 #[tauri::command]
 pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus, String> {
-    let conn = state
-        .db
-        .get_timeout(std::time::Duration::from_secs(2))
-        .map_err(|e| format!("db busy（界面查询不与提取流水线抢等待）: {e}"))?;
+    // 界面走**专用连接**（不参与提取流水线的连接池竞争）；开不出来才退回池（2 秒上限）。
+    let ui = ui_conn_guard();
+    let pool_conn;
+    let conn: &rusqlite::Connection = match ui.as_ref() {
+        Some(c) => c,
+        None => {
+            pool_conn = state
+                .db
+                .get_timeout(std::time::Duration::from_secs(2))
+                .map_err(|e| format!("db busy（界面查询不与提取流水线抢等待）: {e}"))?;
+            &pool_conn
+        }
+    };
     let stats = db::tracker::get_stats(&conn, None).map_err(|e| format!("stats error: {e}"))?;
     let ocred = db::tracker::get_ocred_count(&conn).map_err(|e| format!("ocred error: {e}"))?;
     let total_images = db::tracker::get_total_image_files(&conn).map_err(|e| format!("images error: {e}"))?;
