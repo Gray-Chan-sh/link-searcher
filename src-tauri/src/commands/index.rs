@@ -36,7 +36,7 @@ pub struct IndexIntegrityReport {
     pub resurrected: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct IndexStatus {
     pub total_files: u64,
     pub indexed: u64,
@@ -80,9 +80,17 @@ fn get_last_scan(conn: &rusqlite::Connection) -> Option<i64> {
         .flatten()
 }
 
+/// 2026-10-15 实测：提取流水线的 worker 在整个提取期持有 DB 连接，池被占满时界面的
+/// `get_index_status` 只能等（当时等待上限 60 秒）→ 界面 IPC 排队、窗口被 Windows 标成
+/// "无响应"。现在界面查询**最多等 2 秒**，拿不到连接就立刻返回错误，由前端
+/// （`useIndexStatus` 的 8 秒硬超时 + 连续失败即停止轮询）快速失败并重试，
+/// 绝不让界面跟着流水线排 60 秒。
 #[tauri::command]
 pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = state
+        .db
+        .get_timeout(std::time::Duration::from_secs(2))
+        .map_err(|e| format!("db busy（界面查询不与提取流水线抢等待）: {e}"))?;
     let stats = db::tracker::get_stats(&conn, None).map_err(|e| format!("stats error: {e}"))?;
     let ocred = db::tracker::get_ocred_count(&conn).map_err(|e| format!("ocred error: {e}"))?;
     let total_images = db::tracker::get_total_image_files(&conn).map_err(|e| format!("images error: {e}"))?;
