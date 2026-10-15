@@ -435,6 +435,28 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// `lark-cli` 的就绪探测必须**等于真实探测**（不写死 true/false）。
+    ///
+    /// 它盯的是不变量：`lark_cli()` 里 `files: &[]` 会让 `files_ready` **恒为假**，
+    /// 因此**只有** `is_ready` 里那个 `"lark-cli"` 分支能让它变真 ——
+    /// 两处 id 特例任何一处被删掉或写错，这条测试立刻红，
+    /// 而不是等用户在依赖中心看到"永远未就绪"（那种故障没人会主动上报）。
+    #[test]
+    fn lark_cli_readiness_follows_the_real_probe() {
+        let def = all()
+            .into_iter()
+            .find(|d| d.id == "lark-cli")
+            .expect("catalog 必须有 lark-cli 条目");
+        assert!(def.files.is_empty(), "lark-cli 没有可下载文件（刻意如此）");
+        assert!(def.system_package.is_none(), "它也不是 winget/brew/apt 包");
+        let dir = tmpdir("lark_cli_ready");
+        assert_eq!(
+            is_ready(&def, &dir),
+            lark_cli_path().is_some(),
+            "就绪状态必须等于真实探测结果（不能写死）"
+        );
+    }
+
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("ls_deps_catalog_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
