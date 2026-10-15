@@ -257,7 +257,11 @@ pub fn set_web_api_token(token: &str) {
     }
 }
 
-/// 持锁读取配置文件；文件缺失/损坏时返回默认配置（与 [`load_config`] 一致）。
+/// 持锁读取配置文件；文件缺失/损坏时返回默认配置。
+///
+/// 与 [`load_config`] 的区别：这里**不跑迁移、不写盘、不告警**，纯粹给
+/// [`web_api_token`] / [`set_web_api_token`] 这类"已经持锁、只要值"的调用方用
+/// （走 `load_config` 会在迁移分支里再写一次文件，既浪费也可能自递归）。
 fn read_config_file() -> AppConfig {
     let path = config_dir().join(CONFIG_FILE);
     std::fs::read_to_string(&path)
@@ -294,62 +298,247 @@ fn write_config_file(config: &AppConfig) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     let path = dir.join(CONFIG_FILE);
     let content = serde_json::to_string_pretty(config).map_err(|e| format!("{e}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
+    write_config_atomic(&path, &content)
+}
+
+/// 原子写：写同目录临时文件 → `fsync` → `rename` 覆盖目标。
+///
+/// 与 `commands/ai/session.rs::write_history_unlocked` 同理：读者要么看到旧的完整
+/// 文件、要么看到新的完整文件，**永远不会读到半截 JSON**。旧实现是
+/// `truncate(true)`（先清空再写），写入期间文件是不完整的 —— 此刻进程被杀/磁盘写满，
+/// 旧数据也一并丢失，而 `load_config` 会把解析失败当成"配置不存在"。
+///
+/// 四个与直觉不同、必须守住的细节：
+///
+/// 1. **临时文件必须与目标同目录**：跨文件系统的 `rename` 会失败或退化成
+///    "复制 + 删除"，原子性随之消失（所以不能用系统临时目录）。
+/// 2. **临时文件名带 pid**：进程内的 [`CONFIG_LOCK`] 挡不住第二个进程
+///    （CLI / headless / bot sidecar），固定名会让两个进程写同一个临时文件而互相撕碎。
+/// 3. **unix 权限必须在创建临时文件时就设 0600**：否则 `rename` 之后
+///    `config.json` 会从 0600 变成默认的 0644 —— 而它装着 AI `api_key` 与
+///    `web_api_token`。这是"修一个洞、开一个洞"的典型，务必守住。
+/// 4. **Windows 上退避重试**：AV/索引器可能短暂持有目标文件，`rename` 会以
+///    sharing violation 失败；重试期间旧文件始终完整，最终失败也不破坏它。
+fn write_config_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| format!("config path has no parent: {}", path.display()))?;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(CONFIG_FILE);
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+
+    // ① 写临时文件（同目录、0600、落盘）
+    let written = (|| -> std::io::Result<()> {
         let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true).mode(0o600);
-        let mut file = opts.open(&path).map_err(|e| format!("{e}"))?;
-        std::io::Write::write_all(&mut file, content.as_bytes()).map_err(|e| format!("{e}"))?;
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp)?;
+        std::io::Write::write_all(&mut file, content.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("写入临时配置文件失败: {e}"));
     }
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&path, &content).map_err(|e| format!("{e}"))?;
+
+    // ② rename 覆盖（Windows：退避重试，见上文第 4 点）
+    let mut last_err: Option<String> = None;
+    for attempt in 0..5u32 {
+        match std::fs::rename(&tmp, path) {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e.to_string());
+                if attempt < 4 {
+                    std::thread::sleep(std::time::Duration::from_millis(20 * u64::from(attempt + 1)));
+                }
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("替换配置文件失败: {e}"));
+    }
+
+    // ③ 目录 fsync（仅 POSIX）：让 rename 本身也持久化；Windows 打不开目录。
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
     }
     Ok(())
+}
+
+/// `AppConfig` 的顶层键，用于在把手写错的键名**告警**而不是静默忽略。
+///
+/// 不硬用 `#[serde(deny_unknown_fields)]`：那会让一个拼错的键导致**整份配置被拒**，
+/// 而当前没有 `doctor --fix` 之类的修复入口，用户会看到"配置全没了"。
+/// 等有了修复路径再切换成硬拒绝（见 `docs/LARK_BOT.md`）。
+/// 与 `AppConfig` 字段的同步由一个测试守着。
+const KNOWN_CONFIG_KEYS: &[&str] = &[
+    "data_dir",
+    "language",
+    "ai_api_base",
+    "ai_api_key",
+    "embedding_api_base",
+    "embedding_api_key",
+    "embedding_model",
+    "llm_api_base",
+    "llm_api_key",
+    "llm_model",
+    "providers",
+    "active_embedding_model_id",
+    "active_reranker_model_id",
+    "active_llm_model_id",
+    "semantic_weight",
+    "pending_cleanup_dir",
+    "embed_plans",
+    "web_api_token",
+];
+
+/// 手改了 `config.json` 但键名拼错时给出告警。`$schema` 是唯一允许的例外
+/// （方便编辑器挂 JSON Schema）。
+fn warn_unknown_config_keys(content: &str) {
+    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(content)
+    else {
+        return;
+    };
+    let unknown: Vec<&str> = map
+        .keys()
+        .map(String::as_str)
+        .filter(|k| *k != "$schema" && !KNOWN_CONFIG_KEYS.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        log::warn!(
+            "[CONFIG] config.json 有 {} 个未知键，将被忽略（键名拼错了？）: {}",
+            unknown.len(),
+            unknown.join(", ")
+        );
+    }
+}
+
+fn unix_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 读配置的结果。
+enum ConfigRead {
+    /// 解析成功。
+    Loaded(AppConfig),
+    /// 没有可用配置，但**可以**安全写出一份默认配置：文件不存在（首次运行），
+    /// 或者损坏件已经另存成功。
+    Recreatable,
+    /// 没有可用配置，且**原文件仍在**（读取失败 / 另存失败）——**绝不要覆盖它**，
+    /// 否则会把用户唯一的一份现场销毁掉。
+    KeepOriginal,
+}
+
+/// 读并解析 `config.json`。
+///
+/// - **文件不存在** → [`ConfigRead::Recreatable`]（首次运行，正常路径）
+/// - **解析失败** → 另存为 `config.json.corrupt.<unix_ts>` 后 [`Recreatable`]；
+///   另存失败则 [`KeepOriginal`]。旧实现是直接 `write_config_file(&default)`，
+///   等于**当场销毁现场** —— 用户连"我原来写了什么"都看不到。
+/// - **读取失败**（权限/IO）→ [`KeepOriginal`]，且**绝不触碰**原文件。
+fn read_config_checked(path: &Path) -> ConfigRead {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ConfigRead::Recreatable,
+        Err(e) => {
+            log::error!(
+                "[CONFIG] 读取 {} 失败: {e}；本次以默认配置运行，且不会覆盖该文件",
+                path.display()
+            );
+            return ConfigRead::KeepOriginal;
+        }
+    };
+
+    match serde_json::from_str::<AppConfig>(&content) {
+        Ok(config) => {
+            warn_unknown_config_keys(&content);
+            ConfigRead::Loaded(config)
+        }
+        Err(e) => {
+            let backup = path.with_extension(format!("json.corrupt.{}", unix_ts()));
+            match std::fs::rename(path, &backup) {
+                Ok(()) => {
+                    log::error!(
+                        "[CONFIG] 解析 {} 失败: {e}；已另存为 {} 并以默认配置继续",
+                        path.display(),
+                        backup.display()
+                    );
+                    ConfigRead::Recreatable
+                }
+                Err(rename_err) => {
+                    log::error!(
+                        "[CONFIG] 解析 {} 失败: {e}；另存为 {} 也失败: {rename_err}；保持原文件不动",
+                        path.display(),
+                        backup.display()
+                    );
+                    ConfigRead::KeepOriginal
+                }
+            }
+        }
+    }
 }
 
 pub fn load_config() -> AppConfig {
     let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let path = config_dir().join(CONFIG_FILE);
-    if let Ok(content) = std::fs::read_to_string(&path)
-        && let Ok(mut config) = serde_json::from_str::<AppConfig>(&content) {
-            if let Ok(override_dir) = std::env::var("LINK_SEARCHER_DATA_DIR") {
-                config.data_dir = override_dir.into();
-            } else if config.data_dir.as_os_str().is_empty() {
-                config.data_dir = default_data_dir();
-            }
-            // 评测用开关：允许环境变量覆盖语义权重，便于对 semantic_weight
-            // 跑 A/B（scripts/eval/run_rag_eval.sh），无需改动用户 config.json。
-            if let Ok(w) = std::env::var("LINK_SEARCHER_SEMANTIC_WEIGHT")
-                && let Ok(v) = w.trim().parse::<f64>()
-            {
-                config.semantic_weight = v.clamp(0.0, 1.0);
-            }
-            // Migrate the legacy single-gateway config: if the user only ever
-            // set ai_api_base/key, apply it to BOTH new gateways so the old
-            // behaviour (one gateway for everything) keeps working.
-            if config.embedding_api_base.is_empty()
-                && config.llm_api_base.is_empty()
-                && !config.ai_api_base.is_empty()
-            {
-                config.embedding_api_base = config.ai_api_base.clone();
-                config.embedding_api_key = config.ai_api_key.clone();
-                config.llm_api_base = config.ai_api_base.clone();
-                config.llm_api_key = config.ai_api_key.clone();
-                let _ = write_config_file(&config);
-            }
-            if config.providers.is_empty() && migrate_legacy_gateways(&mut config) {
-                let _ = write_config_file(&config);
-            }
-            reconcile_enabled_active(&mut config);
-            if seed_default_embedding_model(&mut config) {
-                let _ = write_config_file(&config);
-            }
-            return config;
+
+    let mut config = match read_config_checked(&path) {
+        ConfigRead::Loaded(config) => config,
+        ConfigRead::Recreatable => {
+            // 首次运行，或损坏件已另存 → 安全地写出一份默认配置。
+            let fresh = AppConfig::default();
+            let _ = write_config_file(&fresh);
+            return fresh;
         }
-    let config = AppConfig::default();
-    let _ = write_config_file(&config);
+        // 读不到原文件但也不能安全重建（权限 / 另存失败）：只用内存默认值，
+        // 一个字都不写，把用户的文件原样留着。
+        ConfigRead::KeepOriginal => return AppConfig::default(),
+    };
+
+    if let Ok(override_dir) = std::env::var("LINK_SEARCHER_DATA_DIR") {
+        config.data_dir = override_dir.into();
+    } else if config.data_dir.as_os_str().is_empty() {
+        config.data_dir = default_data_dir();
+    }
+    // 评测用开关：允许环境变量覆盖语义权重，便于对 semantic_weight
+    // 跑 A/B（scripts/eval/run_rag_eval.sh），无需改动用户 config.json。
+    if let Ok(w) = std::env::var("LINK_SEARCHER_SEMANTIC_WEIGHT")
+        && let Ok(v) = w.trim().parse::<f64>()
+    {
+        config.semantic_weight = v.clamp(0.0, 1.0);
+    }
+    // Migrate the legacy single-gateway config: if the user only ever
+    // set ai_api_base/key, apply it to BOTH new gateways so the old
+    // behaviour (one gateway for everything) keeps working.
+    if config.embedding_api_base.is_empty()
+        && config.llm_api_base.is_empty()
+        && !config.ai_api_base.is_empty()
+    {
+        config.embedding_api_base = config.ai_api_base.clone();
+        config.embedding_api_key = config.ai_api_key.clone();
+        config.llm_api_base = config.ai_api_base.clone();
+        config.llm_api_key = config.ai_api_key.clone();
+        let _ = write_config_file(&config);
+    }
+    if config.providers.is_empty() && migrate_legacy_gateways(&mut config) {
+        let _ = write_config_file(&config);
+    }
+    reconcile_enabled_active(&mut config);
+    if seed_default_embedding_model(&mut config) {
+        let _ = write_config_file(&config);
+    }
     config
 }
 
@@ -487,6 +676,104 @@ pub fn run_pending_cleanup(current_data_dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Temp `config.json` path in its own directory (per test).
+    fn tmp_config_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ls_cfg_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(CONFIG_FILE)
+    }
+
+    fn leftover_tmp_files(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn atomic_write_replaces_content_and_leaves_no_tmp() {
+        let path = tmp_config_path("atomic");
+        write_config_atomic(&path, r#"{"language":"zh"}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"language":"zh"}"#);
+
+        // Overwrite an existing file.
+        write_config_atomic(&path, r#"{"language":"en"}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), r#"{"language":"en"}"#);
+
+        let leftovers = leftover_tmp_files(path.parent().unwrap());
+        assert!(leftovers.is_empty(), "no temp files may remain: {leftovers:?}");
+    }
+
+    /// 替换失败时：目标保持原样，且临时文件被清掉（不留垃圾）。
+    #[test]
+    fn atomic_write_failure_keeps_target_and_cleans_tmp() {
+        let path = tmp_config_path("atomic_fail");
+        // 目标位置先占一个**目录** → rename 必定失败（两个平台都是）。
+        std::fs::create_dir_all(&path).unwrap();
+
+        let err = write_config_atomic(&path, "{}").unwrap_err();
+        assert!(err.contains("替换配置文件失败"), "unexpected error: {err}");
+        assert!(path.is_dir(), "the existing entry must be left untouched");
+
+        let leftovers = leftover_tmp_files(path.parent().unwrap());
+        assert!(leftovers.is_empty(), "tmp must be cleaned up: {leftovers:?}");
+    }
+
+    /// 守着手写清单：`KNOWN_CONFIG_KEYS` 一旦与 `AppConfig` 字段脱节，这个测试就红。
+    #[test]
+    fn known_config_keys_stay_in_sync_with_appconfig() {
+        let value = serde_json::to_value(AppConfig::default()).unwrap();
+        let mut actual: Vec<String> = value.as_object().unwrap().keys().cloned().collect();
+        actual.sort();
+        let mut expected: Vec<String> =
+            KNOWN_CONFIG_KEYS.iter().map(|s| (*s).to_string()).collect();
+        expected.sort();
+        assert_eq!(
+            actual, expected,
+            "KNOWN_CONFIG_KEYS 与 AppConfig 的字段不同步（新增字段后要同步更新）"
+        );
+    }
+
+    /// 手改写错键名：只告警，**不能**因此拒掉整份配置。
+    #[test]
+    fn unknown_config_keys_are_tolerated_not_fatal() {
+        let path = tmp_config_path("unknown_key");
+        std::fs::write(&path, r#"{"language":"en","llm_apikey":"typo"}"#).unwrap();
+
+        match read_config_checked(&path) {
+            ConfigRead::Loaded(config) => assert_eq!(config.language, "en"),
+            _ => panic!("一个拼错的键名不得让整份配置被拒"),
+        }
+        assert!(path.exists(), "known-good config must stay in place");
+    }
+
+    /// 损坏配置：另存备查 + 可重建，而不是当场被默认值覆盖。
+    #[test]
+    fn corrupt_config_is_archived_and_can_be_recreated() {
+        let path = tmp_config_path("corrupt");
+        std::fs::write(&path, "{ this is not json").unwrap();
+
+        match read_config_checked(&path) {
+            ConfigRead::Recreatable => {}
+            _ => panic!("corrupt config must be reported as recreatable"),
+        }
+        assert!(!path.exists(), "corrupt file must be moved aside, not truncated in place");
+
+        let dir = path.parent().unwrap();
+        let archived: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("corrupt"))
+            .collect();
+        assert_eq!(archived.len(), 1, "exactly one archive expected: {archived:?}");
+        let content = std::fs::read_to_string(dir.join(&archived[0])).unwrap();
+        assert_eq!(content, "{ this is not json", "archive must keep the original bytes");
+    }
 
     #[test]
     fn migrate_legacy_gateways_seeds_providers_and_active() {

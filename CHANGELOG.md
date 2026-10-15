@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：config.json 原子写 + 损坏配置不再被销毁 + 未知键告警
+
+> 背景：讨论「配置能否全部放进配置文件（像 OpenClaw）」时发现，`config.json` 的写入是 `truncate(true)`（**先清空再写**），且 `load_config` 在解析失败时**无条件把默认配置写回文件** —— 即"写入期间被杀"或"文件被写坏"会**当场销毁用户唯一的一份配置现场**。这是既有缺陷，与"要不要迁到文件"的决策无关，故独立先修。
+
+- **① 原子写**（`config.rs::write_config_atomic`，全部写入路径收口于此）：同目录临时文件（**带 pid**）→ unix `0600` → `sync_all` → `rename`（**Windows 退避重试 ×5**，AV/索引器可能短暂持有目标）→ POSIX 目录 fsync。四个易错点写在函数文档里：临时文件必须**同目录**（跨文件系统 rename 会失去原子性）、文件名**带 pid**（`CONFIG_LOCK` 是进程内 Mutex，挡不住第二个进程）、**unix 权限必须在创建临时文件时设 0600**（否则 rename 后 `config.json` 从 0600 变 0644，而它装着 AI `api_key` 与 `web_api_token`——典型"修一个洞开一个洞"）、Windows 需退避重试。参考先例：`commands/ai/session.rs::write_history_unlocked`。
+- **② 损坏配置不再被销毁**：新增 `ConfigRead` 三态 + `read_config_checked()`。解析失败 → 另存 `config.json.corrupt.<unix_ts>` 后以默认值继续（旧实现直接 `write_config_file(&default)`，等于销毁现场）；**读取失败 / 另存失败 → 一个字都不写**，原文件原样保留；文件不存在（首次运行）仍正常写默认值。
+- **③ 未知键告警而非拒绝**：新增 `KNOWN_CONFIG_KEYS` + `warn_unknown_config_keys()`，手改拼错键名时打 WARN 而不是静默忽略、也不拒绝整份配置。**刻意不用 `#[serde(deny_unknown_fields)]`**：一个拼错的键会让整份配置被拒 → 触发"另存 + 默认值"，用户看到"配置全没了"，而当前没有 `doctor --fix` 式修复入口；且 `commands/backup.rs` 的测试用 `{"theme":"dark"}` 当 config fixture，硬拒绝会连带打红。理由已入档 `docs/LARK_BOT.md` §5.6，等有修复路径再切硬拒绝。
+- **测试**：`config::tests` 新增 5 个 —— 原子写替换内容且不留 `.tmp`、替换失败时目标原样且清理临时文件、`KNOWN_CONFIG_KEYS` 与 `AppConfig` 字段的同步守卫、未知键不致整份配置被拒、损坏配置被另存且字节原样保留。
+- **文档**：`docs/LARK_BOT.md` 新增 **§5.6「配置写入：原子性 / 覆盖 / 多写者」**（三类故障不可互换的对照表 + A/B 两档 + 本轮已修 + 未做项）；并把 **D1＝放弃 IP 排他** 记入 §5.5 决策表（阶段四解锁）。
+- **门禁**（按新规矩跑全套）：`cargo test` 全部目标通过（`--lib` **547 passed**，含新增 5 个）；`auto_ui_e2e` 15 / `ipc_test` 8 / `integration` 9 / `webapi_http` 冒烟 / 其余全绿；`npx tsc --noEmit` 通过；`npx vitest run` 73 passed；`semgrep --severity ERROR` **0 findings**。
+- **未做（B 档前置）**：文件监听热重载、意外覆盖防护、跨进程文件锁；`embed_plans`（运行期高频写）仍留在会被整文件重写的 `config.json` 里，`web_api_token` 仍双存储。
+
 ## 2026-10-15：提交门禁从 `cargo test --lib` 扩展为「跑全部测试目标」
 
 > 背景：上一轮查出「3 天 3 个提交各打破一处测试而无人察觉」，根因是提交前只跑 `--lib` —— `src-tauri/tests/` 下的集成测试与 mock E2E 既不编译也不运行，坏掉也不会有人发现。按用户要求把门禁收紧。
