@@ -149,3 +149,14 @@ semgrep scan \
 - **触发条件**：任何 Tauri 命令重命名/拆分重构；此案例自 2026-09-23 静默坏了一周
 - **修复人/时间**：2026-09-29
 - **Tags**: `commands/ai.rs`, `save_chat_session`, `sess`, Tauri 参数名, `invoke`, 静默吞错
+
+### 5. 提取期长期持有 DB 连接（界面/API 被连接池饿死）
+- **现象**：索引期间界面被 Windows 标成"无响应"、前端查询（`[FILES]`）归零，但后台 OCR 照常产出（页计数继续涨）；严重时**批量文件被误判失败**，日志 `DB conn: timed out waiting for connection`
+- **根因**：`indexer.rs::extract_and_index_single` 原本**由调用方先取连接再传入**，这条连接从「去重查询」一直持有到「`mark_extracted`」，**横跨整段提取（含数分钟 PDF OCR）**；`batch_io_concurrency` 个 Phase-1 worker 因此在整批期间占满连接池
+- **历史误修（必须警惕）**：2026-09-26 与 2026-10-14 **两次都只扩大池 / 延长等待**（池 8→12→24→48、等待 10s→30s→60s），**始终没动"持有期"** → 于是反复复发（第四次才修根因）
+- **修复**（2026-10-15，`abb4583`）：签名改为 `(job, db: &Pool<SqliteConnectionManager>, engine_override)`，内部按「A 提取前读 / B 提取（零连接）/ C 提取后写」三阶段**各借各还**；`index_file` 的 `get_dir`/`clear_stale_embeddings`/`update_indexed`/`log_index_error` 同步改短连接
+- **铁律**：`crate::load::acquire_doc()` 等闸门许可**必须在取连接之前**取（放在之后会把池占满 —— 55 次超时的成因）
+- **检查方法**：见到"提取期间界面卡 / `[FILES]` 归零 / `DB conn: timed out`"**先怀疑连接被跨提取期持有**，而不是先扩容；改提取路径后 grep `extract_and_index_single`，确认它**不再接收 `&Connection`**
+- **触发条件**：任何新增/改动"提取"路径（批处理、watcher、Web API、verify/重提取、integrity 自愈）；所有重提取入口都汇入 `index_file`
+- **修复人/时间**：2026-10-15
+- **Tags**: `indexer.rs`, `extract_and_index_single`, `index_file`, `&Pool`, 连接池, `acquire_doc`, 界面无响应
