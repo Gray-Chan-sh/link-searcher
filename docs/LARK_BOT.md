@@ -867,6 +867,37 @@ src-tauri/
 | **卡片更新次数上限** | 卡住 P1 的真实限制 | `card.action.trigger` 的 token **有效期 30 分钟、最多更新 2 次**（`lark-cli event schema card.action.trigger` 原文；**2026-10-15 实测回调里确实带 `token`**）；飞书对单条消息的卡片更新次数另有限制。**不能每个 SSE chunk 都 patch 一次** → 必须**节流合并**（按时间或 token 数批量更新），否则必然超限。另：`card_content` 会被飞书**重写**（非原文回显，见 §2 实测发现 ②） |
 | **会话续租** | 机器人是长时间常驻进程 | 见 §5.1「隐性硬前提」：同机 `127.0.0.1` + 周期 `POST /api/session/ping`，否则 600s 后被 403 |
 
+### 8.1 卡片三件事的实测澄清（2026-10-15，探针实测）
+
+> 起因：`lark-cli im` 下**没有 card 子命令**（`+messages-send` / `+messages-reply` 只列 text/markdown/post/media），
+> 于是先探"卡片到底能不能发/更新"，结果把上表那条"**必然超限**"的假设也一并修正了。
+
+| # | 未知数 | **实测结论** |
+|---|---|---|
+| ① | raw `api` 逃生口能否用 **bot 身份**发卡 | ✅ **可以**：`lark-cli api POST /open-apis/im/v1/messages --as bot`（`im` 无快捷命令，**必须走 raw**） |
+| ② | 卡片 JSON **schema 版本** | ✅ **1.0（`elements` 顶层）与 2.0（`schema:"2.0"` + `body.elements`）都被接受** |
+| ③ | **patch 更新次数上限** | ✅ **80 次连续全成功**（250–300ms 间隔，**未见次数上限**）→ 见下"修正" |
+| ④ | `--data` 传大 JSON | ✅ 支持 **`@file`**（也有 `-` 走 stdin）→ 避开 argv 转义与长度两个坑 |
+| ⑤ | 能否**回复**卡片（而非裸发） | ✅ `POST /open-apis/im/v1/messages/{message_id}/reply` + `msg_type=interactive` 成功 |
+
+**对 §8 上表的修正**：
+
+- 原文"飞书对单条消息的卡片更新次数另有限制……**否则必然超限**"——**实测不成立**（至少到 80 次无失败）。
+  §8 记的"**最多更新 2 次**"是 **`card.action.trigger` 回调 token** 那条路（用于"用户点了按钮后更新那张卡"），
+  **不是** app 身份 `PATCH /open-apis/im/v1/messages/{message_id}` 这条路。两件事**必须分开**。
+- app 身份 patch 的真实约束是**频率（QPS）而非次数** → 节流仍然要做（避免贴脸打 + 省流量），
+  但**不必**按"只有 2 次"来设计；实测 250ms 间隔完全安全。
+
+**另一个必须记的坑（我第一版探针就栽在这）**：`lark-cli` 的返回封装是
+
+```json
+{ "ok": true, "identity": "bot", "data": { … }, "_notice": { … } }
+```
+
+**不是**飞书的 `{ "code": 0, "msg": "success", "data": … }`。按 `code === 0` 判成功会把**成功读成失败**
+（实测：patch 明明成功，却因 `code` 为 `undefined` 被记成失败）。判据要用 **`ok === true`**。
+另外每次调用都会带 `_notice.update`（1.0.96 → 1.0.98 的升级提示）—— 按决策**不升级**，忽略即可。
+
 ---
 
 ## 九、分阶段实施建议

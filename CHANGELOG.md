@@ -1,5 +1,28 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15（第三轮）：卡片探针实测（§8 卡片+节流的前置验证，**未改代码**）
+
+> 起因：`lark-cli im` 下**没有 card 子命令**（`+messages-send`/`+messages-reply` 只列 text/markdown/post/media），
+> 于是先探清"卡片能不能发/更新、上限多少"，再决定 bot 怎么改。
+
+- **① 发卡** ✅ raw 逃生口可用：`lark-cli api POST /open-apis/im/v1/messages --as bot`
+  （`im` 无卡片快捷命令，**必须走 raw**）
+- **② schema** ✅ 卡片 **1.0（`elements` 顶层）与 2.0（`schema:"2.0"` + `body.elements`）都被接受**
+- **③ 更新次数上限** ✅ **80 次连续全成功**（250–300ms 间隔，未见次数上限）
+  → **修正 §8 的"否则必然超限"假设**：§8 记的"最多更新 2 次"属 **`card.action.trigger` 回调 token**
+  路径（用户点按钮后更新那张卡），**不是** app 身份 `PATCH /open-apis/im/v1/messages/{id}` 这条路；
+  后者的真实约束是**频率（QPS）而非次数**。<br>→ 节流仍要做（省流量、留 QPS 余量），但**不必**按"只有 2 次"设计
+- **④ 传参** ✅ `--data @file`（也支持 `-` 走 stdin）→ 避开 argv 转义与长度两个坑
+- **⑤ 回复卡片** ✅ `POST /open-apis/im/v1/messages/{message_id}/reply` + `msg_type=interactive` 成功
+  （bot 最终要的是"**回复**"而不是裸发）
+- **踩到的坑（已入档 §8.1）**：`lark-cli` 的返回封装是 `{ ok, identity, data, _notice }`，
+  **不是**飞书的 `{ code, msg, data }`；按 `code === 0` 判成功会把**成功读成失败**（第一版探针即如此，
+  patch 明明成功却被记成失败）。判据要用 **`ok === true`**。另：每次调用都带 `_notice.update`
+  （1.0.96 → 1.0.98 升级提示），按决策**不升级**。
+- **副作用（用户已同意）**：向该用户飞书发了 **3 张测试卡片**，并在其中一张上**连打 80 次更新**。
+- **文档**：`docs/LARK_BOT.md` 新增 **§8.1**（五条实测 + 对 §8 的修正 + 封装判据的坑）。
+- **未做**：bot 侧的卡片 + 节流代码（等 Step 2 方案确认后再动）。
+
 ## 2026-10-15（第二轮）：bot 拆成独立 crate → 打通 `externalBin` 打包
 
 > 走上一轮 §5.7 里定的**出路 A**：让 bot 成为**不依赖应用 lib 的独立 crate**，解开打包死结。
