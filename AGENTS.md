@@ -163,6 +163,27 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
    `npm run dev` / `npm run tauri:build` 由 `predev` / `prebuild` 自动兜住（无需记得）。
 → 又一个"全门禁绿、真跑才炸"的例子：这类改动**必须真起一次应用**（见 ⑤）。
 
+**⑤″ 构建与运行会互锁：门禁前先停应用（2026-10-15 实测两次）**
+
+`tauri-build` 在编译期会把 sidecar **复制**到 `target/debug/lark-bot.exe`。而**运行中的 bot 进程锁着这个
+目标文件** → 复制失败 → `cargo test` / `cargo build` 直接红：
+
+```
+thread 'main' panicked at tauri-build-2.6.3/src/lib.rs:80:
+called `Result::unwrap()` on an `Err` value: Os { code: 5, kind: PermissionDenied, "拒绝访问。" }
+```
+
+以前只知道 `link-searcher.exe` 会占住应用二进制，**现在 bot 也会占住 sidecar** —— 两个都要停。
+`tauri dev` 里点过自启/开着窗口时同样会中招。
+
+→ **门禁前先停掉正在跑的应用**（`Stop-Process -Name link-searcher`；bot 会随看门狗自退）。
+
+**⑤‴ bot 改了源码，`tauri dev` 不会重建 sidecar**
+
+bot 是**成员 crate**，不是应用包的依赖 → `tauri dev` 的文件监听**只重建应用包**。
+改了 `src-tauri/lark-bot/**` 后**必须重启 dev**（`predev` 才会重编 sidecar），否则跑的还是旧二进制
+（2026-10-15 实测：第一次飞书验收跑的就是旧 bin，白测一轮）。
+
 ## 静态分析（Semgrep）
 
 每次提交前，必须运行阻塞级检查，**零发现**才可提交：

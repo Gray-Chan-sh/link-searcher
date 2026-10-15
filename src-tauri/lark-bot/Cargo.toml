@@ -13,8 +13,9 @@ lark-gate = { path = "../lark-gate" }
 serde_json = "1"
 log = "0.4"
 env_logger = "0.11"
-# 与主程序同款：自签 TLS 的 HTTP 客户端（版本/特性刻意保持一致，避免解析出两个 rustls）
-ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+# 与主程序同款：自签 TLS 的 HTTP 客户端（版本刻意保持一致，避免解析出两个 rustls）
+# ⚠️ **不带 `gzip`**：SSE 进度流会被压缩缓冲住（"进度"就不流了），且 bot 不需要它
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # 父进程看门狗（`--parent-pid`）只取 "system"，与主程序一致
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }

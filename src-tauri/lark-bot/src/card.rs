@@ -1,0 +1,480 @@
+//! 飞书**交互卡片**的渲染、**节流**与 **SSE 帧解析**（`docs/LARK_BOT.md` §8 / §8.1）。
+//!
+//! 这三块都刻意做成**纯逻辑**（不含任何 IO）：节流是最容易"看着对、实际发多或发漏"的地方，
+//! SSE 分帧则是最容易被换行/分块坑到的地方 —— 都不该只能靠"真飞书上试一次"来验证。
+//!
+//! ## 实测依据（2026-10-15 探针，§8.1）
+//!
+//! | 事实 | 结论 |
+//! |---|---|
+//! | app 身份 `PATCH /open-apis/im/v1/messages/{id}` | **没有"最多 2 次"限制**（实测 80/80 成功） |
+//! | 卡 1.0 与 2.0 schema | **都被接受** → 这里用更保守的 1.0 |
+//!
+//! "最多更新 2 次"属 **`card.action.trigger` 回调 token** 那条路，与这里无关。
+//! 因此节流按 **"最小间隔 + 次数上限"** 设计，而不是按"只能发 N 次"。
+
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+/// 中间更新的**最小间隔**。实测 250ms 也安全；1.5s 既留足 QPS 余量，又符合人眼阅读节奏。
+pub const MIN_INTERVAL: Duration = Duration::from_millis(1500);
+/// 中间更新**次数上限**（**不含**最后那次收尾）。
+pub const MAX_UPDATES: usize = 12;
+/// 卡片正文允许的**字节**上限。
+///
+/// 为什么按**字节**而不是字符：飞书的硬约束是**卡片 JSON ≤ 30KB**（字节），
+/// 中文一个字 3 字节 —— 按"字符数"设限极容易在长中文答案上算错（2026-10-15 实测踩过：
+/// 先前按 2500 **字符**截断，而卡片本可承载约 9000 字）。
+/// 取 20KB 给页眉/页脚/JSON 语法留足余量。
+pub const MAX_BODY_BYTES: usize = 20_000;
+
+// ───────────────────────────── 节流 ─────────────────────────────
+
+/// 节流器：回答"这一次更新要不要真的发出去"。
+///
+/// **收尾那一次永远发**（`finished = true`）—— 否则用户会停在一张"处理中"的卡片上，
+/// 那比不显示进度还糟。
+#[derive(Debug)]
+pub struct Throttle {
+    min_interval: Duration,
+    max_updates: usize,
+    last_sent: Option<Instant>,
+    sent: usize,
+}
+
+impl Throttle {
+    pub fn new(min_interval: Duration, max_updates: usize) -> Self {
+        Self { min_interval, max_updates, last_sent: None, sent: 0 }
+    }
+
+    /// 生产参数（§8.1 实测推断）。
+    pub fn standard() -> Self {
+        Self::new(MIN_INTERVAL, MAX_UPDATES)
+    }
+
+    /// `now` 由调用方传入 —— 单测因此**不需要 sleep**（避免把测试挂到真实时间上）。
+    pub fn should_send(&mut self, now: Instant, finished: bool) -> bool {
+        if finished {
+            self.last_sent = Some(now);
+            self.sent += 1;
+            return true;
+        }
+        if self.sent >= self.max_updates {
+            return false;
+        }
+        match self.last_sent {
+            Some(t) if now.duration_since(t) < self.min_interval => false,
+            _ => {
+                self.last_sent = Some(now);
+                self.sent += 1;
+                true
+            }
+        }
+    }
+
+    /// 已发出的更新次数（含收尾）。
+    pub fn sent(&self) -> usize {
+        self.sent
+    }
+}
+
+// ───────────────────────────── 渲染 ─────────────────────────────
+
+/// 按**字节**预算截断（回退到字符边界，绝不切出半个 UTF-8 字符），并说明已截断。
+///
+/// 按字节而不是字符：飞书的限制是卡片 JSON ≤ 30KB **字节**，而中文 1 字 = 3 字节
+/// （2026-10-15 实测踩过：按"字符"设限会把长中文答案截得比纯文本还短）。
+pub fn clip_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n\n…（内容过长已截断；完整内容请到桌面端 / WebUI 查看）",
+        &text[..end]
+    )
+}
+
+/// 单条回答最多占几张卡片。超过就把尾部合并进最后一张并给 WebUI 指引 ——
+/// 极端长的答案不该把聊天刷成十几条（用户要的是"看得到"，不是"被淹没"）。
+pub const MAX_CARDS: usize = 6;
+
+/// 渲染一张卡片（**1.0 schema**：`elements` 在顶层）。
+///
+/// `footer` 走 `note` 元素（灰色小字），用于"耗时 / 引用条数"这类元信息。
+pub fn render_card(title: &str, body_md: &str, footer: Option<&str>) -> serde_json::Value {
+    let mut elements = vec![json!({
+        "tag": "markdown",
+        "content": clip_bytes(body_md, MAX_BODY_BYTES),
+    })];
+    if let Some(f) = footer.map(str::trim).filter(|f| !f.is_empty()) {
+        elements.push(json!({ "tag": "hr" }));
+        elements.push(json!({
+            "tag": "note",
+            "elements": [{ "tag": "plain_text", "content": f }],
+        }));
+    }
+    json!({
+        "config": { "wide_screen_mode": true },
+        "header": { "title": { "tag": "plain_text", "content": title } },
+        "elements": elements,
+    })
+}
+
+/// "检索中"卡片：进度阶段 + 已经生成的部分内容。
+pub fn render_working(progress: &str, partial: &str) -> serde_json::Value {
+    let body = if partial.trim().is_empty() {
+        format!("⏳ {progress}")
+    } else {
+        format!("{partial}\n\n---\n⏳ {progress}")
+    };
+    render_card("正在检索…", &body, None)
+}
+
+/// 渲染**分页**的最终卡片（`page` 从 1 开始）。
+///
+/// 证据条数与耗时**只标在最后一张**：否则一张长回答会连着刷三遍同样的脚注，
+/// 反而把"读到第几段"这个真正有用的信息淹掉。
+pub fn render_answer_card(
+    body: &str,
+    page: usize,
+    pages: usize,
+    evidence_count: usize,
+    took_ms: u64,
+) -> serde_json::Value {
+    let mut meta: Vec<String> = Vec::new();
+    if pages > 1 {
+        meta.push(format!("第 {page} / {pages} 段"));
+    }
+    if page == pages {
+        if evidence_count > 0 {
+            meta.push(format!("共用 {evidence_count} 条证据"));
+        }
+        if took_ms > 0 {
+            meta.push(format!("{}s", took_ms / 1000));
+        }
+    }
+    let title = if pages > 1 { format!("回答（{page} / {pages}）") } else { "回答".to_string() };
+    let footer = if meta.is_empty() { None } else { Some(meta.join(" · ")) };
+    render_card(&title, body, footer.as_deref())
+}
+
+/// 把长回答切成**多张卡片**（每张 ≤ `max_bytes`），最多 `max_cards` 张。
+///
+/// 切分规则与理由：
+/// - **优先在行边界切**（`\n`）→ 不会把一段话拦腰截断；某一行本身超预算时才硬切；
+/// - 硬切一律**回退到字符边界** → 中文不会被切出半个 UTF-8 字符；
+/// - 切分**不丢任何字符**（各段拼回去就是原文）；
+/// - 超过 `max_cards` 时把尾部**合并进最后一张**并加"完整内容请看桌面端/WebUI"指引。
+///
+/// 这段是纯函数 —— "分页会不会把答案弄丢/弄错"正是最该被测试盯住的地方。
+pub fn split_for_cards(text: &str, max_bytes: usize, max_cards: usize) -> Vec<String> {
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+
+    for line in text.split_inclusive('\n') {
+        // 单行自身超预算：先按字符边界切出若干满预算段
+        if line.len() > max_bytes {
+            if !cur.is_empty() {
+                chunks.push(std::mem::take(&mut cur));
+            }
+            let mut rest = line;
+            while rest.len() > max_bytes {
+                let mut end = max_bytes;
+                while end > 0 && !rest.is_char_boundary(end) {
+                    end -= 1;
+                }
+                if end == 0 {
+                    break; // 理论不可达（预算远大于单字符字节数）
+                }
+                chunks.push(rest[..end].to_string());
+                rest = &rest[end..];
+            }
+            cur.push_str(rest);
+            continue;
+        }
+        if !cur.is_empty() && cur.len() + line.len() > max_bytes {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        cur.push_str(line);
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+
+    if chunks.len() > max_cards {
+        let keep = max_cards.max(1);
+        let mut merged = chunks[keep - 1].clone();
+        for extra in chunks.drain(keep..) {
+            merged.push_str(&extra);
+        }
+        chunks[keep - 1] = clip_bytes(&merged, max_bytes);
+    }
+    chunks
+}
+
+/// 失败卡片（**在"卡已发出"之后**出错时用）：不再另发文本，避免答案重复出现两次。
+pub fn render_error(detail: &str) -> serde_json::Value {
+    render_card("出错了", &format!("未能完成这次回答：\n\n```\n{detail}\n```"), None)
+}
+
+// ───────────────────────────── SSE 分帧 ─────────────────────────────
+
+/// SSE 帧累加器。
+///
+/// axum 的 `Sse` 编码是 `event: <name>\n` + `data: <json>\n` + **空行**分隔，
+/// 且 `keep_alive` 会插入 `: ping` 注释行。**必须按帧累加**，不能"一行当一帧"
+/// （数据里含换行或分块到达时会拆错）。
+#[derive(Debug, Default)]
+pub struct SseAccum {
+    event: String,
+    data: String,
+}
+
+impl SseAccum {
+    /// 喂一行；当这一行构成**完整帧**时返回 `(event, data)`。
+    pub fn push_line(&mut self, line: &str) -> Option<(String, String)> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            if self.data.is_empty() {
+                self.event.clear();
+                return None;
+            }
+            return Some((std::mem::take(&mut self.event), std::mem::take(&mut self.data)));
+        }
+        // `:` 开头是注释（keep-alive），其余字段（id/retry）我们不用
+        if line.starts_with(':') {
+            return None;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            self.event = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+        }
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── 节流：全部用注入的 `now`，不 sleep ──
+
+    #[test]
+    fn first_update_goes_out_immediately() {
+        let mut t = Throttle::standard();
+        let t0 = Instant::now();
+        assert!(t.should_send(t0, false), "第一次必须立刻发（否则用户一直看不到卡片内容）");
+    }
+
+    #[test]
+    fn updates_within_interval_are_coalesced_away() {
+        let mut t = Throttle::new(Duration::from_millis(1000), 5);
+        let t0 = Instant::now();
+        assert!(t.should_send(t0, false));
+        assert!(!t.should_send(t0 + Duration::from_millis(300), false), "间隔内必须丢弃（合并）");
+        assert!(!t.should_send(t0 + Duration::from_millis(999), false));
+        assert!(t.should_send(t0 + Duration::from_millis(1000), false), "满一个间隔后应放行");
+    }
+
+    #[test]
+    fn middle_updates_stop_at_the_cap() {
+        let mut t = Throttle::new(Duration::from_millis(1), 3);
+        let t0 = Instant::now();
+        for i in 0..3 {
+            assert!(t.should_send(t0 + Duration::from_millis(i * 10), false), "第 {i} 次应在上限内");
+        }
+        assert!(!t.should_send(t0 + Duration::from_secs(60), false), "超过上限后中间更新必须停");
+        assert_eq!(t.sent(), 3);
+    }
+
+    #[test]
+    fn final_update_always_goes_out_even_past_the_cap() {
+        let mut t = Throttle::new(Duration::from_secs(3600), 1);
+        let t0 = Instant::now();
+        assert!(t.should_send(t0, false));
+        // 既超过次数上限、也远没到间隔 —— 但收尾必须发
+        assert!(t.should_send(t0 + Duration::from_millis(1), true));
+        assert_eq!(t.sent(), 2);
+    }
+
+    // ── 截断 ──
+
+    #[test]
+    fn clip_bytes_never_splits_a_multibyte_char() {
+        let s = "字".repeat(10); // 每个汉字 3 字节 → 共 30 字节
+        assert_eq!(clip_bytes(&s, 30), s, "刚好到预算不该截断");
+        let out = clip_bytes(&s, 10); // 10 不是 3 的倍数 → 必须回退到 9 字节 = 3 个字
+        assert!(out.starts_with("字字字"), "应回退到字符边界：{out}");
+        assert!(out.contains("已截断"));
+        assert_eq!(out.matches('字').count(), 3, "绝不能切出半个 UTF-8 字符");
+    }
+
+    /// 回归：正文预算必须让**整张卡片**（含页眉/页脚/JSON 语法）留在飞书 30KB 硬限内。
+    /// 2026-10-15 实测踩过相反方向的坑：按"字符"设限把长中文答案截得比纯文本还短。
+    #[test]
+    fn whole_card_json_stays_under_feishu_30kb_limit() {
+        let long = "字".repeat(20_000); // 60KB，必被截断
+        let card = render_answer_card(&long, 1, 1, 3, 1000);
+        let json = serde_json::to_string(&card).unwrap();
+        assert!(json.len() < 30_000, "整张卡片 JSON 必须 < 30KB，实际 {} 字节", json.len());
+        assert!(json.contains("已截断"));
+        // 中文长答案的真实收益：能装下远超纯文本(3000 字)的量
+        assert!(
+            card["elements"][0]["content"].as_str().unwrap_or("").matches('字').count() > 5000,
+            "20KB 预算应能装下 5000 字以上中文"
+        );
+    }
+
+    // ── SSE 分帧 ──
+
+    #[test]
+    fn sse_frame_spanning_lines_is_reassembled() {
+        let mut a = SseAccum::default();
+        assert_eq!(a.push_line("event: ai-chunk"), None);
+        assert_eq!(a.push_line("data: {\"a\":1}"), None);
+        assert_eq!(
+            a.push_line(""),
+            Some(("ai-chunk".to_string(), "{\"a\":1}".to_string())),
+            "空行才结束一帧"
+        );
+    }
+
+    #[test]
+    fn sse_keepalive_and_stray_blank_lines_are_ignored() {
+        let mut a = SseAccum::default();
+        assert_eq!(a.push_line(": ping"), None, "keep-alive 注释行不能当事件");
+        assert_eq!(a.push_line(""), None, "没有 data 的空行不产生帧");
+        let mut b = SseAccum::default();
+        b.push_line("event: ai-done");
+        b.push_line("data: {}");
+        assert_eq!(b.push_line(""), Some(("ai-done".to_string(), "{}".to_string())));
+    }
+
+    #[test]
+    fn sse_data_leading_space_is_stripped_but_inner_newlines_kept() {
+        let mut a = SseAccum::default();
+        a.push_line("event: x");
+        a.push_line("data: line1");
+        a.push_line("data: line2");
+        assert_eq!(a.push_line(""), Some(("x".to_string(), "line1\nline2".to_string())));
+    }
+
+    // ── 卡片渲染 ──
+
+    #[test]
+    fn card_shape_is_valid_1_0() {
+        let c = render_answer_card("答案 [1]", 1, 1, 2, 3400);
+        assert!(c.get("config").is_some());
+        assert_eq!(c["header"]["title"]["content"], "回答");
+        assert_eq!(c["elements"][0]["tag"], "markdown");
+        assert_eq!(c["elements"][0]["content"], "答案 [1]");
+        // footer 走 note 元素，含 hr 分隔
+        let tags: Vec<&str> = c["elements"].as_array().unwrap().iter().map(|e| e["tag"].as_str().unwrap_or("")).collect();
+        assert_eq!(tags, vec!["markdown", "hr", "note"]);
+        assert!(c["elements"][2]["elements"][0]["content"].as_str().unwrap_or("").contains("2 条证据"));
+    }
+
+    #[test]
+    fn working_card_shows_progress_and_marks_partial() {
+        let c = render_working("正在检索文档…", "");
+        assert!(c["elements"][0]["content"].as_str().unwrap_or("").contains("⏳"));
+        let c2 = render_working("生成回答中…", "已经写了一半");
+        let body = c2["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(body.contains("已经写了一半") && body.contains("生成回答中"));
+        assert_eq!(c2["elements"].as_array().unwrap().len(), 1, "没有 footer 时不该多出元素");
+    }
+
+    #[test]
+    fn error_card_is_marked_and_not_mistaken_for_an_answer() {
+        let c = render_error("HTTP 500");
+        assert_eq!(c["header"]["title"]["content"], "出错了");
+        assert!(c["elements"][0]["content"].as_str().unwrap_or("").contains("HTTP 500"));
+    }
+
+    // ── 分页（超长回答切成多张卡片）──
+
+    #[test]
+    fn short_answer_stays_one_card() {
+        let chunks = split_for_cards("较短的回答 [1]", 1000, 6);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], "较短的回答 [1]");
+    }
+
+    /// **最重要的一条**：分页绝不能丢内容 —— 各段拼回去必须与原文一字不差。
+    #[test]
+    fn split_never_loses_a_character() {
+        let original: String = (0..400).map(|i| format!("第{i}行，这是一段用来测试分页的中文内容。\n")).collect();
+        let chunks = split_for_cards(&original, 500, 99);
+        assert!(chunks.len() > 1, "这段应当被切成多张");
+        assert_eq!(chunks.concat(), original, "拼回去必须与原文完全一致");
+    }
+
+    #[test]
+    fn every_chunk_fits_the_budget_and_breaks_on_line_boundaries() {
+        let original: String = (0..200).map(|i| format!("行{i}：内容内容内容内容内容\n")).collect();
+        let chunks = split_for_cards(&original, 300, 99);
+        for (i, c) in chunks.iter().enumerate() {
+            assert!(c.len() <= 300, "第 {i} 段超出预算：{} 字节", c.len());
+        }
+        // 除最后一段外，都应在行边界结束（不会把一行话拦腰截断）
+        for c in &chunks[..chunks.len() - 1] {
+            assert!(c.ends_with('\n'), "应在行边界切分：{:?}", &c[c.len().saturating_sub(12)..]);
+        }
+    }
+
+    #[test]
+    fn single_huge_line_is_hard_split_on_char_boundary() {
+        let one_line = "字".repeat(100); // 300 字节，且**没有换行**
+        let chunks = split_for_cards(&one_line, 100, 9);
+        assert!(chunks.len() > 1);
+        assert_eq!(chunks.concat(), one_line, "硬切同样不能丢字符");
+        for c in &chunks {
+            assert!(c.len() <= 100, "硬切也要守预算");
+            assert!(c.chars().all(|ch| ch == '字'), "绝不能切出半个 UTF-8 字符");
+        }
+    }
+
+    #[test]
+    fn over_the_card_cap_merges_tail_and_points_to_the_desktop_app() {
+        let original: String = (0..200).map(|i| format!("行{i}：内容\n")).collect();
+        let chunks = split_for_cards(&original, 200, 3);
+        assert_eq!(chunks.len(), 3, "超过上限应合并到最后一张");
+        let tail = chunks.last().unwrap();
+        assert!(tail.contains("完整内容请到桌面端"), "被合并截断时要给出口：{tail}");
+        assert!(tail.contains("已截断"));
+        // 前 max_cards-1 张不受影响，仍是原文的前缀
+        assert!(original.starts_with(chunks[0].as_str()));
+    }
+
+    #[test]
+    fn paged_card_marks_pages_and_only_last_shows_evidence() {
+        let c1 = render_answer_card("第一段", 1, 3, 19, 67000);
+        assert_eq!(c1["header"]["title"]["content"], "回答（1 / 3）");
+        let f1 = &c1["elements"][2]["elements"][0]["content"];
+        assert_eq!(f1, "第 1 / 3 段", "非最后一张不该标证据/耗时");
+        let c3 = render_answer_card("末段", 3, 3, 19, 67000);
+        let f3 = c3["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(f3.contains("第 3 / 3 段") && f3.contains("19 条证据") && f3.contains("67s"), "实际：{f3}");
+    }
+
+    #[test]
+    fn single_page_card_has_no_page_marker() {
+        let c = render_answer_card("就一段", 1, 1, 2, 3400);
+        assert_eq!(c["header"]["title"]["content"], "回答");
+        let f = c["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(!f.contains("段"), "只有一段时不该出现分页标记：{f}");
+        assert!(f.contains("2 条证据"));
+    }
+}

@@ -8,10 +8,13 @@
 //!   → /api/lark/seen 去重（按 message_id）
 //!   → /api/lark/binding 取/建 chat_id ↔ session_id 绑定
 //!   → /api/chat/sessions/{id}?origin=lark 取会话、带上历史
-//!   → /api/ai/conversation/ask 问一次（非流式）
+//!   → **回复一张"检索中"卡片** → 消费 `POST /api/ai/conversation/ask/stream`（SSE）
+//!     → **节流**更新卡片（§8.1：约束是频率而非次数） → 收尾成最终卡片
+//!     →（卡片发不出去就**退回纯文本**：`/api/ai/conversation/ask` + `im +messages-reply --text`）
 //!   → 把这一轮落回会话（origin=lark）
-//!   → lark-cli im +messages-reply 回纯文本
 //! ```
+//!
+//! 卡片的渲染/节流/SSE 分帧在 [`card`] 模块（纯逻辑，可单测）。
 //!
 //! ## 为什么是**独立 crate**（而不是主程序包里的一个 bin）
 //!
@@ -42,18 +45,23 @@
 //!
 //! ## 尚未做（后续增量）
 //!
-//! - 卡片 + 节流更新（§8）；回答长度截断目前是简单处理
-//! - 改走 Web API 的流式路由（现在是非流式：该路由**忽略** `session_id`，多轮上下文
-//!   只能由我们把历史一并发过去 → 追问时的指代消解不如 UI 端）
+//! - 卡片**按钮/交互**（P3；`card.action.trigger` 回调已实测可走长连接，但需要
+//!   `custom_action_id` 路由，且那条路的更新有"最多 2 次"限制，见 §8.1）
 //! - `lark-cli` 的可执行文件发现应交给**依赖中心**（现在是探测 + `LS_LARK_CLI` 覆盖）
 
-use std::io::{BufRead, BufReader};
+mod card;
+
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use card::{
+    render_answer_card, render_error, render_working, split_for_cards, SseAccum, Throttle,
+    MAX_BODY_BYTES, MAX_CARDS,
+};
 use lark_gate::{
     gate, parse_allowed_users, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent,
     NON_P2P_NOTICE,
@@ -201,32 +209,86 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
 
     // 取/建会话绑定（阶段三）
     let session_id = http.session_for_chat(&ev.chat_id, &ev.sender_id)?;
-    let mut session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
     // 历史**原样透传**（见文件头注释：结构化解析一旦与服务端不一致就会静默丢空历史）
     let mut messages: Vec<Value> = session
         .get("messages")
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     messages.push(json!({ "role": "user", "content": question }));
-    let has_history = messages.len() > 1;
-    if has_history {
+    if messages.len() > 1 {
         log::info!("[bot] 带上 {} 条历史（含本轮问题）", messages.len());
     }
 
-    // 问（非流式；session_id 会被该路由忽略，所以历史由我们带上）
-    let asked = http.post(
-        "/api/ai/conversation/ask",
-        &json!({
-            "messages": messages,
-            "sourceIds": [],
-            // 服务端 `scope` 的字段全是 `#[serde(default)]`，`{}` 即全默认
-            // （原为 `TurnScope::default()`；不搬那个类型是为了不依赖应用 lib）
-            "scope": {},
-            "sessionRetrievalScope": [],
-            "strictDocs": false,
-            "fullRecall": false,
-        }),
-    )?;
+    // 优先走**卡片**（§8：RAG 要几十秒，"一片安静"是最差的体验）。
+    // 但**卡片还没发出去之前**的任何失败 → 完全退回纯文本，用户不会看到两套答案。
+    // `LS_LARK_CARDS=off` 是逃生阀（排查卡片问题时强制走纯文本）。
+    if cards_enabled() {
+        match answer_with_card(http, &ev, &question, &session_id, session.clone(), messages.clone()) {
+            Ok(()) => return Ok(()),
+            Err(e) => log::warn!("[bot] 卡片流程未能启动（{e}）→ 退回纯文本"),
+        }
+    }
+    answer_with_text(http, &ev, &question, &session_id, session, messages)
+}
+
+/// 截断过长回答，并说明原因。
+///
+/// **只用于纯文本兜底路径**（卡片路径有自己的 `card::clip`，且飞书卡片本身能承载更多内容）。
+fn truncate_reply(answer: &str) -> String {
+    if answer.chars().count() <= MAX_REPLY_CHARS {
+        return answer.to_string();
+    }
+    let head: String = answer.chars().take(MAX_REPLY_CHARS).collect();
+    format!("{head}\n\n…（回答过长已截断；完整内容请到 WebUI / 桌面端查看）")
+}
+
+// ───────────────────────────── 会话问答：两条路径 ─────────────────────────────
+
+/// 两个会话问答路由**共用**的请求体（省得两处写法漂移）。
+///
+/// - 非流式 `/api/ai/conversation/ask`：**忽略** `sessionId`，历史只能由我们带上；
+/// - 流式 `/api/ai/conversation/ask/stream`：**接收** `sessionId` → 证据按 session 按轮绑定
+///   （这正是"追问时「他」指代不明确"的根因，见 §8.1）。
+///
+/// `scope` 直接发 `{}`：服务端字段全是 `#[serde(default)]`，语义等同全默认。
+fn ask_body(session_id: &str, messages: &[Value]) -> Value {
+    json!({
+        "messages": messages,
+        "sourceIds": [],
+        "scope": {},
+        "sessionRetrievalScope": [],
+        "strictDocs": false,
+        "fullRecall": false,
+        "sessionId": session_id,
+    })
+}
+
+/// 把这一轮写回会话（`origin=lark`；`origin` 已在会话里，回写时不必带）。
+///
+/// **失败只告警**：落库失败不该让用户拿不到答案。
+fn save_turn(http: &Http, session_id: &str, session: &mut Value, messages: &[Value]) {
+    if let Some(obj) = session.as_object_mut() {
+        obj.insert("messages".into(), serde_json::to_value(messages).unwrap_or_default());
+    }
+    if let Err(e) = http.put(
+        &format!("/api/chat/sessions/{session_id}?origin=lark"),
+        &json!({ "session": session }),
+    ) {
+        log::warn!("[bot] 会话落库失败（回答照常发出）：{e}");
+    }
+}
+
+/// 纯文本回答：**卡片功能之前的老路径**，现在作为兜底保留（能力不能因卡片而变差）。
+fn answer_with_text(
+    http: &Http,
+    ev: &LarkMessageEvent,
+    question: &str,
+    session_id: &str,
+    mut session: Value,
+    messages: Vec<Value>,
+) -> Result<(), String> {
+    let asked = http.post("/api/ai/conversation/ask", &ask_body(session_id, &messages))?;
     let answer = asked
         .get("answer")
         .and_then(|v| v.as_str())
@@ -237,23 +299,13 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
         reply(&ev.message_id, "没有拿到回答（主程序日志里应有原因）。");
         return Ok(());
     }
-
-    // 落回会话（origin=lark；`origin` 已在会话里，回写时不必带）
-    messages.push(json!({ "role": "assistant", "content": answer }));
-    if let Some(obj) = session.as_object_mut() {
-        obj.insert("messages".into(), serde_json::to_value(&messages).unwrap_or_default());
-    }
-    if let Err(e) = http.put(
-        &format!("/api/chat/sessions/{session_id}?origin=lark"),
-        &json!({ "session": session }),
-    ) {
-        // 落库失败不该让用户拿不到回答
-        log::warn!("[bot] 会话落库失败（回答照常发出）：{e}");
-    }
+    let mut done = messages;
+    done.push(json!({ "role": "assistant", "content": answer }));
+    save_turn(http, session_id, &mut session, &done);
 
     reply(&ev.message_id, &truncate_reply(&answer));
     log::info!(
-        "[bot] 已回答 chat={} session={session_id} 问题 {} 字 / 回答 {} 字",
+        "[bot] 已回答（文本）chat={} session={session_id} 问题 {} 字 / 回答 {} 字",
         ev.chat_id,
         question.chars().count(),
         answer.chars().count()
@@ -261,13 +313,246 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     Ok(())
 }
 
-/// 截断过长回答，并说明原因（§8 的卡片分页是后续增量）。
-fn truncate_reply(answer: &str) -> String {
-    if answer.chars().count() <= MAX_REPLY_CHARS {
-        return answer.to_string();
+/// 卡片逃生阀：`LS_LARK_CARDS=off` → 强制走纯文本。
+fn cards_enabled() -> bool {
+    !std::env::var("LS_LARK_CARDS")
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+}
+
+/// 卡片回答：回复一张"检索中"卡片 → 消费 SSE → **节流**更新 → 收尾成最终卡片。
+///
+/// **错误契约**：只在"卡片**还没发出去**"时返回 `Err`（调用方据此退回纯文本）；
+/// 卡片一旦发出，之后的错误都在内部消化成一张"出错了"卡片 —— 否则用户会**同时**看到
+/// 卡片和文本两份答案。
+fn answer_with_card(
+    http: &Http,
+    ev: &LarkMessageEvent,
+    question: &str,
+    session_id: &str,
+    mut session: Value,
+    messages: Vec<Value>,
+) -> Result<(), String> {
+    let card_id = reply_card(&ev.message_id, &render_working("正在检索…", ""))?;
+    log::info!("[bot] 已回卡片 {card_id}（chat={}）", ev.chat_id);
+
+    match stream_turn(http, session_id, &messages, &card_id) {
+        Ok(turn) => {
+            let mut done = messages;
+            done.push(json!({ "role": "assistant", "content": turn.full_text }));
+            save_turn(http, session_id, &mut session, &done);
+
+            // 超长回答**分多张卡片**（"过长也要能完成"）：
+            // 第 1 段更新那张流式卡片（用户正在看它），第 2..N 段作为**新的回复卡片续发**。
+            // 续发只发最终内容、不参与流式更新 → **不额外增加 QPS**。
+            let chunks = split_for_cards(&turn.full_text, MAX_BODY_BYTES, MAX_CARDS);
+            let pages = chunks.len();
+            let mut sent_pages = 0usize;
+            let first = render_answer_card(&chunks[0], 1, pages, turn.evidence_count, turn.took_ms);
+            if let Err(e) = patch_card(&card_id, &first) {
+                // 收尾更新失败：至少把答案给出去（此时卡片里还没有最终内容，不会重复）
+                log::warn!("[bot] 收尾卡片更新失败：{e}");
+                reply(&ev.message_id, &truncate_reply(&turn.full_text));
+            } else {
+                sent_pages = 1;
+                for (i, chunk) in chunks.iter().enumerate().skip(1) {
+                    let card = render_answer_card(chunk, i + 1, pages, turn.evidence_count, turn.took_ms);
+                    match reply_card(&ev.message_id, &card) {
+                        Ok(_) => {
+                            sent_pages += 1;
+                            log::info!("[bot] 续发第 {}/{} 段", i + 1, pages);
+                        }
+                        // 单段失败不该让其余段落不发出
+                        Err(e) => log::warn!("[bot] 第 {}/{} 段续发失败：{e}", i + 1, pages),
+                    }
+                }
+            }
+            log::info!(
+                "[bot] 已回答（卡片）chat={} session={session_id} 问题 {} 字 / 回答 {} 字 / {sent_pages}/{pages} 张卡片 / 中间更新 {} 次{}",
+                ev.chat_id,
+                question.chars().count(),
+                turn.full_text.chars().count(),
+                turn.updates,
+                if turn.cancelled { "（已取消）" } else { "" }
+            );
+            Ok(())
+        }
+        Err(e) => {
+            log::warn!("[bot] 流式回答失败：{e}");
+            let _ = patch_card(&card_id, &render_error(&e));
+            // 卡已发出 → **不**退回纯文本（否则答案会出现两份）
+            Ok(())
+        }
     }
-    let head: String = answer.chars().take(MAX_REPLY_CHARS).collect();
-    format!("{head}\n\n…（回答过长已截断；完整内容请到 WebUI / 桌面端查看）")
+}
+
+/// 一轮流式回答的产出。
+struct Turn {
+    full_text: String,
+    evidence_count: usize,
+    took_ms: u64,
+    cancelled: bool,
+    updates: usize,
+}
+
+/// 消费 SSE 并**节流**更新卡片；返回这一轮的最终内容。
+///
+/// 事件契约（`webapi/routes/ai.rs`）：具名事件 `ai-progress` / `ai-chunk` / `ai-done`，
+/// 各自 data 是 JSON。**只有 `ai-done` 的 `full_text` 是权威结果** —— 中间 chunk 只用于显示，
+/// 广播通道在接收端落后时会丢事件（axum `BroadcastStream` 的 `Lagged`），丢了也不影响最终答案。
+fn stream_turn(http: &Http, session_id: &str, messages: &[Value], card_id: &str) -> Result<Turn, String> {
+    let mut throttle = Throttle::standard();
+    let mut acc = SseAccum::default();
+    let mut partial = String::new();
+    let mut progress = String::from("正在检索…");
+    let mut done_payload: Option<Value> = None;
+
+    http.stream("/api/ai/conversation/ask/stream", &ask_body(session_id, messages), |line| {
+        let Some((event, data)) = acc.push_line(line) else {
+            return Ok(true);
+        };
+        let Ok(v) = serde_json::from_str::<Value>(&data) else {
+            log::warn!("[bot] SSE 帧不是 JSON（忽略）：{}", &data[..data.len().min(120)]);
+            return Ok(true);
+        };
+        match event.as_str() {
+            "ai-progress" => {
+                progress = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("处理中…")
+                    .to_string();
+            }
+            "ai-chunk" => match v.get("delta").and_then(|d| d.as_str()) {
+                Some(d) => partial.push_str(d),
+                None => return Ok(true),
+            },
+            "ai-done" => {
+                done_payload = Some(v);
+                return Ok(false); // 收尾由调用方发**最终卡片**，这里不再 patch
+            }
+            _ => return Ok(true),
+        }
+        // 中间更新：节流决定"这次要不要真发"（把高频 chunk 合并掉）
+        if throttle.should_send(Instant::now(), false)
+            && let Err(e) = patch_card(card_id, &render_working(&progress, &partial))
+        {
+            // 中间更新失败**不**中断回答：抖动不值得让用户拿不到答案
+            log::warn!("[bot] 中间卡片更新失败（继续）：{e}");
+        }
+        Ok(true)
+    })?;
+
+    let Some(done) = done_payload else {
+        // 流结束却没有 `ai-done`：有内容就用内容收尾，否则算失败
+        if partial.trim().is_empty() {
+            return Err("SSE 流结束但没收到 ai-done（也没有任何内容）".to_string());
+        }
+        log::warn!("[bot] 未收到 ai-done，用已接收的部分内容收尾");
+        return Ok(Turn {
+            full_text: partial,
+            evidence_count: 0,
+            took_ms: 0,
+            cancelled: false,
+            updates: throttle.sent(),
+        });
+    };
+
+    let cancelled = done.get("cancelled").and_then(|c| c.as_bool()).unwrap_or(false);
+    let authoritative = done
+        .get("full_text")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let full_text = if authoritative.is_empty() { partial.trim().to_string() } else { authoritative };
+    if full_text.is_empty() {
+        return Err(if cancelled {
+            "本次回答已取消".to_string()
+        } else {
+            "回答为空（主程序日志里应有原因）".to_string()
+        });
+    }
+    let evidence_count = done
+        .get("evidence")
+        .and_then(|e| e.as_array())
+        .map(|a| a.len())
+        .or_else(|| done.get("source_ids").and_then(|s| s.as_array()).map(|a| a.len()))
+        .unwrap_or(0);
+    let took_ms = done.get("took_ms").and_then(|t| t.as_u64()).unwrap_or(0);
+    Ok(Turn { full_text, evidence_count, took_ms, cancelled, updates: throttle.sent() })
+}
+
+// ───────────────────────────── 卡片收发（走 lark-cli raw API）─────────────────────────────
+
+/// 调 `lark-cli api`（raw 逃生口）。
+///
+/// 两个刻意的选择：
+/// - **参数数组传值、不经 shell** → 卡片正文里的引号/换行安全（AGENTS.md 记的那个引号坑
+///   只存在于壳层调用）；
+/// - **`--data -` 走 stdin** → 不受 argv 长度限制（卡片可能有上万字符）。
+fn lark_api(method: &str, path: &str, body: &Value) -> Result<Value, String> {
+    let program = lark_cli_program();
+    let payload = serde_json::to_string(body).map_err(|e| format!("序列化请求体失败：{e}"))?;
+    let mut child = Command::new(&program)
+        .args(["api", method, path, "--as", "bot", "--data", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("无法启动 lark-cli（{}）：{e}", program.display()))?;
+    if let Some(mut si) = child.stdin.take() {
+        si.write_all(payload.as_bytes())
+            .map_err(|e| format!("写 lark-cli stdin 失败：{e}"))?;
+    } // drop → EOF，lark-cli 才会开始处理
+
+    let out = child.wait_with_output().map_err(|e| format!("等待 lark-cli 失败：{e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    if !out.status.success() {
+        return Err(format!(
+            "lark-cli api 退出码 {:?}：{} {}",
+            out.status.code(),
+            stdout.trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let v: Value = serde_json::from_str(&stdout).map_err(|e| {
+        format!("lark-cli 输出不是 JSON：{e}（前 200 字符：{}）", &stdout[..stdout.len().min(200)])
+    })?;
+    // ⚠️ lark-cli 的封装是 `{ ok, identity, data }`，**不是**飞书的 `{ code, msg }`。
+    //（§8.1 实测踩过：按 `code == 0` 判成功会把**成功读成失败**）
+    if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+        return Err(format!("lark-cli api 返回失败：{}", stdout.trim()));
+    }
+    Ok(v)
+}
+
+/// **回复**一张卡片（`+messages-reply` 不支持 interactive，必须走 raw）。返回新卡片的 `message_id`。
+fn reply_card(message_id: &str, card: &Value) -> Result<String, String> {
+    if message_id.is_empty() {
+        return Err("没有 message_id，无法回复".to_string());
+    }
+    let body = json!({
+        "msg_type": "interactive",
+        "content": serde_json::to_string(card).map_err(|e| format!("序列化卡片失败：{e}"))?,
+    });
+    let out = lark_api("POST", &format!("/open-apis/im/v1/messages/{message_id}/reply"), &body)?;
+    out.get("data")
+        .and_then(|d| d.get("message_id"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("回复卡片未返回 message_id：{}", out))
+}
+
+/// 更新已发出的卡片（**app 身份** `PATCH`）。
+///
+/// §8.1 实测：这条路**没有"最多 2 次"限制**（80/80 成功），约束是**频率**而非次数 ——
+/// "最多 2 次"属 `card.action.trigger` 回调 token 那条路。因此这里只做节流，不做硬性次数限制。
+fn patch_card(card_message_id: &str, card: &Value) -> Result<(), String> {
+    let body = json!({
+        "content": serde_json::to_string(card).map_err(|e| format!("序列化卡片失败：{e}"))?,
+    });
+    lark_api("PATCH", &format!("/open-apis/im/v1/messages/{card_message_id}"), &body).map(|_| ())
 }
 
 // ───────────────────────────── 凭据读取 ─────────────────────────────
@@ -493,6 +778,44 @@ impl Http {
     }
     fn put(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         self.call("PUT", path, Some(body))
+    }
+
+    /// 发一个 **SSE** 请求并逐行回调；回调返回 `Ok(false)` 表示下游已拿到要的内容、可以停止读取。
+    ///
+    /// 与 [`Self::call`] 的关键差别：
+    /// - 用 `into_reader()` **流式**读，绝不把响应体整个攒起来（否则"进度"就不流了）；
+    /// - 显式 `Accept-Encoding: identity` —— 压缩会缓冲，进度就看不到（bot crate 也已去掉 `gzip` 特性）；
+    /// - 读超时沿用 agent 的 600s：SSE 有 15s keep-alive，不会因"看起来空闲"而误断。
+    fn stream(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        mut on_line: impl FnMut(&str) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let url = format!("{}{}", self.base, path);
+        let payload = serde_json::to_string(body).map_err(|e| e.to_string())?;
+        let resp = self
+            .agent
+            .post(&url)
+            .set("Authorization", &format!("Bearer {}", self.token))
+            .set("Content-Type", "application/json")
+            .set("Accept", "text/event-stream")
+            .set("Accept-Encoding", "identity")
+            .send_string(&payload)
+            .map_err(|e| match e {
+                ureq::Error::Status(code, resp) => {
+                    format!("HTTP {code}：{}", resp.into_string().unwrap_or_default())
+                }
+                other => format!("{other}"),
+            })?;
+        let reader = BufReader::new(resp.into_reader());
+        for line in reader.lines() {
+            let line = line.map_err(|e| format!("读 SSE 流失败：{e}"))?;
+            if !on_line(&line)? {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// 读设置，并在 webapi 尚未监听时重试（GUI 拉起 bot 时 bind 可能还在异步进行）。
