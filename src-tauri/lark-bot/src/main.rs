@@ -756,11 +756,42 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                     Ok(())
                 }
                 crate::card::CardAction::Retry { session_id } => {
-                    // 卡片上**故意还没有**这个按钮（要等"在同一张卡上重跑一轮"的接线，D-4b）。
-                    // 保留这个分支是让类型封闭；万一真收到（老卡片/手工构造），**明确告知**而不是静默。
-                    log::info!("[bot] 收到 retry 动作（会话 {session_id}）—— 该按钮尚未上线");
-                    reply(&ev.message_id, "「换一批证据」尚未上线：请直接重新发送问题。");
-                    Ok(())
+                    // D-4b：**复用主链路** —— 把重跑当成"用户又问了一遍"。
+                    // 事件用回调里的 id 合成（白名单已在回调入口判过，故这里不会再被拒）。
+                    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+                    let messages: Vec<Value> = session
+                        .get("messages")
+                        .and_then(|v| v.as_array().cloned())
+                        .unwrap_or_default();
+                    // 问题 = 该会话里**最后一条 user 消息**
+                    let question = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if question.is_empty() {
+                        reply(&ev.message_id, "找不到可重跑的问题（这会话里没有用户消息）。");
+                        return Ok(());
+                    }
+                    let synth = LarkMessageEvent {
+                        event_type: "im.message.receive_v1".to_string(),
+                        message_id: ev.message_id.clone(),
+                        chat_id: ev.chat_id.clone(),
+                        chat_type: "p2p".to_string(),
+                        message_type: "text".to_string(),
+                        sender_id: operator.clone().unwrap_or_default(),
+                        sender_type: "user".to_string(),
+                        content: question.clone(),
+                    };
+                    log::info!(
+                        "[bot] 重跑会话 {session_id} 的最后一问（{} 字）",
+                        question.chars().count()
+                    );
+                    answer_with_card(http, &synth, &question, &session_id, session, messages)
+                        .map_err(|e| format!("重跑失败：{e}"))
                 }
             }
         }
