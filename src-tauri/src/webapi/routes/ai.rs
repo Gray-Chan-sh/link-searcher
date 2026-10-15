@@ -95,16 +95,37 @@ async fn turn_ai_events_handler(
     Ok(Json(serde_json::to_value(events).map_err(|e| ApiError { error: e.to_string() })?))
 }
 
+/// 会话来源端：默认 `web`（浏览器），可用 `?origin=lark` 覆盖，供飞书 bot 使用。
+///
+/// 单用户 + Bearer token 模型下这**不构成权限边界**（§5.5 阶段二：隔离是**组织**需要，
+/// 不是安全边界）；校验只为挡住拼写错误 —— 非法值**报错**而不静默回退。
+#[derive(Deserialize, Default)]
+struct OriginQuery {
+    #[serde(default)]
+    origin: Option<String>,
+}
+
+fn session_origin(q: &OriginQuery) -> Result<String, ApiError> {
+    match q.origin.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(crate::commands::ai::ORIGIN_WEB.to_string()),
+        Some(v) => {
+            match crate::commands::ai::parse_origin(Some(v)).map_err(|e| ApiError { error: e })? {
+                Some(o) => Ok(o),
+                None => Ok(crate::commands::ai::ORIGIN_WEB.to_string()),
+            }
+        }
+    }
+}
+
 async fn chat_sessions_handler(
     State(state): State<ApiState>,
+    Query(q): Query<OriginQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    // §5.5 阶段二：Web 端**只见本端**会话（`list_chat_sessions_filtered` 已按
-    // updated_at 倒序）。飞书 bot 在 P1 接入时会以 `lark` 身份调同一族路由。
-    let sessions = crate::commands::ai::list_chat_sessions_filtered(
-        &app_state.data_dir,
-        Some(crate::commands::ai::ORIGIN_WEB),
-    );
+    // §5.5 阶段二：默认只见本端会话；`?origin=lark` 让飞书 bot 也能用同一族路由。
+    let origin = session_origin(&q)?;
+    let sessions =
+        crate::commands::ai::list_chat_sessions_filtered(&app_state.data_dir, Some(&origin));
     let metas: Vec<serde_json::Value> = sessions
         .iter()
         .map(|s| {
@@ -121,29 +142,26 @@ async fn chat_sessions_handler(
 
 async fn chat_session_create_handler(
     State(state): State<ApiState>,
+    Query(q): Query<OriginQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let id = crate::commands::ai::create_chat_session_impl(
-        &app_state.data_dir,
-        crate::commands::ai::ORIGIN_WEB,
-    )
-    .map_err(|e| ApiError {
-        error: e.to_string(),
-    })?;
-    Ok(Json(serde_json::json!({ "id": id })))
+    let origin = session_origin(&q)?;
+    let id = crate::commands::ai::create_chat_session_impl(&app_state.data_dir, &origin)
+        .map_err(|e| ApiError {
+            error: e.to_string(),
+        })?;
+    Ok(Json(serde_json::json!({ "id": id, "origin": origin })))
 }
 
 async fn chat_session_load_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(q): Query<OriginQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
+    let origin = session_origin(&q)?;
     // 跨端的会话按"不存在"处理 —— 不向别的端泄漏"这个 id 是否存在"。
-    let session = crate::commands::ai::find_chat_session(
-        &app_state.data_dir,
-        &id,
-        Some(crate::commands::ai::ORIGIN_WEB),
-    );
+    let session = crate::commands::ai::find_chat_session(&app_state.data_dir, &id, Some(&origin));
     match session {
         Some(s) => Ok(Json(serde_json::to_value(&s).unwrap_or_default())),
         None => Err(ApiError {
@@ -155,14 +173,12 @@ async fn chat_session_load_handler(
 async fn chat_session_delete_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(q): Query<OriginQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::ai::delete_chat_session_impl(
-        &app_state.data_dir,
-        id,
-        Some(crate::commands::ai::ORIGIN_WEB),
-    )
-    .map_err(|e| ApiError { error: e })?;
+    let origin = session_origin(&q)?;
+    crate::commands::ai::delete_chat_session_impl(&app_state.data_dir, id, Some(&origin))
+        .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -176,14 +192,16 @@ struct ExportBody {
 async fn chat_session_export_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(q): Query<OriginQuery>,
     axum::Json(body): axum::Json<ExportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
+    let origin = session_origin(&q)?;
     let md = crate::commands::ai::export_chat_session_impl(
         &app_state.data_dir,
         &id,
         body.turns.as_deref(),
-        Some(crate::commands::ai::ORIGIN_WEB),
+        Some(&origin),
     )
     .map_err(|e| ApiError {
         error: e.to_string(),
@@ -193,7 +211,7 @@ async fn chat_session_export_handler(
         &id,
         Some(&app_state.db),
         body.turns.as_deref(),
-        Some(crate::commands::ai::ORIGIN_WEB),
+        Some(&origin),
     )
     .map_err(|e| ApiError {
         error: e.to_string(),
@@ -474,6 +492,7 @@ async fn conversation_ask_stream_handler(
 async fn save_chat_session_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
+    Query(q): Query<OriginQuery>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let session_val = body.get("session").cloned().ok_or_else(|| ApiError {
@@ -485,12 +504,9 @@ async fn save_chat_session_handler(
         })?;
     session.id = id;
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::ai::save_chat_session_impl(
-        &app_state.data_dir,
-        session,
-        Some(crate::commands::ai::ORIGIN_WEB),
-    )
-    .map_err(|e| ApiError { error: e })?;
+    let origin = session_origin(&q)?;
+    crate::commands::ai::save_chat_session_impl(&app_state.data_dir, session, Some(&origin))
+        .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "saved": true })))
 }
 

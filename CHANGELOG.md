@@ -1,5 +1,19 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书准入判定落地 + webapi 支持 `origin=lark`；修一条环境依赖的既有测试缺陷
+
+> P1（bot 本体）的第一步：把 §7.1 的准入判定做成纯逻辑模块并测试，同时让 webapi 允许 bot 以 `lark` 身份用同一族会话路由。
+
+- **新增 `commands/sessions/lark_gate.rs`** —— §7.1 ① 的判定顺序实现（**严格按序**）：**L0** `sender_type != "user"` 忽略（防机器人自问自答）→ **L2** `chat_type != "p2p"` 拒绝（**回固定提示**）→ **L1** 白名单（空/解析失败/不含 sender）拒绝（**静默**）。
+  - 事件类型 `LarkMessageEvent` **全部字段可选、宽松解析**（实测字段集随场景变：群事件多 `update_time`/`mentions`）。
+  - `parse_allowed_users`：**任何异常都返回空名单（＝拒绝全部）**—— 宁可把自己锁在外面，也不因"读不懂"而放行（fail-closed，§7.1 ②）。
+  - `strip_leading_mention`：剥掉正文里的 `@机器人名` 前缀（实测预渲染把 `@_user_1` 换成机器人名；`mentions[].key` 与实际文本不一致，故按文本剥），并保证**行内的 `@` 不被误伤**。
+- **webapi 会话路由支持 `?origin=`**：新增 `OriginQuery` + `session_origin()`，默认 `web`，可显式指定 `lark` 供 bot 使用；**非法值报错而不静默回退**。create/save 的响应也回带生效的 `origin`。（单用户 + token 下这不构成权限边界 —— 隔离是**组织**需要，§5.5 阶段二已注明。）
+- **修复既有测试缺陷（非本次引入）**：`extractor/pdf/ocr.rs::windowed_pages_stall_stops_dispatch_but_keeps_results` 写死 `stall=10ms` / 每页 `sleep=50ms`，**隐含假设 `window ≤ 4`**；而页窗口自 2026-10-15 起是**全局预算**（`load::page_window_for_pass()`，上限为引擎闸门 8），判定预算 `= stall × window`。窗口随负载变大后该断言就不再成立 → 改为**按运行时实际 `window` 推导 sleep 与断言上限**。已用 `git stash` 在 HEAD 上复现同一失败，确认与本次改动无关。
+- **AGENTS.md 新增门禁第 ④ 条**：**测试不得依赖全局负载档位或机器环境** —— 否则会随机器状态假红，且"不同时刻红的是不同那条"，极易被误判成 flaky 从而放过真缺陷；应**先读运行时实际值再推导断言**。
+- **测试**：`lark_gate.rs` 新增 **9 条**（p2p 放行、群消息按类型拒绝、陌生私聊静默拒绝、**空白名单拒绝全部**、名单解析失败拒绝全部、**L0 优先级高于 L2/L1**、群拒绝原因归"类型"而非"身份"、`require_p2p` 可显式关闭、`@` 前缀剥离含"行内 `@` 不误伤"）；`cargo test --lib` **565 passed / 0 failed**（+9，与新增数一致）。
+- **门禁**：`cargo test` 全目标 EXITCODE=0、`npx tsc --noEmit` 通过、`npx vitest run` 73 passed、`semgrep --severity ERROR` **0 findings**。
+
 ## 2026-10-15：飞书会话映射与事件去重落地（三端交互重构 · 阶段三）
 
 > 目标（`docs/LARK_BOT.md` §5.5 阶段三）：让"同一个飞书私聊"跨 bot 重启接着上轮对话，并让重投事件不产生重复回答。

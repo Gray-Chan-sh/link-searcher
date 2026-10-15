@@ -951,24 +951,37 @@ mod tests {
 
     /// 连续 `stall × window` 内一页都没完成（真卡死）→ 停止派发，已产出结果保留。
     /// 注意判定的是**进展**，不是单页耗时：并发下单页变慢不算卡死。
+    ///
+    /// ⚠️ 页窗口自 2026-10-15 起是**全局预算**（`load::page_window_for_pass()`，上限为引擎
+    /// 闸门 8），而判定预算是 `stall × window`（见 `run_pages_windowed`）。所以本测试
+    /// **必须按实际的 `window` 推导 sleep 与断言**，不能写死 —— 否则会随机器负载档位漂移
+    /// 而假红（2026-10-15 实测：window 由 ≤4 变为 ≥5 后，写死的 50ms 恰好不再"超预算"）。
     #[test]
     fn windowed_pages_stall_stops_dispatch_but_keeps_results() {
         let pages: Vec<u32> = (1..=40).collect();
-        let outcome = run_pages_windowed(&pages, Some(Duration::from_millis(10)), None, || false, |page| {
-            // 每一页都超过 10ms 预算：整本卡死的情形。
-            std::thread::sleep(Duration::from_millis(50));
+        let window = crate::load::page_window_for_pass().max(1);
+        let stall = Duration::from_millis(10);
+        // 预算 = stall × window；每页都必须**明显超过**它，才构成"无进展"。
+        let per_page = stall * (window as u32 + 2);
+
+        let outcome = run_pages_windowed(&pages, Some(stall), None, || false, |page| {
+            // 每一页都超过预算：整本卡死的情形。
+            std::thread::sleep(per_page);
             Some(format!("page-{page}"))
         });
 
-        assert!(outcome.stalled, "超预算必须触发 stall");
         assert!(
-            outcome.attempted >= PAGE_OCR_WINDOW,
-            "第一窗口应当已经派发出去，实测 {}",
+            outcome.stalled,
+            "超预算必须触发 stall（window={window}, per_page={per_page:?}）"
+        );
+        assert!(
+            outcome.attempted >= window,
+            "第一窗口应当已经派发出去，实测 {}（window={window}）",
             outcome.attempted
         );
         assert!(
-            outcome.attempted <= PAGE_OCR_WINDOW * 2,
-            "stall 后只应跑完在飞的页，实测 {}",
+            outcome.attempted <= window * 2,
+            "stall 后只应跑完在飞的页，实测 {}（window={window}）",
             outcome.attempted
         );
         assert_eq!(outcome.texts[0].as_deref(), Some("page-1"), "在飞页结果要保留");
