@@ -294,6 +294,7 @@ const zh: Record<string, string> = {
     index_progress: '索引进度',
     maintenance_tools: '维护工具',
     indexing: '索引中',
+    index_data_may_lag: '索引进行中，界面数据可能滞后（最多 30 秒刷新一次）',
     extracted_but_not_indexed: '已提取，等待写入索引（搜索稍后可用）',
     scan_info: '扫描信息',
     total_indexed: '已索引总数',

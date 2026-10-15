@@ -237,6 +237,19 @@ impl AppState {
 mod tests {
     use super::*;
 
+    /// 这四个用例共享**进程级**全局状态（`task_registry` / `task_briefs`），
+    /// 而 `cargo test` 默认并行执行同一二进制内的用例 → 彼此 `reset()`/写入，
+    /// 断言随机失败（实测 `cargo test --lib` 偶发 1 例失败，且每次失败的用例
+    /// 不同）。用一把测试专用锁把它们串行化即可根治。
+    ///
+    /// 注意：不要用 `.lock().unwrap()` —— 一个用例 panic 会让锁中毒，其余用例
+    /// 会跟着 panic（且 `rust-mutex-lock-unwrap` 是 ERROR 级 semgrep 规则）。
+    static GLOBALS: Mutex<()> = Mutex::new(());
+
+    fn globals() -> std::sync::MutexGuard<'static, ()> {
+        GLOBALS.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn reset() {
         if let Ok(mut t) = task_registry().lock() {
             t.clear();
@@ -245,6 +258,7 @@ mod tests {
 
     #[test]
     fn task_registry_tracks_and_untracks() {
+        let _g = globals();
         reset();
         track_task("verify");
         track_task("verify"); // idempotent
@@ -260,6 +274,7 @@ mod tests {
 
     #[test]
     fn task_guard_drops_on_scope_exit() {
+        let _g = globals();
         reset();
         {
             let _g = TaskGuard::new("reextract");
@@ -273,6 +288,7 @@ mod tests {
     /// `verify::VERIFY_LOCK` / `integrity::HEAL_LOCK`).
     #[test]
     fn task_registry_is_name_only() {
+        let _g = globals();
         reset();
         track_task("verify");
         track_task("verify");
@@ -281,6 +297,7 @@ mod tests {
 
     #[test]
     fn briefs_ring_buffer_newest_first_capped() {
+        let _g = globals();
         for i in 0..60 {
             push_task_brief("t", format!("summary {i}"));
         }

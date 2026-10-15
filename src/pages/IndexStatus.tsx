@@ -298,6 +298,11 @@ export default function IndexStatus() {
           <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
             {t('index_status_overview')}
           </p>
+          {status?.is_scanning && (
+            <p className="text-xs text-amber-600 dark:text-amber-400 mt-1">
+              {t('index_data_may_lag')}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button

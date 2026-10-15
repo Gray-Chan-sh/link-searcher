@@ -290,6 +290,7 @@ const ja: Record<string, string> = {
     index_progress: 'インデックス進捗',
     maintenance_tools: 'メンテナンスツール',
     indexing: 'インデックス中',
+    index_data_may_lag: 'インデックス作成中 — 画面のデータは遅れる場合があります（最大30秒ごとに更新）',
     extracted_but_not_indexed: '抽出済み、インデックスへの書き込み待ち（検索は間もなく利用可能）',
     scan_info: 'スキャン情報',
     total_indexed: 'インデックス総数',

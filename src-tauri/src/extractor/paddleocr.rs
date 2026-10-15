@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use log;
+use md5::Digest;
 use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
 use super::ocr::OcrStats;
 
@@ -149,9 +150,16 @@ fn dict_with_space_token(dict_path: &Path) -> Result<PathBuf, String> {
     content.push(' ');
     content.push('\n');
 
+    // 输出文件名必须**随输入字典而变**：此前只按 pid 命名，于是任何两个字典
+    // （真实模型字典 / 测试字典，或将来多模型并存）都会写同一个文件、互相覆盖 ——
+    // 实测会让并发的单测随机读到别人的内容而偶发失败。
+    let mut hasher = md5::Md5::new();
+    hasher.update(dict_path.to_string_lossy().as_bytes());
+    let tag = format!("{:x}", hasher.finalize());
     let out = std::env::temp_dir().join(format!(
-        "ls_ppocrv5_dict_space_{}.txt",
-        std::process::id()
+        "ls_ppocrv5_dict_space_{}_{}.txt",
+        std::process::id(),
+        &tag[..12.min(tag.len())]
     ));
     std::fs::write(&out, content).map_err(|e| format!("写入 OCR 字典缓存失败: {e}"))?;
     Ok(out)
@@ -267,6 +275,35 @@ mod tests {
         assert_eq!(out, src, "existing space token must short-circuit");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缓存文件必须**按输入字典分开**：此前只按 pid 命名，两个字典会互相覆盖 ——
+    /// 这正是 `dict_with_space_token_appends_missing_space` 在全量并行跑时偶发失败
+    /// 的原因（它与真实引擎初始化抢同一个 `%TEMP%` 文件）。
+    #[test]
+    fn dict_with_space_token_separates_dictionaries() {
+        let base = std::env::temp_dir().join(format!("ls_dict_test3_{}", std::process::id()));
+        let (a_dir, b_dir) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a_dir).unwrap();
+        std::fs::create_dir_all(&b_dir).unwrap();
+        let a = a_dir.join("ppocrv5_dict.txt");
+        let b = b_dir.join("ppocrv5_dict.txt");
+        std::fs::write(&a, "a\nb\n\u{3000}\n").unwrap();
+        std::fs::write(&b, "x\ny\nz\n").unwrap();
+
+        let out_a = dict_with_space_token(&a).expect("ok");
+        let out_b = dict_with_space_token(&b).expect("ok");
+        assert_ne!(out_a, out_b, "两个字典不能共用同一个缓存文件");
+        assert!(std::fs::read_to_string(&out_a).unwrap().ends_with("\n \n"));
+        assert!(std::fs::read_to_string(&out_b).unwrap().ends_with("\n \n"));
+        assert!(std::fs::read_to_string(&out_b).unwrap().starts_with("x\n"));
+
+        // 交错重取：B 的写入不能覆盖 A 的缓存。
+        let _ = dict_with_space_token(&b).expect("ok");
+        let a_now = std::fs::read_to_string(&out_a).unwrap();
+        assert!(a_now.starts_with("a\n"), "重取 B 后 A 的缓存被覆盖了: {a_now:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
 

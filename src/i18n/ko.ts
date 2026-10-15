@@ -290,6 +290,7 @@ const ko: Record<string, string> = {
     index_progress: '인덱스 진행률',
     maintenance_tools: '유지보수 도구',
     indexing: '인덱싱 중',
+    index_data_may_lag: '인덱싱 중 — 화면 데이터가 지연될 수 있습니다 (최대 30초마다 갱신)',
     extracted_but_not_indexed: '추출됨, 인덱스에 쓰기 대기 중 (검색이 곧 가능해집니다)',
     scan_info: '스캔 정보',
     total_indexed: '전체 인덱스 수',

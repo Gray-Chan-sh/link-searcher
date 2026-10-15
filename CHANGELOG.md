@@ -1,5 +1,14 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：修两处**测试隔离**缺陷（并行用例互踩）+ 索引期间「界面数据可能滞后」提示
+
+- **① `paddleocr::dict_with_space_token` 的缓存文件名与输入字典无关**：此前固定写成 `%TEMP%\ls_ppocrv5_dict_space_<pid>.txt`，任何两个字典（真实模型字典 / 测试字典，或将来多模型并存）都会写**同一个文件**互相覆盖 → 用例 `dict_with_space_token_appends_missing_space` 与并行的引擎初始化抢同一文件，`cargo test --lib` **偶发失败**（单独跑、连跑 3 次均绿）。修法：文件名追加**输入字典路径的 md5 前 12 位**；新增回归用例 `dict_with_space_token_separates_dictionaries`（两个字典 → 两个不同文件，且交错重取不互相覆盖）。
+- **② `state.rs` 四个用例共享进程级全局状态**（`task_registry()` / `task_briefs()`）却各自 `reset()`：并行执行时互踩 → `cargo test --lib` **偶发 1 例失败**（两次实测分别挂在 `state::tests::task_registry_tracks_and_untracks` 与上面那条 paddleocr 用例 —— 即"每次挂的用例不同"）。修法：这四个用例加一把测试专用锁 `static GLOBALS: Mutex<()>` 串行化；用 `unwrap_or_else(|e| e.into_inner())` 而非 `.unwrap()`，避免一个用例 panic 连坐，同时不触碰 ERROR 级 semgrep 规则（`rust-mutex-lock-unwrap`）。
+  - **为什么要修**：测试门禁是 AGENTS.md 的强制验收项 —— **偶发失败会掩盖真实回归**（本轮就是靠连跑才把它与真问题区分开）。
+- **③ 索引期间「界面数据可能滞后」提示**（`docs/index-pipeline-eval.md` 挂了两轮的 ⏳ 项）：新增 i18n 键 `index_data_may_lag`（zh/en/ja/ko），在**索引状态页**标题下、以及**状态栏**扫描指示器（tooltip）显示 —— 解释"为什么计数最多 30 秒才动"，而不是让用户以为界面卡死；配合 `useIndexStatus` 的 10s/30s 自适应轮询。
+- **测试**：`cargo test --lib` **541 passed / 0 failed**，**连跑 5 次全绿**（修前同一条命令偶发失败）；`npx tsc -b` 0 错误；`semgrep --severity ERROR`（custom + owasp-top-ten + secrets）**0 findings**。
+- **涉及文件**：`src-tauri/src/extractor/paddleocr.rs`、`src-tauri/src/state.rs`、`src/i18n/{zh,en,ja,ko}.ts`、`src/components/StatusBar.tsx`、`src/pages/IndexStatus.tsx`、`CHANGELOG.md`。
+
 ## 2026-10-15：验证连接持有期修复（`abb4583`）+ 批屏障 ~18GB 归因**证伪**
 
 - **端到端验证（隔离实例，不碰真实库、不碰 Syncthing 同步目录）**：用 CLI 的 `LINK_SEARCHER_DATA_DIR=<临时>` + `scan <临时目录>` 走**同一条核心链路**（`scanner → batch_index → extract_and_index_single`）：

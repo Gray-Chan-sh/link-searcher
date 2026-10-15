@@ -86,12 +86,12 @@ export default function StatusBar() {
           <div className="flex items-center gap-2 flex-wrap shrink-0">
             {status.is_scanning && (
               scanProgress ? (
-                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400" title={t('index_data_may_lag')}>
                   <LoadingSpinner className="size-3" />
                   {scanProgress.phase === 'index' ? t('indexing') : t('scanning')}: {scanProgress.processed}/{scanProgress.total > 0 ? scanProgress.total : '?'}
                 </span>
               ) : (
-                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400">
+                <span className="flex items-center gap-1 text-blue-600 dark:text-blue-400" title={t('index_data_may_lag')}>
                   <LoadingSpinner className="size-3" />
                   {t('scanning')}...
                 </span>

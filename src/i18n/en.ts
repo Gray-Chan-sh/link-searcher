@@ -294,6 +294,7 @@ const en: Record<string, string> = {
     index_progress: 'Index Progress',
     maintenance_tools: 'Maintenance Tools',
     indexing: 'Indexing',
+    index_data_may_lag: 'Indexing in progress — on-screen data may lag (refreshed at most every 30s)',
     extracted_but_not_indexed: 'Extracted, waiting to be written to the index (search will work soon)',
     scan_info: 'Scan Info',
     total_indexed: 'Total indexed',
