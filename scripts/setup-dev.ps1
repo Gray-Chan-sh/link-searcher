@@ -396,6 +396,7 @@ if (-not (Test-MsvcPresent)) {
 Write-Host ""
 Write-Host "==> 完成。之后：" -ForegroundColor Green
 Write-Host "    npm ci"
+Write-Host "    npm run sidecar    # 生成 lark-bot sidecar（bundle.externalBin 在编译期就要求它存在）"
 Write-Host "    cd src-tauri"
 Write-Host "    cargo build"
 Write-Host ""

@@ -46,8 +46,15 @@ mock E2E **完全不参与编译与运行** —— 测试目标一旦编译不�
 ### 必跑命令（全部通过才可提交）
 
 ```bash
-# 全部测试目标（15 个，含集成测试与 mock E2E）；约 3 分钟，其中编译占大头
-cargo test --manifest-path src-tauri/Cargo.toml
+# 全部测试目标（应用 15 个目标 + 2 个成员 crate）；约 3 分钟，其中编译占大头
+#
+# ⚠️ 必须带 `--workspace`：`src-tauri` 既是 workspace 根**又是** package，此时
+#    `cargo test` 默认**只作用于主程序包** → 成员 crate `lark-gate` 会静默不跑，
+#    而那段准入判定是"仅私聊 + 白名单"的**唯一防线**（2026-10-15 拆 crate 时立的规矩）。
+# ⚠️ 换机器/全新克隆后先跑一次 `npm run sidecar`：`bundle.externalBin` 在**编译期**
+#    就要求 `src-tauri/binaries/lark-bot-<triple>.exe` 存在，缺了 `cargo test` 会以
+#    `failed to run custom build command` 失败（看起来像代码坏了，其实是缺文件）。
+cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
 # 前端
 npx tsc --noEmit
@@ -60,7 +67,9 @@ npx vitest run
 
 | 目标 | 用例 | 耗时 | 性质 |
 |------|:----:|:----:|------|
-| `--lib` | 542 | 7.2s | 单元测试 |
+| `--lib` | 557 | 7.2s | 单元测试（拆分后：566 − `lark-gate` 的 9 个搬到成员 crate） |
+| `lark-gate`（成员 crate） | 9 | 0.00s | **准入判定策略**（仅私聊 + 白名单，唯一防线；`-p lark-gate` 单独跑） |
+| `lark-bot`（成员 crate） | 3 | 0.00s | bot 纯函数（回复截断等；`-p lark-bot`） |
 | `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（**最慢**，但无网络依赖） |
 | `auto_ui_e2e` | 15 | 0.5s | mock runtime（`MockRuntime`） |
 | `ipc_test` | 8 | 5.3s | mock runtime |
@@ -140,6 +149,19 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 > 而**同一提交的全门禁是绿的**。
 
 → 此类改动提交前**至少起一次应用**，或至少验 `cargo run <flags> -- --help` 能成功推断。
+
+**⑤′ 同类盲区：`bundle.externalBin` 在**编译期**就要求 sidecar 文件已存在**
+
+（2026-10-15 做 bot 打包时实测）`tauri-build` 在 `build.rs` 里校验 `externalBin`：**文件缺失即构建失败**
+（`failed to run custom build command`），而 `cargo test` / `cargo build` 都会走 `build.rs`。
+于是"生成那个文件"的脚本若反过来必须先编主程序 —— **鸡生蛋**，`tauri dev` 当场起不来。
+
+现在 bot 是成员 crate `lark-bot`（**不在主程序包里**）：`npm run sidecar` 只跑
+`cargo build -p lark-bot`，**完全不触碰主程序** → 环已断（`docs/LARK_BOT.md` §5.7）。
+
+→ **换机器 / 全新克隆**后先跑一次 `npm run sidecar`，再 `cargo test`；
+   `npm run dev` / `npm run tauri:build` 由 `predev` / `prebuild` 自动兜住（无需记得）。
+→ 又一个"全门禁绿、真跑才炸"的例子：这类改动**必须真起一次应用**（见 ⑤）。
 
 ## 静态分析（Semgrep）
 

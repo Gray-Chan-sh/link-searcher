@@ -14,4 +14,7 @@
 
 pub mod in_flight;
 pub mod lark;
-pub mod lark_gate;
+
+// 准入判定（§7.1）已搬到**独立 crate `lark-gate`**（`src-tauri/lark-gate`，2026-10-15）。
+// 原因：它只有 bot 用，而"为用它就得依赖整个应用 lib"会把 sidecar 撑到 30 MB，
+// 并让 `externalBin` 打包陷入鸡生蛋（§5.7）。它本就零应用依赖，抽出去即可。

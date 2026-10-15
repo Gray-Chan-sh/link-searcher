@@ -495,7 +495,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 |---|---|---|---|
 | **C1** | 多会话并发（取消串扰） | 场景 A/B：**靠排队完全规避，0 核心改动**；场景 C：**必须做队列** | `AI_CANCEL` 是全局 `AtomicBool`（`ai/mod.rs:1567`）且**无 single-flight 守卫**；每次生成都 `reset_ai_cancel()`（`commands/ai.rs:372`）→ 并发时会互清标志。桌面端靠 **UI 单飞**兜住 |
 | **C2** | 索引期资源竞争 | **已被削平，非必做**（曾定为必做，据实下调） | ① `abb4583` 已在 HEAD（提取期不再持连接）② AI 路径本就是"借→查→还→再生成"（`ai/prompt.rs:65`、`ai.rs:214`）③ 已有交互优先机制 `ChatTurnGuard`（`ai.rs:375`）。剩"变慢"，bot 侧超时+退避足够 |
-| **C3** | 进程生命周期 / 优雅停机 / daemon 归属 | ✅ **核心已实现并实测（2026-10-15）**：GUI 在 `setup` 里拉起 bot（`lark_bot.rs`，按**与主程序同目录**解析可执行文件 —— 这样 dev 无需 `externalBin` 就能跑）、`RunEvent::Exit` 里收掉它。**两个实测发现**：① **应用被硬杀/崩溃时 `RunEvent::Exit` 不会执行 → 会留下孤儿 bot**（实测确认；危害是它继续占长连接，且应用重启后会**同时跑两个 bot → 重复回答**）→ 已给 bot 加 `--parent-pid` 看门狗（`sysinfo` 轮询，父进程消失即 `exit(0)`），实测**硬杀后 2 秒内自退**；② **daemon 的存活不受我们控制**（实测它既会长期留存、也会自行退出，且 `lark-cli event status` 本身会起一个）→ 故按决策**不去管它**：在就复用、不在就重建，绝不 `kill -9`。**未做**：autostart 开关（本轮的另一半） |
+| **C3** | 进程生命周期 / 优雅停机 / daemon 归属 | ✅ **核心已实现并实测（2026-10-15）**：GUI 在 `setup` 里拉起 bot（`lark_bot.rs`，按**与主程序同目录**解析可执行文件 —— dev 直接用 `target/debug/lark-bot.exe`，装包后由 `externalBin` 放到同目录；两种命名都认，见 §5.7）、`RunEvent::Exit` 里收掉它。**两个实测发现**：① **应用被硬杀/崩溃时 `RunEvent::Exit` 不会执行 → 会留下孤儿 bot**（实测确认；危害是它继续占长连接，且应用重启后会**同时跑两个 bot → 重复回答**）→ 已给 bot 加 `--parent-pid` 看门狗（`sysinfo` 轮询，父进程消失即 `exit(0)`），实测**硬杀后 2 秒内自退**；② **daemon 的存活不受我们控制**（实测它既会长期留存、也会自行退出，且 `lark-cli event status` 本身会起一个）→ 故按决策**不去管它**：在就复用、不在就重建，绝不 `kill -9`。**autostart 开关 ✅ 已做**（`autostart_state` / `set_autostart` 命令 + `SystemTab` 开关改为**以 OS 状态为准**；实测 Run 项已写入，且自启起来的 bot 接着原会话继续聊） |
 
 > 另一条飞书侧硬约束：**同一 app 只能有一个 event bus 连接**（`another bus already connected` → 校验失败 exit 2）
 > → "单机器人"被强制，**不能靠多开 consumer 扩并发**，并发只能在一个进程内解决。
@@ -601,28 +601,50 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 `config.json` 里；`web_api_token` 仍**双存储**（config.json + DB `app_settings`，靠
 `resolve_token()` 的 env > config.json > DB 优先级对齐）。若走 B 档，这两处应一并重新分工。
 
-### 5.7 bot sidecar 的打包（**暂缓**，附原因与两条出路）
+### 5.7 bot sidecar 的打包（**已解决**：拆 crate → 打开 `externalBin`）
 
-`bundle.externalBin` 要求文件名 `<name>-<target-triple>[.exe]`。生成脚本已备好
-（`scripts/build-sidecar.mjs` → `npm run sidecar` / `sidecar:release`），但**不能就此打开 externalBin**。
-
-**实测（2026-10-15）**：`tauri-build` 在**编译期校验** `externalBin`，文件不存在即构建失败 ——
-而"生成该文件"的脚本本身必须先编译整个包（含 `build.rs`）→ **鸡生蛋**：
+**曾经的死结（2026-10-15 实测）**：`tauri-build` 在**编译期校验** `externalBin`，文件不存在即构建失败
+—— 而"生成该文件"的脚本本身必须先编译整个包（含 `build.rs`）→ **鸡生蛋**：
 
 ```
 error: failed to run custom build command for `link-searcher v1.2.2`
 （build.rs = tauri-build 校验 externalBin，文件缺失即失败）
 ```
 
-根因是 **bot 与主程序在同一个 package**，无法"先单独编 bot、再编主程序"。两条出路：
+根因：**bot 与主程序在同一个 package**，无法"先单独编 bot、再编主程序"。
 
-| 出路 | 说明 | 代价 |
-|---|---|---|
-| **A（推荐）** | 把准入判定抽成**独立微型 crate**（如 `lark-gate`），bot 只依赖它 → bot 成为**独立 crate**，可先于主程序编译，鸡生蛋消失；顺带把 sidecar 从 **30 MB 缩到很小**（现在它链了整个应用 lib，只为用 `lark_gate` + 读 token） | 中等重构（新增 crate + `lark_gate` 搬家） |
-| B | 在 `beforeBuildCommand` 里先 `npm run sidecar:release`，并把"文件已存在"作为约定 | **对全新克隆仍会失败**，得靠 CI/文档额外约定顺序 |
+**解法（当初列的出路 A，已实施）**：把两者拆成**独立 crate**，`src-tauri/Cargo.toml` 升为 workspace 根：
 
-**现状**：`externalBin` **未开启**（保持 `tauri dev` / `tauri build` 可用）；bot 按"与主程序同目录"
-解析，开发下直接用 `target/debug/lark-bot[.exe]` ✅。`src-tauri/binaries/` 是构建产物，已加入 `.gitignore`。
+```text
+src-tauri/
+├── Cargo.toml        # [workspace] members = ["lark-gate", "lark-bot"]；同时仍是主程序 package
+├── lark-gate/        # 准入判定（纯策略，只依赖 serde）← 从 commands/sessions/lark_gate.rs 搬家
+└── lark-bot/         # bot 本体（只依赖 lark-gate）      ← 从 src/bin/lark-bot.rs 搬家
+```
+
+| 收益 | 实测（2026-10-15） |
+|---|---|
+| 鸡生蛋消失 | `npm run sidecar` 只跑 `cargo build -p lark-bot`，**完全不触碰主程序**（编译列表里没有 tantivy / onnxruntime / Tauri） |
+| sidecar 体积 | **30.3 MB → 4.5 MB** |
+| `externalBin` | **已打开**（`tauri.conf.json`），`predev` / `prebuild` 自动生成 sidecar |
+
+**为什么 bot 刻意不 import 应用 lib**（三处替代）：
+
+1. **准入判定** → `lark-gate` crate。策略仍只有**一份实现、一份测试**（9 个用例随文件一起搬走）
+2. **会话 `messages`** → 不透明的 `serde_json::Value` **原样透传**，不做结构化解析：
+   字段一旦与服务端不一致，结构化解析会**静默把历史丢空**（表现为"它忘了前面说过什么"），
+   而透传最多被服务端拒绝 —— 那是**能看见**的错
+3. **`web_api_token()`** → bot 内的小函数（读 `config.json`，路径规则与 `config.rs::config_dir` 一致），
+   另有环境变量 `LS_WEB_API_TOKEN` 优先（便于手动运行）
+
+**两条必须记住的约定**：
+
+- ⚠️ **门禁必须带 `--workspace`**：`src-tauri` 既是 workspace 根**又是** package，不加就**只测主程序包**
+  → `lark-gate` 那 9 个准入判定测试会**静默不跑**（而它是"仅私聊 + 白名单"的唯一防线）
+- ⚠️ **换机器 / 全新克隆**后先 `npm run sidecar` 再 `cargo test`（`externalBin` 在**编译期**就要文件在）；
+  `npm run dev` / `npm run tauri:build` 由 `predev` / `prebuild` 自动兜住，不必记得
+
+`src-tauri/binaries/` 是构建产物，已加入 `.gitignore`。
 
 ---
 
@@ -786,7 +808,8 @@ error: failed to run custom build command for `link-searcher v1.2.2`
 > **#3 与 #6 是一对**：它们共同锁死"两个空数组方向相反"这条约定；任一个被改错，测试立刻红。
 > **#8 用真实群 id 作夹具**（2026-10-15 实测机器人确实被拉进了该群），比构造的假 id 更有说服力。
 >
-> **落地进度（2026-10-15）**：判定顺序 ① 与 L0/L2/L1 已实现在 `commands/sessions/lark_gate.rs`，
+> **落地进度（2026-10-15）**：判定顺序 ① 与 L0/L2/L1 已实现在 **`lark-gate` 独立 crate**
+> （`src-tauri/lark-gate/src/lib.rs`，2026-10-15 从 `commands/sessions/lark_gate.rs` 搬出，见 §5.7），
 > 其中 **#1 / #2 / #3 / #4 / #5 / #7** 及"@ 前缀剥离"已有测试覆盖；**#6**（外发收紧阀）与 **#8**
 > （真实群夹具，属 bot 级）待后续增量。
 
@@ -879,7 +902,7 @@ error: failed to run custom build command for `link-searcher v1.2.2`
 
 **仍未定（均不阻塞 P1）**
 
-- [ ] **跨平台打包范围**：范围是"跨平台"，但**打包当前只有 MSI**（无 dmg / deb / appimage，无 CI）。要在 macOS/Linux 装机需补打包流程
+- [ ] **跨平台打包范围**：范围是"跨平台"，但**打包当前只有 MSI**（无 dmg / deb / appimage，无 CI）。要在 macOS/Linux 装机需补打包流程。**Windows MSI 现已内含 bot**（`externalBin`，2026-10-15 实测：`Link-Searcher_1.2.2_x64_en-US.msi` 解包后 `lark-bot.exe` 与主程序同在 `Link-Searcher\` ✅）
 - [x] **`lark-cli` 的取得方式** ✅：**不随包分发**（省 49 MB）；**纳入「依赖中心」管理** —— 复用 `deps/catalog.rs`
   那一套（探测是否已安装 / 状态展示 / 按需安装 / 取消），并在杀软与安全中心**加信任**
 

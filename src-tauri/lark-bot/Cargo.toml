@@ -1,0 +1,22 @@
+[package]
+name = "lark-bot"
+version = "1.2.2"
+description = "Feishu (Lark) bot sidecar: consumes im.message.receive_v1 and answers through the local Web API"
+edition = "2024"
+publish = false
+
+# 只依赖 `lark-gate`（纯策略）——**不依赖应用 lib**。
+# 这既让 `cargo build -p lark-bot` 不触碰主程序（解开 externalBin 的鸡生蛋），
+# 也让这个二进制不链 onnxruntime / tantivy / Tauri（30 MB → 几 MB）。
+[dependencies]
+lark-gate = { path = "../lark-gate" }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+# 与主程序同款：自签 TLS 的 HTTP 客户端（版本/特性刻意保持一致，避免解析出两个 rustls）
+ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# 父进程看门狗（`--parent-pid`）只取 "system"，与主程序一致
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# 读 `config.json` 里的 web_api_token（不能依赖主程序 lib，见 main.rs 顶部注释）
+dirs = "5"

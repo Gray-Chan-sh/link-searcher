@@ -8,6 +8,8 @@
     "build": "tsc -b && vite build",
     "sidecar": "node scripts/build-sidecar.mjs",
     "sidecar:release": "node scripts/build-sidecar.mjs --release",
+    "predev": "npm run sidecar",
+    "prebuild": "npm run sidecar:release",
     "lint": "oxlint",
     "test": "vitest run",
     "preview": "vite preview",

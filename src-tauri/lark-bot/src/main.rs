@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! 消费 lark-cli 的 NDJSON 事件
-//!   → §7.1 准入判定（lark_gate：L0 来源 / L2 类型 / L1 白名单）
+//!   → §7.1 准入判定（`lark-gate` crate：L0 来源 / L2 类型 / L1 白名单）
 //!   → /api/lark/seen 去重（按 message_id）
 //!   → /api/lark/binding 取/建 chat_id ↔ session_id 绑定
 //!   → /api/chat/sessions/{id}?origin=lark 取会话、带上历史
@@ -13,20 +13,38 @@
 //!   → lark-cli im +messages-reply 回纯文本
 //! ```
 //!
-//! ## 为什么这么写
+//! ## 为什么是**独立 crate**（而不是主程序包里的一个 bin）
 //!
-//! - **准入判定复用 lib**：`link_searcher_lib::commands::sessions::lark_gate` —— 策略只有一份实现，
-//!   也就只有一份测试。实测飞书侧**拦不住"把机器人拉进群"**（§7.1 ⑨），所以这段判定是唯一防线。
+//! 把 bot 装进安装包要用 `bundle.externalBin`，而 `tauri-build` **在编译期校验**
+//! externalBin：那个文件不存在就直接构建失败。若 bot 只是主程序的一个 bin，那么
+//! "生成该文件"就必须先编主程序 —— **鸡生蛋**（2026-10-15 实测撞上，见 §5.7）。
+//!
+//! 拆成独立 crate 且**只依赖 `lark-gate`** 之后，`cargo build -p lark-bot` **完全不触碰
+//! 主程序**，环就断了；顺带的好处是不再链 onnxruntime / tantivy / Tauri，
+//! 体积从 30 MB 降到几 MB。
+//!
+//! ## 因此这里**不 import `link_searcher_lib`**
+//!
+//! 一旦引应用 lib，等于把整个应用链回来（体积、编译时间、鸡生蛋全部回来）。三处替代：
+//!
+//! - **准入判定** → `lark-gate` crate（策略只有一份实现、一份测试）
+//! - **会话 `messages`** → 当**不透明 `serde_json::Value`** 原样透传。不结构化解析：
+//!   字段一旦与服务端不一致，结构化解析会**静默把历史丢空**（表现为"它忘了前面说过什么"），
+//!   而透传最多被服务端拒绝 —— 那是能看见的错。
+//! - **`web_api_token()`** → 本文件内的小函数（读 `config.json`，路径规则与
+//!   `config.rs::config_dir` 一致），见 [`web_api_token`]
+//!
+//! ## 其它约束
+//!
 //! - **stderr 先就绪、stdout 再解析**：lark-cli 的契约是"stderr 出现 `[event] ready event_key=`
 //!   之后才开始读 stdout"（§2 实测）。两个流必须分开读，不能合并。
 //! - **自签名 TLS**：webapi 用自签证书，本进程必须显式接受（见 [`insecure_agent`]）。
-//! - **`session_id` 自己带**：webapi 的非流式 `/api/ai/conversation/ask` **忽略** `session_id`，
-//!   多轮上下文只能由我们把历史 `messages` 一并发过去，因此先读会话、再回写会话。
 //!
 //! ## 尚未做（后续增量）
 //!
 //! - 卡片 + 节流更新（§8）；回答长度截断目前是简单处理
-//! - C3 生命周期：由 GUI 拉起 / 优雅停机（关 stdin）
+//! - 改走 Web API 的流式路由（现在是非流式：该路由**忽略** `session_id`，多轮上下文
+//!   只能由我们把历史一并发过去 → 追问时的指代消解不如 UI 端）
 //! - `lark-cli` 的可执行文件发现应交给**依赖中心**（现在是探测 + `LS_LARK_CLI` 覆盖）
 
 use std::io::{BufRead, BufReader};
@@ -36,11 +54,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use link_searcher_lib::commands::ai::{ChatMessage, TurnScope};
-use link_searcher_lib::commands::sessions::lark_gate::{
+use lark_gate::{
     gate, parse_allowed_users, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent,
     NON_P2P_NOTICE,
 };
+use serde_json::{json, Value};
 
 /// webapi 基址（自签名 TLS）。可用 `LS_WEB_API_URL` 覆盖。
 const DEFAULT_BASE: &str = "https://127.0.0.1:8443";
@@ -61,7 +79,7 @@ fn main() {
     }
 
     // ── 1. 凭据与基址 ──────────────────────────────────────────────────────
-    let token = link_searcher_lib::config::web_api_token();
+    let token = web_api_token();
     if token.is_empty() {
         log::error!("config.json 里没有 web_api_token —— 请先启动一次主程序（它会生成）");
         std::process::exit(2);
@@ -169,7 +187,7 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     }
 
     // 去重（§8：键是 message_id，不是 event_id）
-    let seen = http.post("/api/lark/seen", &serde_json::json!({ "message_id": ev.message_id }))?;
+    let seen = http.post("/api/lark/seen", &json!({ "message_id": ev.message_id }))?;
     if !seen.get("first_time").and_then(|v| v.as_bool()).unwrap_or(false) {
         log::info!("[bot] 重投，忽略 message_id={}", ev.message_id);
         return Ok(());
@@ -184,20 +202,26 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     // 取/建会话绑定（阶段三）
     let session_id = http.session_for_chat(&ev.chat_id, &ev.sender_id)?;
     let mut session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
-    let mut messages: Vec<ChatMessage> = session
+    // 历史**原样透传**（见文件头注释：结构化解析一旦与服务端不一致就会静默丢空历史）
+    let mut messages: Vec<Value> = session
         .get("messages")
-        .cloned()
-        .and_then(|v| serde_json::from_value(v).ok())
+        .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
-    messages.push(ChatMessage { role: "user".into(), content: question.clone() });
+    messages.push(json!({ "role": "user", "content": question }));
+    let has_history = messages.len() > 1;
+    if has_history {
+        log::info!("[bot] 带上 {} 条历史（含本轮问题）", messages.len());
+    }
 
     // 问（非流式；session_id 会被该路由忽略，所以历史由我们带上）
     let asked = http.post(
         "/api/ai/conversation/ask",
-        &serde_json::json!({
+        &json!({
             "messages": messages,
             "sourceIds": [],
-            "scope": TurnScope::default(),
+            // 服务端 `scope` 的字段全是 `#[serde(default)]`，`{}` 即全默认
+            // （原为 `TurnScope::default()`；不搬那个类型是为了不依赖应用 lib）
+            "scope": {},
             "sessionRetrievalScope": [],
             "strictDocs": false,
             "fullRecall": false,
@@ -215,13 +239,13 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     }
 
     // 落回会话（origin=lark；`origin` 已在会话里，回写时不必带）
-    messages.push(ChatMessage { role: "assistant".into(), content: answer.clone() });
+    messages.push(json!({ "role": "assistant", "content": answer }));
     if let Some(obj) = session.as_object_mut() {
         obj.insert("messages".into(), serde_json::to_value(&messages).unwrap_or_default());
     }
     if let Err(e) = http.put(
         &format!("/api/chat/sessions/{session_id}?origin=lark"),
-        &serde_json::json!({ "session": session }),
+        &json!({ "session": session }),
     ) {
         // 落库失败不该让用户拿不到回答
         log::warn!("[bot] 会话落库失败（回答照常发出）：{e}");
@@ -244,6 +268,40 @@ fn truncate_reply(answer: &str) -> String {
     }
     let head: String = answer.chars().take(MAX_REPLY_CHARS).collect();
     format!("{head}\n\n…（回答过长已截断；完整内容请到 WebUI / 桌面端查看）")
+}
+
+// ───────────────────────────── 凭据读取 ─────────────────────────────
+
+/// 读 webapi token：`LS_WEB_API_TOKEN` 优先，否则读 `config.json`。
+///
+/// **为什么复刻这段读取逻辑**：它是 `link_searcher_lib::config::web_api_token` 的等价物，
+/// 但本 crate 刻意不依赖应用 lib（见文件头）。路径规则必须与 `config.rs::config_dir`
+/// 一致：`LS_CONFIG_DIR` 后门 → 否则 `dirs::config_dir()/.link-searcher`。
+///
+/// 这一段"复刻"是有意的取舍：它只有十来行、失败时**有明确报错**（退出码 2），
+/// 而不复刻的代价是把 30 MB 的整个应用链进来。
+fn web_api_token() -> String {
+    if let Ok(t) = std::env::var("LS_WEB_API_TOKEN") {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    let dir = match std::env::var("LS_CONFIG_DIR") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => match dirs::config_dir() {
+            Some(d) => d.join(".link-searcher"),
+            None => return String::new(),
+        },
+    };
+    std::fs::read_to_string(dir.join("config.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .and_then(|v| {
+            v.get("web_api_token")
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_default()
 }
 
 // ───────────────────────────── 父进程看门狗 ─────────────────────────────
@@ -491,7 +549,7 @@ impl Http {
         {
             return Ok(sid.to_string());
         }
-        let created = self.post("/api/chat/sessions?origin=lark", &serde_json::json!({}))?;
+        let created = self.post("/api/chat/sessions?origin=lark", &json!({}))?;
         let sid = created
             .get("id")
             .and_then(|v| v.as_str())
@@ -499,7 +557,7 @@ impl Http {
             .to_string();
         self.put(
             "/api/lark/binding",
-            &serde_json::json!({
+            &json!({
                 "chat_id": chat_id,
                 "session_id": sid,
                 "user_open_id": user_open_id,
@@ -572,4 +630,35 @@ fn insecure_agent() -> ureq::Agent {
         // RAG 可能要几十秒；给足读超时
         .timeout_read(Duration::from_secs(600))
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_reply_keeps_short_answer_intact() {
+        assert_eq!(truncate_reply("短回答"), "短回答");
+        let exact: String = "字".repeat(MAX_REPLY_CHARS);
+        assert_eq!(truncate_reply(&exact), exact, "刚好到上限不应截断");
+    }
+
+    #[test]
+    fn truncate_reply_marks_truncation_and_cuts_by_char() {
+        let long: String = "字".repeat(MAX_REPLY_CHARS + 1);
+        let out = truncate_reply(&long);
+        assert_eq!(
+            out.chars().filter(|c| *c == '字').count(),
+            MAX_REPLY_CHARS,
+            "必须按**字符**（不是字节）截断，否则中文会被切出半个字符"
+        );
+        assert!(out.contains("已截断"), "截断必须说明原因，否则像「回答就这么多」");
+    }
+
+    #[test]
+    fn arg_value_reads_pairs_only() {
+        // 只测"解析规则"本身：`--key value` 成对取值，孤立 key 取不到。
+        //（不能改进程 args，故这里只覆盖无参场景。）
+        assert_eq!(arg_value("--parent-pid"), None);
+    }
 }

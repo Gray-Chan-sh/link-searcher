@@ -1,5 +1,48 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15（第二轮）：bot 拆成独立 crate → 打通 `externalBin` 打包
+
+> 走上一轮 §5.7 里定的**出路 A**：让 bot 成为**不依赖应用 lib 的独立 crate**，解开打包死结。
+> 上一轮"撞上鸡生蛋后退回"的那条路，这一轮走通了。
+
+- **拆出两个成员 crate**（`src-tauri/Cargo.toml` 升为 workspace 根，**同时仍是主程序 package**）：
+  - `src-tauri/lark-gate/` —— 准入判定从 `commands/sessions/lark_gate.rs` **原样搬家**
+    （策略仍只有**一份实现、一份测试**，9 个用例随文件走）
+  - `src-tauri/lark-bot/` —— bot 本体从 `src/bin/lark-bot.rs` 搬家
+  - **实测收益**：`cargo build -p lark-bot` **完全不触碰主程序**（编译列表里没有 tantivy / onnxruntime /
+    Tauri）→ **鸡生蛋解开**；sidecar 体积 **30.3 MB → 4.5 MB**
+- **bot 侧三处解耦**（刻意不 import 应用 lib，否则等于把整个应用链回来）：
+  1. 会话 `messages` 改为**不透明的 `serde_json::Value` 原样透传**。原先走结构化解析：字段一旦与服务端
+     不一致会**静默把历史丢空**（表现为"它忘了前面说过什么"）；透传最多被服务端拒绝 —— 那是**能看见**的错
+  2. `scope` 直接发 `{}`：服务端字段全是 `#[serde(default)]`，语义与 `TurnScope::default()` 等价，
+     省掉把一个复杂类型搬进新 crate
+  3. `web_api_token()` 由 bot **自读 `config.json`**（约 12 行，路径规则同 `config.rs::config_dir`），
+     另有环境变量 `LS_WEB_API_TOKEN` 优先
+- **打开 `externalBin`**：`tauri.conf.json` 加 `binaries/lark-bot`；`package.json` 挂回
+  `predev` / `prebuild` 自动生成 sidecar；`scripts/build-sidecar.mjs` 改 `-p lark-bot`（不再触碰主程序）
+- **新增测试**：`lark-bot` 3 个（回复按**字符**截断的边界、截断必须说明原因）
+- **⚠️ 两条新约定（已写入 AGENTS.md 门禁节）**：
+  - 门禁命令必须带 **`--workspace`** —— `src-tauri` 既是 workspace 根又是 package，不加就**只测主程序包**，
+    `lark-gate` 那 9 个测试会**静默不跑**（而它是"仅私聊 + 白名单"的**唯一防线**）
+  - **换机器 / 全新克隆**先 `npm run sidecar` 再 `cargo test`（`externalBin` 在**编译期**就要求该文件存在，
+    缺了会以 `failed to run custom build command` 失败 —— 看起来像代码坏了，其实只是缺文件）
+- **实测验收**：`cargo test --workspace` 全绿（lark-bot 3 / lark-gate 9 / 应用 557 + 全部集成目标）；
+  `tsc --noEmit` 0；`vitest` 73；`semgrep --severity ERROR` **0**；`cargo check --workspace` 0；
+  **`npx tauri dev` 真起一次**（AGENTS ⑤）→ 应用正常启动，GUI 成功拉起
+  `lark-bot.exe --parent-pid 3924`，且 `lark-cli event consume im.message.receive_v1` 也建上了；
+  **硬杀应用后 4 秒内 bot 自退**（看门狗生效，无孤儿；`lark-cli` daemon 按决策留着复用）。
+- **MSI 打包实测通过（本轮最终验收）**：`npx tauri build` 产出
+  `src-tauri/target/release/bundle/msi/Link-Searcher_1.2.2_x64_en-US.msi`（**35.3 MB**）；
+  `prebuild` 自动先跑 `sidecar:release`（**release 版 bot = 3.55 MB**）。
+  - **用 `msiexec /a`（管理安装＝只解包、不注册产品、不改环境）解出真实布局**验证：
+    `PFiles\Link-Searcher\link-searcher.exe`（85.5 MB）与 **`PFiles\Link-Searcher\lark-bot.exe`（3.55 MB）**
+    —— **同一目录** ✅。Tauri 打包时把 sidecar 的 target-triple 后缀**去掉了**，而 `lark_bot.rs`
+    的解析本来就**优先认 `lark-bot.exe`**，两处正好对上（若当初只认带后缀的名字，装完就会找不到 bot）。
+  - MSI File 表（WindowsInstaller COM 直读）：只有两个文件 —— `Path`（主程序）+ `Bin_lark_bot.exe`（bot）✅
+- **文档**：`docs/LARK_BOT.md` §5.7 由"暂缓"改为"**已解决**"（含新结构图与两条约定）；
+  `AGENTS.md` 更新门禁命令、目标表（新增两个成员 crate）、并新增 **⑤′** 条"externalBin 编译期要文件"盲区；
+  `scripts/setup-dev.ps1` 补 `npm run sidecar` 一步。
+
 ## 2026-10-15：bot sidecar 打包尝试（撞上鸡生蛋，已回退保住 dev）+ 自启开关验收补记
 
 > 目标：把 bot 装进 MSI（`bundle.externalBin`）。**尝试后发现不能在当前结构下开启**，已回退并记清原因与出路。

@@ -1,12 +1,23 @@
+[workspace]
+# 飞书 bot sidecar 与本包**拆成两个 crate**（2026-10-15，见 `docs/LARK_BOT.md` §5.7）：
+# `bundle.externalBin` 要求"sidecar 文件必须先存在"，而 tauri-build 在**编译期**校验它。
+# 若 bot 是本包的 bin，生成那个文件就必须先编本包 → 鸡生蛋。独立成 crate 后
+# `cargo build -p lark-bot` **完全不触碰本包**，环就断了（顺带 sidecar 从 30 MB 降到几 MB）。
+#
+# ⚠️ workspace 根**同时是 package** 时，`cargo build` / `cargo test` 默认**只作用于本包**，
+#    不会带上成员 crate。因此门禁命令必须显式加 `--workspace`，否则 `lark-gate` 的
+#    准入判定测试会静默不跑 —— 而那段策略是"仅私聊 + 白名单"的**唯一防线**（AGENTS.md 门禁）。
+members = ["lark-gate", "lark-bot"]
+
 [package]
 name = "link-searcher"
 version = "1.2.2"
 description = "Cross-platform full-text search desktop application"
 authors = ["Link-Searcher"]
 edition = "2024"
-# 本包有两个 bin（`link-searcher` 主程序 + `lark-bot` 飞书 sidecar）。
-# 不指定这个键，`cargo run` / `tauri dev` 会以
-# "could not determine which binary to run" 失败 —— `tauri dev` 正是用 `cargo run` 起应用的。
+# 本包现在只有一个 bin（`link-searcher` 主程序；`lark-bot` 已拆到同名成员 crate）。
+# 保留这个键的理由：`tauri dev` 用 `cargo run` 起应用，而 `cargo run` 在
+# "本包 + workspace" 下需要它来消歧（历史上正是缺它导致 `tauri dev` 直接失败）。
 default-run = "link-searcher"
 
 [lib]

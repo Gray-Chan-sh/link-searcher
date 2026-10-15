@@ -11,6 +11,13 @@
 //! L1 白名单为空 / 解析失败 / 不含 sender  → 拒绝（**静默**）
 //! 通过                                     → 进入问答流程
 //! ```
+//!
+//! ## 为什么是**独立 crate**
+//!
+//! 原本它住在 `link_searcher_lib::commands::sessions::lark_gate`，于是 bot（飞书
+//! sidecar）为了用它就必须依赖整个应用 lib —— 既让 sidecar 涨到 30 MB，也让
+//! "先编 bot、再编主程序"变成不可能（打包 `externalBin` 的鸡生蛋，§5.7）。
+//! 这段策略本来就**零应用依赖**，抽出来即可：策略仍只有一份实现、一份测试。
 
 /// 飞书 `im.message.receive_v1` 中我们真正用到的字段。
 ///
@@ -253,7 +260,7 @@ mod tests {
         assert_eq!(
             strip_leading_mention("价格是 a@b 吗"),
             "价格是 a@b 吗",
-            "行内的 @ 不能被误伤"
+            "行内的 @ 不能误伤"
         );
     }
 }

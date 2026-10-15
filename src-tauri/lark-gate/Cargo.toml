@@ -1,0 +1,13 @@
+[package]
+name = "lark-gate"
+version = "1.2.2"
+description = "Feishu (Lark) inbound-message admission policy: p2p-only + user allowlist (fail-closed)"
+edition = "2024"
+publish = false
+
+# 零重依赖：只有 serde。之所以能独立成 crate，是因为这段策略**不碰**应用里的
+# 任何东西（不读配置、不连库、不碰 Tauri），所以可以脱离主程序单独编译 ——
+# 这正是解开 `bundle.externalBin` 鸡生蛋的关键（见 `docs/LARK_BOT.md` §5.7）。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
