@@ -1,5 +1,15 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：门禁章节补充两个实测踩到的坑（纯文档）
+
+> 起因：本轮 doc-only 提交时门禁报 `E0786 invalid metadata files`，而我那条命令把 `cargo test` 与 `git commit` 串在一起无条件执行 —— **测试红了仍然提交并推送了**。排查后确认是缓存问题（同一份代码重跑即 547 全绿），但流程错必须记下。
+
+- **AGENTS.md「测试门禁」新增「门禁命令的两个坑」**：
+  1. **不要用 `Select-Object -First N` 截断 cargo 输出** —— PowerShell 取够 N 行即**提前关闭管道**，把 cargo 半途掐断、留下**写了一半的元数据**，下次构建报 `error[E0786]: found invalid metadata files for crate link_searcher_lib`。**它看起来像代码坏了，其实是缓存坏了**，重跑即可；截断请改用 `Select-String` / `Where-Object`（消费完整个流）或先收进变量。
+  2. **门禁必须"失败即停"** —— 不要把 `cargo test` 与 `git commit` 串在同一条命令里无条件往下跑；正确做法是先跑绿、确认后再单独提交（或脚本里 `if ($LASTEXITCODE -ne 0) { exit 1 }`）。
+- **复核**：本条提交前完整跑过门禁 —— `cargo test` 全部 16 个目标 **EXITCODE=0**（`--lib` 547 passed）；`semgrep --severity ERROR` 0 findings。
+- **未做**：无代码改动。
+
 ## 2026-10-15：群消息实测带出第 4 道防线（L0）；确认"飞书侧拦不住加群"（纯文档）
 
 > 用户把「二飞」拉进一个群并在群里 @ 它，拿到真实群消息样本。结果同时**证伪一个假设**、**暴露一个新风险**。

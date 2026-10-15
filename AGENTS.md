@@ -78,6 +78,27 @@ npx vitest run
 （可能很慢/需要模型），因此在**换机器或放入样例后**要留意耗时变化。`#[ignore]` 的用例默认不跑，
 需显式 `-- --ignored`。
 
+### ⚠️ 门禁命令的两个坑（2026-10-15 实测踩到）
+
+**① 不要用 `Select-Object -First N` 截断 cargo 的输出**
+
+PowerShell 在取够 N 行后会**提前关闭管道**，把 cargo 进程**半途掐断**，留下**写了一半的元数据**。
+下一次构建就会以看似严重的错误失败：
+
+```
+error[E0786]: found invalid metadata files for crate `link_searcher_lib`
+```
+
+**它看起来像代码坏了，其实是缓存坏了** —— 重跑一次就好。截断输出请改用 `Select-String` /
+`Where-Object`（会消费完整个流），或先把输出收进变量再筛。
+
+> 若真见到 `E0786`：**先重跑一次**再下结论；仍然失败再 `cargo clean -p link-searcher`。
+
+**② 门禁必须"失败即停"**
+
+**不要**把 `cargo test` 和 `git commit` 串在同一条命令里无条件往下跑 —— 测试红了它照样会提交。
+正确做法：先把门禁跑绿，**确认之后再单独提交**（或在脚本里 `if ($LASTEXITCODE -ne 0) { exit 1 }`）。
+
 ## 静态分析（Semgrep）
 
 每次提交前，必须运行阻塞级检查，**零发现**才可提交：
