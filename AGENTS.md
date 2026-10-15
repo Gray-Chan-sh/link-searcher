@@ -99,6 +99,18 @@ error[E0786]: found invalid metadata files for crate `link_searcher_lib`
 **不要**把 `cargo test` 和 `git commit` 串在同一条命令里无条件往下跑 —— 测试红了它照样会提交。
 正确做法：先把门禁跑绿，**确认之后再单独提交**（或在脚本里 `if ($LASTEXITCODE -ne 0) { exit 1 }`）。
 
+**③ 不要用 PowerShell 的 `Set-Content` / `-replace | Set-Content` 改源码**
+
+PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本机中文 Windows 上是 GBK）。
+拿它改 UTF-8 源码会把**所有非 ASCII 字符写坏**（中文注释全变乱码），而编译器通常**不会报错**
+—— 因为坏掉的是注释而不是字符串字面量，于是损坏**静默通过**。
+
+→ 改源码**一律用编辑工具**（`edit` / `write`）。**绝不**用 `Set-Content` / `Out-File` / `-replace` 落盘。
+（2026-10-15 实测：`-replace | Set-Content` 把 `webapi/routes/lark.rs` 的中文注释写成了乱码，只能整份重写。）
+
+**读**源码同理：PS 5.1 的 `Get-Content` 默认也按 ANSI 解码，读 UTF-8 文件会**显示成乱码**（文件其实是好的）。
+看到"乱码"先换 `Get-Content -Encoding UTF8`（或直接用编辑工具读）再判断 —— 别去"修"一个健康的文件。
+
 ## 静态分析（Semgrep）
 
 每次提交前，必须运行阻塞级检查，**零发现**才可提交：

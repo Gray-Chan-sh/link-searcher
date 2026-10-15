@@ -11,6 +11,7 @@ pub mod logs;
 pub mod tesseract;
 pub mod backup;
 pub mod config;
+pub mod lark;
 
 use axum::{
     http::StatusCode,
@@ -63,6 +64,7 @@ pub fn build_router(state: ApiState) -> Router {
         .merge(backup::router(state.clone()))
         .merge(config::router(state.clone()))
         .merge(events::router(state.clone()))
+        .merge(lark::router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::webapi::session::session_guard,

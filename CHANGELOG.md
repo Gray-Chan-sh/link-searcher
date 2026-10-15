@@ -1,5 +1,20 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书会话映射与事件去重落地（三端交互重构 · 阶段三）
+
+> 目标（`docs/LARK_BOT.md` §5.5 阶段三）：让"同一个飞书私聊"跨 bot 重启接着上轮对话，并让重投事件不产生重复回答。
+
+- **`commands/sessions/lark.rs`（新增）** —— §5.5 决策 D4 所说"统一管理模块"的第二块（第一块是 `in_flight`）：
+  - `LarkBinding { chat_id, session_id, user_open_id, created_at, updated_at }` + `get/upsert/delete/list`。`upsert` 用 `ON CONFLICT DO UPDATE`，**更新时保留 `created_at`**。
+  - `mark_seen(message_id, now, cap)` → **返回 `true` ＝ 首次见到（应处理）/ `false` ＝ 重投（应忽略）**，即 §8 的幂等落点。键是 `message_id` 而**不是** `event_id`（官方明言后者重投会变）。环容量默认 `DEFAULT_SEEN_CAP = 1000`，只在首次插入时修剪。
+- **DB**：`lark_sessions` / `lark_seen_messages`（+ `seen_at` 索引）加入 `CREATE_TABLES_SQL`；`SCHEMA_VERSION` **8 → 9**，并同步 `test_schema_version_is_9`。
+- **webapi 接口**（bot 是**独立进程**，只经 webapi 访问本库，故必须有 HTTP 面）：`GET/PUT/DELETE /api/lark/binding`、`GET /api/lark/bindings`、`POST /api/lark/seen`（新增 `webapi/routes/lark.rs` 并注册进 `build_router`）。`created_at`/`updated_at` 由**服务端**生成，bot 不必自己算。
+- **存储选型修正**：早先 §5.5 写"独立文件"，已按决定改为 **SQLite 表** —— 事务性 + 跨进程安全，不必再造一套文件锁与临时文件（§5.6 的教训）。
+- **依赖修正**：阶段三**不依赖 C3**（映射只是数据）；C3 是 bot 自身需要的，属 P1。
+- **测试**：`lark.rs` 新增 3 条（绑定往返 + upsert 保留 created_at + 删除幂等；去重"首次/重投"；环容量上限且最旧先淘汰）；`cargo test --lib` **556 passed / 0 failed**。
+- **观察到的既有 flaky（非本次引入）**：首次整跑时 `ai::tests::gateways_unconfigured_report_not_ok` 失败，单跑与重跑均通过 —— 属仓库已知的并行测试干扰类问题（`bf9ae61` 亦修过同类）。
+- **门禁**：`cargo test` 全目标 EXITCODE=0、`npx tsc --noEmit` 通过、`npx vitest run` 73 passed、`semgrep --severity ERROR` **0 findings**。
+
 ## 2026-10-15：会话按来源端隔离（三端交互重构 · 阶段二）
 
 > 目标（`docs/LARK_BOT.md` §5.5 阶段二）：桌面 / Web / 飞书三端**各自只见己方**聊天会话，为 P1 接飞书铺路。

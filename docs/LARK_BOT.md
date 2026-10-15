@@ -541,7 +541,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 |---|---|---|
 | **一（已获批）** | AI 取消按会话：in-flight 注册表 + 令牌；`/api/ai/cancel` 带 `session_id`；`cancel_scan` 解耦 | 并能回滚到静态 flag。验收：A/B 两会话并发生成，取消 A 不影响 B；取消晚于完成为无操作；删除中生成被中止且不复活 |
 | 二 ✅ **完成（2026-10-15）** | `ChatSession.origin`（`ui`/`web`/`lark`；**空串＝未指定**，生效时按 `ui`）+ 按端过滤（list / load / delete / export）+ **写入限同来源端**（跨端写入与删除被拒）+ **50 上限改为按端各自计算**。IPC 恒以 `ui` 身份、webapi 恒以 `web` 身份 —— `origin` **不出现在 IPC 参数里**，避免动参数名（AGENTS.md #4）。旧单会话结构的迁移也补了 `origin` | ✅ 验收：旧文件原样加载且归 `ui`；三端各自只见己方；`None`＝不限来源（供"统一管理"用）。⚠️ **行为变化见下** |
-| 三 | 飞书 `chat_id ↔ session_id` 映射 + `message_id` 去重环（✅ 决定：**存 SQLite 表**，不用独立文件 —— 事务性 + 跨进程安全，不必再造锁与临时文件）| 需先完成 §5.4 的 **C3 生命周期**；验收：bot 重启映射保留、重复事件不产生重复会话 |
+| 三 ✅ **完成（2026-10-15）** | 飞书 `chat_id ↔ session_id` 映射 + `message_id` 去重环（✅ **SQLite 表**，非独立文件）。新增 `commands/sessions/lark.rs`（核心 CRUD，属 §5.5 D4 的"统一管理模块"第二块）+ webapi 接口 `GET/PUT/DELETE /api/lark/binding`、`GET /api/lark/bindings`、`POST /api/lark/seen`（bot 是独立进程，只走 webapi）；`SCHEMA_VERSION` 8 → **9** | ✅ 验收：绑定 upsert 保留 `created_at`、跨私聊互不影响；去重"首次 true / 重投 false"、环容量上限生效。**C3 不由本阶段承担**（映射只是数据），C3 属 bot 自身（P1） |
 | 四 | 租约重构（`session_guard` 移除/降级）| **D1 已定＝放弃 IP 排他**；验收：手机浏览器与 bot 可同时使用 |
 
 > ⚠️ **阶段二的行为变化（需知悉）**：本功能之前产生的会话一律归 `ui`，因此**在浏览器里打开 Web 端将看不到

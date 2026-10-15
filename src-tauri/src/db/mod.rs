@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "8";
+const SCHEMA_VERSION: &str = "9";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -413,6 +413,24 @@ const CREATE_TABLES_SQL: &str = "
         PRIMARY KEY (md5, chunk_index)
     );
 
+    -- 飞书机器人：p2p 会话 ↔ 本库聊天会话 的映射（docs/LARK_BOT.md §5.5 阶段三）。
+    -- 存 DB 而非独立文件：事务性 + 跨进程安全，不必再造一套锁与临时文件。
+    CREATE TABLE IF NOT EXISTS lark_sessions (
+        chat_id      TEXT PRIMARY KEY,
+        session_id   TEXT NOT NULL,
+        user_open_id TEXT NOT NULL DEFAULT '',
+        created_at   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL
+    );
+
+    -- 飞书事件去重环：按 message_id 记住已处理的消息（§8 幂等）。
+    -- 官方明言 event_id **不可**用于去重（重投会变），必须用 message_id。
+    CREATE TABLE IF NOT EXISTS lark_seen_messages (
+        message_id TEXT PRIMARY KEY,
+        seen_at    INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_lsm_seen_at ON lark_seen_messages(seen_at);
+
 ";
 
 /// Remove content_index rows whose md5 is no longer referenced by any
@@ -796,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_8() {
+    fn test_schema_version_is_9() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -805,7 +823,7 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "8");
+        assert_eq!(version, "9");
     }
 
     #[test]
