@@ -1,3 +1,26 @@
+## 2026-10-16（第十一轮）：B 项 —— `lark-cli` 纳入「依赖中心」
+
+> 目标：让"飞书机器人依赖的 `lark-cli`"变成**依赖中心能显示、能一键安装**的东西，
+> 而不是让 bot 自己到处猜路径。
+
+- **B1 接缝**（`3191dc1`）：应用侧解析 lark-cli 的路径 → spawn bot 时经 **`LS_LARK_CLI`** 注入 →
+  bot 直接用（自带的探测保留，仅作"手动运行 bot"的兜底），并记日志 `[LARK-BOT] 使用 lark-cli = …`。
+  - **为什么用环境变量**：bot 刻意**不依赖应用 lib**（拆 crate 的成果），两边**不能共享实现** →
+    环境变量就是那条接缝；它同时是"依赖中心可显示/可安装"的前置。
+- **B1.5 归位**（`fae0950`）：发现逻辑移入 **`deps::catalog::lark_cli_path()`** ——
+  它的本质是"某个外部依赖装没装"，与 `is_ready` 同类，归 `deps` 才只有一份实现；`lark_bot.rs` 留薄封装 = 接缝点。
+- **B2 条目 + 就绪探测**（`c7e7d40`）：`catalog` 新增 `lark_cli()` 条目；`is_ready` 加 id 特例
+  → `lark_cli_path().is_some()`。
+  - **不给 `DepDef` 加来源类型**：`lark-cli` 是 npm 全局包（不是可下载 `files`、也不是 winget/brew/apt 包），
+    照 ffmpeg/poppler 的**既有 id 特例模式**实现即可 —— 省掉 10 处字面量改动。
+  - `files: &[]` 是**刻意**的：`files_ready` 要求非空，故不会被误判成"已就绪"；但也因此**必须有那个 id 特例**。
+- **B3 一键安装**（`3da1cb7`）：`install_dep` 增加 **npm 分支** → `install_npm_package`（`npm i -g @larksuite/cli`）。
+  - **Windows 上必须经 `cmd /C`**：`npm` 只有 `.cmd` 批处理包装，`CreateProcess` 不能直接执行 `.cmd`
+    （与 `lark-cli` 那条坑同源）；此处参数是**固定字面量**、不含用户输入，所以没有"被 cmd 二次解析"的风险。
+  - npm 不在 PATH 时，错误信息里给出**可手动执行的命令**。
+- **仍未做**：B4（确认依赖中心列表能正确渲染该条目 —— 看起来是后端数据驱动，需跑一次 dev 看）、
+  B5（**运行时验证接缝**：dev 起来后 grep 日志里的 `[LARK-BOT] 使用 lark-cli = …`；需先关掉安装版）。
+
 ## 2026-10-15/16（第十轮）：C 项 —— 装机实测通过（MSI + 安装版 bot + 卡片降级）
 
 - **MSI**：`Link-Searcher_1.2.2_x64_en-US.msi`（35.3 MB，含本轮全部改动：分页 / markdown 降级 / purge 修复）。
