@@ -450,7 +450,47 @@ pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
 ///
 /// 保留成函数而不是散落的字面量：两边一旦漂移，测试里的往返（round-trip）断言会立刻红。
 pub fn action_value(action: &str, session_id: &str) -> String {
-    serde_json::json!({ "action": action, "session_id": session_id }).to_string()
+    action_payload(action, session_id).to_string()
+}
+
+/// 按钮 `value` 的**对象**形式（飞书按钮的 `value` 字段要对象）。
+///
+/// 飞书回调时会把它的**字符串化**结果放进 `action_value`（§2 实测样本正是如此：
+/// `"action_value":"{\"probe\":\"card-action-20261015\"}"`），所以 [`parse_card_action`]
+/// 走"二次 parse"那条路 —— 两边靠 `action_payload` 单点定义 + 往返测试保持一致。
+pub fn action_payload(action: &str, session_id: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action, "session_id": session_id })
+}
+
+/// 给卡片**追加**动作按钮（只有"最后一张"该用）。
+///
+/// - **只在最后一张**：多段回答时中间页挂按钮会让"点哪个"变含糊；
+/// - **没有 session_id 就不加**：动作都作用于某个会话，匿名按钮点不动反而是噪音。
+pub fn append_actions(card: &mut serde_json::Value, session_id: &str) {
+    let sid = session_id.trim();
+    if sid.is_empty() {
+        return;
+    }
+    let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) else {
+        return;
+    };
+    elements.push(serde_json::json!({
+        "tag": "action",
+        "actions": [
+            {
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": "打开详情" },
+                "type": "default",
+                "value": action_payload("open_detail", sid),
+            },
+            {
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": "换一批证据" },
+                "type": "default",
+                "value": action_payload("retry", sid),
+            },
+        ],
+    }));
 }
 
 /// 从回调事件的原始 JSON 里取出**操作者 `open_id`**。
@@ -854,6 +894,46 @@ mod tests {
         assert!(
             !card_action_allowed(Some("ou_me"), &[]),
             "空名单 = 拒绝全部（与 §7.1 ② 一致）"
+        );
+    }
+
+    /// **发送侧 ↔ 解析侧**必须钉在一起：按钮的 `value`（对象）被飞书**字符串化**成
+    /// `action_value` 后，必须能被 `parse_card_action` 认出来。
+    /// 它们一旦漂移，症状是"按钮点了没反应"—— 最难查的那种。
+    #[test]
+    fn action_buttons_round_trip_into_parseable_actions() {
+        let mut card = render_answer_card("答", 1, 1, 1, 1000);
+        append_actions(&mut card, "sess-9");
+        let elems = card["elements"].as_array().unwrap();
+        let action = elems.last().expect("应追加 action 元素");
+        assert_eq!(action["tag"], "action");
+        let buttons = action["actions"].as_array().unwrap();
+        assert_eq!(buttons.len(), 2, "两个按钮：打开详情 / 换一批证据");
+        assert_eq!(buttons[0]["text"]["content"], "打开详情");
+
+        for (btn, expect) in [
+            (&buttons[0], CardAction::OpenDetail { session_id: "sess-9".into() }),
+            (&buttons[1], CardAction::Retry { session_id: "sess-9".into() }),
+        ] {
+            // 模拟飞书：把 value 对象字符串化后作为 action_value 交回来
+            let ev = CardActionEvent {
+                event_type: "card.action.trigger".into(),
+                action_value: btn["value"].to_string(),
+                ..Default::default()
+            };
+            assert_eq!(parse_card_action(&ev), Some(expect), "按钮往返失败：{btn}");
+        }
+    }
+
+    #[test]
+    fn actions_are_skipped_without_a_session_id() {
+        let mut card = render_answer_card("答", 1, 1, 1, 1000);
+        let before = card["elements"].as_array().unwrap().len();
+        append_actions(&mut card, "   ");
+        assert_eq!(
+            card["elements"].as_array().unwrap().len(),
+            before,
+            "没有 session_id 就不该加按钮（点了也动不了，只会是噪音）"
         );
     }
 }

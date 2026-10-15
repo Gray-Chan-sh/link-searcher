@@ -350,7 +350,11 @@ fn answer_with_card(
             let chunks = split_for_cards(&turn.full_text, MAX_BODY_BYTES, MAX_CARDS);
             let pages = chunks.len();
             let mut sent_pages = 0usize;
-            let first = render_answer_card(&chunks[0], 1, pages, turn.evidence_count, turn.took_ms);
+            let mut first = render_answer_card(&chunks[0], 1, pages, turn.evidence_count, turn.took_ms);
+            if pages == 1 {
+                // 只有一张 → 按钮挂它；多张 → 挂最后一张（见下）
+                card::append_actions(&mut first, session_id);
+            }
             if let Err(e) = patch_card(&card_id, &first) {
                 // 收尾更新失败：至少把答案给出去（此时卡片里还没有最终内容，不会重复）
                 log::warn!("[bot] 收尾卡片更新失败：{e}");
@@ -358,7 +362,10 @@ fn answer_with_card(
             } else {
                 sent_pages = 1;
                 for (i, chunk) in chunks.iter().enumerate().skip(1) {
-                    let card = render_answer_card(chunk, i + 1, pages, turn.evidence_count, turn.took_ms);
+                    let mut card = render_answer_card(chunk, i + 1, pages, turn.evidence_count, turn.took_ms);
+                    if i + 1 == pages {
+                        card::append_actions(&mut card, session_id);
+                    }
                     match reply_card(&ev.message_id, &card) {
                         Ok(_) => {
                             sent_pages += 1;
