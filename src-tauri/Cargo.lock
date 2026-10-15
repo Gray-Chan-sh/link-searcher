@@ -3867,6 +3867,7 @@ dependencies = [
  "lark-gate",
  "log",
  "rustls",
+ "serde",
  "serde_json",
  "sysinfo",
  "ureq",

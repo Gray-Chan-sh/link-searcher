@@ -10,6 +10,9 @@ publish = false
 # 也让这个二进制不链 onnxruntime / tantivy / Tauri（30 MB → 几 MB）。
 [dependencies]
 lark-gate = { path = "../lark-gate" }
+# `serde` 直接依赖：卡片回调事件需要 `#[derive(Deserialize)]`
+# （此前只用 `serde_json`，它不提供 derive。）
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
 env_logger = "0.11"

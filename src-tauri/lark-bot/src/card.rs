@@ -382,6 +382,77 @@ impl SseAccum {
     }
 }
 
+// ───────────────────────────── 卡片回调（D：交互按钮）─────────────────────────────
+
+/// 卡片回调事件（`card.action.trigger`）里我们真正用到的字段（§2 有实测样本）。
+///
+/// ⚠️ **实测约束（§2 实测发现 ①②④）**：
+///
+/// - `card_content` 会被飞书**重写**（不是发送原文的回显）→ **绝不能**靠它判断卡片状态，
+///   路由只能看 `action_value` / `custom_action_id`；
+/// - `action_value` 往往是**一个 JSON 字符串**，需要**二次 parse**；
+/// - 卡片事件的 `timestamp` 是**微秒**（消息事件是毫秒）→ 两者不可按同一精度解析
+///   （这里不解析它，只用 `message_id` 等稳定字段）。
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct CardActionEvent {
+    /// 事件类型，应为 `card.action.trigger`。
+    #[serde(rename = "type", default)]
+    pub event_type: String,
+    /// 按钮上带的值（通常是 JSON 字符串）。
+    #[serde(default)]
+    pub action_value: String,
+    /// 卡片所在的消息 id。
+    #[serde(default)]
+    pub message_id: String,
+    /// 会话 id。
+    #[serde(default)]
+    pub chat_id: String,
+    /// 点击者的 `open_id`（仍需过白名单 —— 回调是**另一条入口**，不能只靠消息入口把关）。
+    #[serde(default)]
+    pub operator_id: String,
+}
+
+/// 我们支持的按钮动作。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardAction {
+    /// 「打开详情」：给出会话在 WebUI 里的入口。
+    OpenDetail { session_id: String },
+    /// 「换一批证据」：用同一个问题重跑一轮。
+    Retry { session_id: String },
+}
+
+/// 从 `action_value` 解析出动作。返回 `None` = **不认识/不完整 → 直接忽略**。
+///
+/// 纯函数：路由错了会变成"点 A 触发 B"，而这条链路**没法靠肉眼在飞书里穷举**，
+/// 所以它是 D 最该被单测盯住的一层。
+pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
+    // 二次 parse：飞书给的是 JSON **字符串**（§2 实测发现 ①）
+    let v: serde_json::Value = serde_json::from_str(ev.action_value.trim()).ok()?;
+    let action = v.get("action")?.as_str()?.trim();
+    let session_id = v
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    // 没有 session_id 的动作无法安全执行（不知道对哪个会话做事）→ 忽略
+    if session_id.is_empty() {
+        return None;
+    }
+    match action {
+        "open_detail" => Some(CardAction::OpenDetail { session_id }),
+        "retry" => Some(CardAction::Retry { session_id }),
+        _ => None,
+    }
+}
+
+/// 按钮的 `action_value` 构造器（**发送侧与解析侧必须成对**，故放同一个文件）。
+///
+/// 保留成函数而不是散落的字面量：两边一旦漂移，测试里的往返（round-trip）断言会立刻红。
+pub fn action_value(action: &str, session_id: &str) -> String {
+    serde_json::json!({ "action": action, "session_id": session_id }).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,5 +709,65 @@ mod tests {
         let src = "### 标题\n* 项\n| a | b |\n| - | - |\n`code`\n> 引";
         let once = normalize_for_card(src);
         assert_eq!(normalize_for_card(&once), once, "二次归一化不该再变化");
+    }
+
+    // ── 卡片回调（D）：解析与路由 ──
+
+    #[test]
+    fn card_action_round_trips_with_its_builder() {
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: action_value("open_detail", "sess-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::OpenDetail { session_id: "sess-1".into() })
+        );
+        let ev2 = CardActionEvent {
+            action_value: action_value("retry", "sess-2"),
+            ..Default::default()
+        };
+        assert_eq!(parse_card_action(&ev2), Some(CardAction::Retry { session_id: "sess-2".into() }));
+    }
+
+    /// 陌生/不完整的动作必须**忽略**，绝不能"猜着执行" —— 按钮是**另一条入口**。
+    #[test]
+    fn unknown_or_incomplete_actions_are_ignored_not_executed() {
+        for bad in [
+            r#"{"action":"delete_everything","session_id":"s"}"#,
+            r#"{"action":"open_detail"}"#,                    // 缺 session_id
+            r#"{"session_id":"s"}"#,                          // 缺 action
+            r#"{"action":"open_detail","session_id":"  "}"#,  // session_id 是空白
+            "not json at all",
+            "",
+        ] {
+            let ev = CardActionEvent { action_value: bad.to_string(), ..Default::default() };
+            assert_eq!(parse_card_action(&ev), None, "必须忽略：{bad}");
+        }
+    }
+
+    #[test]
+    fn action_value_survives_surrounding_whitespace() {
+        let ev = CardActionEvent {
+            action_value: format!("  {}  ", action_value("retry", "s3")),
+            ..Default::default()
+        };
+        assert_eq!(parse_card_action(&ev), Some(CardAction::Retry { session_id: "s3".into() }));
+    }
+
+    /// 真实事件字段更多（`timestamp` 是**微秒**、还有 `token`/`card_content`…）→ 必须**宽松解析**。
+    #[test]
+    fn card_event_json_tolerates_extra_fields() {
+        let raw = r#"{"type":"card.action.trigger","timestamp":"1792054882978640","token":"c-x",
+          "action_value":"{\"action\":\"open_detail\",\"session_id\":\"s4\"}",
+          "card_content":"{\"config\":{}}","message_id":"om_1","chat_id":"oc_1","operator_id":"ou_1"}"#;
+        let ev: CardActionEvent = serde_json::from_str(raw).expect("多字段不应导致解析失败");
+        assert_eq!(ev.message_id, "om_1");
+        assert_eq!(ev.operator_id, "ou_1");
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::OpenDetail { session_id: "s4".into() })
+        );
     }
 }
