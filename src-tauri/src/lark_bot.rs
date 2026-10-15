@@ -67,6 +67,48 @@ fn bot_exe_path() -> Result<PathBuf, String> {
     ))
 }
 
+/// 解析 `lark-cli` 可执行文件 —— **应用侧的唯一权威实现**（同时是「依赖中心」的就绪探测）。
+///
+/// 顺序（与 bot 内的兜底探测保持一致，便于两边行为对齐）：
+/// 1. 环境变量 `LS_LARK_CLI`（用户/CI 显式指定）；
+/// 2. npm 全局的原生二进制 —— Windows 上 `lark-cli` 只是 `.cmd` 包装，而 `CreateProcess`
+///    **不能**直接执行 `.cmd`（要经 cmd.exe，届时参数会被二次重解析，而回复正文任意 → 坑很深）；
+/// 3. PATH 上的 `lark-cli`（只认 `.exe`；`.cmd` 交给 bot 自己那层兜底）。
+///
+/// 找不到返回 `None` —— **不报错**："还没装 lark-cli"是可接受的初始状态，且 bot 自己还有一层兜底。
+///
+/// 不写单测是**有意的**：它读进程级 env / PATH，写单测就得 `set_var`（正是 AGENTS ④ 那类
+/// "全局可变状态导致并行假红"）。它的正确性由"注入后 bot 是否用它"这条运行时链路保证。
+fn lark_cli_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("LS_LARK_CLI") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if cfg!(windows)
+        && let Ok(local) = std::env::var("LOCALAPPDATA")
+    {
+        let native = PathBuf::from(local)
+            .join("Programs")
+            .join("nodejs")
+            .join("node_modules")
+            .join("@larksuite")
+            .join("cli")
+            .join("bin")
+            .join("lark-cli.exe");
+        if native.is_file() {
+            return Some(native);
+        }
+    }
+    let exe = if cfg!(windows) { "lark-cli.exe" } else { "lark-cli" };
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(exe))
+            .find(|p| p.is_file())
+    })
+}
+
 /// 若 `lark_bot_enabled == "true"` 则拉起 bot。**任何失败都只记日志**，
 /// 绝不因此影响应用启动。
 pub fn spawn_if_enabled(app: &AppHandle) {
@@ -99,7 +141,8 @@ pub fn spawn_if_enabled(app: &AppHandle) {
         }
     };
 
-    match Command::new(&path)
+    let mut cmd = Command::new(&path);
+    cmd
         // 让 bot 看住我们：应用被**硬杀/崩溃**时 `RunEvent::Exit` 不会执行，
         // 没有任何人会收它 —— 不看着父进程就会留下孤儿 bot（2026-10-15 实测确认）。
         .arg("--parent-pid")
@@ -107,9 +150,23 @@ pub fn spawn_if_enabled(app: &AppHandle) {
         // stdin 保留为管道：它是"关 stdin 即优雅停机"的落点（Windows 没有可用的 SIGTERM）。
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+
+    // ── lark-cli 的发现权归**应用侧**（依赖中心），经环境变量交给 bot ────────────────
+    // bot 刻意不依赖应用 lib（上一轮拆 crate 的成果），所以两边**不能共享实现**；
+    // 这条环境变量就是接缝：应用解析 → 注入 → bot 直接用（bot 自带探测仅作手动运行的兜底）。
+    // 也是「依赖中心」将来"显示状态 / 一键安装"的前置。
+    match lark_cli_path() {
+        Some(cli) => {
+            log::info!("[LARK-BOT] 使用 lark-cli = {}", cli.display());
+            cmd.env("LS_LARK_CLI", &cli);
+        }
+        None => log::warn!(
+            "[LARK-BOT] 未发现 lark-cli（`LS_LARK_CLI` / npm 全局路径 / PATH 都没有）—— 交给 bot 自行兜底探测"
+        ),
+    }
+
+    match cmd.spawn() {
         Ok(mut child) => {
             if let Some(out) = child.stdout.take() {
                 forward(out, "lark-bot", false);
