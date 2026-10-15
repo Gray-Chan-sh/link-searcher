@@ -114,6 +114,70 @@ pub fn get_version() -> serde_json::Value {
     })
 }
 
+/// 开机自启的真实状态（**来自操作系统**，不是我们的设置项）。
+#[derive(serde::Serialize)]
+pub struct AutostartState {
+    /// OS 里当前是否已登记自启。
+    pub enabled: bool,
+    /// 本进程实际使用的数据目录。
+    pub data_dir: String,
+    /// 非 `None` 表示"自启**无法**复现当前数据目录"的原因，供 UI 提示。
+    pub warning: Option<String>,
+}
+
+/// 组装自启状态。`effective` 由调用方给出（避免这里再取一次 state）。
+fn autostart_state_with(app: &tauri::AppHandle, effective: std::path::PathBuf) -> Result<AutostartState, String> {
+    use tauri_plugin_autostart::ManagerExt as _;
+
+    let enabled = app.autolaunch().is_enabled().map_err(|e| e.to_string())?;
+
+    // 自启是**无参数**启动应用的（插件 API 不接受参数），因此它读的是 `config.json` 里的
+    // data_dir。若当前进程是用 `--data-dir` 启动的，两者会不同 —— 那时自启会指向**另一个库**，
+    // 必须显式告知用户，而不是默默失败。
+    let from_config = crate::config::load_config().data_dir;
+    let warning = if from_config == effective {
+        None
+    } else {
+        Some(format!(
+            "自启以无参数启动应用，会使用 config.json 里的数据目录（{}），而当前进程用的是 {}。\
+             若你要自启到当前这个库，请把 config.json 的 data_dir 改成它。",
+            from_config.display(),
+            effective.display()
+        ))
+    };
+    Ok(AutostartState {
+        enabled,
+        data_dir: effective.display().to_string(),
+        warning,
+    })
+}
+
+/// 查询自启状态（含"能否复现当前 data_dir"的提示）。
+#[tauri::command]
+pub fn autostart_state(app: tauri::AppHandle) -> Result<AutostartState, String> {
+    use tauri::Manager as _;
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    autostart_state_with(&app, data_dir)
+}
+
+/// 打开/关闭开机自启。
+#[tauri::command]
+pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<AutostartState, String> {
+    use tauri::Manager as _;
+    use tauri_plugin_autostart::ManagerExt as _;
+
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable().map_err(|e| e.to_string())?;
+    } else {
+        manager.disable().map_err(|e| e.to_string())?;
+    }
+    let data_dir = app.state::<AppState>().data_dir.clone();
+    let state = autostart_state_with(&app, data_dir)?;
+    log::info!("[AUTOSTART] set enabled={enabled} -> 实际 {}", state.enabled);
+    Ok(state)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

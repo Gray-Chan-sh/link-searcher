@@ -26,7 +26,9 @@ use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, 
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, retry_failed_files, trigger_scan, verify_index_content};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
-use crate::commands::settings::{get_settings, get_version, update_settings};
+use crate::commands::settings::{
+    autostart_state, get_settings, get_version, set_autostart, update_settings,
+};
 use crate::commands::webapi::{web_session_logout, web_session_status};
 use crate::commands::performance::{detect_hardware, auto_optimize, get_performance_profile, set_performance_tier};
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
@@ -170,6 +172,8 @@ get_dir_children,
             remove_dir_with_files,
             get_settings,
             update_settings,
+            autostart_state,
+            set_autostart,
             web_session_status,
             web_session_logout,
             check_tesseract,

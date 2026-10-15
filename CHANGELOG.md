@@ -13,7 +13,9 @@
 - **实测发现 ②（修正上一轮的结论）**：daemon 存活**不受我们控制** —— 它既会长期留存（上轮实测 uptime 5m50s），也会自行退出；且 **`lark-cli event status` 本身就会起一个**（本轮实测看到 PID 与 uptime 都变了）。→ 这**加强**了"留着复用"的决策：不去管理它，**在就复用、不在就重建**，绝不 `kill -9`。
 - **新增启动期健壮性**：bot 读设置失败会**重试 20 秒**（GUI 拉起它时 webapi 的 bind 可能还在异步进行）。
 - **验证方式（AGENTS 门禁 ⑤）**：本轮属结构性改动，已**真起应用**验证：`cargo run --no-default-features` → 确认 bot 被拉起 → 硬杀应用 → 确认 bot 2 秒内自退、daemon 留存。
-- **未做**：**autostart 开关**（本轮 A 的另一半，见 §5.1 缺口 1）；`externalBin` 打包；卡片+节流；内容闸门。
+- **开机自启开关接通（A 的另一半）**：`SystemTab` 里原有的 `auto_start` 开关**只写设置、无人读**（点了等于没点）。现改为**以操作系统状态为准**：新增 Tauri 命令 `autostart_state` / `set_autostart`（走 `tauri-plugin-autostart` 的 Rust API：`is_enabled` / `enable` / `disable`），UI 挂载时读真实状态、切换时调真实开关；`auto_start` 设置项仅**同步写入**供展示与追溯。Web 端没有该命令 → 控件静默隐藏。
+  - **data_dir 提示（重要）**：插件 API **不接受参数**，自启是**无参数**启动，读的是 `config.json` 里的 `data_dir`。若当前进程是用 `--data-dir` 启动的（effective ≠ config），命令返回 **warning** 让 UI 显式提示"自启会指向另一个库"，而不是默默错开。（本机 data_dir 存在 config.json，故不触发。）
+- **未做**：`externalBin` 打包（把 bot 装进 MSI —— 注意配置了却未准备 `<name>-<target-triple>` 文件会**直接打断 `tauri dev`**，故不急于加）；卡片+节流；内容闸门；C3 的"从容退出"路径（`RunEvent::Exit` 已接，"托盘退出"的实测留待用户点一次）。
 
 ## 2026-10-15：飞书 bot **端到端验收通过**（P1 纯文本版）+ 补设置白名单缺口
 

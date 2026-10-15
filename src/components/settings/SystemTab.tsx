@@ -20,10 +20,26 @@ interface WebSessionStatus {
   bind?: string
 }
 
+/** 与 Rust 端 `commands::settings::AutostartState` 对齐。 */
+interface AutostartState {
+  enabled: boolean
+  data_dir: string
+  /** 非 null 表示"自启无法复现当前数据目录"（如以 `--data-dir` 启动）。 */
+  warning: string | null
+}
+
 export function SystemTab({ settings, onFieldChange, onRegenerateToken }: SystemTabProps) {
   const { t } = useI18n()
   const [session, setSession] = useState<WebSessionStatus | null>(null)
   const [copied, setCopied] = useState(false)
+
+  // 开机自启：**真实状态来自操作系统**，而不是设置项 —— 之前那个 `auto_start` 开关
+  // 只写设置、从没人读，所以点了等于没点。Web 端没有这个命令 → 静默隐藏该控件。
+  const [autostart, setAutostart] = useState<AutostartState | null>(null)
+  const [autostartBusy, setAutostartBusy] = useState(false)
+  useEffect(() => {
+    invoke<AutostartState>('autostart_state').then(setAutostart).catch(() => setAutostart(null))
+  }, [])
 
   // 单用户会话状态 + 局域网地址（桌面端走 Tauri 命令，Web 端走 GET /api/session）。
   const refreshSession = () => {
@@ -62,11 +78,35 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
   return (
     <div className="space-y-6">
       <Section title={t('tab_system')}>
-        <ToggleField
-          label={t('sys_launch_on_startup')}
-          checked={settings['auto_start'] === 'true'}
-          onChange={v => onFieldChange('auto_start', v ? 'true' : 'false')}
-        />
+        {autostart && (
+          <>
+            <ToggleField
+              label={t('sys_launch_on_startup')}
+              checked={autostart.enabled}
+              onChange={async v => {
+                setAutostartBusy(true)
+                try {
+                  const next = await invoke<AutostartState>('set_autostart', { enabled: v })
+                  setAutostart(next)
+                  // 同步写设置项仅供展示/追溯；**真实状态以操作系统为准**。
+                  onFieldChange('auto_start', next.enabled ? 'true' : 'false')
+                } catch (e) {
+                  console.error('[autostart] 切换失败', e)
+                } finally {
+                  setAutostartBusy(false)
+                }
+              }}
+            />
+            {autostart.warning && (
+              <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+                {autostart.warning}
+              </p>
+            )}
+            {autostartBusy && (
+              <p className="text-xs text-neutral-500 dark:text-neutral-400">…</p>
+            )}
+          </>
+        )}
       </Section>
 
       <Section title={t('sys_scheduling')}>

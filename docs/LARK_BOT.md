@@ -308,10 +308,12 @@ restore-completed / dep-progress / dep-install-done
 
 **待补的 4 个小缺口**：
 
-1. **autostart 没接线**（唯一要写代码的地方）
-   插件已装、权限已授（`autostart:default`），但在 `src/` 全局搜 `autostart`（含 import 路径）
-   **零命中** → 前端从未调用 `enable()` / `isEnabled()`。
-   → 需在设置页加开关（`@tauri-apps/plugin-autostart`）。
+1. ~~**autostart 没接线**~~ ✅ **已接线（2026-10-15）**
+   插件已装、权限已授（`autostart:default`）；新增 Tauri 命令 `autostart_state` / `set_autostart`
+   走插件 **Rust API**，设置页开关改为**以操作系统状态为准**（原先那个开关只写设置、无人读）。
+   ⚠️ **data_dir 的坑**：插件 API **不接受参数**，自启是**无参数**启动 → 读的是 `config.json` 里的
+   `data_dir`。若用户以 `--data-dir` 启动，自启会指向**另一个库** → 命令会回 `warning` 让 UI 显式提示
+   （而不是默默错开）。本机 data_dir 存在 config.json 里，故无此提示。
 2. **webapi 默认绑 `0.0.0.0`**（对机器人而言这是**硬前提**，不只是"建议"）
    `settings_bind()` 默认值即 `"0.0.0.0"`（`webapi/mod.rs:225-236`）→ **默认对局域网开放**。
    个人隐私库这个默认偏激进；更要紧的是 webapi 有**单用户 IP 会话租约**（见下方「隐性硬前提 ①」），
