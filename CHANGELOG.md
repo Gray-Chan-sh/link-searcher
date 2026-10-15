@@ -1,5 +1,18 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书接入 P0 完成（实测入档，无代码改动）
+
+> P0 = 建自建应用并授权 + 拿到真实事件样本确认字段。本轮**真机跑通**，结论入档 `docs/LARK_BOT.md` §2 与 §9。
+
+- **接通状态**：`lark-cli config init --new`（设备码式浏览器流程）一次到位 —— App ID `cli_aa5a2e242e785c09`，`auth status` 为 **bot identity ready**，`doctor` 六项全 pass，`event consume … --dry-run` 三条前置（`credentials_available` / `console_event_published` / `scopes_granted`）全 ok。
+- **更正一个早先的判断**：原以为授权之外还要手工去控制台补"事件订阅 / scope"——**实测不需要**（`console_event_published: ok`）。
+- **长连接契约实证**：就绪标记 `[event] ready event_key=…` 原文确认；**官方自己**提示"不要 `kill -9`"（印证 §2 那条不是我推的）；`--max-events` 触发时 `reason: limit` = **正常退出（0）**，daemon 最后消费者退出后 **30s 自清**、无残留订阅；**stdout/stderr 必须分流**（诊断在 stderr、事件 JSON 在 stdout）。
+- **真实样本的关键结论**：① `content` 是**预渲染裸文本**（`hello`，不是 `{"text":…}` 信封）→ bot 省一层解信封代码，`image/file/audio` 同受益；② `id` 与 `message_id` 相同（前者 legacy alias），**`event_id` 官方禁止用于去重** → §8「幂等用 `message_id`」**得到证实**；③ `chat_type: p2p` 证实 §5.4「p2p 是 per-user」；④ `sender_id` 为 `ou_…` open_id → 可直接当 §7 用户白名单的键。
+- **回程也验证**：`lark-cli im +messages-reply` 回消息成功、飞书端可见 → **收 + 发闭环成立**。
+- **顺带记录**：`lark-cli` 凭据在 Windows 上位于 `%USERPROFILE%\.lark-cli\config.json`（`keychain-downgrade` 仅 macOS 有意义），`config show` 对 secret 显示 `****` → §7 补上"备份时不要把这个文件带走"；`doctor` 持续提示 `1.0.96 → 1.0.98` 可升 → 作为 §5.3「自更新风险」的实证，建议本次**不升级**（全部验证在 1.0.96 上做的）。
+- **文档**：§2 新增「P0 实测记录」（配置检查表 + 长连接契约 + 样本字段表）；§9 P0 标记完成、P0.5 仅剩「`card.action.trigger` 的 `callback` 类型能否走长连接」一项待验（另一项"租约实测"因 D1 放弃 IP 排他而作废）；§10「身份」勾选为 `bot`。
+- **未做**：无代码改动；`semgrep --severity ERROR` 0 findings。
+
 ## 2026-10-15：config.json 原子写 + 损坏配置不再被销毁 + 未知键告警
 
 > 背景：讨论「配置能否全部放进配置文件（像 OpenClaw）」时发现，`config.json` 的写入是 `truncate(true)`（**先清空再写**），且 `load_config` 在解析失败时**无条件把默认配置写回文件** —— 即"写入期间被杀"或"文件被写坏"会**当场销毁用户唯一的一份配置现场**。这是既有缺陷，与"要不要迁到文件"的决策无关，故独立先修。

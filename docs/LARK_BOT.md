@@ -23,6 +23,10 @@
 >
 > **2026-10-15 配置写入补录**：新增 §5.6（原子性 / 覆盖 / 多写者三层 + A/B 两档）。
 > **D1 已定＝放弃 IP 排他**（阶段四解锁）；配置写入的原子化已实施。
+>
+> **2026-10-15 P0 实测入档**：§2 新增「P0 实测记录」——应用 `cli_aa5a2e242e785c09` 已接通、
+> 长连接契约与真实事件样本逐字段确认（`content` 已预渲染、去重键为 `message_id`）、
+> **收 + 发闭环已验证**；§9 的 P0 标记完成、P0.5 仅剩卡片回调一项待验。
 
 ---
 
@@ -62,9 +66,60 @@
   - **不要 `kill -9`**：部分 EventKey（minutes/vc/board）退出时会向服务端退订，`kill -9`
     会泄漏服务端订阅，表现为重启后 "subscription already exists" 与重复投递
 
-**当前状态**：`lark-cli auth status` 返回 `not_configured`。
-前置步骤：`lark-cli config init --new`（需在飞书开放平台建**自建应用**，拿 app_id/app_secret，
-走一次 OAuth 授权）。
+**当前状态**：✅ **已接通**（2026-10-15，App ID `cli_aa5a2e242e785c09`）。
+`lark-cli config init --new` 的浏览器流程**一次到位**，**无需**再手工去控制台勾机器人能力/事件/scope。
+
+### P0 实测记录（2026-10-15）
+
+**配置与授权**
+
+| 检查 | 结果 |
+|---|---|
+| `lark-cli auth status` | appId `cli_aa5a2e242e785c09`、brand `feishu`、**bot identity `ready`**、`tokenStatus: ready` |
+| `lark-cli doctor` | `config_file` / `app_resolved` / `bot_identity` / `identity_ready` / `endpoint_open` / `endpoint_mcp` **全 pass**；仅两条 warn：`cli_update`（1.0.96→1.0.98）、`user_identity`（未登录，本次不需要） |
+| `event consume … --dry-run` | `status: ready`；前置 `credentials_available` / **`console_event_published`** / **`scopes_granted`** **全 ok** |
+
+> ⚠️ **更正一个早先的担心**：原以为浏览器授权之外还要手工去控制台补"事件订阅 / scope"。实测**不需要**——
+> `console_event_published: ok` + `scopes_granted: ok` 说明授权流程已一并完成。
+
+**长连接子进程契约（实证）**
+
+```
+[event] started bus daemon pid=15700 (auto-exits 30s after last consumer)
+[event] to stop gracefully: send SIGTERM (kill <pid>). Avoid kill -9 — it skips cleanup and may leak server-side subscriptions.
+[event] ready event_key=im.message.receive_v1
+[source] feishu-websocket: connected
+[event] exited — received 1 event(s) in 4m11s (reason: limit)
+```
+
+- ✅ 就绪标记 `[event] ready event_key=<key>` 原文确认
+- ✅ **官方自己**就提示"不要 `kill -9`"（§2 那条不是我推的）
+- ✅ 边界退出：`--max-events` 触发 → `reason: limit` = **正常退出（0）**；daemon 在最后一个消费者退出后
+  **30s 自清**，**无残留订阅**
+- ✅ **stdout / stderr 必须分流**：诊断（`[event] …`）走 **stderr**，事件 JSON 走 **stdout**
+  → bot 应**阻塞读 stderr 等到就绪标记，然后只解析 stdout**（逐行 NDJSON）
+
+**真实事件样本**（注意 `content` 已是**预渲染的裸文本**）
+
+```json
+{"type":"im.message.receive_v1","event_id":"8a912373…","timestamp":"1792054128477",
+ "id":"om_x100b623d7830c4a8c093ff978ce62a0","message_id":"om_x100b623d7830c4a8c093ff978ce62a0",
+ "create_time":"1792054128004","chat_id":"oc_be9fcfffcb9b1b46349fc347c608914b","chat_type":"p2p",
+ "message_type":"text","sender_id":"ou_bfdf6618eacf1f52eaa1911ca71ace6a","sender_type":"user",
+ "content":"hello"}
+```
+
+| 字段 | 实测 | 结论 |
+|---|---|---|
+| `content` | `hello`（**裸文本，不是 `{"text":"hello"}` 信封**） | ✅ schema 所称 "pre-rendered human-readable text" 证实 → **bot 省掉一层解信封代码**，`image/file/audio` 同受益 |
+| `message_id` / `id` | 两者**完全相同** | ✅ `id` 是 legacy alias → 统一用 `message_id` |
+| `event_id` | 与 `message_id` **不同** | ⚠️ 官方明确**不可**用作去重键（重投会变）→ §8「幂等」用 `message_id` **获得证实** |
+| `chat_id` / `chat_type` | `oc_…` / `p2p` | ✅ `p2p` 是 **per-user**（§5.4 事实 2 证实）；`oc_…` 即 §5.5 阶段三要持久化的**映射键** |
+| `sender_id` | `ou_…` | ✅ `open_id` 形态 → §7 用户白名单可直接以它为键 |
+| `timestamp` vs `create_time` | 投递比创建晚 473ms | 两者语义不同，勿混用 |
+
+**回程亦已验证**：`lark-cli im +messages-reply --message-id <收到的> --text …` 返回
+`{"ok":true,"identity":"bot","data":{"message_id":"om_…"}}`，飞书端可见 → **收 + 发闭环成立**。
 
 相关命令：
 
@@ -341,6 +396,11 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 `scripts/run.js` 里专门处理了 "crashed self-update left `.old`" → 说明存在自更新路径。
 自更新会替换二进制（正在运行的 `consume` 可能受影响），且是**联网行为**，与内网/离线机器冲突。
 
+> **实证（2026-10-15）**：`doctor` 与几乎每条命令的 `_notice` 都带
+> `lark-cli 1.0.98 available, current 1.0.96, run: lark-cli update` → 自更新通道确实存在。
+> 建议**不要在接入过程中顺手升级**：它会替换二进制，而 P0 的全部验证都是在 1.0.96 上做的。
+> 要升就单独升、并重跑一遍 §2 的实测记录。
+
 **④ 方案 A 跨平台**
 
 | 平台 | autostart | 托盘 | 结论 |
@@ -542,7 +602,11 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 3. **外发前脱敏**：身份证 / 银行卡 / 手机号 / 密钥（可复用 `EXTENSION_IDEAS.md` 中"敏感信息扫描"扩展
    的闸门）
 4. **访问控制**：谁能问？群 / 用户白名单；避免把敏感库暴露给不相关的人
-5. **凭据存储**：app_secret 不得硬编码（webapi 侧已有 `config.json` + Bearer token 先例可参照）
+5. **凭据存储**：app_secret **不得进我们的 `config.json`**（它已是明文，且装着 AI `api_key`）。
+   实测（2026-10-15）由 `lark-cli` **自持**：Windows 下位于 `%USERPROFILE%\.lark-cli\config.json`
+   （`keychain-downgrade` 仅 macOS 有意义）；`lark-cli config show` 对 secret 显示 `****`。
+   我们的进程**零接触、不复制**。⚠️ 因此**备份/打包时不要把该文件带上**，它不在 `data_dir` 里，
+   容易被"顺手一起备份"带走。
 
 > **这一条不解决，不建议做。**
 
@@ -553,7 +617,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 | 问题 | 说明 | 做法 |
 |---|---|---|
 | **慢回答的体验** | RAG 要几秒到几十秒；飞书有消息长度、卡片更新次数、QPS 限制 | 先回"处理中"卡片 → 用 patch 逐步更新。**能用的 SSE 只有两条**：`POST /api/ai/conversation/ask/stream`（按 session 推流）与全局 `GET /api/events`（含 `ai-chunk`/`ai-progress`/`ai-done`）。`/api/ai/events` 是普通 GET，只能轮询已落库事件 |
-| **幂等** | 事件可能重投（官方文档明确提到订阅泄漏会导致重复投递） | 按 `message_id` 去重，否则重复回答 |
+| **幂等** | 事件可能重投（官方文档明确提到订阅泄漏会导致重复投递） | 按 `message_id` 去重，否则重复回答。**2026-10-15 实测证实**：`id` 与 `message_id` 相同（前者是 legacy alias），而 `event_id` 不同、且官方明言**不得**用作去重键 |
 | **离线感知** | GUI 退出/重启时 webapi 不可用，机器人会"静默失联" | 健康检查 + 向指定群告警 |
 | **卡片更新次数上限** | 卡住 P1 的真实限制 | `card.action.trigger` 的 token **有效期 30 分钟、最多更新 2 次**（`lark-cli event schema card.action.trigger` 原文）；飞书对单条消息的卡片更新次数另有限制。**不能每个 SSE chunk 都 patch 一次** → 必须**节流合并**（按时间或 token 数批量更新），否则必然超限 |
 | **会话续租** | 机器人是长时间常驻进程 | 见 §5.1「隐性硬前提」：同机 `127.0.0.1` + 周期 `POST /api/session/ping`，否则 600s 后被 403 |
@@ -564,8 +628,8 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 
 | 阶段 | 内容 | 前置 |
 |---|---|---|
-| **P0** | `lark-cli config init` 建自建应用并授权；`event consume` 拿到 `im.message.receive_v1` 样本，确认字段 | 管理员审批 scopes **+ 控制台勾开事件**（`im.message.receive_v1` 属 "Required Console Events"，非订阅即用） |
-| **P0.5**（验证地基，1~2 天，不动代码） | 打掉三个不确定项：<br>① `event consume im.message.receive_v1 --dry-run` 确认身份（`--as bot/user`）与前置<br>② 同机 `curl` 实测 webapi 单会话租约对机器人是否友好（§5.1 硬前提 ①）<br>③ `event consume card.action.trigger` 确认 **`callback` 类型**在长连接下可消费 | P0 |
+| **P0** ✅ **完成（2026-10-15）** | `config init --new` 建应用并授权（App ID `cli_aa5a2e242e785c09`）；已拿到真实样本并逐字段确认；**收 + 发闭环已验证** —— 全部记录见 §2「P0 实测记录」 | 前置由浏览器授权流程**一并满足**，无需手工补控制台事件/scope |
+| **P0.5**（仅剩一项） | ① ✅ 身份实测为 **`bot`**（`defaultAs: auto` 实际解析到 bot）<br>② ~~同机单会话租约实测~~ **已作废**（D1 已定＝放弃 IP 排他，租约将在阶段四拆除，无需再测）<br>③ ⏳ **待验**：`card.action.trigger` 的 **`callback` 类型**能否走长连接 | P0 ✅ |
 | **P1** | 白名单群里 @机器人提问 → `POST /api/ai/conversation/ask/stream`（SSE）→ **节流更新**卡片；**autostart 开关**补上（带 data_dir）；只回摘要 | 数据边界规则定好 |
 | **P2** | 文件 / 语音 / 图片入站（下载 → 监控目录 → 自动入库 → 回执） | P1 稳定 |
 | **P3** | 定时摘要 + 出口（写飞书文档/表格）+ 卡片回调 | P0.5 ③ 已验证 `card.action.trigger` 可用 |
@@ -578,7 +642,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 - [ ] **定位（阻塞其它所有结论的前置项）**：个人助手（方案 A）还是团队 7×24 服务？→ 不勾这条，§5.4 的必做项无法收敛
 - [ ] **目标机器**：Windows 桌面常驻 / Windows 服务 / Linux NAS？（Linux → 方案 B 不成立）
 - [ ] **数据边界**：哪些目录可外发？是否只回摘要？是否要脱敏闸门？
-- [ ] **身份**：`--as bot` 还是 `--as user`（后者权限更大更敏感）？
+- [x] **身份** ✅：实测为 **`bot`**（`defaultAs: auto` 解析到 bot）；user 身份未登录、本次也不需要
 - [ ] **访问控制**：哪些群 / 哪些人可用？
 - [ ] 是否接受"GUI 与 headless 互斥"，还是要求共存（需只读 headless + 禁用写路由）？
 - [ ] **跨平台范围**：只发 Windows（现状只有 MSI），还是也要 macOS/Linux 装机？（要后者需补打包 target 与 CI）
