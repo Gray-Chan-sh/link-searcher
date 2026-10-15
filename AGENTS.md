@@ -147,9 +147,20 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 
 → 这类测试必须**独占**一个目录。`commands/index.rs` 已加 `isolated_temp_root()`（每次调用都不同），
 `integrity_heal_*` / `verify_*` 共 5 条已改（改前约 1/3 轮次红，改后连跑 4 轮全绿）。
-**仍未改（已知同类）**：`scanner/mod.rs:871,1059`（把 `%TEMP%` 当被索引目录）、
-`indexer.rs::tmp_file`（固定名 `idx_test_<pid>`，`purge_dir_data_*` 这类按目录计数的测试会受影响）。
+**仍未改（已知同类）**：`scanner/mod.rs:871,1059`（把 `%TEMP%` 当被索引目录）。
 建议改法：用 `std::thread::current().name()` 当 tag —— libtest 用**测试名**命名线程，天然"一测试一目录"。
+
+**⚠️ 另一条"看着像同类、其实不是"的 flaky**：`indexer::tests::purge_dir_data_clears_dir_but_keeps_shared_content`
+（实测 **6 轮红 1 次**；换 `--nocapture` 连跑 8 轮又全绿 —— 典型时序敏感）。
+
+**已排除**"共享 %TEMP% 目录"这个解释：它用 uuid 建库（`idx_pool_<uuid>`）+ 进程内 RAM 索引，
+断言全是**本测试自己的 DB 计数**；而且失败时 `file_tracking WHERE dir_id='d1'` **已经是 0**
+（说明 `purge_dir_data` 确实跑到了），**只有 `doc_embeddings` 没被清掉**。
+
+→ 怀疑是**测试内部竞态**：`index_file` 的**向量写入**在 `purge_dir_data` 之后才落地
+（`svc.commit()` 未必 join 向量那条路径），于是"清完又来"。**不是**目录共享问题。
+→ **下一步**：先循环抓到失败时的 `left/right` 实际值（8 轮没抓到 → 加大轮次或用 `--test-threads` 控并行度），
+**拿到实际值再改** —— 这种"看着像 A 其实是 B"的 flaky，盲改只会把它推到更难查的形态。
 
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 

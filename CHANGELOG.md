@@ -1,5 +1,19 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15（第八轮）：A 项进展 —— 复现并定性 `purge_dir_data_*`，纠正归类
+
+- **复现**：`indexer::tests::purge_dir_data_clears_dir_but_keeps_shared_content` **6 轮红 1 次**（全 lib 套件）；
+  换 `--nocapture` 连跑 8 轮全绿 → **时序敏感**。
+- **定性（重要，纠正我上一轮的归类）**：它**不属于**"把 `%TEMP%` 当被索引目录"那一类。证据：
+  ① 它用 uuid 建库（`idx_pool_<uuid>`）+ 进程内 RAM 索引，断言全是**本测试自己的 DB 计数**；
+  ② 失败时 `file_tracking WHERE dir_id='d1'` **已经是 0**（`purge_dir_data` 确实执行了），
+  **只有 `doc_embeddings WHERE file_id=fid` 没被清掉**。
+  → 指向**测试内部竞态**：`index_file` 的**向量写入**在 `purge_dir_data` 之后才落地
+  （`svc.commit()` 未必 join 向量那条路径），即"清完又写回来"。
+- **因此没有盲改**（这是有意的选择）：这类"看着像 A 其实是 B"的 flaky，先要拿到失败时的
+  `left/right` 实际值再动手，否则只会把它推成更难查的形态。**下一步**：加大轮次或用 `--test-threads`
+  控并行度抓实际值。结论与下一步已写入 `AGENTS.md` ④′。
+
 ## 2026-10-15（第七轮）：修 `integrity_heal_*` 一类 flaky（测试独占临时目录）
 
 > 起因：门禁里两条 **应用侧**测试（`integrity_heal_downgrades_unrecoverable_rows`、
