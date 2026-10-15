@@ -45,6 +45,15 @@ const ALLOWED_KEYS: &[&str] = &[
     "perf_writer_buffer_mb",
     "embed_parallelism",
     "embed_adaptive",
+    // 飞书机器人（`docs/LARK_BOT.md` §7.1 ⑤）。
+    // ⚠️ `lark_allowed_users` / `lark_allowed_chats` 的**空值语义是"拒绝全部"**（fail-closed），
+    //    而 `lark_export_allow_dirs` 的空值是"不限制"（fail-open）—— 方向相反，别"顺手统一"。
+    "lark_bot_enabled",
+    "lark_require_p2p",
+    "lark_allowed_users",
+    "lark_allowed_chats",
+    "lark_export_allow_dirs",
+    "lark_pairing",
 ];
 
 #[tauri::command]
@@ -115,5 +124,21 @@ mod tests {
             ALLOWED_KEYS.contains(&"ocr_pdf_dpi"),
             "ALLOWED_KEYS must contain 'ocr_pdf_dpi'"
         );
+    }
+
+    /// 飞书策略键必须可通过设置接口写入 —— 否则 bot 侧读到的永远是默认值，
+    /// 表现为"机器人不响应任何消息"（2026-10-15 E2E 实测：`unknown setting key`）。
+    #[test]
+    fn allowed_keys_contain_lark_policy() {
+        for key in [
+            "lark_bot_enabled",
+            "lark_require_p2p",
+            "lark_allowed_users",
+            "lark_allowed_chats",
+            "lark_export_allow_dirs",
+            "lark_pairing",
+        ] {
+            assert!(ALLOWED_KEYS.contains(&key), "ALLOWED_KEYS 缺少 '{key}'");
+        }
     }
 }

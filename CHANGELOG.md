@@ -1,5 +1,19 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书 bot **端到端验收通过**（P1 纯文本版）+ 补设置白名单缺口
+
+> 首次在**真实飞书**上跑通全链路，并因此发现一个必须修的缺口。
+
+- **验收结果（真实私聊，两轮）**：
+  - 链路：`去重 → 绑定会话 → 取历史 → RAG 问答 → 落库 → 回复` 全部成功；日志 `[bot] 已回答 … 问题 12 字 / 回答 109 字`，追问一轮同样成功（117 字）。
+  - **多轮连续成立**：追问「他的生日和户籍地址？」被接到同一会话；回答带 `[1][2]……[25]` 引用标记。
+  - **三端隔离在真实数据上成立**：`?origin=lark` 返回 1 条（标题取自首问）、`?origin=web` 返回 0 条、`?origin=ui` 返回 6 条 —— 各自只见己方。
+  - 绑定落库正确：`oc_be9f…914b ↔ 3d3a9b1e-…`，含 `user_open_id`；bot 重启后可直接复用（阶段三的验收项）。
+- **E2E 暴露并修掉的缺口**：`commands/settings.rs` 的 `update_settings` 有**键白名单**，飞书策略键不在其中 → `PUT /api/settings` 直接报 `unknown setting key: lark_bot_enabled`，表现为"设置写不进去 → 机器人不响应"。已把 `lark_bot_enabled` / `lark_require_p2p` / `lark_allowed_users` / `lark_allowed_chats` / `lark_export_allow_dirs` / `lark_pairing` 加入白名单（并在注释里写明"两个空数组方向相反"），补一条测试守住。
+- **C3 的新实证**：bot 退出后 lark-cli 的 event bus daemon **仍在运行**（uptime 5m50s、活跃消费者 0）—— 与它自称的"最后一个消费者退出 30s 后自动退出"**不符**。官方干净停法是 `lark-cli event stop`（已用它收掉，非 `kill -9`）。已记入 §5.4 的 C3：**daemon 归属必须显式决定**，建议留着复用（避免重连抖动与订阅泄漏类风险）。
+- **已知限制（精确）**：bot 走的是**非流式** `/api/ai/conversation/ask`，而该路由**忽略 `session_id`** → 历史**内容**能续（bot 自己带 `messages`），但**每轮证据绑定**用不上（表现为追问时出现"「他」的指代不明确"提示）。要消除需改用 `conversation_ask_stream`。
+- **未做**：卡片+节流、autostart 开关、C3 生命周期、内容闸门（§7 已放弃脱敏，故目前会原样外发含身份证号等正文 —— 用户已知悉、待决定是否补闸门）。
+
 ## 2026-10-15：修上一提交引入的回归 —— `tauri dev` 因多 bin 无法推断而挂
 
 > **回归来源**：`dea468d` 新增 `src/bin/lark-bot.rs` 后，本包有两个 bin（`link-searcher` + `lark-bot`），
