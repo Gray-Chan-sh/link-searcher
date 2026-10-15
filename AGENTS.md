@@ -23,11 +23,60 @@
    c. 更新 USER_MANUAL.md（涉及用户可见行为变化）
    d. semgrep scan --severity ERROR 零发现
    e. cargo check / npx tsc 零错误
+   f. **跑全部测试目标**（不只是 `--lib`）零失败 —— 见「测试门禁」
   ↓
 6. 提交 & 推送：git commit + git push（CHANGELOG 必须同在此 commit）
 ```
 
 > **例外**：纯修 typo、单行 config 改值、仅文档修改等**微不足道**的变更，可跳过步骤 2–3，直接实施。
+
+## 测试门禁（提交前必跑全部测试目标）
+
+**禁止**把 `cargo test --lib` 当作提交门禁：它只覆盖单元测试，`src-tauri/tests/` 下的集成测试与
+mock E2E **完全不参与编译与运行** —— 测试目标一旦编译不过或断言过时，就会长期无人发现。
+
+**为什么立这条规矩（2026-10-15 实测的三连击）**：
+
+| 提交 | 时间 | 后果 | 潜伏期 |
+|---|---|---|---|
+| `ada8485` | 2026-10-12 | 给 `remove_dir` 加 `app: AppHandle` → `auto_ui_e2e` **编译不过** | **3 天**（整个目标等于没在跑） |
+| `2db9c21` | 2026-10-15 | 引入 `UI_CONN`（界面专用连接）→ 静默打破 `ipc_test::test_ipc_get_index_status` | 当日发现 |
+| — | — | 两者都只跑过 `--lib`，故都未被察觉 | — |
+
+### 必跑命令（全部通过才可提交）
+
+```bash
+# 全部测试目标（15 个，含集成测试与 mock E2E）；约 3 分钟，其中编译占大头
+cargo test --manifest-path src-tauri/Cargo.toml
+
+# 前端
+npx tsc --noEmit
+npx vitest run
+```
+
+> 不要用 `--lib`、`--test <单个>` 或 filter 缩小范围作为提交门禁；只在**定位单个失败**时才缩小。
+
+### 目标清单与实测耗时（本机基线）
+
+| 目标 | 用例 | 耗时 | 性质 |
+|------|:----:|:----:|------|
+| `--lib` | 542 | 7.2s | 单元测试 |
+| `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（**最慢**，但无网络依赖） |
+| `auto_ui_e2e` | 15 | 0.5s | mock runtime（`MockRuntime`） |
+| `ipc_test` | 8 | 5.3s | mock runtime |
+| `integration` | 9 | 1.8s | 真实模块（db/indexer/scanner/search） |
+| `webapi_http` | 冒烟 | ~0s | 真 axum + 真 Wry app（`harness = false`，主线程） |
+| `focus_mode_test` / `merge_scope_test` / `test_pagination` | 4 / 4 / 2 | <0.1s | 纯逻辑 |
+| `doc_rs_poc` / `doc_rs_poc_fallback` | 1 + 1 | 0.00s | POC 证据 |
+| `test_pdf_inspector_ab` | 2（+1 ignored） | 0.02s | A/B 对比 |
+| `funasr_smoke` | 3 | 0.00s | **缺 env/模型时防御性早退** |
+| `ocr_eval` | 1 | 0.23s | **缺 fixtures 时早退** |
+| `test_pdf_ocr` | 2 | 0.00s | **缺样例时早退**（含硬编码 macOS 路径） |
+| `remote_embed_adaptive_bench` | 0（1 ignored） | 0.00s | 手动基准，需 `--ignored` + 网络 |
+
+**注意**：后 4 项在缺少样例/模型/env 时**快速早退并通过**，属正常；但一旦样例存在它们会真跑
+（可能很慢/需要模型），因此在**换机器或放入样例后**要留意耗时变化。`#[ignore]` 的用例默认不跑，
+需显式 `-- --ignored`。
 
 ## 静态分析（Semgrep）
 

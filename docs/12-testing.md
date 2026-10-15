@@ -16,6 +16,34 @@ Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 | 前端会话测试 | `src/api/__tests__/sessionClient.test.ts` | 7 | `npm run test` | 无 |
 | MCP E2E 测试 | `src-tauri/tests/e2e_mcp.sh` | 22 | `bash src-tauri/tests/e2e_mcp.sh` | 需 App 窗口 + LLM |
 
+### 提交门禁：一次跑全部目标（不要只跑 `--lib`）
+
+**`cargo test --lib` 不是合格的门禁**——它不编译也不运行 `src-tauri/tests/` 下的集成测试与
+mock E2E，于是"测试目标编译不过 / 断言过时"可以长期无人发现（2026-10-12 `ada8485` 让
+`auto_ui_e2e` 编译不过、潜伏 3 天；2026-10-15 `2db9c21` 静默打破 `ipc_test`）。详见
+`AGENTS.md`「测试门禁」。
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml   # 全部 15 个目标，约 3 分钟（编译占大头）
+npx tsc --noEmit && npx vitest run
+```
+
+当前全部目标与实测耗时（本机基线）：
+
+| 目标 | 用例 | 耗时 | 性质 |
+|------|:----:|:----:|------|
+| `--lib` | 542 | 7.2s | 单元 |
+| `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（最慢，无网络依赖） |
+| `auto_ui_e2e` | 15 | 0.5s | mock runtime |
+| `ipc_test` | 8 | 5.3s | mock runtime |
+| `integration` | 9 | 1.8s | 真实模块 |
+| `webapi_http` | 冒烟 | ~0s | 真 axum + 真 Wry（`harness = false`） |
+| `focus_mode_test` / `merge_scope_test` / `test_pagination` | 4 / 4 / 2 | <0.1s | 纯逻辑 |
+| `doc_rs_poc` / `doc_rs_poc_fallback` | 1 + 1 | 0.00s | POC |
+| `test_pdf_inspector_ab` | 2（+1 ignored） | 0.02s | A/B |
+| `funasr_smoke` / `ocr_eval` / `test_pdf_ocr` | 3 / 1 / 2 | ≤0.25s | **缺样例或 env 时快速早退**，样例存在时才真跑 |
+| `remote_embed_adaptive_bench` | 0（1 ignored） | 0.00s | 手动基准，需 `--ignored` + 网络 |
+
 ### Web API HTTP 冒烟测试（`webapi_http.rs`）
 
 真实起 axum（`into_make_service_with_connect_info::<SocketAddr>()`，与生产一致）+ `ureq` 打真请求，覆盖鉴权与单用户会话全链路：401(无/错 token，且**不创建会话**) → 200 + 首次授予会话（证明来源 IP 抽取成功）→ `/api/session` JSON 形状 → `ping` 续租 → `logout` → 重新登入。
@@ -52,7 +80,10 @@ Link-Searcher 有两套自动化测试，分别覆盖不同层次：
 - 删除目录
 
 ### 索引状态
-- 初始状态（total_files=0, indexed=0）
+- 返回形状（含 `total_files`/`indexed`/`pending`/`errors`/`load_level`）+ 注入状态的 `is_scanning=false`
+  > ⚠️ **不能断言 `total_files=0`**：`get_index_status` 刻意走进程级「界面专用只读连接」
+  > (`ui_conn_guard`，`2db9c21`) 以避开提取期的连接池竞争，因此**不读**注入的 `AppState` 池，
+  > 读到的是真实 data_dir 的统计。同一原因使 `ipc_test::test_ipc_get_index_status` 也如此断言。
 
 ### 设置
 - 读取设置
