@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：修上一提交引入的回归 —— `tauri dev` 因多 bin 无法推断而挂
+
+> **回归来源**：`dea468d` 新增 `src/bin/lark-bot.rs` 后，本包有两个 bin（`link-searcher` + `lark-bot`），
+> 而 `tauri dev` 内部用 `cargo run` 起应用 —— `cargo run` 无法推断跑哪个，直接失败：
+> `error: cargo run could not determine which binary to run. ... available binaries: lark-bot, link-searcher`。
+> **用户第一次 `npx tauri dev` 就撞上了。**
+
+- **修复**：`src-tauri/Cargo.toml` 的 `[package]` 增 `default-run = "link-searcher"`（错误提示本身推荐的键），并在旁注明原因 —— 否则下次有人加第三个 bin 会再踩一次。
+- **验证**：`cargo metadata` 显示 `default_run = "link-searcher"`；`cargo run --no-default-features -- --help` **成功推断并执行**（输出 `Usage: link-searcher.exe <COMMAND>`，退出码 0；走 CLI 分支故不会启动 GUI/触发单实例）。
+- **教训**：给应用**新增 bin 目标**属于会打断开发工作流的结构性改动，必须同时处理 `default-run`（或改用独立 crate）。这与门禁无关（`cargo build`/`cargo test` 都不需要推断），所以跑全门禁也**测不出来** —— 只能靠"起一次应用"验证。
+- **未做**：无其它代码改动。
+
 ## 2026-10-15：飞书 bot sidecar 本体（纯文本版）+ 修两条既有测试基础设施缺陷
 
 > P1 的第二步：把 bot 真正写出来 —— `lark-cli` 事件消费 → §7.1 准入判定 → 去重 → 会话绑定 → 调 webapi 问答 → 回文本。

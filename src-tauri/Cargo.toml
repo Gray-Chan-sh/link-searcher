@@ -4,6 +4,10 @@ version = "1.2.2"
 description = "Cross-platform full-text search desktop application"
 authors = ["Link-Searcher"]
 edition = "2024"
+# 本包有两个 bin（`link-searcher` 主程序 + `lark-bot` 飞书 sidecar）。
+# 不指定这个键，`cargo run` / `tauri dev` 会以
+# "could not determine which binary to run" 失败 —— `tauri dev` 正是用 `cargo run` 起应用的。
+default-run = "link-searcher"
 
 [lib]
 name = "link_searcher_lib"
