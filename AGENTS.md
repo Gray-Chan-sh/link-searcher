@@ -139,6 +139,18 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 `sleep=50ms`，隐含假设 `window ≤ 4`；页窗口改为"全局预算、上限 8"后随负载漂移而红，且在 HEAD 上
 **同样失败** —— 属既有缺陷，非当时改动引入。）
 
+**④′ 测试把 `%TEMP%` 整个当"被索引目录"，或共用固定名临时目录（2026-10-15 实测的红法）**
+
+有些测试把 `std::env::temp_dir()` **本身**注册成被索引目录（`dir_config::add_dir(&c, temp_dir, …)`），
+或让一组测试共用固定名目录（如 `idx_test_<pid>`）。并行跑时**别的测试往那里写的文件会被卷进本次统计**
+→ `healed == 1` / `db_indexed == 2` 这类断言随并行时序失败，而**单独跑必过**（"看着像 flaky"的典型）。
+
+→ 这类测试必须**独占**一个目录。`commands/index.rs` 已加 `isolated_temp_root()`（每次调用都不同），
+`integrity_heal_*` / `verify_*` 共 5 条已改（改前约 1/3 轮次红，改后连跑 4 轮全绿）。
+**仍未改（已知同类）**：`scanner/mod.rs:871,1059`（把 `%TEMP%` 当被索引目录）、
+`indexer.rs::tmp_file`（固定名 `idx_test_<pid>`，`purge_dir_data_*` 这类按目录计数的测试会受影响）。
+建议改法：用 `std::thread::current().name()` 当 tag —— libtest 用**测试名**命名线程，天然"一测试一目录"。
+
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 
 给应用**新增 bin 目标**、加 `default-run`、换入口点这类改动，`cargo build` / `cargo test` **都不会**

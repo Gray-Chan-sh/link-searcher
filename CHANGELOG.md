@@ -1,5 +1,22 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15（第七轮）：修 `integrity_heal_*` 一类 flaky（测试独占临时目录）
+
+> 起因：门禁里两条 **应用侧**测试（`integrity_heal_downgrades_unrecoverable_rows`、
+> `integrity_heal_reindexes_db_orphans`）在**并行**下红过，**单独跑却必过** —— 典型的假 flaky。
+
+- **根因**：这几条测试把 **整个 `%TEMP%`** 注册成"被索引目录"（`add_dir(&c, std::env::temp_dir(), …)`），
+  并行时**别的测试往 `%TEMP%` 写的文件被卷进本次扫描/统计** → `healed == 1` / `db_indexed == 2`
+  这类断言随并行时序失败。（DB 文件本身是各自独立的，不是 DB 冲突。）
+- **修法**：新增 `isolated_temp_root()`（**每次调用都不同**的独占目录），把
+  `verify_core_recovers_or_marks_dead`、`integrity_heal_reindexes_db_orphans`、
+  `integrity_heal_downgrades_unrecoverable_rows`、`verify_core_downgrades_*` 等共 **5 条**的根目录换掉。
+- **实测**：改前约 **1/3 轮次**红；改后 `--lib` **连跑 4 轮全绿**（557 passed / 0 failed）。
+- **仍未改（已在 AGENTS ④′ 记为同类待办）**：`scanner/mod.rs:871,1059`（把 `%TEMP%` 当被索引目录）、
+  `indexer.rs::tmp_file`（固定名 `idx_test_<pid>`）。**没有顺手改它们是我有意的选择**：
+  要正确改得逐一核对"测试自己算路径注册目录"的地方，盲改有把测试改坏的风险；
+  建议改法已写入 AGENTS（用 `std::thread::current().name()` 当 tag，libtest 天然"一测试一目录"）。
+
 ## 2026-10-15（第六轮）：卡片 markdown 子集实测 + 降级渲染
 
 > 起因：用户问"卡片内能否渲染 markdown"。正文**本来就是** `markdown` 元素，所以真问题是

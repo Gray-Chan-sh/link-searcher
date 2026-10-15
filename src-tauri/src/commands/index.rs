@@ -1493,7 +1493,7 @@ mod tests {
             let c = pool.get().unwrap();
             db::init_db(&c).unwrap();
             db::dir_config::add_dir(
-                &c, std::env::temp_dir().to_str().unwrap(), None, None, None, None, true,
+                &c, isolated_temp_root().to_str().unwrap(), None, None, None, None, true,
             )
             .unwrap();
             let d_id = db::dir_config::list_dirs(&c).unwrap().remove(0).id;
@@ -1530,6 +1530,26 @@ mod tests {
         let _ = std::fs::remove_file(&db_path);
     }
 
+    /// **独占的临时根目录**（每次调用都不同）。
+    ///
+    /// 为什么必须有它：这些"对着某个目录做索引/自愈"的测试原本直接用 `std::env::temp_dir()`，
+    /// 等于把**整个 `%TEMP%`** 注册成被索引目录 —— 并行跑时别的测试往 `%TEMP%` 写的文件会被
+    /// 卷进本测试的扫描/统计，断言（`healed == 1` / `db_indexed == 2` …）随之间歇性失败，
+    /// **单独跑却必过**（2026-10-15 实测：`integrity_heal_*` 就是这样红的）。
+    /// 根本原因不是"测试写得不对"，而是**共享了外部可变状态**（AGENTS 门禁 ④ 那一类）。
+    fn isolated_temp_root() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "ls_isolated_{}_{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create isolated temp root");
+        dir
+    }
+
     /// End-to-end: run_verify_core re-extracts a file whose stored content is
     /// empty. A fixable file (real text on disk) recovers; an unfixable one
     /// (binary junk) stays empty and gets flagged dead_content.
@@ -1544,7 +1564,7 @@ mod tests {
         {
             let c = pool.get().unwrap();
             db::init_db(&c).unwrap();
-            let tmp_root = std::env::temp_dir();
+            let tmp_root = isolated_temp_root();
             db::dir_config::add_dir(&c, tmp_root.to_str().unwrap(), None, None, None, None, true).unwrap();
             let d = db::dir_config::list_dirs(&c).unwrap().remove(0);
             let d_id = d.id.clone();
@@ -1595,7 +1615,7 @@ mod tests {
 
         let db_path = std::env::temp_dir().join(format!("heal_pool_{}.db", std::process::id()));
         let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
-        let tmp_root = std::env::temp_dir();
+        let tmp_root = isolated_temp_root();
         let (keep_a, keep_b, file_a, file_b, d_id, indexer) = {
             let c = pool.get().unwrap();
             db::init_db(&c).unwrap();
@@ -1666,7 +1686,7 @@ mod tests {
             let c = pool.get().unwrap();
             db::init_db(&c).unwrap();
             let d = db::dir_config::add_dir(
-                &c, std::env::temp_dir().to_str().unwrap(), None, None, None, None, true,
+                &c, isolated_temp_root().to_str().unwrap(), None, None, None, None, true,
             )
             .unwrap();
             // 磁盘上不存在，但 DB 标为已索引 → heal 无论如何都重灌不了。
@@ -1714,7 +1734,7 @@ mod tests {
 
         let db_path = std::env::temp_dir().join(format!("healdup_pool_{}.db", std::process::id()));
         let pool = crate::db::get_pool(db_path.to_str().unwrap()).unwrap();
-        let tmp_root = std::env::temp_dir();
+        let tmp_root = isolated_temp_root();
         let (file_a, d_id, indexer) = {
             let c = pool.get().unwrap();
             db::init_db(&c).unwrap();
