@@ -1,3 +1,20 @@
+## 2026-10-15/16（第十轮）：C 项 —— 装机实测通过（MSI + 安装版 bot + 卡片降级）
+
+- **MSI**：`Link-Searcher_1.2.2_x64_en-US.msi`（35.3 MB，含本轮全部改动：分页 / markdown 降级 / purge 修复）。
+- **安装位置纠正**：真实安装落在 **`C:\Users\Gray\AppData\Local\Link-Searcher\`**（**perUser**，
+  **不需要 UAC**）。先前用 `msiexec /a`（管理安装）解包看到 `PFiles\Link-Searcher\…` **是误导** ——
+  那是管理安装的目录映射，不代表真实安装位置（差点把"会弹 UAC"写进文档）。
+- **安装版拉起 bot 实测** ✅：`lark-bot.exe --parent-pid <安装版 PID>`；且 MSI 装的 sidecar 名为
+  **`lark-bot.exe`（无 target-triple 后缀）** —— 正好命中 `bot_exe_path()` 的容错解析
+  （当初若只认带后缀的名字，装完就会找不到 bot，这条实测把那个隐患钉死了）。
+- **卡片 markdown 降级（安装版实测）** ✅：卡片 `msg_type=interactive`、页眉「回答」、
+  **裸 `###` = 无**、**加粗 = 有**；且**没有**多余文本答案。
+- **自启坑升级（重要纠正）**：Run 项记的是"**点开关那一刻的 exe**"。从 dev 会话切到安装版时，
+  开关**通常已经是 ON**（只是指向 dev 的 exe）→ 正确操作是「**先关一次、再开一次**」，
+  而不是"点一次"（实测：按"点一次"会把它点成 OFF）。复核：`HKCU\...\Run\Link-Searcher`
+  现指向 `…\Link-Searcher\link-searcher.exe` ✅。
+- **文档**：`docs/LARK_BOT.md` 新增 **§5.8（装机实测）**，并修正 §5.1 的自启操作说明。
+
 ## 2026-10-15（第九轮）：A 收尾 —— `purge_dir_data` 改为单事务、不再吞错
 
 - **根因**（不是竞态、也不是共享目录）：三条按 `file_id` 的 DELETE **各自独立执行、失败只 `warn`**；

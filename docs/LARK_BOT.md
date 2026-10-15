@@ -317,7 +317,8 @@ restore-completed / dep-progress / dep-install-done
    ⚠️ **dev/install 差异（实测）**：Run 项记的是**当时启动它的那个 exe 路径**。在 `tauri dev` 里点
    开关 → 记的是 `target/debug/link-searcher.exe`（**dev 版**）；开机自启会拉起 dev 程序，而它的前端
    指向 `devUrl: 127.0.0.1:1420` —— **vite 没在跑时窗口是空白/报错页**（Rust 侧与 bot 仍正常启动）。
-   → **装完 MSI 后应在「已安装的应用」里重新点一次开关**，让 Run 项指向真正的安装路径。
+   → ⚠️ **切到安装版时它通常已经是 ON**（只是指向 dev 的 exe）→ 正确操作是「**先关一次、再开一次**」，
+   否则会把它点成 OFF（2026-10-15/16 实测踩到）。复核方法：`Get-ItemProperty 'HKCU:\...\Run'` 看值是否指向安装路径。
 2. **webapi 默认绑 `0.0.0.0`**（对机器人而言这是**硬前提**，不只是"建议"）
    `settings_bind()` 默认值即 `"0.0.0.0"`（`webapi/mod.rs:225-236`）→ **默认对局域网开放**。
    个人隐私库这个默认偏激进；更要紧的是 webapi 有**单用户 IP 会话租约**（见下方「隐性硬前提 ①」），
@@ -645,6 +646,24 @@ src-tauri/
   `npm run dev` / `npm run tauri:build` 由 `predev` / `prebuild` 自动兜住，不必记得
 
 `src-tauri/binaries/` 是构建产物，已加入 `.gitignore`。
+
+### 5.8 装机实测（2026-10-15/16，**已通过**）
+
+| 验证点 | 结果 |
+|---|---|
+| MSI 产出 | `src-tauri/target/release/bundle/msi/Link-Searcher_1.2.2_x64_en-US.msi`（35.3 MB） |
+| **安装位置** | `C:\Users\Gray\AppData\Local\Link-Searcher\` —— **perUser 模式，装到 `%LOCALAPPDATA%`，不需要 UAC** ⚠️ **纠正**：先前用 `msiexec /a`（管理安装）解包看到的是 `PFiles\Link-Searcher\…`，**那是管理安装的映射，不代表真实安装位置** |
+| 两二进制同目录 | ✅ `link-searcher.exe`（85.41 MB）+ `lark-bot.exe`（3.57 MB） |
+| 安装版拉起 bot | ✅ `lark-bot.exe --parent-pid <安装版 PID>` —— 注意 MSI 装的 sidecar 名字是 **`lark-bot.exe`（无 target-triple 后缀）**，正好命中 `bot_exe_path()` 的容错解析（当初若只认带后缀的名字，装完就会找不到 bot） |
+| 长连接 | ✅ `lark-cli event consume` 消费者 + daemon |
+| **卡片 markdown 降级（安装版实测）** | ✅ 收到的那张：`msg_type=interactive`、页眉「回答」、**裸 `###` = 无**、**加粗 = 有** |
+| 有无多余文本答案 | ✅ 无（同刻那条 `text` 是用户自己的提问） |
+| 自启 Run 项 | ✅ `HKCU\...\Run` → `Link-Searcher = C:\Users\Gray\AppData\Local\Link-Searcher\link-searcher.exe`（**指向安装路径**） |
+
+> **自启开关的正确操作（坑的升级版）**：Run 项记的是"**当时点开关的那个 exe**"。
+> 从 **dev 会话**切到**安装版**时，开关往往**已经是 ON**（只是指向 dev 的 exe）——
+> 所以正确做法是 **先关一次、再开一次**（而不是"点一次"），否则会像我这次一样把它点成 OFF。
+> 已用 `Get-ItemProperty …Run` 复核：现在指向安装路径 ✅。
 
 ---
 
