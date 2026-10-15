@@ -173,7 +173,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
 
   const handleCancel = useCallback(async () => {
     if (!loading) return
-    cancelAiRequest().catch(() => {})
+    cancelAiRequest(session?.id).catch(() => {})
     if (session?.id) markStreamEnded(session.id)
     latestReqIdRef.current += 1
     sendingRef.current = false

@@ -9,12 +9,24 @@ use crate::state::AppState;
 mod cite;
 pub use cite::{auto_cite, sanitize_citations, sanitize_citations_set};
 
-/// Cancel the currently in-flight AI chat request. Marks a one-shot flag;
-/// the running request completes in the background but its result is
-/// discarded. Safe to call with no request in flight.
+/// Cancel an in-flight AI generation.
+///
+/// `session_id: Some(id)` cancels only that chat session, so stopping one
+/// end's answer no longer aborts another's (`docs/LARK_BOT.md` §5.5 stage 1).
+/// `None` cancels every in-flight generation — kept for callers that predate
+/// per-session cancellation (§5.5 decision D3). Cancelling nothing is not an
+/// error.
 #[tauri::command]
-pub async fn cancel_ai_request() -> Result<(), String> {
-    crate::ai::cancel_ai();
+pub async fn cancel_ai_request(session_id: Option<String>) -> Result<(), String> {
+    use crate::commands::sessions::in_flight;
+    let affected = match session_id.as_deref() {
+        Some(id) if !id.is_empty() => usize::from(in_flight::cancel(id)),
+        _ => in_flight::cancel_all(),
+    };
+    log::info!(
+        "[AI-CANCEL] requested scope={} affected={affected}",
+        session_id.as_deref().filter(|s| !s.is_empty()).unwrap_or("<all>")
+    );
     Ok(())
 }
 
@@ -344,7 +356,7 @@ struct AiProgress {
 
 mod prompt;
 pub use prompt::truncate_text;
-pub(crate) use prompt::{prepare_conversation_prompt, PreparedConversation, DOC_TYPE_NOUNS};
+pub(crate) use prompt::{prepare_conversation_prompt, prepare_conversation_prompt_with_cancel, PreparedConversation, DOC_TYPE_NOUNS};
 use prompt::{compose_answer_text, prepare_smart_prompt, PreparedSmart};
 #[cfg(test)]
 use prompt::{
@@ -369,7 +381,9 @@ pub async fn smart_search(
         return Err("问题不能为空".into());
     }
     log::info!("[AI] smart_search: query={}", query);
-    crate::ai::reset_ai_cancel();
+    // §5.5 stage 1: cancellation is per generation, not process-global. This
+    // entry point carries no session id, so it uses the session-less slot.
+    let inflight = crate::commands::sessions::in_flight::InFlight::begin(None);
     // Mark this turn interactive so the embedding backfill yields the local
     // model pool/CPU to us (dropped on every exit path).
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
@@ -381,13 +395,13 @@ pub async fn smart_search(
         .await
         .unwrap_or(None)
         .ok_or_else(|| {
-            if crate::ai::ai_cancelled() {
+            if inflight.is_cancelled() {
                 "请求已取消".to_string()
             } else {
                 "AI 请求失败（检查网关配置或网络）".to_string()
             }
         })?;
-    if crate::ai::ai_cancelled() {
+    if inflight.is_cancelled() {
         return Err("请求已取消".into());
     }
     log::info!(
@@ -417,7 +431,7 @@ pub async fn smart_search_stream(
         return Err("问题不能为空".into());
     }
     log::info!("[AI] smart_search_stream: query={}", query);
-    crate::ai::reset_ai_cancel();
+    let inflight = crate::commands::sessions::in_flight::InFlight::begin(Some(&session_id));
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedSmart { system, user_msg, source_ids, source_files, evidence } =
@@ -425,11 +439,12 @@ pub async fn smart_search_stream(
     let hits = evidence.len();
     let session_clone = session_id.clone();
     let app_inner = app.clone();
+    let cancel_token = inflight.token_arc();
     let result = tokio::task::spawn_blocking(move || {
         let mut emit = |d: &str, _is_reasoning: bool| {
             let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: false });
         };
-        crate::ai::chat_stream(&system, &user_msg, &mut emit)
+        crate::ai::chat_stream_cancellable(&system, &user_msg, Some(&cancel_token), &mut emit)
     })
     .await
     .map_err(|e| format!("task panicked: {e}"))?;
@@ -525,7 +540,8 @@ pub async fn conversation_ask(
         messages.len(),
         source_ids.len()
     );
-    crate::ai::reset_ai_cancel();
+    // §5.5 stage 1: this entry point carries no session id → session-less slot.
+    let inflight = crate::commands::sessions::in_flight::InFlight::begin(None);
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, clarify_blocking, .. } =
@@ -543,13 +559,13 @@ pub async fn conversation_ask(
         .await
         .unwrap_or(None)
         .ok_or_else(|| {
-            if crate::ai::ai_cancelled() {
+            if inflight.is_cancelled() {
                 "请求已取消".to_string()
             } else {
                 "AI 请求失败（检查网关配置或网络）".to_string()
             }
         })?;
-    if crate::ai::ai_cancelled() {
+    if inflight.is_cancelled() {
         return Err("请求已取消".into());
     }
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
@@ -590,12 +606,12 @@ pub async fn conversation_ask_stream(
         messages.len(),
         source_ids.len()
     );
-    crate::ai::reset_ai_cancel();
+    let inflight = crate::commands::sessions::in_flight::InFlight::begin(Some(&session_id));
 
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
-    let prepared = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref()).await;
+    let prepared = prepare_conversation_prompt_with_cancel(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref(), Some(inflight.token())).await;
     match &prepared {
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
@@ -666,6 +682,7 @@ pub async fn conversation_ask_stream(
     }
     let session_clone = session_id.clone();
     let app_inner = app.clone();
+    let cancel_token = inflight.token_arc();
     log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
     let result = if clarify_blocking {
         log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
@@ -675,7 +692,7 @@ pub async fn conversation_ask_stream(
             let mut emit = |d: &str, is_reasoning: bool| {
                 let _ = app_inner.emit("ai-chunk", AiChunk { session_id: session_clone.clone(), delta: d.to_string(), reasoning: is_reasoning });
             };
-            crate::ai::chat_stream(&system, &user_msg, &mut emit)
+            crate::ai::chat_stream_cancellable(&system, &user_msg, Some(&cancel_token), &mut emit)
         })
         .await
         .map_err(|e| format!("task panicked: {e}"))?

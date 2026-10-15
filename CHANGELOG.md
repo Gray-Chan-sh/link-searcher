@@ -1,5 +1,19 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：AI 取消按会话隔离（三端交互重构 · 阶段一）
+
+> 背景：三端（桌面窗口 / Web / 飞书）共用一个**进程级**取消标志，导致「桌面点停止会把飞书正在生成的回答一起掐断」。按 `docs/LARK_BOT.md` §5.5 阶段一实施。
+
+- **根因**：`ai/mod.rs` 的 `static AI_CANCEL: AtomicBool` 是**进程级单例**；`cancel_ai_request` 无参数、全局置位；每次生成开头还 `reset_ai_cancel()`，会清掉别处的取消意图。`AppState` 中亦**没有任何生成互斥**（只有 `is_scanning`/`is_rebuilding`/`is_restoring`）。桌面端靠 UI 单飞自保，**跨端零协调**。
+- **修复**：新增 `commands/sessions/in_flight.rs` —— **按 chat session 的 in-flight 注册表**，RAII 语义（`InFlight::begin` 注册、`Drop` 摘除，不会泄漏），令牌为新增的 `ai::CancelToken`（替换全局静态标志）。`ai::chat_stream` 拆出 `chat_stream_cancellable(.., Option<&CancelToken>, ..)`，原 3 参 `chat_stream` 保留为无取消包装 → **15 个既有 wire 测试零改动**。`prepare_conversation_prompt` 原签名保留，新增 `prepare_conversation_prompt_with_cancel(.., cancel)` 供流式路径使用。语义：**同一会话只有一次权威生成**，新生成会取消并取代旧的。
+- **接口变化**：`cancel_ai_request(session_id: Option<String>)`；`POST /api/ai/cancel` 接受可选 body `{ session_id }`（同时接受 `sessionId`；缺省/无 body 仍为「取消全部在途」——决策 D3 的过渡兼容）。前端 `cancelAiRequest(sessionId?)`，`ChatPanel` 传当前会话 id。
+- **顺带解耦（决策 D2）**：`webapi/routes/index.rs` 的 `cancel_scan_handler` 原先调用 `crate::ai::cancel_ai()` —— **取消扫描会连带取消 AI 生成**；已移除并加注释说明。
+- **行为变化**：① 取消只作用于目标会话（无 session 的入口如 `smart_search` 归入独立的 session-less 槽，不被会话级取消波及）；② 取消扫描不再中断 AI 回答。
+- **测试**：新增 `commands::sessions::in_flight` 生命周期测试（注册 / 按会话取消 / 未知会话无操作 / session-less 槽隔离 / `cancel_all` / 取代语义 / Drop 不泄漏）；`cargo test --lib` **542 passed / 0 failed**；`ai_chat_stream_wire` **15 passed**；`npx tsc --noEmit` 通过。
+- **已知既有问题（非本次引入，已用 `git stash` 对照确证）**：`tests/auto_ui_e2e.rs` 在 HEAD 上即编译失败 —— `commands::dirs::remove_dir` 增加 `app: AppHandle` 后与测试的 `MockRuntime` 不兼容（`AppHandle: CommandArg<MockRuntime>` 不成立）。
+- **文档**：`docs/LARK_BOT.md` §5.5 已含评估与本阶段决策；`docs/08-ai-features.md` 补充取消的会话范围。README 无需改（其中「单用户会话」描述属阶段四范畴，本次未触碰租约）。
+- `semgrep scan --severity ERROR`：**0 findings**。
+
 ## 2026-10-15：飞书接入「三端交互重构」评估入档（纯文档，未改代码）
 
 > 背景：定位确定为本机 + 单机器人 + 多端；提出"会话完全隔离 + 统一管理模块"，进一步提出"把 `session_guard` 与 AI 生成都放在会话之后"。按要求做了一次**全面结构评估**，结论入档 `docs/LARK_BOT.md` §5.5，作为实施依据。

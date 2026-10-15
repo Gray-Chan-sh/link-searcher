@@ -240,7 +240,8 @@ async fn cancel_scan_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
     app_state.cancel_scan.store(true, Ordering::Relaxed);
-    crate::ai::cancel_ai();
+    // Deliberately does NOT cancel AI generation: stopping a scan must not
+    // abort an unrelated answer (`docs/LARK_BOT.md` §5.5 decision D2).
     Ok(Json(serde_json::json!({ "status": "cancelled" })))
 }
 

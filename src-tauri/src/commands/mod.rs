@@ -12,6 +12,7 @@ pub mod logs;
 pub mod performance;
 pub mod rerank;
 pub mod search;
+pub mod sessions;
 pub mod settings;
 pub mod tesseract;
 pub mod webapi;

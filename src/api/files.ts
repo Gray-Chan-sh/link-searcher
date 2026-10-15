@@ -140,8 +140,10 @@ export interface ChatSession {
   full_recall?: boolean
 }
 
-export async function cancelAiRequest(): Promise<void> {
-  return client.invoke<void>('cancel_ai_request')
+/** Cancel an in-flight AI generation. `sessionId` scopes it to one chat
+ * session; omitting it cancels every in-flight generation (legacy callers). */
+export async function cancelAiRequest(sessionId?: string): Promise<void> {
+  return client.invoke<void>('cancel_ai_request', { sessionId: sessionId ?? null })
 }
 
 export interface ChatSessionMeta {

@@ -198,6 +198,8 @@ pub fn resolve_mention_file_ids(
     (resolved, missing)
 }
 
+/// Retrieval + prompt assembly without cancellation — the original signature,
+/// kept for the CLI and tests (`docs/LARK_BOT.md` §5.5 stage 1).
 pub(crate) async fn prepare_conversation_prompt(
     state: &AppState,
     messages: &[ChatMessage],
@@ -210,6 +212,30 @@ pub(crate) async fn prepare_conversation_prompt(
     app: Option<&tauri::AppHandle>,
     session_id: &str,
     clarify_reply: Option<&ClarifyReply>,
+) -> Result<PreparedConversation, String> {
+    prepare_conversation_prompt_with_cancel(
+        state, messages, source_ids, scope, session_retrieval_scope, strict_docs,
+        full_recall, skip_llm_rewrite, app, session_id, clarify_reply, None,
+    )
+    .await
+}
+
+/// [`prepare_conversation_prompt`] plus a per-generation [`CancelToken`], so a
+/// cancel that arrives during retrieval aborts the pipeline instead of letting
+/// it hand work to the LLM afterwards.
+pub(crate) async fn prepare_conversation_prompt_with_cancel(
+    state: &AppState,
+    messages: &[ChatMessage],
+    source_ids: &[String],
+    scope: &TurnScope,
+    session_retrieval_scope: &[String],
+    strict_docs: bool,
+    full_recall: bool,
+    skip_llm_rewrite: bool,
+    app: Option<&tauri::AppHandle>,
+    session_id: &str,
+    clarify_reply: Option<&ClarifyReply>,
+    cancel: Option<&crate::ai::CancelToken>,
 ) -> Result<PreparedConversation, String> {
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = app {
@@ -224,7 +250,7 @@ pub(crate) async fn prepare_conversation_prompt(
     };
     macro_rules! check_cancel {
         () => {
-            if crate::ai::ai_cancelled() {
+            if cancel.is_some_and(crate::ai::CancelToken::is_cancelled) {
                 return Err("请求已取消".into());
             }
         };

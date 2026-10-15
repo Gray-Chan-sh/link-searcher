@@ -146,7 +146,7 @@ const MAPPINGS: Record<string, Mapping> = {
   smart_search_stream: (a) => ({ method: 'POST', path: '/api/ai/smart-search/stream', body: a, sse: true }),
   conversation_ask_stream: (a) => ({ method: 'POST', path: '/api/ai/conversation/ask/stream', body: a, sse: true }),
   test_ai_gateway: { method: 'GET', path: '/api/ai/gateways/test' },
-  cancel_ai_request: { method: 'POST', path: '/api/ai/cancel' },
+  cancel_ai_request: (a) => ({ method: 'POST', path: '/api/ai/cancel', body: { session_id: a.sessionId ?? null } }),
   get_ai_events: { method: 'GET', path: '/api/ai/events', paramMap: { sessionId: 'session_id' } },
   get_turn_ai_events: { method: 'GET', path: '/api/ai/events/turn', paramMap: { sessionId: 'session_id', turnNumber: 'turn_number' } },
 

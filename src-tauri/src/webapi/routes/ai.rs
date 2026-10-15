@@ -474,8 +474,21 @@ async fn test_gateway_handler() -> Result<Json<serde_json::Value>, ApiError> {
     Ok(Json(serde_json::to_value(&tests).unwrap_or_default()))
 }
 
-async fn cancel_ai_request_handler() -> Result<Json<serde_json::Value>, ApiError> {
-    crate::commands::ai::cancel_ai_request()
+/// Optional body: `{ "session_id": "..." }` (the `sessionId` spelling is also
+/// accepted). Omitting it cancels every in-flight generation, which is what
+/// callers predating per-session cancellation send (`docs/LARK_BOT.md` §5.5
+/// decision D3).
+#[derive(serde::Deserialize, Default)]
+struct CancelAiBody {
+    #[serde(default, alias = "sessionId")]
+    session_id: Option<String>,
+}
+
+async fn cancel_ai_request_handler(
+    body: Option<Json<CancelAiBody>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let session_id = body.and_then(|Json(b)| b.session_id);
+    crate::commands::ai::cancel_ai_request(session_id)
         .await
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "cancelled": true })))

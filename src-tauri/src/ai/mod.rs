@@ -1218,14 +1218,28 @@ pub struct ChatStreamOutcome {
 /// Send a chat-completion prompt in streaming mode (`stream: true`), invoking
 /// `on_delta` for every content fragment as it arrives. Falls back to a plain
 /// non-streamed response when the gateway ignores `stream` (first line is not
-/// `data:`). Stops early when [`cancel_ai`] fires; the partial text is then
-/// discarded by the caller.
+/// `data:`).
+///
+/// Non-cancellable convenience wrapper — see [`chat_stream_cancellable`].
 pub fn chat_stream(
     system: &str,
     user: &str,
     on_delta: &mut dyn FnMut(&str, bool),
 ) -> ChatStreamOutcome {
+    chat_stream_cancellable(system, user, None, on_delta)
+}
+
+/// [`chat_stream`] with a per-generation [`CancelToken`] (`docs/LARK_BOT.md`
+/// §5.5 stage 1). Stops early when the token fires; the partial text is then
+/// discarded by the caller.
+pub fn chat_stream_cancellable(
+    system: &str,
+    user: &str,
+    cancel: Option<&CancelToken>,
+    on_delta: &mut dyn FnMut(&str, bool),
+) -> ChatStreamOutcome {
     use std::io::{BufRead, Read};
+    let is_cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
     let started = std::time::Instant::now();
     let failed = ChatStreamOutcome { text: None, took_ms: 0, cancelled: false, truncated: false };
     if !llm_enabled() {
@@ -1369,7 +1383,7 @@ pub fn chat_stream(
             first_line = false;
             if !l.starts_with("data:") {
                 // Gateway ignored stream:true — read the rest as a plain body.
-                if ai_cancelled() {
+                if is_cancelled() {
                     cancelled = true;
                     break;
                 }
@@ -1427,7 +1441,7 @@ pub fn chat_stream(
                         }
             }
         }
-        if ai_cancelled() {
+        if is_cancelled() {
             cancelled = true;
             break;
         }
@@ -1561,21 +1575,31 @@ fn build_agent_with_read_timeout(read_timeout_secs: u64) -> ureq::Agent {
     builder.build()
 }
 
-/// One-shot AI cancellation flag. Set by the frontend "cancel" action; the
-/// in-flight chat request completes in the background but its result is
-/// discarded (the caller checks the flag after the call returns).
-static AI_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn cancel_ai() {
-    AI_CANCEL.store(true, std::sync::atomic::Ordering::Release);
+/// Per-generation AI cancellation handle (`docs/LARK_BOT.md` §5.5 stage 1).
+///
+/// Replaces the former process-global `AI_CANCEL` flag: cancelling one
+/// generation no longer aborts every other end's answer (desktop UI, Web and
+/// Feishu used to share a single flag). Instances are owned by
+/// [`crate::commands::sessions::in_flight`], which also exposes them for
+/// cancellation by session id.
+///
+/// Semantics are one-shot and sticky: the flag is never reset, because each
+/// generation gets a fresh token. A non-streaming request already in flight
+/// completes in the background and the caller discards its result (it checks
+/// [`Self::is_cancelled`] after the call returns).
+#[derive(Debug, Default)]
+pub struct CancelToken {
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
-pub fn reset_ai_cancel() {
-    AI_CANCEL.store(false, std::sync::atomic::Ordering::Release);
-}
+impl CancelToken {
+    pub fn cancel(&self) {
+        self.cancelled.store(true, std::sync::atomic::Ordering::Release);
+    }
 
-pub fn ai_cancelled() -> bool {
-    AI_CANCEL.load(std::sync::atomic::Ordering::Acquire)
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// Per-gateway connectivity test result.
