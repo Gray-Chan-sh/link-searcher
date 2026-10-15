@@ -123,6 +123,7 @@ pub fn all() -> Vec<DepDef> {
     defs.push(funasr());
     defs.push(ffmpeg());
     defs.push(poppler());
+    defs.push(lark_cli());
     defs
 }
 
@@ -343,6 +344,27 @@ fn ffmpeg() -> DepDef {
     }
 }
 
+/// 飞书 `lark-cli` —— 机器人的外部依赖（**npm 全局包**：既不是可下载文件，也不是 winget/brew/apt 包）。
+///
+/// 所以它两样都不是：`files: &[]` + `system_package: None`，**就绪探测与安装都走 `id` 特例**
+/// （探测见 [`is_ready`] → [`lark_cli_path`]；安装见 `deps::commands::install_dep` 的 npm 分支）。
+/// 与 ffmpeg/poppler 同一模式，不需要为它给 [`DepDef`] 加来源类型。
+///
+/// 注意 `files: &[]` 是**刻意**的：`files_ready` 要求非空，因此它**不会**被误判成"已就绪"；
+/// 但它也意味着**如果没有那个 id 特例**，这条会永远显示未就绪 —— 两处必须同时存在。
+fn lark_cli() -> DepDef {
+    DepDef {
+        id: "lark-cli",
+        name: "飞书 lark-cli（机器人）",
+        recommended: false,
+        size_bytes: 0,
+        hint: "飞书机器人依赖；点击安装走 npm 全局安装（@larksuite/cli）",
+        files: &[],
+        sources: vec![],
+        system_package: None,
+    }
+}
+
 /// Poppler (pdftoppm) — render PDF pages for OCR fallback. System-provided.
 fn poppler() -> DepDef {
     DepDef {
@@ -380,6 +402,8 @@ pub fn is_ready(def: &DepDef, data_dir: &Path) -> bool {
     match def.id {
         "ffmpeg" => return crate::extractor::audio::ffmpeg_available(),
         "poppler" => return crate::extractor::pdf::poppler_available(),
+        // 飞书机器人依赖：只问"可执行文件在不在"（探测实现只有一份，见 lark_cli_path）
+        "lark-cli" => return lark_cli_path().is_some(),
         _ => {}
     }
 
