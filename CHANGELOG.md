@@ -1,3 +1,29 @@
+## 2026-10-16（第十三轮）：D 项 —— 卡片交互（按钮）实现完成
+
+> 前置：§8.4 的**决定性实验已通过**（本地多消费者允许）→ 按"双消费者"架构实现。
+
+| 步 | 内容 | 提交 |
+|---|---|---|
+| 1 | 回调**解析 + 路由**：`CardActionEvent`（宽松解析）、`parse_card_action`（`action_value` **二次 parse**；陌生/缺字段/session_id 空白一律忽略）、`action_value`/`action_payload`（发送侧与解析侧单点定义） | `9a62caa` |
+| 2a | **身份 + 准入**：`operator_open_id`（兼容多种形状；**形状未用真实样本确认**故取不到即 None）、`card_action_allowed`（与消息入口**共用白名单**，空名单/取不到操作者一律拒绝） | `1381764` |
+| 2b | **第二个消费者**：`spawn_consumer(EventKey)` 泛化 + `spawn_card_consumer` + `handle_card_line`（先过闸门再路由） | `ba804a8` |
+| 3 | **按钮**：`append_actions`（只挂最后一张；无 session_id 不加） | `f0d5098` |
+| 4a | **`打开详情`**：`GET /api/session` 取 `lan_ip`+`port` → reply **LAN 地址**的 WebUI 入口（`webui_url` 纯函数 + 单测） | `2355596` |
+| 4b | **`换一批证据`**：取会话最后一条 user 消息 → **合成事件复用 `answer_with_card`**（流式/节流/分页/落库全复用） | `fc7e81a` |
+
+- **设计要点（都已写进代码注释）**：
+  - 回调是**另一条入口** —— 消息入口的 L0/L1/L2 **不会**自动保护它，所以 `handle_card_line` 先过白名单（fail-closed）；
+    合成的重跑事件里 `sender` 就是**已核实**的 operator，故不会再被消息级闸门拒。
+  - **失败只告警、绝不退出**：`按钮点不动`远比`机器人不能答`轻 —— 回调消费者起不来不能拖垮主链路。
+  - 更新卡片一律**不需要回调 token**（避开"最多 2 次更新"那条路，§8.1）。
+  - **只发布能用得上的按钮**：`换一批证据` 在其接线（4b）落地前**刻意不出现在卡片上** ——
+    一个点了没反应的按钮比没有按钮更糟（这条也写进了 `append_actions` 的注释）。
+- **测试**：`lark-bot` 38 个（含"按钮 value → 字符串化 → 必须解析回对应动作"的**往返测试**、
+  `webui_url` 必须给 LAN 地址、白名单 fail-closed、宽松解析容忍额外字段）。
+- **环境抖动（已入 AGENTS ④′ 的 playbook）**：期间门禁两次因**链接期**问题红过
+  （`link.exe` 1327/1158、`1102`=LNK1102 内存不足），一次因**构建缓存不一致**
+  （`required to be available in rlib format`）—— **均为重跑即过**（缓存那次经 `cargo clean -p link-searcher` 后过）。
+
 ## 2026-10-16（第十二轮）：D 项前置调研（决定卡片交互的架构）
 
 - **实测**：`lark-cli event consume <EventKey>` **只接受一个 key** → 卡片回调必须**另起一个 consumer**；
