@@ -178,6 +178,17 @@ called `Result::unwrap()` on an `Err` value: Os { code: 5, kind: PermissionDenie
 
 → **门禁前先停掉正在跑的应用**（`Stop-Process -Name link-searcher`；bot 会随看门狗自退）。
 
+⚠️ **但只停应用还不够**：`tauri dev` 在**监听源码**，一改文件它就 `Rebuilding application...` 并**重新起一个**应用
+（2026-10-15 实测：改完 `webapi/session.rs` 后跑门禁，又撞上 `failed to remove file …link-searcher.exe`）。
+→ 要跑门禁就**把 `tauri dev` 本身停掉**（杀掉命令行含 `tauri` 的 `node` 进程），而不是只杀应用。
+
+```powershell
+Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
+  Where-Object { $_.CommandLine -match 'tauri' } |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Stop-Process -Name link-searcher -Force -ErrorAction SilentlyContinue
+```
+
 **⑤‴ bot 改了源码，`tauri dev` 不会重建 sidecar**
 
 bot 是**成员 crate**，不是应用包的依赖 → `tauri dev` 的文件监听**只重建应用包**。

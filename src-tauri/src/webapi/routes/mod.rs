@@ -49,7 +49,7 @@ pub fn build_router(state: ApiState) -> Router {
     // overwrite the token and take over the API.
     //
     // Layer order: `route_layer` added later runs first on the request, so
-    // `bearer_auth` (token check) wraps `session_guard` (single-user IP lease):
+    // `bearer_auth` (token check) wraps `session_guard` (**在线状态记录**；阶段四起不再排他):
     // a wrong token gets 401 before any session state is touched/created.
     search::router(state.clone())
         .merge(files::router(state.clone()))
