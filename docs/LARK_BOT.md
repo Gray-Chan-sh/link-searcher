@@ -314,6 +314,10 @@ restore-completed / dep-progress / dep-install-done
    ⚠️ **data_dir 的坑**：插件 API **不接受参数**，自启是**无参数**启动 → 读的是 `config.json` 里的
    `data_dir`。若用户以 `--data-dir` 启动，自启会指向**另一个库** → 命令会回 `warning` 让 UI 显式提示
    （而不是默默错开）。本机 data_dir 存在 config.json 里，故无此提示。
+   ⚠️ **dev/install 差异（实测）**：Run 项记的是**当时启动它的那个 exe 路径**。在 `tauri dev` 里点
+   开关 → 记的是 `target/debug/link-searcher.exe`（**dev 版**）；开机自启会拉起 dev 程序，而它的前端
+   指向 `devUrl: 127.0.0.1:1420` —— **vite 没在跑时窗口是空白/报错页**（Rust 侧与 bot 仍正常启动）。
+   → **装完 MSI 后应在「已安装的应用」里重新点一次开关**，让 Run 项指向真正的安装路径。
 2. **webapi 默认绑 `0.0.0.0`**（对机器人而言这是**硬前提**，不只是"建议"）
    `settings_bind()` 默认值即 `"0.0.0.0"`（`webapi/mod.rs:225-236`）→ **默认对局域网开放**。
    个人隐私库这个默认偏激进；更要紧的是 webapi 有**单用户 IP 会话租约**（见下方「隐性硬前提 ①」），
@@ -596,6 +600,29 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 **仍待处理（B 档的前置）**：`embed_plans` 是**运行期高频写**的字段，却待在会被整文件重写的
 `config.json` 里；`web_api_token` 仍**双存储**（config.json + DB `app_settings`，靠
 `resolve_token()` 的 env > config.json > DB 优先级对齐）。若走 B 档，这两处应一并重新分工。
+
+### 5.7 bot sidecar 的打包（**暂缓**，附原因与两条出路）
+
+`bundle.externalBin` 要求文件名 `<name>-<target-triple>[.exe]`。生成脚本已备好
+（`scripts/build-sidecar.mjs` → `npm run sidecar` / `sidecar:release`），但**不能就此打开 externalBin**。
+
+**实测（2026-10-15）**：`tauri-build` 在**编译期校验** `externalBin`，文件不存在即构建失败 ——
+而"生成该文件"的脚本本身必须先编译整个包（含 `build.rs`）→ **鸡生蛋**：
+
+```
+error: failed to run custom build command for `link-searcher v1.2.2`
+（build.rs = tauri-build 校验 externalBin，文件缺失即失败）
+```
+
+根因是 **bot 与主程序在同一个 package**，无法"先单独编 bot、再编主程序"。两条出路：
+
+| 出路 | 说明 | 代价 |
+|---|---|---|
+| **A（推荐）** | 把准入判定抽成**独立微型 crate**（如 `lark-gate`），bot 只依赖它 → bot 成为**独立 crate**，可先于主程序编译，鸡生蛋消失；顺带把 sidecar 从 **30 MB 缩到很小**（现在它链了整个应用 lib，只为用 `lark_gate` + 读 token） | 中等重构（新增 crate + `lark_gate` 搬家） |
+| B | 在 `beforeBuildCommand` 里先 `npm run sidecar:release`，并把"文件已存在"作为约定 | **对全新克隆仍会失败**，得靠 CI/文档额外约定顺序 |
+
+**现状**：`externalBin` **未开启**（保持 `tauri dev` / `tauri build` 可用）；bot 按"与主程序同目录"
+解析，开发下直接用 `target/debug/lark-bot[.exe]` ✅。`src-tauri/binaries/` 是构建产物，已加入 `.gitignore`。
 
 ---
 

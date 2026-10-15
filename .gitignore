@@ -24,6 +24,7 @@ dist-ssr
 
 # Tauri
 src-tauri/target/
+src-tauri/binaries/
 src-tauri/.env
 src-tauri/data.db*
 src-tauri/*.log

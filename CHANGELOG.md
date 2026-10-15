@@ -1,5 +1,23 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：bot sidecar 打包尝试（撞上鸡生蛋，已回退保住 dev）+ 自启开关验收补记
+
+> 目标：把 bot 装进 MSI（`bundle.externalBin`）。**尝试后发现不能在当前结构下开启**，已回退并记清原因与出路。
+
+- **撞到的结构性障碍（实测）**：`tauri-build` 在**编译期校验** `externalBin`，文件缺失即构建失败：
+  `error: failed to run custom build command for link-searcher v1.2.2`。而"生成那个文件"的脚本
+  本身必须先编译整个包（含 `build.rs`）→ **鸡生蛋**。根因是 **bot 与主程序在同一个 package**。
+- **已回退**：`tauri.conf.json` 的 `externalBin` **移除**（`tauri dev` / `build` 恢复可用，已验证编译通过）；`package.json` 不挂 `predev`/`prebuild` 自动钩子（未启用 externalBin 时那只是无谓开销）。
+- **保留的成果**：新增 `scripts/build-sidecar.mjs`（+ `npm run sidecar` / `sidecar:release`）—— 它做两件事：取 `rustc -vV` 的 host 三元组、编 `lark-bot` 并复制成 `src-tauri/binaries/lark-bot-<triple>[.exe]`。**实测可用**（产出 30 MB 文件）。
+  - **顺带发现**：sidecar 有 **30 MB**，因为它链了整个应用 lib（只为用 `lark_gate` + 读 token）→ 这也是"抽独立 crate"的另一个理由。
+  - `src-tauri/binaries/` 是构建产物，已加入 `.gitignore`。
+- **容错解析**：`lark_bot.rs` 解析 bot 可执行文件时**两种命名都认**（开发下 `lark-bot.exe`；打包后可能是 `lark-bot-<triple>.exe`），否则装包后会找不到。
+- **文档**：新增 §5.7「bot sidecar 的打包（暂缓）」—— 记录鸡生蛋、两条出路（**A 抽独立 crate 推荐** / B 靠 CI 顺序），并注明现状。
+- **自启开关的验收补记（真实证据）**：`HKCU\...\Run` 已写入 `[Link-Searcher] = D:\link-searcher\src-tauri\target\debug\link-searcher.exe`（**无参数**）；进程侧 `link-searcher` + **`lark-bot`（GUI 拉起）** + `lark-cli`（消费者）+ daemon 齐全；`event status` 显示 `Active consumers: 1`、`RECEIVED=1 DROPPED=0`；**会话连续性成立**（绑定仍是同一 `session_id`，其 `updated_at` 已推进 → 自动起来的 bot 接着原会话继续聊）。
+- **顺带记录一个 dev/install 的坑**：Run 项指向**当时启动它的 exe**；在 `tauri dev` 里开自启 → 记的是 dev 版，开机后会拉起前端指向 `devUrl` 的 dev 程序（vite 没跑时窗口空白，但 Rust 侧与 bot 正常）→ **装完 MSI 后应重新点一次开关**。已入档 §5.1。
+- **又修一条既有 flaky（门禁第三次被它挡住）**：`ai::tests::gateways_unconfigured_report_not_ok` 断言"未配置 ⇒ ok=false"，但它依赖**两样进程级全局**：① 网关探测结果有 **30s 缓存**；② **`LS_CONFIG_DIR` 是进程级环境变量**，`commands/backup.rs` 的测试会临时 `set_var` 指向一个只有 `{"theme":"dark"}` 的目录。并行时 `llm_enabled()` 读到"没网关"而缓存里是"有网关" → 断言随机失败（在 HEAD 上同样会红）。已改为**只断言与环境无关的结构性事实**（两条路由各一条 + `kind`/`detail` 非空），更名为 `gateways_probe_reports_one_entry_per_role`。修后 `cargo test --lib` **连跑 3 轮 + 全目标 1 轮全绿**。
+- **未做**：卡片+节流；内容闸门；`externalBin` 的最终落地（依赖"抽独立 crate"）。
+
 ## 2026-10-15：飞书 bot 生命周期（C3 核心）——GUI 拉起 / 退出收掉 / 硬杀不残留
 
 > `docs/LARK_BOT.md` §5.4 把 C3 标为"唯一必做"。本轮实现其核心并在真机验证（含两种退出路径）。

@@ -30,24 +30,41 @@ fn bot_file_name() -> &'static str {
     if cfg!(windows) { "lark-bot.exe" } else { "lark-bot" }
 }
 
+/// 可执行文件后缀（用于容错匹配）。
+fn bot_ext() -> &'static str {
+    if cfg!(windows) { ".exe" } else { "" }
+}
+
 /// 解析 bot 可执行文件路径：**主程序旁边**。
 ///
-/// 开发下即 `target/debug/lark-bot[.exe]`；打包时应由 `bundle.externalBin` 放到同一目录
-/// （那一步尚未做，见模块注释）。
+/// 两种命名都要认，否则打包后会找不到：
+/// - 开发：`cargo` 产出 `lark-bot[.exe]`（无后缀）
+/// - 打包：`bundle.externalBin` 的命名要求是 `lark-bot-<target-triple>[.exe]`
+///   （Tauri 在装包时可能保留也可能去掉三元组后缀 → 所以这里按前缀扫一遍兜住）
 fn bot_exe_path() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe 失败: {e}"))?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "主程序没有父目录".to_string())?;
-    let path = dir.join(bot_file_name());
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(format!(
-            "未找到 {}（开发下由 `cargo build --bin lark-bot` 生成；打包需 bundle.externalBin）",
-            path.display()
-        ))
+    let dir = exe.parent().ok_or_else(|| "主程序没有父目录".to_string())?;
+
+    let plain = dir.join(bot_file_name());
+    if plain.is_file() {
+        return Ok(plain);
     }
+
+    let ext = bot_ext();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("lark-bot") && name.ends_with(ext) && entry.path().is_file() {
+                return Ok(entry.path());
+            }
+        }
+    }
+
+    Err(format!(
+        "在 {} 里没找到 lark-bot{}（开发下跑 `npm run sidecar` 生成；打包需 bundle.externalBin）",
+        dir.display(),
+        ext
+    ))
 }
 
 /// 若 `lark_bot_enabled == "true"` 则拉起 bot。**任何失败都只记日志**，

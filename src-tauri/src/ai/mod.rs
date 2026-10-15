@@ -2108,17 +2108,21 @@ mod tests {
     }
 
     #[test]
-    fn gateways_unconfigured_report_not_ok() {
-        // Environment-independent: the probe must complete without panicking,
-        // and unconfigured gateways must report ok=false. If the host has
-        // gateways configured, ok may be true.
+    fn gateways_probe_reports_one_entry_per_role() {
+        // 只断言**与环境无关**的结构性事实。
+        //
+        // ⚠️ 这里原来还断言"未配置 ⇒ ok=false"，但它依赖两样**进程级全局**，并行跑时互相打架：
+        //   ① 网关探测结果有 **30s 缓存**（`test_ai_gateway` / `capabilities`），别的测试可能已把
+        //      "有网关、ok=true"缓存进去；
+        //   ② **`LS_CONFIG_DIR` 是进程级环境变量**，`commands/backup.rs` 的测试会临时 `set_var` 指向
+        //      一个只有 `{"theme":"dark"}` 的一次性配置目录 —— 于是 `llm_enabled()` 读到"没网关"，
+        //      而缓存里是"有网关" → 两者不一致，断言随机失败（2026-10-15 三次复现，且 HEAD 上同样会红）。
+        //   结论：这类"读真实配置 + 真实网络探测"的断言**不可放进门禁**（AGENTS.md 门禁 ④）。
         let tests = test_gateways();
-        assert_eq!(tests.len(), 2);
-        if !embedding_enabled() {
-            assert!(!tests[0].ok);
-        }
-        if !llm_enabled() {
-            assert!(!tests[1].ok);
+        assert_eq!(tests.len(), 2, "embedding / llm 各一条");
+        for t in &tests {
+            assert!(!t.kind.is_empty(), "每条都要有 kind，UI 依赖它归因");
+            assert!(!t.detail.is_empty(), "每条都要有 detail，便于排查");
         }
         let _ = capabilities();
     }
