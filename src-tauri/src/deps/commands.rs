@@ -48,7 +48,9 @@ pub fn install_dep(
         return Err(format!("未知依赖: {dep}"));
     };
     let is_system_pkg = def.files.is_empty() && def.system_package.is_some();
-    if def.files.is_empty() && !is_system_pkg {
+    // npm 全局包（lark-cli）：既不是可下载文件，也不是 winget/brew/apt 包 —— 走 npm 分支。
+    let is_npm_pkg = npm_package_of(def.id).is_some();
+    if def.files.is_empty() && !is_system_pkg && !is_npm_pkg {
         // System-provided deps with no package spec (future deps) — not installable.
         return Err(format!("依赖 {dep} 需要按平台手动安装（见引导）"));
     }
@@ -73,7 +75,9 @@ pub fn install_dep(
                 }),
             );
         };
-        let res = if is_system_pkg {
+        let res = if is_npm_pkg {
+            install_npm_package(&def)
+        } else if is_system_pkg {
             install_system_package(&def)
         } else {
             download::install_dep(&def, &data_dir, &CANCEL, &on_progress)
@@ -109,6 +113,57 @@ pub fn install_dep(
         let _ = app.emit("dep-install-done", &result);
     });
 
+    Ok(())
+}
+
+/// npm 包名：id → 包名。**只此一处映射**（也用于判断"这是不是 npm 依赖"）。
+///
+/// 放在这里而不是给 `DepDef` 加字段：与就绪探测同一个取舍（见 `catalog::lark_cli`）——
+/// 不为**单个**条目引入一整套来源类型，代价是这两处 id 特例必须同生共死。
+fn npm_package_of(id: &str) -> Option<&'static str> {
+    match id {
+        "lark-cli" => Some("@larksuite/cli"),
+        _ => None,
+    }
+}
+
+/// 安装 npm 全局包（目前只有 `lark-cli`）。
+///
+/// 两个要点：
+/// - **Windows 上必须经 `cmd /C`**：`npm` 只有 `.cmd` 批处理包装，而 `CreateProcess`
+///   不能直接执行 `.cmd`（与 `lark-cli` 那条坑同源）。这里的参数是**固定字面量**
+///   （包名来自本文件），不含任何用户输入，所以没有"被 cmd 二次解析"的风险。
+/// - npm 不在 PATH 很常见（Node 装在非默认位置）→ 报错里给出**可执行的手动命令**。
+fn install_npm_package(def: &catalog::DepDef) -> Result<(), download::DownloadError> {
+    let Some(pkg) = npm_package_of(def.id) else {
+        return Err(download::DownloadError(format!("依赖 {} 没有 npm 安装规格", def.id)));
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "npm", "install", "-g", pkg]);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("npm");
+        c.args(["install", "-g", pkg]);
+        c
+    };
+
+    let out = cmd.output().map_err(|e| {
+        download::DownloadError(format!(
+            "无法启动 npm：{e}。请先安装 Node.js（含 npm），或手动执行：npm i -g {pkg}"
+        ))
+    })?;
+    if !out.status.success() {
+        let detail: String = String::from_utf8_lossy(&out.stderr).trim().chars().take(400).collect();
+        return Err(download::DownloadError(format!(
+            "npm 安装失败（退出码 {:?}）：{detail}",
+            out.status.code()
+        )));
+    }
     Ok(())
 }
 
