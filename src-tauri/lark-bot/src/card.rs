@@ -81,8 +81,7 @@ impl Throttle {
 
 // ───────────────────────────── 渲染 ─────────────────────────────
 
-/// 按**字节**预算截断（回退到字符边界，绝不切出半个 UTF-8 字符），并说明已截断。
-///
+/// 按**字节**预算截断（回退到字符边界，绝不切出半个 UTF-8 字符），并说明已截断。///
 /// 按字节而不是字符：飞书的限制是卡片 JSON ≤ 30KB **字节**，而中文 1 字 = 3 字节
 /// （2026-10-15 实测踩过：按"字符"设限会把长中文答案截得比纯文本还短）。
 pub fn clip_bytes(text: &str, max_bytes: usize) -> String {
@@ -103,13 +102,131 @@ pub fn clip_bytes(text: &str, max_bytes: usize) -> String {
 /// 极端长的答案不该把聊天刷成十几条（用户要的是"看得到"，不是"被淹没"）。
 pub const MAX_CARDS: usize = 6;
 
+/// 飞书卡片 markdown 支持的是**子集**，这里把不支持的写法降级成等价表达。
+///
+/// **实测能力矩阵（2026-10-15，用户逐项核对，见 §8.3）**
+///
+/// | 支持 ✅ | 不支持 ❌ |
+/// |---|---|
+/// | `**粗体**`、`*斜体*`、`~~删除~~`、`-` 列表、`1.` 列表、**嵌套列表（缩进）**、代码块、链接、`---`、空行 | **`#` 标题**、**行内代码**、**`>` 引用**、**表格** |
+///
+/// 降级规则（**只改"怎么摆"，不改内容**）：
+///
+/// 1. `### X` → `**X**`（独立加粗行，前后补空行）—— 这是最要紧的一条：模型的回答里标题极多，
+///    不降级就会满屏裸 `###`
+/// 2. `* 项目` → `- 项目`（`*` 会被当斜体起始；`-` 实测稳定）——**缩进一律原样保留**，
+///    因为**嵌套列表实测是支持的**（拍平会白丢层级）
+/// 3. 行内代码的反引号去掉（`x`）—— 飞书不渲染行内代码，留着就是裸反引号
+/// 4. `> 引用` → 去掉 `>`，保留文字
+/// 5. **表格** → 用代码块包起来（保住对齐；飞书不渲染表格）
+///
+/// 安全边界：**代码块内部一律原样保留**（`#`、反引号、`|` 在那里都是内容，不是标记）。
+pub fn normalize_for_card(text: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut in_fence = false;
+    let mut in_table = false;
+    let close_table = |out: &mut Vec<String>, in_table: &mut bool| {
+        if *in_table {
+            out.push("```".to_string());
+            *in_table = false;
+        }
+    };
+
+    for raw in text.split('\n') {
+        let line = raw.trim_end();
+        let trimmed = line.trim_start();
+
+        // ── 代码块：原样进出（不解析内部任何标记）──
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            close_table(&mut out, &mut in_table);
+            in_fence = !in_fence;
+            out.push(line.to_string());
+            continue;
+        }
+        if in_fence {
+            out.push(line.to_string());
+            continue;
+        }
+
+        // ── 表格行：连续包进代码块 ──
+        if is_table_row(trimmed) {
+            if !in_table {
+                out.push("```".to_string());
+                in_table = true;
+            }
+            out.push(line.to_string());
+            continue;
+        }
+        close_table(&mut out, &mut in_table);
+
+        // 行内代码：去掉反引号（非代码块行才处理）
+        let line = line.replace('`', "");
+        let trimmed = line.trim_start();
+        let indent = " ".repeat(line.len() - trimmed.len());
+
+        // ① 标题 → 加粗独立行
+        if let Some(title) = heading_text(trimmed) {
+            if !out.last().map(|l| l.trim().is_empty()).unwrap_or(true) {
+                out.push(String::new());
+            }
+            out.push(format!("**{title}**"));
+            continue;
+        }
+        // ② `* 项目` → `- 项目`
+        if let Some(rest) = bullet_rest(trimmed) {
+            out.push(format!("{indent}- {rest}"));
+            continue;
+        }
+        // ④ 引用 → 去掉 `>`，保留文字
+        if let Some(rest) = trimmed.strip_prefix('>') {
+            out.push(format!("{indent}{}", rest.trim_start()));
+            continue;
+        }
+        out.push(line.to_string());
+    }
+    close_table(&mut out, &mut in_table);
+    out.join("\n")
+}
+
+/// `### 标题` → `Some("标题")`；`#` 数量 1–6 且后面有内容才算标题。
+fn heading_text(line: &str) -> Option<String> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if hashes == 0 || hashes > 6 {
+        return None;
+    }
+    let rest = line[hashes..].trim();
+    if rest.is_empty() { None } else { Some(rest.to_string()) }
+}
+
+/// `* 项目` / `*\t项目` → `Some("项目")`。
+///
+/// **必须要求 `*` 后面是空白**：否则 `*斜体*` 会被误当列表项。
+fn bullet_rest(line: &str) -> Option<String> {
+    let rest = line.strip_prefix('*')?;
+    if !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
+    if rest.starts_with("**") {
+        return None; // `**粗体**` 不是列表
+    }
+    Some(rest.trim_start().to_string())
+}
+
+/// 形如 `| a | b |` 的行（飞书不渲染表格 → 我们用代码块保住对齐）。
+fn is_table_row(line: &str) -> bool {
+    line.starts_with('|') && line.ends_with('|') && line.matches('|').count() >= 2
+}
+
 /// 渲染一张卡片（**1.0 schema**：`elements` 在顶层）。
+///
+/// `body_md` 会先过 [`normalize_for_card`]：飞书的卡片 markdown 是**子集**，
+/// 不支持的写法要降级，否则用户会看到裸标记（`### 一、…`）。
 ///
 /// `footer` 走 `note` 元素（灰色小字），用于"耗时 / 引用条数"这类元信息。
 pub fn render_card(title: &str, body_md: &str, footer: Option<&str>) -> serde_json::Value {
     let mut elements = vec![json!({
         "tag": "markdown",
-        "content": clip_bytes(body_md, MAX_BODY_BYTES),
+        "content": clip_bytes(&normalize_for_card(body_md), MAX_BODY_BYTES),
     })];
     if let Some(f) = footer.map(str::trim).filter(|f| !f.is_empty()) {
         elements.push(json!({ "tag": "hr" }));
@@ -476,5 +593,50 @@ mod tests {
         let f = c["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
         assert!(!f.contains("段"), "只有一段时不该出现分页标记：{f}");
         assert!(f.contains("2 条证据"));
+    }
+
+    // ── markdown 子集降级（§8.3 实测矩阵：这些写法飞书**不渲染**）──
+
+    #[test]
+    fn headings_become_bold_standalone_lines() {
+        let out = normalize_for_card("前文\n### 一、公司设立\n正文");
+        assert_eq!(out, "前文\n\n**一、公司设立**\n正文", "标题要变加粗行并补空行");
+        assert!(!out.contains('#'), "不能残留裸 #：{out}");
+    }
+
+    #[test]
+    fn asterisk_bullets_become_dash_but_italics_are_untouched() {
+        assert_eq!(normalize_for_card("* 项目 A"), "- 项目 A");
+        assert_eq!(normalize_for_card("  * 嵌套项"), "  - 嵌套项", "缩进要保留");
+        assert_eq!(normalize_for_card("*斜体* 不是列表"), "*斜体* 不是列表");
+        assert_eq!(normalize_for_card("**粗体** 也不是列表"), "**粗体** 也不是列表");
+    }
+
+    #[test]
+    fn inline_backticks_and_blockquote_marker_are_removed() {
+        assert_eq!(normalize_for_card("调用 `foo()` 即可"), "调用 foo() 即可");
+        assert_eq!(normalize_for_card("> 引用一句"), "引用一句");
+    }
+
+    #[test]
+    fn tables_are_wrapped_in_a_code_block() {
+        let out = normalize_for_card("| a | b |\n| --- | --- |\n| 1 | 2 |\n普通行");
+        assert!(out.starts_with("```\n| a | b |"), "表格前要有代码块起点：{out}");
+        assert!(out.contains("| 1 | 2 |\n```"), "表格后要闭合：{out}");
+        assert!(out.ends_with("普通行"), "表格后的正文不受影响：{out}");
+    }
+
+    /// **安全边界**：代码块内部是内容、不是标记 —— 一个字都不能改。
+    #[test]
+    fn code_block_content_is_left_verbatim() {
+        let src = "```\n### 标题\n`x`\n| a | b |\n```";
+        assert_eq!(normalize_for_card(src), src);
+    }
+
+    #[test]
+    fn normalization_is_idempotent() {
+        let src = "### 标题\n* 项\n| a | b |\n| - | - |\n`code`\n> 引";
+        let once = normalize_for_card(src);
+        assert_eq!(normalize_for_card(&once), once, "二次归一化不该再变化");
     }
 }
