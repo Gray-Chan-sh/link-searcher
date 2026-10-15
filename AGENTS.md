@@ -130,6 +130,17 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 `sleep=50ms`，隐含假设 `window ≤ 4`；页窗口改为"全局预算、上限 8"后随负载漂移而红，且在 HEAD 上
 **同样失败** —— 属既有缺陷，非当时改动引入。）
 
+**⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
+
+给应用**新增 bin 目标**、加 `default-run`、换入口点这类改动，`cargo build` / `cargo test` **都不会**
+暴露问题 —— 它们不需要"跑哪个二进制"的推断。但 `tauri dev` 内部是用 `cargo run` 起应用的：
+
+> 2026-10-15 实测：新增 `src/bin/lark-bot.rs` 后 `npx tauri dev` 直接失败
+> （`could not determine which binary to run ... available binaries: lark-bot, link-searcher`），
+> 而**同一提交的全门禁是绿的**。
+
+→ 此类改动提交前**至少起一次应用**，或至少验 `cargo run <flags> -- --help` 能成功推断。
+
 ## 静态分析（Semgrep）
 
 每次提交前，必须运行阻塞级检查，**零发现**才可提交：
