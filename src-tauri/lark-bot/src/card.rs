@@ -453,6 +453,53 @@ pub fn action_value(action: &str, session_id: &str) -> String {
     serde_json::json!({ "action": action, "session_id": session_id }).to_string()
 }
 
+/// 从回调事件的原始 JSON 里取出**操作者 `open_id`**。
+///
+/// ⚠️ 该字段的**准确形状尚未用真实样本确认**（§2 那份样本以 `card_content` / `token` 为主），
+/// 因此这里**兼容几种已知形状**，并且**fail-closed**：取不到就返回 `None`，上层据此**拒绝**。
+/// 宁可"按钮暂时点不动"，也绝不"看不懂就放行" —— 回调是**另一条入口**，
+/// 消息入口那套闸门**不会**自动保护它。
+///
+/// 兼容形状：`operator_id` 为字符串；或对象里的 `open_id`/`id`/`user_id`；
+/// 或外层叫 `operator` / `operator_open_id`。
+pub fn operator_open_id(v: &serde_json::Value) -> Option<String> {
+    fn pick(x: &serde_json::Value) -> Option<String> {
+        if let Some(s) = x.as_str() {
+            let t = s.trim();
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+        for k in ["open_id", "id", "user_id"] {
+            if let Some(s) = x.get(k).and_then(|y| y.as_str()) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        None
+    }
+    for k in ["operator_id", "operator", "operator_open_id"] {
+        if let Some(id) = v.get(k).and_then(|x| if x.is_null() { None } else { pick(x) }) {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// 回调的准入判定：**与消息入口共用同一份白名单**（§7.1 ②：空名单 = 拒绝全部，fail-closed）。
+///
+/// 回调里没有 `chat_type`（它不是消息事件）→ 这里**只判身份**；
+/// "仅私聊"由消息入口保证（卡片只会发在 p2p 会话里）。
+/// 取不到操作者（`None`）→ **拒绝**。
+pub fn card_action_allowed(operator: Option<&str>, allowed_users: &[String]) -> bool {
+    match operator.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(op) => allowed_users.iter().any(|u| u == op),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,6 +815,45 @@ mod tests {
         assert_eq!(
             parse_card_action(&ev),
             Some(CardAction::OpenDetail { session_id: "s4".into() })
+        );
+    }
+
+    // ── 回调的身份与准入（**fail-closed**；回调是另一条入口）──
+
+    #[test]
+    fn operator_open_id_accepts_the_known_shapes() {
+        let s = |j: &str| operator_open_id(&serde_json::from_str::<serde_json::Value>(j).unwrap());
+        assert_eq!(s(r#"{"operator_id":"ou_a"}"#), Some("ou_a".to_string()));
+        assert_eq!(s(r#"{"operator_id":{"open_id":"ou_b"}}"#), Some("ou_b".to_string()));
+        assert_eq!(s(r#"{"operator":{"open_id":"ou_c"}}"#), Some("ou_c".to_string()));
+        assert_eq!(s(r#"{"operator_open_id":"ou_d"}"#), Some("ou_d".to_string()));
+    }
+
+    /// 形状未确认 → 取不到就**必须是 None**（上层据此拒绝），绝不猜。
+    #[test]
+    fn operator_open_id_is_none_when_unavailable() {
+        let s = |j: &str| operator_open_id(&serde_json::from_str::<serde_json::Value>(j).unwrap());
+        for bad in [
+            r#"{}"#,
+            r#"{"operator_id":""}"#,
+            r#"{"operator_id":null}"#,
+            r#"{"operator_id":{}}"#,
+        ] {
+            assert_eq!(s(bad), None, "取不到操作者必须是 None（fail-closed）：{bad}");
+        }
+    }
+
+    #[test]
+    fn card_action_is_denied_unless_operator_is_whitelisted() {
+        let allowed = vec!["ou_me".to_string()];
+        assert!(card_action_allowed(Some("ou_me"), &allowed));
+        assert!(!card_action_allowed(Some("ou_stranger"), &allowed), "陌生人不许点");
+        assert!(!card_action_allowed(None, &allowed), "取不到操作者 → 拒绝");
+        assert!(!card_action_allowed(Some(""), &allowed));
+        assert!(!card_action_allowed(Some("  "), &allowed));
+        assert!(
+            !card_action_allowed(Some("ou_me"), &[]),
+            "空名单 = 拒绝全部（与 §7.1 ② 一致）"
         );
     }
 }
