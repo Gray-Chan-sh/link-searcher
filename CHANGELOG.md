@@ -50,6 +50,8 @@
 - **补录 §5.3「跨平台可用性」**：应用本体三平台 cfg 分叉齐全（`process.rs`／`deps/commands.rs:117-148` winget/brew/apt／三套 OCR）→ **可编译**；但 `tauri.conf.json:30` `"targets": ["msi"]` **只有 MSI**、无 dmg/deb/appimage、**无 CI** → 交付只覆盖 Windows。`lark-cli` 官方声明 `os: darwin/linux/win32` × `cpu: x64/arm64/riscv64`，且是**原生二进制**（`bin/lark-cli.exe` 49 MB，`scripts/run.js` 只是 Node 薄壳）→ **可直连二进制、不必装 Node**，定位可复用 `process.rs`。另记其**自更新**行为（`run.js` 处理 `.old` 残留）为跨平台共有运维风险。
 - **§8 新增两条技术点**：**卡片更新次数上限**（`card.action.trigger` token 有效 30 分钟、**最多更新 2 次**，`lark-cli event schema` 原文 → 流式 patch 必须节流合并）与**会话续租**。
 - **§9 新增 P0.5 验证阶段**，并修正 P1 的路由（`/api/chat/ask` → `POST /api/ai/conversation/ask/stream` + 节流）；P0 前置补"控制台勾开事件"（`im.message.receive_v1` 属 Required Console Events）；§10 待确认项补 4 条（跨平台范围、机器人同机、lark-cli 取得方式/自更新、`card.action.trigger` 长连接支持）。
+- **新增 §5.4「部署场景与并发模型」**：以两条决定一切的事实（① `session_guard` 按 IP 识别 → **多端登录不产生多客户端**；② 飞书 p2p 会话是 **per-user 不是 per-device** → 多端不增会话数）给出四种场景（个人助手单端/多端/多群、团队 7×24）× 必做项表；含三个技术点：桌面 UI 与 bot **共写同一 `chat_history.json`**（`session.rs:14-16` 已自认桌面+Web 可并发写，而 `AGENTS.md` #3/#4 正是该存储的并发问题 → 需决定 bot 是否用独立命名空间）、**多端点击瞬间用满卡片"最多更新 2 次"**、以及飞书侧"同一 app 只能一个 event bus 连接"（不能靠多开 consumer 扩并发）。
+- **据实重判 C1/C2/C3（修正我自己上一轮的过度判断）**：**C2 从"必做"下调为非必做**——`abb4583` 已在 HEAD（提取期不再持连接）、AI 路径本就"借→查→还→再生成"（`ai/prompt.rs:65`、`ai.rs:214`）、且已有交互优先 `ChatTurnGuard`（`ai.rs:375`），剩"变慢"用 bot 侧超时+退避即可；**C1 可零核心改动规避**（桌面端靠 UI 单飞兜住全局 `AI_CANCEL`，bot 加每会话串行队列等价）；**C3（生命周期/优雅停机/daemon 归属）为唯一必做**。§10「定位」标注为**阻塞其它所有结论的前置项**。
 - **未做**：无代码改动，未跑 `cargo check` / `npx tsc`（文档变更）。
 
 ## 2026-10-15：扩展功能想法 + 飞书机器人接入设计（纯文档，未改代码）
