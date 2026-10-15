@@ -977,6 +977,41 @@ src-tauri/
 **安全边界**：**代码块内部一律原样保留**（`#`、反引号、`|` 在那里都是内容），并有单测盯着；
 归一化**幂等**（跑两次结果相同）。层级的表达降级为"空行 + 加粗 + 中文编号（一、二、三）"。
 
+### 8.4 卡片交互（"D"）的前置调研与设计（2026-10-16）
+
+**本次实测/复核的事实**：
+
+- `lark-cli event consume <EventKey>` **只接受一个 key**（没有多 key 语法）→ 卡片回调必须**另起一个 consumer**。
+- `event consume card.action.trigger --as bot --dry-run` → **`status: ready`**，三个前置全部 ok
+  （`credentials_available` / `console_event_published` / `scopes_granted`），其 `would_write` 是
+  `start_or_reuse_local_bus` + `register_consumer` + `open_event_stream` ——
+  即它**注册到本地 bus**，而**不是**自己再连一条飞书上游。
+- 因此 §5.1 那条"同一 app **只能有一个** event bus 连接"应当指的是**上游**（daemon → 飞书）那一条；
+  **本地多消费者大概率是允许的** —— 但**这条还没有被直接验证**。
+
+**决定性实验（下次做；必须在"bot 可短暂中断"时进行）**：
+
+> 在 bot 的 consumer 正跑着时，另起
+> `lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 30s`
+>
+> - 能起来且 bot 的事件不断 → 按"**双消费者**"架构做 D ✅
+> - 报 `another bus already connected` / exit 2 → 必须改成"一条连接消费两个 key"（需另找实现路径）
+>
+> ⚠️ **别在用户正用飞书时做**：失败可能打断正在服务的那条流。
+
+**若实验通过，D 的实现要点**：
+
+1. bot 起**两个** consumer（消息 + 卡片回调），各自一条 NDJSON 流（失败互不影响）；
+2. 回调路由用 **`action_value` / `custom_action_id`** —— §2 实测 `card_content` 会被飞书**重写**，
+   **不能**靠"比对发送原文"判断卡片状态；
+3. 更新卡片**优先用 app 身份 `PATCH`**（§8.1 实测**无次数限制**），
+   **不要**走回调 token 那条路（"最多 2 次"，那是另一条路）；
+4. 按钮语义（§6 路线）：`打开详情`（链到 WebUI）/ `换一批证据`（重新检索）——
+   注意与"回答已收尾"的状态机配合（回调可能**晚到**，要能忽略过期回调）。
+
+> **另**："分页"已由**自动续发卡片**解决（§8.2）→ D 的按钮应做**交互类**（详情 / 重试），
+> 而不是翻页按钮（那是重复建设）。
+
 ---
 
 ## 九、分阶段实施建议
