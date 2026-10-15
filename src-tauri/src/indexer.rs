@@ -851,25 +851,33 @@ impl IndexerService {
         // Tantivy: one term delete for the whole directory (committed below).
         self.delete_dir(dir_id)?;
 
-        // Per-`file_id` rows must be cleared *before* file_tracking disappears.
+        // ── 一张事务里删完所有按 file_id / dir_id 的行 ──────────────────────────
+        //
+        // 为什么必须**原子 + 不吞错**：这几条 DELETE 原本各自独立执行、且**失败只 warn**
+        // （旧写法），于是在并发写入者（keeper / 周期提交）短暂持锁时会**静默失败**；
+        // 而紧随其后的 `DELETE FROM file_tracking` 可能成功 —— 结果留下
+        // "追踪行已没、`doc_embeddings`/`doc_summaries` 还在"的**孤儿**。
+        // 实测（2026-10-15）：正是这个症状让 `purge_dir_data_clears_dir_but_keeps_shared_content`
+        // 约 **1/6 轮次**红（`file_tracking(dir_id)=0` 而 `doc_embeddings` ≠ 0）。
+        // 顺序也不能变：**先**删按 file_id 的行，**再**删 file_tracking（子查询依赖后者还在）。
+        let tx = conn.unchecked_transaction().context("purge_dir_data: begin")?;
         for sql in [
             "DELETE FROM doc_embeddings WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
             "DELETE FROM doc_summaries  WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
             "DELETE FROM index_errors   WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
         ] {
-            if let Err(e) = conn.execute(sql, [dir_id]) {
-                log::warn!("[INDEX] purge_dir_data: {e}");
-            }
+            tx.execute(sql, [dir_id]).context("purge_dir_data: per-file_id cleanup")?;
         }
-        conn.execute("DELETE FROM file_tracking WHERE dir_id=?1", [dir_id])
+        tx.execute("DELETE FROM file_tracking WHERE dir_id=?1", [dir_id])
             .context("purge_dir_data: delete file_tracking failed")?;
-        if deep
-            && let Err(e) = conn.execute("DELETE FROM unsupported_ext_stats WHERE dir_id=?1", [dir_id])
-        {
-            log::warn!("[INDEX] purge_dir_data: unsupported_ext_stats: {e}");
+        if deep {
+            tx.execute("DELETE FROM unsupported_ext_stats WHERE dir_id=?1", [dir_id])
+                .context("purge_dir_data: unsupported_ext_stats failed")?;
         }
+        tx.commit().context("purge_dir_data: commit")?;
 
         // Content-keyed cleanup: only rows whose md5 no longer has any owner.
+        // 这两步保持**尽力而为**（各自内部有自己的事务/幂等语义），失败只记日志。
         if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
             log::warn!("[INDEX] purge_dir_data: cleanup_orphan_content: {e}");
         }
