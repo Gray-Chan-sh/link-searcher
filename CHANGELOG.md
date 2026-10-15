@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：验证连接持有期修复（`abb4583`）+ 批屏障 ~18GB 归因**证伪**
+
+- **端到端验证（隔离实例，不碰真实库、不碰 Syncthing 同步目录）**：用 CLI 的 `LINK_SEARCHER_DATA_DIR=<临时>` + `scan <临时目录>` 走**同一条核心链路**（`scanner → batch_index → extract_and_index_single`）：
+  - 语料 **206 文件 / 12.1 MB**（200 小文件 + 5×63k 字长文 + 1×5.24M 字巨文）；
+  - 结果 **206 files, 206 indexed, 0 errors, 2389 ms**；
+  - 直接查库：`active+indexed=206`、`failed=0`、`indexed<>1=0`、`md5 IS NULL=0`、`content_index=206`、**「indexed=1 却无 content_index」= 0（无内容丢失）**、`doc_chunks=4278`（huge.txt 4033 + 5 篇长文各 49）、`index_errors=0`。
+  - → 三阶段重构（A 提取前读 / B 提取 / C 提取后写）在真实批量路径上**没有丢正文、没有丢 `mark_extracted`、分块照常**。（该入口退出即结束，回填 keeper 未及跑完，故 `doc_embeddings`/`chunk_embeddings` 为 0 —— 与本次改动无关。）
+- **批屏障「~18GB」归因 = 证伪 → 不做 Phase-1 分批落库**：全库 `SUM(char_count)` = **108,354,301 字 ≈ 0.30 GB**（16,349 篇，单篇最大 2.13M 字）→ 一批（≤500 文件）驻留文本**上界 ~0.30 GB**，与 18GB 差约 **60×**；隔离跑实测驻留 **~5.5 MB**。故 18.7GB 属 `extractor/audio.rs` 整段解码、10.2GB 属并行大扫描件**页位图**（均受 `load.rs` 闸门管），**不是 Phase-1 结果屏障**。保留每块一条 `[PERF] 批屏障` 观测作为长期口径。
+- **真实应用重启验证**：13:34:08 启动新构建（`link-searcher.exe` 13:31:37），`deps: OCR=ok pdf=ok FunASR=ok ffmpeg=ok`；两目录启动扫描 7,791 + 12,049 文件、**0 errors**、13:34:47 `启动扫描完成`；**无** `DB conn: timed out`。
+- **遗留（下一轮可选）**：① 提取已不再占池，**连接池 48 可以缩回**（当前 48 是当年为了容纳"提取期持有连接"而加的）；② `paddleocr::dict_with_space_token` 临时文件名与输入字典无关导致的测试偶发串扰（见上一条）。
+- **涉及文件**：`docs/index-pipeline-eval.md`、`CHANGELOG.md`（**无代码改动**）。
+
 ## 2026-10-15：修「提取期长期持有 DB 连接」（界面/Web API 被池饿死的**根因**）+ 批屏障内存取证观测
 
 - **根因（结构性；前几轮只做了缓解）**：`indexer.rs` 的 `extract_and_index_single(job, conn, …)` 由**调用方先取连接、再传进来**，这条连接从「去重查询」一直持有到「`mark_extracted`」，**中途横跨整段提取（含数分钟的 PDF OCR）**。于是 `batch_io_concurrency` 个 Phase-1 worker 在整个批次里占着池连接 —— 并发 14 时曾把 24 连接池耗尽（实测 108 个文件超时误判失败），界面查询也被饿死。此前只靠"池 24→48 + 等待 60s + 界面 2s 超时 + 界面专用连接"缓解，本轮从根上改掉。
