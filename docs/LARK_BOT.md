@@ -489,7 +489,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 |---|---|---|---|
 | **C1** | 多会话并发（取消串扰） | 场景 A/B：**靠排队完全规避，0 核心改动**；场景 C：**必须做队列** | `AI_CANCEL` 是全局 `AtomicBool`（`ai/mod.rs:1567`）且**无 single-flight 守卫**；每次生成都 `reset_ai_cancel()`（`commands/ai.rs:372`）→ 并发时会互清标志。桌面端靠 **UI 单飞**兜住 |
 | **C2** | 索引期资源竞争 | **已被削平，非必做**（曾定为必做，据实下调） | ① `abb4583` 已在 HEAD（提取期不再持连接）② AI 路径本就是"借→查→还→再生成"（`ai/prompt.rs:65`、`ai.rs:214`）③ 已有交互优先机制 `ChatTurnGuard`（`ai.rs:375`）。剩"变慢"，bot 侧超时+退避足够 |
-| **C3** | 进程生命周期 / 优雅停机 / daemon 归属 | **唯一必做**（约两三百行） | Windows 无可用 `SIGTERM`，只能靠**关 stdin** 优雅停；event bus daemon 是**跨 app 单例**、归属未定义；处理不当 → 订阅泄漏 → 重复投递，属"**静默坏**"类（对照 `AGENTS.md` 4 条历史教训）。**2026-10-15 实测补充**：lark-cli 自称 daemon "最后一个消费者退出 30s 后自动退出"，但**实测没有** —— bot 退出后 daemon 仍 `running`、活跃消费者 0、uptime 5m50s（`lark-cli event status` 可查）。官方干净的停法是 **`lark-cli event stop`**（不是 `kill -9`）。→ C3 必须**显式决定** daemon 的归属：随 bot 停（用 `event stop`）还是留着复用（推荐留着，可避免重连抖动与订阅泄漏类风险） |
+| **C3** | 进程生命周期 / 优雅停机 / daemon 归属 | ✅ **核心已实现并实测（2026-10-15）**：GUI 在 `setup` 里拉起 bot（`lark_bot.rs`，按**与主程序同目录**解析可执行文件 —— 这样 dev 无需 `externalBin` 就能跑）、`RunEvent::Exit` 里收掉它。**两个实测发现**：① **应用被硬杀/崩溃时 `RunEvent::Exit` 不会执行 → 会留下孤儿 bot**（实测确认；危害是它继续占长连接，且应用重启后会**同时跑两个 bot → 重复回答**）→ 已给 bot 加 `--parent-pid` 看门狗（`sysinfo` 轮询，父进程消失即 `exit(0)`），实测**硬杀后 2 秒内自退**；② **daemon 的存活不受我们控制**（实测它既会长期留存、也会自行退出，且 `lark-cli event status` 本身会起一个）→ 故按决策**不去管它**：在就复用、不在就重建，绝不 `kill -9`。**未做**：autostart 开关（本轮的另一半） |
 
 > 另一条飞书侧硬约束：**同一 app 只能有一个 event bus 连接**（`another bus already connected` → 校验失败 exit 2）
 > → "单机器人"被强制，**不能靠多开 consumer 扩并发**，并发只能在一个进程内解决。

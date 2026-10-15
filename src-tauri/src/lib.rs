@@ -7,6 +7,7 @@ pub mod db;
 pub mod deps;
 pub mod extractor;
 pub mod indexer;
+pub mod lark_bot;
 pub mod load;
 pub mod logs;
 pub mod process;
@@ -427,6 +428,10 @@ get_dir_children,
                 }
             }
 
+            // 飞书 bot sidecar（§5.4 的 C3）：webapi 之后再拉，因为它要经 webapi 读设置。
+            // bot 侧对"webapi 还没监听上"有重试（见 bin/lark-bot.rs），故这里不必等。
+            lark_bot::spawn_if_enabled(app.handle());
+
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
@@ -726,11 +731,15 @@ get_dir_children,
     match result {
         Ok(app) => {
             app.run(|app_handle, event| {
-                if let tauri::RunEvent::Exit = event
-                    && let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
+                if let tauri::RunEvent::Exit = event {
+                    // 先收 bot：它一停，其 lark-cli 子进程会因 stdin EOF 优雅退出
+                    //（bus daemon 按决策**留着复用**，不在这里动它）。
+                    lark_bot::shutdown();
+                    if let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
                         token.cancel();
                         log::info!("[SHUTDOWN] Web API server shutdown signal sent");
                     }
+                }
             });
         }
         Err(e) => {

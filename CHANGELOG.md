@@ -1,5 +1,20 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书 bot 生命周期（C3 核心）——GUI 拉起 / 退出收掉 / 硬杀不残留
+
+> `docs/LARK_BOT.md` §5.4 把 C3 标为"唯一必做"。本轮实现其核心并在真机验证（含两种退出路径）。
+
+- **新增 `src-tauri/src/lark_bot.rs`**：`spawn_if_enabled(app)` 读 `lark_bot_enabled`，为真时拉起 bot 并把它的 stdout/stderr **逐行转发进应用日志**；`shutdown()` 在 `RunEvent::Exit` 里收掉它。`lib.rs` 在 webapi 之后调用（bot 要经 webapi 读设置）。
+- **可执行文件按"与主程序同目录"解析**（`current_exe()` 旁）：开发下 `cargo` 已把两个 bin 都放进 `target/debug/`，因此**无需** `externalBin` 即可运行 —— 这点很重要，`externalBin` 要求 `<name>-<target-triple>` 文件存在，**配置了却没准备文件会直接打断 `tauri dev`**。打包那一步留待后续（已在模块注释写明）。
+- **停止方式**：只 `kill` bot，**不碰 lark-cli 的 bus daemon**（按决策"留着复用"）。bot 持有 lark-cli 的 stdin 管道，bot 一死该管道即 EOF → lark-cli **优雅退出**（它自己的提示即 "close stdin"）。
+- **⚠️ 实测发现 ①（真实缺口）**：**应用被硬杀/崩溃时 `RunEvent::Exit` 不会执行 → bot 变孤儿**（实测：`Stop-Process` 应用后 lark-bot 仍在，且其 lark-cli 消费者 + daemon 都在）。危害不止"泄漏"：孤儿 bot 仍占长连接，**应用重启后会同时跑两个 bot → 重复回答**。
+  - **修法**：GUI 拉起时传 `--parent-pid <pid>`，bot 侧起看门狗（`sysinfo` 只刷新该 pid，`exit(0)` 退出；进程一死管道即 EOF，lark-cli 优雅退出）。**实测：硬杀应用后 2 秒内 bot 自退** ✅。
+  - 选 `sysinfo` 而非 `OpenProcess`/`WaitForSingleObject`：它**已是本包依赖**（自适应闸门在用）且跨平台，只刷新单个 pid 成本可忽略。
+- **实测发现 ②（修正上一轮的结论）**：daemon 存活**不受我们控制** —— 它既会长期留存（上轮实测 uptime 5m50s），也会自行退出；且 **`lark-cli event status` 本身就会起一个**（本轮实测看到 PID 与 uptime 都变了）。→ 这**加强**了"留着复用"的决策：不去管理它，**在就复用、不在就重建**，绝不 `kill -9`。
+- **新增启动期健壮性**：bot 读设置失败会**重试 20 秒**（GUI 拉起它时 webapi 的 bind 可能还在异步进行）。
+- **验证方式（AGENTS 门禁 ⑤）**：本轮属结构性改动，已**真起应用**验证：`cargo run --no-default-features` → 确认 bot 被拉起 → 硬杀应用 → 确认 bot 2 秒内自退、daemon 留存。
+- **未做**：**autostart 开关**（本轮 A 的另一半，见 §5.1 缺口 1）；`externalBin` 打包；卡片+节流；内容闸门。
+
 ## 2026-10-15：飞书 bot **端到端验收通过**（P1 纯文本版）+ 补设置白名单缺口
 
 > 首次在**真实飞书**上跑通全链路，并因此发现一个必须修的缺口。

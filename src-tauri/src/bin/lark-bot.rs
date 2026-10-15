@@ -52,6 +52,14 @@ const MAX_REPLY_CHARS: usize = 3000;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // ── 0. 父进程看门狗（由 GUI 拉起时才启用）──────────────────────────────
+    // 应用被**硬杀/崩溃**（任务管理器、OOM、panic 后 abort）时 `RunEvent::Exit`
+    // **不会**执行 → 没人收我们。若不看住父进程，就会留下**孤儿 bot**继续占着长连接；
+    // 更糟的是应用重启后会**同时跑两个 bot**（重复回答）。2026-10-15 实测确认过这个缺口。
+    if let Some(pid) = arg_value("--parent-pid").and_then(|v| v.parse::<u32>().ok()) {
+        watch_parent(pid);
+    }
+
     // ── 1. 凭据与基址 ──────────────────────────────────────────────────────
     let token = link_searcher_lib::config::web_api_token();
     if token.is_empty() {
@@ -63,7 +71,8 @@ fn main() {
     log::info!("[bot] webapi = {base}");
 
     // ── 2. 策略（§7.1 ⑤；默认关，必须显式开启）─────────────────────────────
-    let cfg = match http.load_gate_config() {
+    // 由 GUI 拉起时，webapi 的 bind 可能还在异步进行 → 重试一小会儿再判定失败。
+    let cfg = match http.load_gate_config_with_retry(Duration::from_secs(20)) {
         Ok(c) => c,
         Err(e) => {
             log::error!("读取设置失败：{e}（主程序/webapi 是否在运行？）");
@@ -237,6 +246,41 @@ fn truncate_reply(answer: &str) -> String {
     format!("{head}\n\n…（回答过长已截断；完整内容请到 WebUI / 桌面端查看）")
 }
 
+// ───────────────────────────── 父进程看门狗 ─────────────────────────────
+
+/// 取命令行 `--key value` 形式的值（本进程参数极少，不引 clap）。
+fn arg_value(key: &str) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == key {
+            return args.next();
+        }
+    }
+    None
+}
+
+/// 父进程消失即退出（由 `--parent-pid` 启用）。
+///
+/// 不用"父进程句柄"的原因：Windows 上要 `OpenProcess` + `WaitForSingleObject`，
+/// 而 `sysinfo` 已是本包依赖（自适应闸门在用）且**跨平台**，只刷新单个 pid 的成本可忽略。
+/// 退出走 `exit(0)`：进程一死，lark-cli 的 stdin 管道即 EOF → 它**优雅退出**
+/// （bus daemon 按决策留着复用，不受影响；2026-10-15 实测过这条路径）。
+fn watch_parent(parent_pid: u32) {
+    std::thread::spawn(move || {
+        use sysinfo::{Pid, ProcessesToUpdate, System};
+        let pid = Pid::from_u32(parent_pid);
+        let mut sys = System::new();
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            sys.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+            if sys.process(pid).is_none() {
+                log::warn!("[bot] 父进程 {parent_pid} 已退出 → 随之退出（避免孤儿 bot 重复回答）");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 // ───────────────────────────── lark-cli 子进程 ─────────────────────────────
 
 /// 探测 `lark-cli` 可执行文件。
@@ -391,6 +435,23 @@ impl Http {
     }
     fn put(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         self.call("PUT", path, Some(body))
+    }
+
+    /// 读设置，并在 webapi 尚未监听时重试（GUI 拉起 bot 时 bind 可能还在异步进行）。
+    fn load_gate_config_with_retry(&self, budget: Duration) -> Result<BotConfig, String> {
+        let deadline = Instant::now() + budget;
+        loop {
+            match self.load_gate_config() {
+                Ok(c) => return Ok(c),
+                Err(e) => {
+                    if Instant::now() >= deadline {
+                        return Err(e);
+                    }
+                    log::warn!("[bot] 读取设置失败，1 秒后重试：{e}");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
     }
 
     /// 读 `app_settings` 里的飞书策略（§7.1 ⑤）。
