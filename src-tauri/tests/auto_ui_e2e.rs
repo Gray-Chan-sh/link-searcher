@@ -263,13 +263,16 @@ fn test_index_status_page_initial() {
     let tmp = TempDir::new("index_page");
     let (_app, webview) = setup_app(&tmp);
 
+    // NOTE: `get_index_status` 刻意走进程级「界面专用只读连接」(`ui_conn_guard`)，
+    // **不读**注入的 AppState 连接池（2026-10-15 为修「提取期界面被连接池饿死/
+    // 无响应」而加），所以这里无法断言该临时库的计数为 0 —— 它读的是真实
+    // data_dir 的统计。只断言返回形状 + 确实来自注入 AppState 的字段。
     let result = invoke_cmd(&webview, "get_index_status", json!({}));
-    assert_eq!(result["total_files"], json!(0), "expected total_files=0");
-    assert_eq!(result["indexed"], json!(0), "expected indexed=0");
-    let pending = result["pending"].as_i64().unwrap_or(0);
-    assert_eq!(pending, 0, "expected pending=0");
-    let failed = result["failed"].as_i64().unwrap_or(0);
-    assert_eq!(failed, 0, "expected failed=0");
+    assert!(result.is_object(), "index status should be an object");
+    for key in ["total_files", "indexed", "pending", "errors", "load_level"] {
+        assert!(result.get(key).is_some(), "index status should contain '{key}'");
+    }
+    assert_eq!(result["is_scanning"], json!(false), "injected AppState is not scanning");
 }
 
 #[test]
@@ -405,9 +408,12 @@ fn test_add_and_remove_dir() {
         .collect();
     assert!(ids.contains(&dir_id.as_str()), "dir should be in list");
 
-    // Remove
+    // Remove — returns a `RemoveDirReport` (added after this test was written;
+    // it used to be unit). Removal itself is proven by the list check below.
     let removed = invoke_cmd(&webview, "remove_dir", json!({"id": dir_id}));
-    assert_eq!(removed, json!(null), "remove should succeed");
+    assert!(removed.is_object(), "remove should return a report, got {removed}");
+    assert_eq!(removed["stopped_scan"], json!(false), "no scan was running in this test");
+    assert_eq!(removed["resumed_scan"], json!(false), "nothing to resume: no scan was stopped");
 
     // Verify removed
     let list2 = invoke_cmd(&webview, "list_dirs", json!({}));

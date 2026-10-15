@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::db;
 use crate::state::AppState;
@@ -187,7 +187,7 @@ pub struct RemoveDirProgress {
     pub detail: String,
 }
 
-fn emit_progress(app: &AppHandle, stage: &str, detail: impl Into<String>) {
+fn emit_progress<R: Runtime>(app: &AppHandle<R>, stage: &str, detail: impl Into<String>) {
     let _ = app.emit(
         "remove-dir-progress",
         RemoveDirProgress { stage: stage.to_string(), detail: detail.into() },
@@ -202,8 +202,8 @@ fn emit_progress(app: &AppHandle, stage: &str, detail: impl Into<String>) {
 /// (orphan `content_index`, ghost Tantivy documents).
 ///
 /// Returns `true` when a scan was actually stopped.
-async fn wait_for_scan_to_stop(
-    app: &AppHandle,
+async fn wait_for_scan_to_stop<R: Runtime>(
+    app: &AppHandle<R>,
     is_scanning: &std::sync::atomic::AtomicBool,
     cancel_scan: &std::sync::atomic::AtomicBool,
 ) -> bool {
@@ -229,9 +229,9 @@ async fn wait_for_scan_to_stop(
 }
 
 #[tauri::command]
-pub async fn remove_dir(
+pub async fn remove_dir<R: Runtime>(
     state: State<'_, AppState>,
-    app: AppHandle,
+    app: AppHandle<R>,
     id: String,
     purge: Option<bool>,
 ) -> Result<RemoveDirReport, String> {

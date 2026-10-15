@@ -196,13 +196,16 @@ fn test_ipc_get_index_status() {
     let tmp = TempDir::new("index_status");
     let (_app, webview) = setup_app(&tmp);
 
+    // NOTE: `get_index_status` 刻意走进程级「界面专用只读连接」(`ui_conn_guard`,
+    // 提交 2db9c21)，**不读**注入的 AppState 连接池 —— 它读的是真实 data_dir 的
+    // 统计，因此无法断言临时库计数为 0。只断言返回形状与来自注入 AppState 的字段。
     let result = invoke_cmd(&webview, "get_index_status", json!({}));
 
-    assert_eq!(
-        result["total_files"], json!(0),
-        "expected total_files=0"
-    );
-    assert_eq!(result["indexed"], json!(0), "expected indexed=0");
+    assert!(result.is_object(), "index status should be an object");
+    for key in ["total_files", "indexed", "pending", "errors"] {
+        assert!(result.get(key).is_some(), "index status should contain '{key}'");
+    }
+    assert_eq!(result["is_scanning"], json!(false), "injected AppState is not scanning");
 }
 
 #[test]

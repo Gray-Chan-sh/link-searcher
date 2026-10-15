@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Runtime, State};
 
 use crate::db;
 use crate::db::tracker;
@@ -152,8 +152,10 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
 /// The caller must already have claimed `is_scanning` (compare_exchange
 /// false→true); [`ScanWorker::run`] clears `is_scanning`/`cancel_scan` on every
 /// exit path.
-pub(crate) struct ScanWorker {
-    pub app: AppHandle,
+/// Generic over the runtime so the command can also run under
+/// `tauri::test::MockRuntime` (`tests/auto_ui_e2e.rs`); production uses `Wry`.
+pub(crate) struct ScanWorker<R: Runtime> {
+    pub app: AppHandle<R>,
     pub db: Pool<SqliteConnectionManager>,
     pub scanner: Arc<Scanner>,
     pub indexer: Arc<IndexerService>,
@@ -163,7 +165,7 @@ pub(crate) struct ScanWorker {
     pub logs_dir: PathBuf,
 }
 
-impl ScanWorker {
+impl<R: Runtime> ScanWorker<R> {
     /// `dir_id = None` scans every configured directory (full scan);
     /// `Some(id)` scans that one incrementally.
     pub fn run(self, dir_id: Option<String>) {
@@ -327,10 +329,10 @@ impl ScanWorker {
 }
 
 #[tauri::command]
-pub async fn trigger_scan(
+pub async fn trigger_scan<R: Runtime>(
     state: State<'_, AppState>,
     dir_id: Option<String>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<(), String> {
     if state
         .is_scanning
@@ -401,9 +403,9 @@ fn clear_index_tables(conn: &rusqlite::Connection) {
 ///
 /// Returns the number of records reset.
 #[tauri::command]
-pub async fn retry_failed_files(
+pub async fn retry_failed_files<R: Runtime>(
     state: State<'_, AppState>,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<u64, String> {
     let reset = {
         let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;

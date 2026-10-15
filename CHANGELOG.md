@@ -1,5 +1,18 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：修复静默失效的 mock E2E 测试（运行时泛型化 + 2 处过时断言）
+
+> 背景：`tests/auto_ui_e2e.rs` 自 `ada8485`（2026-10-12）起就**编译不过**，等于没在跑。按用户选择实施「泛型化」（非「删掉该命令的覆盖」）。
+
+- **① 运行时泛型化**：`remove_dir` 带 `app: AppHandle`（`ada8485` 为「删除时停扫描 + 传进度」而加），而该测试用 `MockRuntime` + `generate_handler!`，两者不兼容（`AppHandle: CommandArg<MockRuntime>` 不成立）。仅改 `remove_dir` 不够 —— 其内部构造 `ScanWorker { app }`，故一并泛型化为 `R: tauri::Runtime`：`ScanWorker<R>`（`index.rs`）、`trigger_scan<R>`、`retry_failed_files<R>`、`emit_progress<R>` / `wait_for_scan_to_stop<R>` / `remove_dir<R>`（`dirs.rs`）+ 两处 `use tauri::...Runtime`。**生产路径零行为变化**（`Wry` 由调用点推断；`run()` 只用 `app.emit`，本身与 runtime 无关）。
+- **② 恢复后才暴露的 2 处过时断言**（均为测试侧问题，产品行为正确）：
+  - `auto_ui_e2e::test_add_and_remove_dir`：断言 `remove_dir == null`，但该命令早已改为返回 `RemoveDirReport { message, stopped_scan, swept_orphan_dirs, resumed_scan }` → 改为断言报告形状（删除结果仍由随后的 `list_dirs` 校验）。
+  - `auto_ui_e2e::test_index_status_page_initial` 与 `ipc_test::test_ipc_get_index_status`：断言临时库 `total_files=0`，但 `get_index_status` 刻意走进程级「界面专用只读连接」`ui_conn_guard()`（见下），**不读**注入的 `AppState` 连接池 → 读到的是真实库统计（本机 19821）。改为断言返回形状 + 来自注入 `AppState` 的 `is_scanning`。
+- **③ 顺带发现的今日回归**：`2db9c21`（2026-10-15，`perf(ui): dedicated read-only connection for status queries`）引入 `UI_CONN`，**静默打破了 `ipc_test::test_ipc_get_index_status`**（同一根因）。该测试此前是编译通过且在跑的，说明那次改动只跑了 `--lib` 未跑集成测试。本次一并修好。
+- **验证**：`auto_ui_e2e` **15 passed / 0 failed**（此前 0 —— 编译不过）；`ipc_test` **8 passed**；`--lib` **542 passed**；`integration` 9、`focus_mode_test` 4、`merge_scope_test` 4、`test_pagination` 2、`webapi_http` 冒烟全绿；`cargo check --all-targets` 无 error。
+- **说明**：本轮**不改产品行为**，只让被掩盖的测试恢复真实运行；「`get_index_status` 绕过注入状态」是 `2db9c21` 的有意设计（修提取期界面无响应），测试侧按此对齐而非改产品。
+- `semgrep scan --severity ERROR`：**0 findings**。
+
 ## 2026-10-15：AI 取消按会话隔离（三端交互重构 · 阶段一）
 
 > 背景：三端（桌面窗口 / Web / 飞书）共用一个**进程级**取消标志，导致「桌面点停止会把飞书正在生成的回答一起掐断」。按 `docs/LARK_BOT.md` §5.5 阶段一实施。
