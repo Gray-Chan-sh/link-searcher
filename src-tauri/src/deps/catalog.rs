@@ -63,6 +63,54 @@ pub struct DepDef {
     pub system_package: Option<SystemPackage>,
 }
 
+/// 解析 `lark-cli` 可执行文件 —— 这就是「依赖中心」对 lark-cli 的**就绪探测**。
+///
+/// 放在 `deps` 里是有意的：它的本质是"某个外部依赖装没装"，与 `is_ready` 同类；
+/// 应用侧拉起飞书 bot 时也调它，于是"发现 lark-cli"只有**一份实现**。
+/// （bot 是独立 crate、不依赖应用 lib，所以它有自己的一层兜底探测；
+/// 应用解析到的路径会经 `LS_LARK_CLI` 注入给 bot，见 `lark_bot.rs`。）
+///
+/// 顺序：
+/// 1. 环境变量 `LS_LARK_CLI`（用户 / CI 显式指定）；
+/// 2. npm 全局的原生二进制 —— Windows 上 `lark-cli` 只是 `.cmd` 包装，而 `CreateProcess`
+///    **不能**直接执行 `.cmd`（要经 cmd.exe，届时参数会被二次重解析，而回复正文任意 → 坑很深）；
+/// 3. PATH 上的 `lark-cli`（只认 `.exe`；`.cmd` 交给 bot 自己那层兜底）。
+///
+/// 找不到返回 `None` —— **不报错**："还没装 lark-cli"是可接受的初始状态。
+///
+/// 不写单测是**有意的**：它读进程级 env / PATH，写单测就得 `set_var`（正是 AGENTS ④ 那类
+/// "全局可变状态导致并行假红"）。它的正确性由运行时链路保证。
+pub fn lark_cli_path() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Ok(p) = std::env::var("LS_LARK_CLI") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if cfg!(windows)
+        && let Ok(local) = std::env::var("LOCALAPPDATA")
+    {
+        let native = PathBuf::from(local)
+            .join("Programs")
+            .join("nodejs")
+            .join("node_modules")
+            .join("@larksuite")
+            .join("cli")
+            .join("bin")
+            .join("lark-cli.exe");
+        if native.is_file() {
+            return Some(native);
+        }
+    }
+    let exe = if cfg!(windows) { "lark-cli.exe" } else { "lark-cli" };
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(exe))
+            .find(|p| p.is_file())
+    })
+}
+
 /// All catalog entries (fresh copy each call; cheap, pure).
 pub fn all() -> Vec<DepDef> {
     let mut defs = vec![

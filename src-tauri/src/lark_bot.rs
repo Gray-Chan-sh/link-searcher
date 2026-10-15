@@ -67,46 +67,13 @@ fn bot_exe_path() -> Result<PathBuf, String> {
     ))
 }
 
-/// 解析 `lark-cli` 可执行文件 —— **应用侧的唯一权威实现**（同时是「依赖中心」的就绪探测）。
+/// 解析 `lark-cli` 可执行文件 —— 委托给**依赖中心**（`deps::catalog::lark_cli_path`）。
 ///
-/// 顺序（与 bot 内的兜底探测保持一致，便于两边行为对齐）：
-/// 1. 环境变量 `LS_LARK_CLI`（用户/CI 显式指定）；
-/// 2. npm 全局的原生二进制 —— Windows 上 `lark-cli` 只是 `.cmd` 包装，而 `CreateProcess`
-///    **不能**直接执行 `.cmd`（要经 cmd.exe，届时参数会被二次重解析，而回复正文任意 → 坑很深）；
-/// 3. PATH 上的 `lark-cli`（只认 `.exe`；`.cmd` 交给 bot 自己那层兜底）。
-///
-/// 找不到返回 `None` —— **不报错**："还没装 lark-cli"是可接受的初始状态，且 bot 自己还有一层兜底。
-///
-/// 不写单测是**有意的**：它读进程级 env / PATH，写单测就得 `set_var`（正是 AGENTS ④ 那类
-/// "全局可变状态导致并行假红"）。它的正确性由"注入后 bot 是否用它"这条运行时链路保证。
+/// 为什么在依赖中心：这才是"某个外部依赖装没装"该待的地方（与 `is_ready` 同类），
+/// 于是"发现 lark-cli"只有一份实现。这里保留同名薄封装，是因为**接缝**就在本文件：
+/// 应用解析出路径 → 经 `LS_LARK_CLI` 注入给 bot（bot 是独立 crate，自带兜底探测）。
 fn lark_cli_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("LS_LARK_CLI") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    if cfg!(windows)
-        && let Ok(local) = std::env::var("LOCALAPPDATA")
-    {
-        let native = PathBuf::from(local)
-            .join("Programs")
-            .join("nodejs")
-            .join("node_modules")
-            .join("@larksuite")
-            .join("cli")
-            .join("bin")
-            .join("lark-cli.exe");
-        if native.is_file() {
-            return Some(native);
-        }
-    }
-    let exe = if cfg!(windows) { "lark-cli.exe" } else { "lark-cli" };
-    std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(exe))
-            .find(|p| p.is_file())
-    })
+    crate::deps::catalog::lark_cli_path()
 }
 
 /// 若 `lark_bot_enabled == "true"` 则拉起 bot。**任何失败都只记日志**，
