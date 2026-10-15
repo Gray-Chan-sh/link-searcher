@@ -1163,11 +1163,18 @@ mod tests {
     use crate::search::schema::build_schema;
     use tantivy::Index;
 
-    /// Create a clean in-memory DB + tantivy pair and insert a tracking record.
-    fn setup() -> (IndexerService, String) {
+    /// Create a clean DB + tantivy pair and insert a tracking record.
+    ///
+    /// ⚠️ 用**临时文件库**而不是 `SqliteConnectionManager::memory()`：
+    /// 内存 SQLite 是**每个连接一个独立库**，而这里用的是连接池 —— 池一旦发出第二个
+    /// 连接（并行跑测试时就会），那个连接看到的库里**没有表**，于是随执行时序偶发
+    /// `upsert_file failed` / `delete file_tracking failed`（2026-10-15 实测连跑 4 轮红 2 轮）。
+    fn setup() -> (IndexerService, String, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("idx_pool_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
         let pool: Pool<SqliteConnectionManager> = r2d2::Pool::builder()
-            .max_size(2)
-            .build(SqliteConnectionManager::memory())
+            .max_size(4)
+            .build(SqliteConnectionManager::file(dir.join("data.db")))
             .unwrap();
         {
             let c = pool.get().unwrap();
@@ -1189,12 +1196,12 @@ mod tests {
 
         let c = svc.db.get().unwrap();
         let fid = crate::db::tracker::upsert_file(&c, "/tmp/test.txt", "d1", 1000, 42, None).unwrap();
-        (svc, fid)
+        (svc, fid, dir)
     }
 
     #[test]
     fn perf_params_set_and_get_roundtrip() {
-        let (svc, _) = setup();
+        let (svc, _, _dir) = setup();
         assert_eq!(svc.batch_io_concurrency(), DEFAULT_BATCH_IO_CONCURRENCY);
         assert_eq!(svc.writer_buffer_mb(), DEFAULT_WRITER_BUFFER_MB);
         assert_eq!(svc.commit_interval(), 100);
@@ -1219,7 +1226,7 @@ mod tests {
 
     #[test]
     fn test_content_change_clears_stale_embeddings() {
-        let (svc, fid) = setup();
+        let (svc, fid, _dir) = setup();
         let c = svc.db.get().unwrap();
 
         crate::db::tracker::update_indexed(&c, &fid, Some("oldhash")).unwrap();
@@ -1280,7 +1287,7 @@ mod tests {
 
     #[test]
     fn test_index_file_creates_document() {
-        let (svc, fid) = setup();
+        let (svc, fid, _dir) = setup();
         let path = tmp_file("test_create.txt", "hello world test content");
 
         svc.index_file(&fid, &path, "d1", None).unwrap();
@@ -1309,7 +1316,7 @@ mod tests {
 
     #[test]
     fn test_index_file_dedup_content() {
-        let (svc, fid1) = setup();
+        let (svc, fid1, _dir) = setup();
         let fid2 = {
             let c = svc.db.get().unwrap();
             crate::db::tracker::upsert_file(&c, "/tmp/test2.txt", "d1", 1000, 42, None).unwrap()
@@ -1342,7 +1349,7 @@ mod tests {
 
     #[test]
     fn test_index_file_handles_missing_file_gracefully() {
-        let (svc, fid) = setup();
+        let (svc, fid, _dir) = setup();
         let missing = std::path::Path::new("/tmp/nonexistent_file_xyz.txt");
 
         let result = svc.index_file(&fid, missing, "d1", None);
@@ -1359,7 +1366,7 @@ mod tests {
     /// content/chunks/块向量只在无人引用时才清。重加该目录即全新处理。
     #[test]
     fn purge_dir_data_clears_dir_but_keeps_shared_content() {
-        let (svc, fid) = setup(); // dir 'd1' + fid(/tmp/test.txt)
+        let (svc, fid, _dir) = setup(); // dir 'd1' + fid(/tmp/test.txt)
         let path = tmp_file("purge_a.txt", "purge dir data shared content marker");
         svc.index_file(&fid, &path, "d1", None).unwrap();
         svc.commit().unwrap();
@@ -1435,7 +1442,7 @@ mod tests {
     /// 行/文档/向量一起清掉，且**不动**仍在配置里的目录。
     #[test]
     fn sweep_orphan_dirs_removes_leftovers_but_keeps_configured_dirs() {
-        let (svc, fid) = setup(); // 'd1' + fid
+        let (svc, fid, _dir) = setup(); // 'd1' + fid
         {
             let conn = svc.db.get().unwrap();
             // 模拟"扫描仍在跑、目录已被移除"
@@ -1475,7 +1482,7 @@ mod tests {
 
     #[test]
     fn test_delete_file() {
-        let (svc, fid) = setup();
+        let (svc, fid, _dir) = setup();
         let path = tmp_file("test.txt", "delete test content");
 
         svc.index_file(&fid, &path, "d1", None).unwrap();
@@ -1557,7 +1564,7 @@ mod tests {
 
     #[test]
     fn test_quality_score_persisted_after_extraction() {
-        let (svc, fid) = setup();
+        let (svc, fid, _dir) = setup();
         let path = tmp_file(
             "quality_test.txt",
             "This is a test document with sufficient content for quality scoring to produce a non-null score",

@@ -88,9 +88,11 @@ pub(super) fn run_pages_windowed(
     pages: &[u32],
     stall: Option<Duration>,
     give_up_after: Option<usize>,
-    // Injected so tests are deterministic: the real callers pass
-    // `crate::extractor::scan_cancelled`, but that is a process-global flag which
-    // other (parallel) tests can set, making tests flaky.
+    // 页窗口。生产传 `None`（＝按全局预算 `load::page_window_for_pass()` 现算）；
+    // 测试传 `Some(n)` 固定下来 —— 那个全局值取决于**同时进行的 pass 数**
+    // （`ACTIVE_PASSES`），并行测试会互相改变它，从而让断言随执行顺序漂移。
+    // 与下面的 `is_cancelled` 注入是同一套理由。
+    window_override: Option<usize>,
     is_cancelled: impl Fn() -> bool + Sync,
     ocr_page: impl Fn(u32) -> Option<String> + Sync,
 ) -> PageOcrOutcome {
@@ -104,7 +106,10 @@ pub(super) fn run_pages_windowed(
     // 记入"在飞 pass 数"：本 pass 的页窗口按**全局预算**（引擎闸门）均分，文档少时自动
     // 放大到吃满闸门（修"批尾/小批只有半速"）。
     let _pass = crate::load::begin_page_pass();
-    let window = crate::load::page_window_for_pass().max(1).min(pages.len().max(1));
+    let window = window_override
+        .unwrap_or_else(crate::load::page_window_for_pass)
+        .max(1)
+        .min(pages.len().max(1));
     // 进度以「自本轮开始以来的单调时刻」记录 —— 不能用每页各自的耗时（各 worker 之间
     // 不可比，相减会下溢：debug 直接 panic，实测就是它让单测偶发失败的）。
     let pass_started = Instant::now();
@@ -242,7 +247,7 @@ pub(super) fn run_pdf_ocr_pipeline(
         let stall = global_ocr_stall_timeout();
         let all_pages: Vec<u32> = (1..=page_count as u32).collect();
         let pass_t0 = Instant::now();
-        let outcome = run_pages_windowed(&all_pages, stall, Some(5), crate::extractor::scan_cancelled, |page| {
+        let outcome = run_pages_windowed(&all_pages, stall, Some(5), None, crate::extractor::scan_cancelled, |page| {
             let started = Instant::now();
             let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
             // 这一路径原本整段无日志（188 页的扫描件十几分钟一行不写，看起来像卡死），
@@ -690,7 +695,7 @@ pub fn ocr_pdf_via_pdfimages(
         .map(|i| (i + 1) as u32)
         .collect();
     let pass_t0 = std::time::Instant::now();
-    let outcome = run_pages_windowed(&render_pages, stall, None, crate::extractor::scan_cancelled, |page| {
+    let outcome = run_pages_windowed(&render_pages, stall, None, None, crate::extractor::scan_cancelled, |page| {
         let started = std::time::Instant::now();
         let text = ocr_single_pdf_page(path, page, dpi, lang, engine);
         match text.as_deref() {
@@ -890,7 +895,7 @@ mod tests {
         let live = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
 
-        let outcome = run_pages_windowed(&pages, None, None, || false, |page| {
+        let outcome = run_pages_windowed(&pages, None, None, Some(4), || false, |page| {
             calls.fetch_add(1, Ordering::SeqCst);
             let now = live.fetch_add(1, Ordering::SeqCst) + 1;
             peak.fetch_max(now, Ordering::SeqCst);
@@ -936,7 +941,7 @@ mod tests {
 
         let pages: Vec<u32> = (1..=50).collect();
         let calls = AtomicUsize::new(0);
-        let outcome = run_pages_windowed(&pages, None, Some(5), || false, |_| {
+        let outcome = run_pages_windowed(&pages, None, Some(5), Some(PAGE_OCR_WINDOW), || false, |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(5));
             None
@@ -952,36 +957,41 @@ mod tests {
     /// 连续 `stall × window` 内一页都没完成（真卡死）→ 停止派发，已产出结果保留。
     /// 注意判定的是**进展**，不是单页耗时：并发下单页变慢不算卡死。
     ///
-    /// ⚠️ 页窗口自 2026-10-15 起是**全局预算**（`load::page_window_for_pass()`，上限为引擎
-    /// 闸门 8），而判定预算是 `stall × window`（见 `run_pages_windowed`）。所以本测试
-    /// **必须按实际的 `window` 推导 sleep 与断言**，不能写死 —— 否则会随机器负载档位漂移
-    /// 而假红（2026-10-15 实测：window 由 ≤4 变为 ≥5 后，写死的 50ms 恰好不再"超预算"）。
+    /// ⚠️ **页窗口由测试注入固定值**：生产用的是 `load::page_window_for_pass()`，它按
+    /// `ACTIVE_PASSES`（同时进行的 pass 数）均分全局预算 —— 并行跑测试时别的用例会改变它，
+    /// 于是"我读到的 window"与"函数内部读到的 window"可能不同，`budget = stall × window`
+    /// 随之漂移，断言就会随执行顺序时红时绿（2026-10-15 实测：单跑必过、整跑偶红）。
+    /// 注入后本用例完全确定。
     #[test]
     fn windowed_pages_stall_stops_dispatch_but_keeps_results() {
+        const WINDOW: usize = 4;
         let pages: Vec<u32> = (1..=40).collect();
-        let window = crate::load::page_window_for_pass().max(1);
         let stall = Duration::from_millis(10);
-        // 预算 = stall × window；每页都必须**明显超过**它，才构成"无进展"。
-        let per_page = stall * (window as u32 + 2);
+        // 预算 = stall × WINDOW；每页都必须**超过**它，才构成"无进展"。
+        let per_page = stall * (WINDOW as u32 + 2);
 
-        let outcome = run_pages_windowed(&pages, Some(stall), None, || false, |page| {
-            // 每一页都超过预算：整本卡死的情形。
-            std::thread::sleep(per_page);
-            Some(format!("page-{page}"))
-        });
-
-        assert!(
-            outcome.stalled,
-            "超预算必须触发 stall（window={window}, per_page={per_page:?}）"
+        let outcome = run_pages_windowed(
+            &pages,
+            Some(stall),
+            None,
+            Some(WINDOW),
+            || false,
+            |page| {
+                // 每一页都超过预算：整本卡死的情形。
+                std::thread::sleep(per_page);
+                Some(format!("page-{page}"))
+            },
         );
+
+        assert!(outcome.stalled, "超预算必须触发 stall（per_page={per_page:?}）");
         assert!(
-            outcome.attempted >= window,
-            "第一窗口应当已经派发出去，实测 {}（window={window}）",
+            outcome.attempted >= WINDOW,
+            "第一窗口应当已经派发出去，实测 {}",
             outcome.attempted
         );
         assert!(
-            outcome.attempted <= window * 2,
-            "stall 后只应跑完在飞的页，实测 {}（window={window}）",
+            outcome.attempted <= WINDOW * 2,
+            "stall 后只应跑完在飞的页，实测 {}",
             outcome.attempted
         );
         assert_eq!(outcome.texts[0].as_deref(), Some("page-1"), "在飞页结果要保留");
@@ -1088,7 +1098,7 @@ mod tests {
 
         let pages: Vec<u32> = (1..=10).collect();
         let calls = AtomicUsize::new(0);
-        let outcome = run_pages_windowed(&pages, None, None, || true, |_| {
+        let outcome = run_pages_windowed(&pages, None, None, Some(4), || true, |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             Some("x".to_string())
         });

@@ -108,6 +108,13 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 → 改源码**一律用编辑工具**（`edit` / `write`）。**绝不**用 `Set-Content` / `Out-File` / `-replace` 落盘。
 （2026-10-15 实测：`-replace | Set-Content` 把 `webapi/routes/lark.rs` 的中文注释写成了乱码，只能整份重写。）
 
+**即使显式带上 `-Encoding UTF8` 也不行**：PS 5.1 的 `-Encoding UTF8` 会写入 **BOM**（`EF BB BF`），
+把源码首字节污染；不指定编码则按 ANSI 写、直接写坏中文。**两种都不对**。
+（2026-10-15 再次实测：明知此条规则、仍用 `Set-Content -Encoding UTF8` 改了 `indexer.rs` —— 中文侥幸没坏，
+但**加了 BOM**，只能用 .NET 再写一遍去掉：
+`[IO.File]::WriteAllText($p, [IO.File]::ReadAllText($p), (New-Object System.Text.UTF8Encoding $false))`。
+结论不变且更强：**改源码只用编辑工具**，一次也别例外。）
+
 **读**源码同理：PS 5.1 的 `Get-Content` 默认也按 ANSI 解码，读 UTF-8 文件会**显示成乱码**（文件其实是好的）。
 看到"乱码"先换 `Get-Content -Encoding UTF8`（或直接用编辑工具读）再判断 —— 别去"修"一个健康的文件。
 

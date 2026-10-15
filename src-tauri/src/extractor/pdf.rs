@@ -438,6 +438,7 @@ impl PdfExtractor {
                     &need_pages,
                     None,
                     None,
+                    None,
                     crate::extractor::scan_cancelled,
                     |page| {
                         let started = std::time::Instant::now();
