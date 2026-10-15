@@ -44,12 +44,24 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
     }
     let manager = SqliteConnectionManager::file(db_path);
     let pool = Pool::builder()
-        // 实测（2026-10-14 小城 XC 全量重建）：Phase-1 提取 worker 在整个提取期持有连接
-        // （含几分钟的 OCR），并发 14，加上 embedding keeper、Web API、自适应采样线程与
-        // 扫描/监控线程后，24 个连接**不够**——本轮出现 **108 次**
-        // "DB conn: timed out waiting for connection"，并直接造成 **108 个文件失败**。
-        // 提到 48（≈3× 提取并发）并把等待上限从 30s 放宽到 60s：让等不到的线程"等"而不是
-        // "失败"（超时即判失败是这轮 60% 失败的成因）。
+        // 容量按「**同一时刻最多有多少线程想借连接**」推导，**不是**按硬件参数：
+        //   · Phase-1 提取 worker（`perf_batch_io_concurrency`，**上限 24** —— 见
+        //     `commands/performance.rs::scale_params`：cores × 档位系数 × 磁盘系数，
+        //     aggressive 档 ceil=24）——每个文件只在「提取前读 / 提取后写」两个**毫秒级
+        //     窗口**各借一次；
+        //   · embedding keeper 2 条（doc / chunk）；
+        //   · Web API / 扫描 / 文件监听 / 采样 / verify 等若干条。
+        // → 24 + 2 + 若干 ≈ 30；48 ≈ 1.6×，给"多个 worker 同时落在短窗口"的突发留余量。
+        //
+        // ⚠️ **历史教训（不要再走一遍）**：2026-09-26 与 2026-10-14 两次「连接池不够」
+        // 的真因**都不是池小**，而是 `indexer::extract_and_index_single` **在整个提取期
+        // （含数分钟 OCR）持有连接**。两次都只把池 12→24→48、等待 10s→30s→60s，把症状
+        // 吸收掉、根因留了三个月，最终爆成 108 个文件被误判失败。根因已于 2026-10-15
+        // 修掉（提取三阶段各借各还，**提取期零连接占用**）。
+        // → 见到 `DB conn: timed out` 请**先查连接是否被长期持有**，不要把"扩池"当修复。
+        //
+        // 等待上限保持宽松（60s）是**安全阀**：修好之后健康的取连接是亚毫秒级，60s 只用于
+        // 「极偶发突发时让线程等，而不是失败」—— 因池等待而判文件失败是不可接受的。
         .max_size(48)
         .connection_timeout(std::time::Duration::from_secs(60))
         .connection_customizer(Box::new(PragmaCustomizer))
