@@ -989,15 +989,20 @@ src-tauri/
 - 因此 §5.1 那条"同一 app **只能有一个** event bus 连接"应当指的是**上游**（daemon → 飞书）那一条；
   **本地多消费者大概率是允许的** —— 但**这条还没有被直接验证**。
 
-**决定性实验（下次做；必须在"bot 可短暂中断"时进行）**：
+**决定性实验：已做，通过（2026-10-16）** ✅
 
-> 在 bot 的 consumer 正跑着时，另起
-> `lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 30s`
->
-> - 能起来且 bot 的事件不断 → 按"**双消费者**"架构做 D ✅
-> - 报 `another bus already connected` / exit 2 → 必须改成"一条连接消费两个 key"（需另找实现路径）
->
-> ⚠️ **别在用户正用飞书时做**：失败可能打断正在服务的那条流。
+在 bot 的 consumer（`im.message.receive_v1`）**正跑着**时另起：
+
+```text
+lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 25s
+→ [event] ready event_key=card.action.trigger
+→ [event] exited — received 0 event(s) in 25s (reason: timeout)，exit 0
+```
+
+**结论：本地多消费者是允许的** —— §5.1 那条"同一 app 只能有一条 event bus 连接"确实指**上游**
+（daemon → 飞书）那一条；另起消费者之后，**bot 自己的 consumer 仍在正常运行**（实测未被干扰、
+也不影响正在服务的消息流）。
+→ **D 按"双消费者"架构实现**（不需要另找实现路径）。
 
 **若实验通过，D 的实现要点**：
 

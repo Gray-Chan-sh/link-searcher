@@ -8,6 +8,13 @@
 - **如实记录未验证项**：决定性实验（在 bot 的 consumer 跑着时另起一个 `card.action.trigger` 消费者）
   **故意没做** —— 失败可能打断正在服务的那条流，必须在"bot 可短暂中断"时做。做法与两种分支已写入
   `docs/LARK_BOT.md` **§8.4**。
+- **✅ 随后已做且通过（2026-10-16）**：另起 `card.action.trigger` 消费者 → `[event] ready event_key=card.action.trigger`，
+  有界退出（timeout, exit 0），**且 bot 自己的 consumer 全程未受干扰** →
+  **本地多消费者是允许的**，那条"同一 app 一条 bus 连接"指的是**上游**（daemon→飞书）。
+  → **D 按"双消费者"架构实现**（§8.4 已更新）。
+- **B5 也已验证** ✅：dev 日志（`D:\index\app.log`）出现
+  `[LARK-BOT] 使用 lark-cli = …\@larksuite\cli\bin\lark-cli.exe` → 接缝确实生效；
+  对照之下，05:37 那条**安装版**日志里没有该行（那个构建早于 B1，自洽）。
 - **顺带纠正 D 的方向**：**"分页"已由自动续发卡片解决**（§8.2）→ D 的按钮应做**交互类**
   （`打开详情` / `换一批证据`），而不是翻页按钮（重复建设）。
 - **实现要点已定**（§8.4）：回调路由用 `action_value` / `custom_action_id`（`card_content` 会被重写，不能比对原文）；
