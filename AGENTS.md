@@ -169,9 +169,13 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 在追踪行消失后**没有清道夫**（现有的 `cleanup_orphan_content` / `cleanup_orphan_chunk_embeddings` 是 **md5 键**的）。
 `purge_dir_data` 之所以能清，全靠"删之前追踪行还在"这个前提。
 
-→ **下一步（二选一，都要先跑出失败值确认再改）**：(a) **测试侧**：让 `fid` 指向真实存在的文件、
-或在 purge 前显式断言前置条件；(b) **产品侧**：补一个按 `file_id` 的孤儿清理（`sweep_orphan_dirs` 的自然扩展）。
-**故意没改**：两种改法都要先拿到失败时的 `left/right` 实际值，盲改会把"疑似 keeper 竞态"推成更难查的形态。
+→ **已修（选了产品侧 (b)，2026-10-15）**：`purge_dir_data` 原本三条按 `file_id` 的 DELETE **各自独立执行、失败只 warn**
+—— 并发写入者（keeper / 周期提交）短暂持锁时它们会**静默失败**，而紧随其后的 `DELETE FROM file_tracking`
+却可能成功 → 正好留下"追踪行没了、`doc_embeddings`/`doc_summaries` 还在"的孤儿（与实测症状完全吻合）。
+现改为**同一事务 + 传播错误**（`unchecked_transaction`，顺序不变：先 file_id 行、再 file_tracking；
+`unsupported_ext_stats` 同归事务），两步 md5 键的孤儿清理仍保持尽力而为。
+**验证**：单条 **12/12** 绿、全 lib **再压 6/6** 绿（改前约 1/6 轮次红）。
+> 教训：**"失败只 warn" 的 DELETE 就是"偶发脏数据"的温床** —— 多语句的清理要么同一事务，要么带重试。
 
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 

@@ -1,4 +1,17 @@
-# Link-Searcher 变更日志
+## 2026-10-15（第九轮）：A 收尾 —— `purge_dir_data` 改为单事务、不再吞错
+
+- **根因**（不是竞态、也不是共享目录）：三条按 `file_id` 的 DELETE **各自独立执行、失败只 `warn`**；
+  并发写入者（keeper / 周期提交）短暂持锁时它们**静默失败**，而紧随其后的 `DELETE FROM file_tracking`
+  却可能成功 → 留下"追踪行没了、`doc_embeddings` / `doc_summaries` 还在"的**孤儿**。
+  与实测症状完全吻合（`file_tracking(dir_id)=0` 而 `doc_embeddings != 0`）。
+- **改法**：5 条删除放进**同一事务**（`unchecked_transaction`）并**传播错误**；顺序不变
+  （先 file_id 行、再 file_tracking）；`unsupported_ext_stats` 同归事务；两步 **md5 键**的孤儿清理保持尽力而为。
+- **验证**：单条 `purge_dir_data` **12/12** 绿 + 全 lib **再压 6/6** 绿（改前约 **1/6 轮次**红）；
+  全门禁绿（cargo 0 / tsc 0 / vitest 73 / semgrep 0）。
+- **同时纠正两处误判**（复读代码确认无害）：`scanner/mod.rs:871,1059`（测试扫描前会 `UPDATE path` 换成独占子目录）、
+  `indexer.rs::tmp_file`（只当文件容器，各测试文件名互不相同）。
+- **教训入档（AGENTS ④′）**：**"失败只 warn" 的 DELETE 就是"偶发脏数据"的温床** ——
+  多语句清理要么同一事务，要么带重试。
 
 ## 2026-10-15（第八轮）：A 项进展 —— 复现并定性 `purge_dir_data_*`，纠正归类
 
