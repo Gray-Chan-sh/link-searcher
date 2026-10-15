@@ -13,6 +13,15 @@
 - **因此没有盲改**（这是有意的选择）：这类"看着像 A 其实是 B"的 flaky，先要拿到失败时的
   `left/right` 实际值再动手，否则只会把它推成更难查的形态。**下一步**：加大轮次或用 `--test-threads`
   控并行度抓实际值。结论与下一步已写入 `AGENTS.md` ④′。
+- **第二轮排查（读 `purge_dir_data` 本体后）**：它是**同步**的、顺序也正确（先删 `doc_embeddings`
+  再删 `file_tracking`），但那条子查询**依赖 `fid` 的追踪行还在** —— 而 `setup()` 给 `fid` 的路径是
+  **磁盘上不存在**的 `/tmp/test.txt`，只要后台 keeper/清理先把它当死文件清掉，purge 就会**漏掉**它的向量。
+  这与"追踪行为 0、只有 `doc_embeddings` 没清"的失败现象**完全吻合**。
+  - **顺带暴露一个真实产品缺口**：以 `file_id` 为键的 `doc_embeddings` / `doc_summaries` / `index_errors`
+    在追踪行消失后**没有清道夫**（现有两个 orphan 清理都是 **md5 键**的）。
+- **同时纠正上一轮的两处误判（都已复读代码确认无害）**：`scanner/mod.rs:871,1059` 每个测试都会在扫描前
+  用 `UPDATE dir_config SET path=…` 换成独占子目录（`%TEMP%` 只是占位值）；`indexer.rs::tmp_file`
+  的共享目录只当**文件容器**、各测试文件名互不相同、也没人拿它去 `add_dir`。
 
 ## 2026-10-15（第七轮）：修 `integrity_heal_*` 一类 flaky（测试独占临时目录）
 

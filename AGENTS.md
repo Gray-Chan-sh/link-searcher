@@ -147,8 +147,10 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 
 → 这类测试必须**独占**一个目录。`commands/index.rs` 已加 `isolated_temp_root()`（每次调用都不同），
 `integrity_heal_*` / `verify_*` 共 5 条已改（改前约 1/3 轮次红，改后连跑 4 轮全绿）。
-**仍未改（已知同类）**：`scanner/mod.rs:871,1059`（把 `%TEMP%` 当被索引目录）。
-建议改法：用 `std::thread::current().name()` 当 tag —— libtest 用**测试名**命名线程，天然"一测试一目录"。
+**仍未改（已知同等风险模式）**：`scanner/mod.rs:871,1059` —— **但复读代码后判定它无害**：
+每个测试都会在扫描前用 `UPDATE dir_config SET path=…` 把它换成**自己独占的子目录**，
+`%TEMP%` 只是"注册时的占位值"，没有任何扫描会在它还是 `%TEMP%` 时发生。
+（`indexer.rs::tmp_file` 的共享目录同理：它只当**文件容器**用，各测试用的文件名互不相同，也没有测试拿它的路径去 `add_dir`。）
 
 **⚠️ 另一条"看着像同类、其实不是"的 flaky**：`indexer::tests::purge_dir_data_clears_dir_but_keeps_shared_content`
 （实测 **6 轮红 1 次**；换 `--nocapture` 连跑 8 轮又全绿 —— 典型时序敏感）。
@@ -157,10 +159,19 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 断言全是**本测试自己的 DB 计数**；而且失败时 `file_tracking WHERE dir_id='d1'` **已经是 0**
 （说明 `purge_dir_data` 确实跑到了），**只有 `doc_embeddings` 没被清掉**。
 
-→ 怀疑是**测试内部竞态**：`index_file` 的**向量写入**在 `purge_dir_data` 之后才落地
-（`svc.commit()` 未必 join 向量那条路径），于是"清完又来"。**不是**目录共享问题。
-→ **下一步**：先循环抓到失败时的 `left/right` 实际值（8 轮没抓到 → 加大轮次或用 `--test-threads` 控并行度），
-**拿到实际值再改** —— 这种"看着像 A 其实是 B"的 flaky，盲改只会把它推到更难查的形态。
+→ **更精确的诊断（第二轮排查，已读 `purge_dir_data` 本体）**：它是**同步**的，并且顺序正确 ——
+**先**删 `doc_embeddings`（`file_id IN (SELECT id FROM file_tracking WHERE dir_id=?)`）**再**删 `file_tracking`。
+但注意这条子查询**依赖 `fid` 的追踪行仍然存在**；而 `setup()` 给 `fid` 的路径是**磁盘上不存在**的
+`/tmp/test.txt` → 只要后台 **keeper / 清理**恰好先把它当"死文件"清掉，purge 就会**漏掉** `fid` 的向量。
+失败时"`file_tracking(dir_id='d1')` 已是 0、**只有** `doc_embeddings` 没清"**与该推测完全吻合**。
+
+→ 顺带暴露一个**真实产品缺口**：以 `file_id` 为键的 `doc_embeddings` / `doc_summaries` / `index_errors`
+在追踪行消失后**没有清道夫**（现有的 `cleanup_orphan_content` / `cleanup_orphan_chunk_embeddings` 是 **md5 键**的）。
+`purge_dir_data` 之所以能清，全靠"删之前追踪行还在"这个前提。
+
+→ **下一步（二选一，都要先跑出失败值确认再改）**：(a) **测试侧**：让 `fid` 指向真实存在的文件、
+或在 purge 前显式断言前置条件；(b) **产品侧**：补一个按 `file_id` 的孤儿清理（`sweep_orphan_dirs` 的自然扩展）。
+**故意没改**：两种改法都要先拿到失败时的 `left/right` 实际值，盲改会把"疑似 keeper 竞态"推成更难查的形态。
 
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 
