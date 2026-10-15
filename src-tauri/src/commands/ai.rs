@@ -756,41 +756,46 @@ pub struct ChatMessage {
 
 mod session;
 pub use session::{
-    AiEventJson, ChatHistoryFile, ChatSession, ChatSessionMeta, PerTurnEvidence, PerTurnScope,
-    ScopeCondition, TurnScope, chat_history_path, create_chat_session_impl,
-    delete_chat_session_impl, export_chat_session_impl, export_chat_session_json_impl,
-    mutate_history, read_history, write_history,
+    AiEventJson, ChatHistoryFile, ChatSession, ChatSessionMeta, ORIGIN_LARK, ORIGIN_UI, ORIGIN_WEB,
+    PerTurnEvidence, PerTurnScope, ScopeCondition, TurnScope, chat_history_path,
+    create_chat_session_impl, delete_chat_session_impl, effective_origin, export_chat_session_impl,
+    export_chat_session_json_impl, find_chat_session, list_chat_sessions_filtered, mutate_history,
+    parse_origin, read_history, save_chat_session_impl, write_history,
 };
 use session::{
     assign_material_no, prior_evidence_paths, prior_material_order, visible_material_numbers,
 };
 #[cfg(test)]
-use session::{now_ts, save_chat_session_impl};
+use session::now_ts;
 
 // ── Session commands (thin wrappers; implementation lives in `session`) ──
+//
+// 桌面端（IPC）一律以 `ORIGIN_UI` 身份访问会话，故 `origin` **不出现在命令参数里**
+// —— 前端不需要知道这个概念，也避免动 IPC 参数名（AGENTS.md #4 的坑）。
+// Web / 飞书分别由 webapi 路由传 `web` / `lark`（§5.5 阶段二）。
 
-/// List all chat sessions, newest first.
+/// List this end's chat sessions, newest first (IPC = desktop `ui`).
 #[tauri::command]
 pub fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionMeta>, String> {
-    session::list_chat_sessions(state)
+    session::list_chat_sessions(state, Some(session::ORIGIN_UI.to_string()))
 }
 
-/// Create a new empty session. Returns its id.
+/// Create a new empty session for this end. Returns its id.
 #[tauri::command]
 pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
-    session::create_chat_session(state)
+    session::create_chat_session(state, Some(session::ORIGIN_UI.to_string()))
 }
 
-/// Delete a session by id.
+/// Delete a session by id (only this end's sessions).
 #[tauri::command]
 pub fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    session::delete_chat_session(state, id)
+    session::delete_chat_session(state, id, Some(session::ORIGIN_UI.to_string()))
 }
 
-/// Load a full session by id. Returns None if not found.
+/// Load a full session by id (only this end's sessions). Returns None if not found.
 #[tauri::command]
 pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Option<ChatSession>, String> {
-    session::load_chat_session(state, id)
+    session::load_chat_session(state, id, Some(session::ORIGIN_UI.to_string()))
 }
 
 /// Save (create or update) a session. If the session is new or has no title,
@@ -803,7 +808,7 @@ pub fn save_chat_session(
     // 表现为聊天内容全部无法持久化（2026-09-23 拆分重构曾误改为 `sess`）。
     session: ChatSession,
 ) -> Result<(), String> {
-    session::save_chat_session(state, session)
+    session::save_chat_session(state, session, Some(session::ORIGIN_UI.to_string()))
 }
 
 /// Export a session as Markdown (chat transcript with full traceability).
@@ -813,7 +818,7 @@ pub fn export_chat_session(
     id: String,
     turns: Option<Vec<usize>>,
 ) -> Result<String, String> {
-    session::export_chat_session(state, id, turns)
+    session::export_chat_session(state, id, turns, Some(session::ORIGIN_UI.to_string()))
 }
 
 /// Export a session as analysis-friendly JSON.
@@ -823,7 +828,7 @@ pub fn export_chat_session_json(
     id: String,
     turns: Option<Vec<usize>>,
 ) -> Result<String, String> {
-    session::export_chat_session_json(state, id, turns)
+    session::export_chat_session_json(state, id, turns, Some(session::ORIGIN_UI.to_string()))
 }
 
 /// Structured RAG pipeline events for a session.
@@ -883,7 +888,7 @@ mod history_tests {
 
         // create 时按 updated_at 驱逐最旧，总量锁 50。
         let created: Vec<String> = (0..51)
-            .map(|i| create_chat_session_impl(&dir).unwrap())
+            .map(|i| create_chat_session_impl(&dir, "ui").unwrap())
             .collect();
         let h = read_history(&dir);
         assert_eq!(h.sessions.len(), 50, "超过 50 应驱逐最旧");
@@ -912,8 +917,9 @@ mod history_tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, s.clone()).unwrap();
+        save_chat_session_impl(&dir, s.clone(), Some("ui")).unwrap();
         // 无标题 → 从首条 user 消息推导
         let h = read_history(&dir);
         assert_eq!(h.sessions.len(), 1);
@@ -921,7 +927,7 @@ mod history_tests {
 
         // 再次保存（新消息）→ 原地更新，不新增
         s.messages.push(ChatMessage { role: "assistant".into(), content: "答1".into() });
-        save_chat_session_impl(&dir, s.clone()).unwrap();
+        save_chat_session_impl(&dir, s.clone(), Some("ui")).unwrap();
         let h = read_history(&dir);
         assert_eq!(h.sessions.len(), 1, "同 id 保存应原地更新");
         assert_eq!(h.sessions[0].messages.len(), 2);
@@ -979,9 +985,10 @@ mod history_tests {
                 scope: vec!["a.pdf".into()],
             }],
             strict_docs: true,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s1", None).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
+        let md = export_chat_session_impl(&dir, "s1", None, Some("ui")).unwrap();
         assert!(md.contains("# 克虏伯项目"));
         assert!(md.contains("## 追溯信息"), "头部应有追溯信息块: {md}");
         assert!(md.contains("LLM 模型"), "追溯块应含模型: {md}");
@@ -1026,9 +1033,10 @@ mod history_tests {
             per_turn_evidence: vec![],
             per_turn_scopes: vec![PerTurnScope { turn_index: 0, scope: vec![] }],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s3", None).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
+        let md = export_chat_session_impl(&dir, "s3", None, Some("ui")).unwrap();
         assert!(!md.contains("> 📁 检索范围"), "顶部空会话范围不显示: {md}");
         assert!(md.contains("**检索范围:**\n- 未指定（全库）"), "每轮空范围应标注: {md}");
 
@@ -1079,9 +1087,10 @@ mod history_tests {
                 PerTurnScope { turn_index: 1, scope: vec![scope.clone()] },
             ],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
-        let json_str = export_chat_session_json_impl(&dir, "s2", None, None).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s2", None, None, Some("ui")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
         // schema v3：无 ai_events 记录时省略 log 段（向后兼容）。
@@ -1134,23 +1143,24 @@ mod history_tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
 
         // 全部轮次（turns=None）。
-        let all = export_chat_session_json_impl(&dir, "s-turns", None, None).unwrap();
+        let all = export_chat_session_json_impl(&dir, "s-turns", None, None, Some("ui")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&all).unwrap();
         assert_eq!(v["turns"].as_array().map(Vec::len), Some(2));
 
         // 仅第 2 轮：turns 数组只含 turn_index=2。
-        let only2 = export_chat_session_json_impl(&dir, "s-turns", None, Some(&[2])).unwrap();
+        let only2 = export_chat_session_json_impl(&dir, "s-turns", None, Some(&[2]), Some("ui")).unwrap();
         let v2: serde_json::Value = serde_json::from_str(&only2).unwrap();
         let ts = v2["turns"].as_array().unwrap();
         assert_eq!(ts.len(), 1, "应只导出第 2 轮: {ts:?}");
         assert_eq!(ts[0]["turn_index"], serde_json::json!(2));
 
         // Markdown 同样支持轮次选择：只含第 1 轮标题，不含第 2 轮。
-        let md = export_chat_session_impl(&dir, "s-turns", Some(&[1])).unwrap();
+        let md = export_chat_session_impl(&dir, "s-turns", Some(&[1]), Some("ui")).unwrap();
         assert!(md.contains("## 第 1 轮"), "md 应含第 1 轮");
         assert!(!md.contains("## 第 2 轮"), "md 不应含未选轮次");
 
@@ -1184,8 +1194,9 @@ mod history_tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec!["案件/和嘉案/聊天记录".into()],
             strict_docs: true,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
 
         // 记录第 0 轮（ai_events 的 turn_number 是 0-based）的两个事件。
         {
@@ -1203,7 +1214,7 @@ mod history_tests {
             drop(c);
         }
 
-        let json_str = export_chat_session_json_impl(&dir, "s-evt", Some(&pool), None).unwrap();
+        let json_str = export_chat_session_json_impl(&dir, "s-evt", Some(&pool), None, Some("ui")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(v["schema_version"], serde_json::json!(3));
         let log = &v["turns"][0]["log"];
@@ -1512,6 +1523,7 @@ mod history_tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: "ui".to_string(),
             per_turn_evidence: vec![PerTurnEvidence {
                 turn_index: 0,
                 file_ids: vec!["f1".into()],
@@ -1649,9 +1661,10 @@ mod mention_resolve_tests {
             }],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s1", None).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
+        let md = export_chat_session_impl(&dir, "s1", None, Some("ui")).unwrap();
         assert!(md.contains("全库"), "empty scope should render as 全库: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1679,9 +1692,10 @@ mod mention_resolve_tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: "ui".to_string(),
         };
-        save_chat_session_impl(&dir, session).unwrap();
-        let md = export_chat_session_impl(&dir, "s2", None).unwrap();
+        save_chat_session_impl(&dir, session, Some("ui")).unwrap();
+        let md = export_chat_session_impl(&dir, "s2", None, Some("ui")).unwrap();
         assert!(!md.contains("检索范围"), "no per_turn_scopes should not render scope: {md}");
 
         let _ = std::fs::remove_dir_all(&dir);

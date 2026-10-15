@@ -1,5 +1,21 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：会话按来源端隔离（三端交互重构 · 阶段二）
+
+> 目标（`docs/LARK_BOT.md` §5.5 阶段二）：桌面 / Web / 飞书三端**各自只见己方**聊天会话，为 P1 接飞书铺路。
+
+- **`ChatSession.origin`**（`ui` / `web` / `lark`）：**空串＝未指定**，生效时经 `effective_origin()` 按 `ui` 处理。**刻意不用 `#[serde(default = ...)]`** —— 前端不知道自己在哪个端、保存时不会带该字段，若给非空默认值，**Web 端的保存会把桌面端会话"认领"成 `web`**。空串＋保存逻辑（沿用已有值 / 取调用方来源）才安全。
+- **按端过滤**：新增 `list_chat_sessions_filtered(data_dir, Option<&str>)` 与 `find_chat_session(data_dir, id, Option<&str>)`；list / load / delete / export 全部按端收口（跨端的 load 按"不存在"处理，不泄漏别的端有没有该 id）。
+- **写入限同来源端**：`save_chat_session_impl` 增加 `caller_origin`，跨端写入**被拒**（`跨来源端写入被拒绝`）且不留下任何改动；`delete_chat_session_impl` 同理。
+- **50 上限改为按端各自计算**：一端刷满不再挤掉另一端的会话。
+- **来源端由调用路径决定，不出现在 IPC 参数里**：`commands/ai.rs` 的会话命令恒传 `ORIGIN_UI`，`webapi/routes/ai.rs` 恒传 `ORIGIN_WEB`。**避免改动 IPC 参数名**（AGENTS.md #4 的坑）；webapi 的会话列表额外回传 `origin` 字段。
+- **未知来源端报错**而不是静默回退 —— 静默回退会把别端会话认领过来。
+- **旧单会话结构迁移**（`read_history_unlocked` 里的 legacy 分支）补上 `origin = ui`。
+- **前端**：`files.ts` 的 `ChatSession` 增 `origin?`（前端不需设置）、`ChatSessionMeta` 增 `origin?`。
+- **⚠️ 行为变化**：本功能之前的会话一律归 `ui`，**Web 端从此看不到这些既有会话**（文件里仍在、桌面端照常可见）。未做"迁移为共享"，因为定位是三端隔离；如需三端共见需另做迁移。
+- **测试**：`session.rs` 新增 **6 条**（三端隔离含跨端 load/delete、老会话归 `ui` 且对 Web 不可见、保存不带 origin 不改来源、跨端写入被拒且无残留改动、50 上限按端、未知来源报错且容忍两侧空白）；`cargo test --lib` **553 passed / 0 failed**。
+- **门禁**：`cargo test` 全目标 EXITCODE=0、`npx tsc --noEmit` 通过、`npx vitest run` 73 passed、`semgrep --severity ERROR` **0 findings**。
+
 ## 2026-10-15：门禁章节补充两个实测踩到的坑（纯文档）
 
 > 起因：本轮 doc-only 提交时门禁报 `E0786 invalid metadata files`，而我那条命令把 `cargo test` 与 `git commit` 串在一起无条件执行 —— **测试红了仍然提交并推送了**。排查后确认是缓存问题（同一份代码重跑即 547 全绿），但流程错必须记下。

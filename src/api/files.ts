@@ -136,6 +136,11 @@ export interface ChatSession {
   retrieval_scope?: string[]
   /** P2：严格模式——范围内无命中时拒绝回答 */
   strict_docs?: boolean
+  /**
+   * 会话来源端（`ui` / `web` / `lark`）。前端**不需要设置** —— 缺省时后端沿用
+   * 已有值，新建时取调用端的来源（见 `docs/LARK_BOT.md` §5.5 阶段二）。
+   */
+  origin?: string
   /** 全量召回：检索与注入不截断，尽可能覆盖范围内所有文件 */
   full_recall?: boolean
 }
@@ -150,6 +155,8 @@ export interface ChatSessionMeta {
   id: string
   title: string
   updated_at: number
+  /** 生效来源端（老会话为 `ui`）。后端已按端过滤，这里供分组/标注用。 */
+  origin?: string
 }
 
 export async function smartSearch(query: string): Promise<SmartSearchResponse> {

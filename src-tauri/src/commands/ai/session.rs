@@ -10,6 +10,52 @@ pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("chat_history.json")
 }
 
+/// 会话来源端（`docs/LARK_BOT.md` §5.5 阶段二）。
+///
+/// 三端各自**只见己方**会话：桌面走 IPC（`ui`）、浏览器走 webapi（`web`）、
+/// 飞书机器人走 webapi 并以 `lark` 标记（P1 接）。
+///
+/// ⚠️ 这是**组织隔离**，**不是安全边界**：单用户 + Bearer token 模型下，
+/// 三端本就同权；这里只为避免"三端会话互相混杂"。
+pub const ORIGIN_UI: &str = "ui";
+pub const ORIGIN_WEB: &str = "web";
+pub const ORIGIN_LARK: &str = "lark";
+
+/// 解析来源端。只接受三个已知值，未知值**报错而不静默回退**（静默会把别人的
+/// 会话认领到自己名下）。`None` ＝ **内部调用 / 统一管理**（不限来源），
+/// 三端一律传 `Some(自己)`。
+pub fn parse_origin(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw {
+        None => Ok(None),
+        Some(v) => match v.trim() {
+            ORIGIN_UI => Ok(Some(ORIGIN_UI.to_string())),
+            ORIGIN_WEB => Ok(Some(ORIGIN_WEB.to_string())),
+            ORIGIN_LARK => Ok(Some(ORIGIN_LARK.to_string())),
+            other => Err(format!(
+                "未知的会话来源端 '{other}'（只接受 {ORIGIN_UI} / {ORIGIN_WEB} / {ORIGIN_LARK}）"
+            )),
+        },
+    }
+}
+
+/// 会话的**生效**来源：本功能之前产生的老会话没有 `origin` 字段 → 归 `ui`
+/// （它们确实是桌面端产生的）。
+pub fn effective_origin(session: &ChatSession) -> &str {
+    if session.origin.is_empty() {
+        ORIGIN_UI
+    } else {
+        session.origin.as_str()
+    }
+}
+
+/// 该会话是否属于 `origin`（`None` ＝ 不限来源，全部通过）。
+fn belongs_to(session: &ChatSession, origin: Option<&str>) -> bool {
+    match origin {
+        None => true,
+        Some(o) => effective_origin(session) == o,
+    }
+}
+
 /// One turn's source file references, recorded when a conversation turn
 /// completes so the session history can show which documents backed each
 /// user/assistant exchange. `items` carries the traceable evidence
@@ -104,6 +150,15 @@ pub struct ChatSession {
     /// 功能初衷"仅依据引用文档"，而非静默退化为全库检索。
     #[serde(default = "default_strict_docs")]
     pub strict_docs: bool,
+    /// 会话来源端（`ui` / `web` / `lark`，见 [`ORIGIN_UI`]）。
+    ///
+    /// **老会话没有该字段** → 空串，由 [`effective_origin`] 归为 `ui`。
+    ///
+    /// 刻意**不用** `#[serde(default = "default_origin")]`：前端不知道自己在哪个端，
+    /// 保存时不会带这个字段；若给个非空默认值，Web 端的保存就会把桌面端会话
+    /// **认领**成 `web`。空串＝"未指定"，由保存逻辑决定（沿用已有值 / 取调用方来源）。
+    #[serde(default)]
+    pub origin: String,
 }
 
 fn default_strict_docs() -> bool { true }
@@ -114,6 +169,8 @@ pub struct ChatSessionMeta {
     pub id: String,
     pub title: String,
     pub updated_at: i64,
+    /// 生效来源端（老会话为 `ui`）。前端据此做分组/标注，也是"统一管理"视图的键。
+    pub origin: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -190,7 +247,9 @@ fn read_history_unlocked(data_dir: &std::path::Path) -> ChatHistoryFile {
                     per_turn_evidence: vec![],
                     per_turn_scopes: vec![],
                     retrieval_scope: vec![],
-        strict_docs: true,
+                    // 旧单会话结构没有来源端概念 —— 它确实是桌面端产生的。
+                    strict_docs: true,
+                    origin: ORIGIN_UI.to_string(),
                 };
                 let migrated = ChatHistoryFile { sessions: vec![session] };
                 // 调用方已持锁 → 走 unlocked 版本（std Mutex 不可重入）。
@@ -236,22 +295,46 @@ fn title_from_first_message(session: &ChatSession) -> String {
         .unwrap_or_else(|| "新会话".to_string())
 }
 
-/// List all chat sessions, newest first.
-pub fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionMeta>, String> {
-    let mut h = read_history(&state.data_dir);
+/// List chat sessions of **one** origin, newest first.
+///
+/// `origin = None` ＝ **不限来源**（内部调用 / 将来的"统一管理"视图）；三端一律传
+/// `Some(自己)`。
+pub fn list_chat_sessions_filtered(
+    data_dir: &std::path::Path,
+    origin: Option<&str>,
+) -> Vec<ChatSessionMeta> {
+    let mut h = read_history(data_dir);
+    h.sessions.retain(|s| belongs_to(s, origin));
     h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(h.sessions
+    h.sessions
         .into_iter()
-        .map(|s| ChatSessionMeta { id: s.id, title: s.title, updated_at: s.updated_at })
-        .collect())
+        .map(|s| {
+            let origin = effective_origin(&s).to_string();
+            ChatSessionMeta { id: s.id, title: s.title, updated_at: s.updated_at, origin }
+        })
+        .collect()
 }
 
-/// Create a new empty session. Returns its id.
-pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
-    create_chat_session_impl(&state.data_dir)
+/// List chat sessions for one end, newest first. Unknown origin values error out
+/// instead of silently falling back (a fallback would mislabel someone's sessions).
+pub fn list_chat_sessions(
+    state: State<'_, AppState>,
+    origin: Option<String>,
+) -> Result<Vec<ChatSessionMeta>, String> {
+    let origin = parse_origin(origin.as_deref())?;
+    Ok(list_chat_sessions_filtered(&state.data_dir, origin.as_deref()))
 }
 
-pub fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, String> {
+/// Create a new empty session **for one end**. Returns its id.
+pub fn create_chat_session(
+    state: State<'_, AppState>,
+    origin: Option<String>,
+) -> Result<String, String> {
+    let origin = parse_origin(origin.as_deref())?.unwrap_or_else(|| ORIGIN_UI.to_string());
+    create_chat_session_impl(&state.data_dir, &origin)
+}
+
+pub fn create_chat_session_impl(data_dir: &std::path::Path, origin: &str) -> Result<String, String> {
     let now = now_ts();
     let session = ChatSession {
         id: uuid::Uuid::new_v4().to_string(),
@@ -267,13 +350,29 @@ pub fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, St
         per_turn_scopes: vec![],
         retrieval_scope: vec![],
         strict_docs: false,
+        origin: origin.to_string(),
     };
     let id = session.id.clone();
-    // 持锁 RMW：并发创建（桌面 + Web）不会互相覆盖。
+    // 持锁 RMW：并发创建（桌面 + Web + 飞书）不会互相覆盖。
     mutate_history(data_dir, |h| {
-        if h.sessions.len() >= 50 {
-            h.sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-            h.sessions.pop();
+        // 上限**按来源端各自**计算：三端隔离后，某一端刷满不该挤掉另一端的会话。
+        let oldest_same_origin = {
+            let mut same: Vec<usize> = h
+                .sessions
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| effective_origin(s) == origin)
+                .map(|(i, _)| i)
+                .collect();
+            if same.len() >= 50 {
+                same.sort_by_key(|&i| h.sessions[i].updated_at);
+                Some(same[0])
+            } else {
+                None
+            }
+        };
+        if let Some(idx) = oldest_same_origin {
+            h.sessions.remove(idx);
         }
         h.sessions.push(session);
         Ok(())
@@ -281,22 +380,58 @@ pub fn create_chat_session_impl(data_dir: &std::path::Path) -> Result<String, St
     Ok(id)
 }
 
-/// Delete a session by id.
-pub fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    delete_chat_session_impl(&state.data_dir, id)
+/// Delete a session by id. `origin = Some(...)` restricts deletion to that end
+/// (跨来源端删除会被拒绝)；`None` ＝ 内部/统一管理，不受限。
+pub fn delete_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    origin: Option<String>,
+) -> Result<(), String> {
+    let origin = parse_origin(origin.as_deref())?;
+    delete_chat_session_impl(&state.data_dir, id, origin.as_deref())
 }
 
-pub fn delete_chat_session_impl(data_dir: &std::path::Path, id: String) -> Result<(), String> {
+pub fn delete_chat_session_impl(
+    data_dir: &std::path::Path,
+    id: String,
+    origin: Option<&str>,
+) -> Result<(), String> {
     mutate_history(data_dir, |h| {
+        if let Some(o) = origin
+            && let Some(s) = h.sessions.iter().find(|s| s.id == id)
+            && effective_origin(s) != o
+        {
+            return Err(format!(
+                "跨来源端删除被拒绝：会话属于 '{}'，请求来自 '{o}'",
+                effective_origin(s)
+            ));
+        }
         h.sessions.retain(|s| s.id != id);
         Ok(())
     })
 }
 
-/// Load a full session by id. Returns None if not found.
-pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Option<ChatSession>, String> {
-    let h = read_history(&state.data_dir);
-    Ok(h.sessions.into_iter().find(|s| s.id == id))
+/// 按 id（+可选来源端）取一个完整会话。`origin = None` ＝ 不限来源。
+/// 三端与 webapi 路由共用它，避免各自重复实现过滤。
+pub fn find_chat_session(
+    data_dir: &std::path::Path,
+    id: &str,
+    origin: Option<&str>,
+) -> Option<ChatSession> {
+    read_history(data_dir)
+        .sessions
+        .into_iter()
+        .find(|s| s.id == id && belongs_to(s, origin))
+}
+
+/// Load a full session by id. Returns None if not found **or not owned by `origin`**.
+pub fn load_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    origin: Option<String>,
+) -> Result<Option<ChatSession>, String> {
+    let origin = parse_origin(origin.as_deref())?;
+    Ok(find_chat_session(&state.data_dir, &id, origin.as_deref()))
 }
 
 /// Save (create or update) a session. If the session is new or has no title,
@@ -304,32 +439,56 @@ pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Optio
 pub fn save_chat_session(
     state: State<'_, AppState>,
     session: ChatSession,
+    origin: Option<String>,
 ) -> Result<(), String> {
-    save_chat_session_impl(&state.data_dir, session)
+    let origin = parse_origin(origin.as_deref())?;
+    save_chat_session_impl(&state.data_dir, session, origin.as_deref())
 }
 
-pub(super) fn save_chat_session_impl(data_dir: &std::path::Path, session: ChatSession) -> Result<(), String> {
+pub fn save_chat_session_impl(
+    data_dir: &std::path::Path,
+    session: ChatSession,
+    caller_origin: Option<&str>,
+) -> Result<(), String> {
     let now = now_ts();
     let mut session = session;
     session.updated_at = now;
     if session.title.is_empty() || session.title == "新会话" {
         session.title = title_from_first_message(&session);
     }
-    // 持锁 RMW：两个客户端同时保存不同会话时不再互相覆盖。
+    // 持锁 RMW：多个客户端同时保存不同会话时不再互相覆盖。
     mutate_history(data_dir, |h| {
-        let exists = h.sessions.iter_mut().find(|s| s.id == session.id);
-        match exists {
-            Some(existing) => {
-                if session.created_at == 0 {
-                    session.created_at = existing.created_at;
+        let found = h.sessions.iter().position(|s| s.id == session.id);
+        match found {
+            Some(idx) => {
+                let existing_origin = effective_origin(&h.sessions[idx]).to_string();
+                // 写入限同来源端：别端的会话不允许被改写。
+                if let Some(o) = caller_origin
+                    && existing_origin != o
+                {
+                    return Err(format!(
+                        "跨来源端写入被拒绝：会话属于 '{existing_origin}'，请求来自 '{o}'"
+                    ));
                 }
-                *existing = session
+                let existing_created_at = h.sessions[idx].created_at;
+                if session.created_at == 0 {
+                    session.created_at = existing_created_at;
+                }
+                // 载荷没带 origin（前端不知道自己在哪个端）→ 沿用已有值，
+                // **绝不**因为缺字段就把来源改掉。
+                if session.origin.is_empty() {
+                    session.origin = existing_origin;
+                }
+                h.sessions[idx] = session;
             }
             None => {
                 if session.created_at == 0 {
                     session.created_at = now;
                 }
-                h.sessions.push(session)
+                if session.origin.is_empty() {
+                    session.origin = caller_origin.unwrap_or(ORIGIN_UI).to_string();
+                }
+                h.sessions.push(session);
             }
         }
         Ok(())
@@ -366,20 +525,23 @@ pub fn export_chat_session(
     state: State<'_, AppState>,
     id: String,
     turns: Option<Vec<usize>>,
+    origin: Option<String>,
 ) -> Result<String, String> {
-    export_chat_session_impl(&state.data_dir, &id, turns.as_deref())
+    let origin = parse_origin(origin.as_deref())?;
+    export_chat_session_impl(&state.data_dir, &id, turns.as_deref(), origin.as_deref())
 }
 
 pub fn export_chat_session_impl(
     data_dir: &std::path::Path,
     id: &str,
     selected_turns: Option<&[usize]>,
+    origin: Option<&str>,
 ) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
         .into_iter()
-        .find(|s| s.id == id)
+        .find(|s| s.id == id && belongs_to(s, origin))
         .ok_or_else(|| "会话不存在".to_string())?;
 
     let config = crate::config::load_config();
@@ -525,8 +687,16 @@ pub fn export_chat_session_json(
     state: State<'_, AppState>,
     id: String,
     turns: Option<Vec<usize>>,
+    origin: Option<String>,
 ) -> Result<String, String> {
-    export_chat_session_json_impl(&state.data_dir, &id, Some(&state.db), turns.as_deref())
+    let origin = parse_origin(origin.as_deref())?;
+    export_chat_session_json_impl(
+        &state.data_dir,
+        &id,
+        Some(&state.db),
+        turns.as_deref(),
+        origin.as_deref(),
+    )
 }
 
 pub fn export_chat_session_json_impl(
@@ -534,12 +704,13 @@ pub fn export_chat_session_json_impl(
     id: &str,
     db: Option<&r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>>,
     selected_turns: Option<&[usize]>,
+    origin: Option<&str>,
 ) -> Result<String, String> {
     let h = read_history(data_dir);
     let session = h
         .sessions
         .into_iter()
-        .find(|s| s.id == id)
+        .find(|s| s.id == id && belongs_to(s, origin))
         .ok_or_else(|| "会话不存在".to_string())?;
 
     // Load per-turn structured pipeline events (ai_events, 0-based turn_number).
@@ -766,6 +937,7 @@ mod tests {
             per_turn_scopes: vec![],
             retrieval_scope: vec![],
             strict_docs: false,
+            origin: ORIGIN_UI.to_string(),
         }
     }
 
@@ -778,12 +950,12 @@ mod tests {
         let d2 = dir.clone();
         let t1 = std::thread::spawn(move || {
             for i in 0..50 {
-                save_chat_session_impl(&d1, mk_session("s-a", &format!("a{i}"))).unwrap();
+                save_chat_session_impl(&d1, mk_session("s-a", &format!("a{i}")), Some("ui")).unwrap();
             }
         });
         let t2 = std::thread::spawn(move || {
             for i in 0..50 {
-                save_chat_session_impl(&d2, mk_session("s-b", &format!("b{i}"))).unwrap();
+                save_chat_session_impl(&d2, mk_session("s-b", &format!("b{i}")), Some("ui")).unwrap();
             }
         });
         t1.join().unwrap();
@@ -800,7 +972,7 @@ mod tests {
     #[test]
     fn write_history_leaves_no_temp_file() {
         let dir = temp_dir();
-        save_chat_session_impl(&dir, mk_session("s-1", "t")).unwrap();
+        save_chat_session_impl(&dir, mk_session("s-1", "t"), Some("ui")).unwrap();
         assert!(chat_history_path(&dir).is_file());
         assert!(
             !dir.join("chat_history.json.tmp").exists(),
@@ -816,12 +988,132 @@ mod tests {
     #[test]
     fn create_and_delete_preserve_other_sessions() {
         let dir = temp_dir();
-        let a = create_chat_session_impl(&dir).unwrap();
-        save_chat_session_impl(&dir, mk_session("s-x", "x")).unwrap();
-        delete_chat_session_impl(&dir, a).unwrap();
+        let a = create_chat_session_impl(&dir, "ui").unwrap();
+        save_chat_session_impl(&dir, mk_session("s-x", "x"), Some("ui")).unwrap();
+        delete_chat_session_impl(&dir, a, Some("ui")).unwrap();
         let h = read_history(&dir);
         assert_eq!(h.sessions.len(), 1);
         assert_eq!(h.sessions[0].id, "s-x");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── §5.5 阶段二：来源端隔离 ──────────────────────────────────────────────
+
+    /// 三端各自**只见己方**会话；`None` 表示不限来源（统一管理视图用）。
+    #[test]
+    fn sessions_are_isolated_per_origin() {
+        let dir = temp_dir();
+        let ui_id = create_chat_session_impl(&dir, ORIGIN_UI).unwrap();
+        let web_id = create_chat_session_impl(&dir, ORIGIN_WEB).unwrap();
+        let lark_id = create_chat_session_impl(&dir, ORIGIN_LARK).unwrap();
+
+        let ui = list_chat_sessions_filtered(&dir, Some(ORIGIN_UI));
+        assert_eq!(ui.len(), 1, "桌面端只应看到自己那 1 条");
+        assert_eq!(ui[0].id, ui_id);
+        assert_eq!(ui[0].origin, ORIGIN_UI);
+
+        let web = list_chat_sessions_filtered(&dir, Some(ORIGIN_WEB));
+        assert_eq!(web.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![web_id.as_str()]);
+        let lark = list_chat_sessions_filtered(&dir, Some(ORIGIN_LARK));
+        assert_eq!(lark.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), vec![lark_id.as_str()]);
+
+        assert_eq!(list_chat_sessions_filtered(&dir, None).len(), 3, "None = 不限来源");
+
+        // load：跨端按"不存在"处理，不泄漏别的端有没有这个 id
+        assert!(find_chat_session(&dir, &ui_id, Some(ORIGIN_WEB)).is_none());
+        assert!(find_chat_session(&dir, &ui_id, Some(ORIGIN_UI)).is_some());
+        assert!(find_chat_session(&dir, &ui_id, None).is_some());
+
+        // delete：跨端必须被拒，且被拒后会话仍在
+        let err = delete_chat_session_impl(&dir, ui_id.clone(), Some(ORIGIN_WEB)).unwrap_err();
+        assert!(err.contains("跨来源端删除被拒绝"), "unexpected: {err}");
+        assert!(find_chat_session(&dir, &ui_id, Some(ORIGIN_UI)).is_some(), "被拒后会话必须仍在");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 老会话（没有 `origin` 字段）归 `ui`；**Web 端看不到它** —— 这是本阶段的行为变化，
+    /// 用测试钉住，避免将来有人"顺手"把老会话改成对三端都可见。
+    #[test]
+    fn legacy_sessions_without_origin_are_ui_only() {
+        let dir = temp_dir();
+        std::fs::write(
+            chat_history_path(&dir),
+            r#"{"sessions":[{"id":"legacy-1","title":"旧会话","created_at":1,"updated_at":2,
+                "messages":[],"source_ids":[],"source_files":[]}]}"#,
+        )
+        .unwrap();
+
+        let ui = list_chat_sessions_filtered(&dir, Some(ORIGIN_UI));
+        assert_eq!(ui.len(), 1, "老会话必须归 ui");
+        assert_eq!(ui[0].origin, ORIGIN_UI);
+        assert!(
+            list_chat_sessions_filtered(&dir, Some(ORIGIN_WEB)).is_empty(),
+            "老会话不应出现在 Web 端"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 保存时**不带** origin（前端的真实情况：它不知道自己在哪个端）不得改写来源端。
+    #[test]
+    fn save_without_origin_keeps_existing_origin() {
+        let dir = temp_dir();
+        let id = create_chat_session_impl(&dir, ORIGIN_WEB).unwrap();
+        let mut s = find_chat_session(&dir, &id, None).unwrap();
+        assert_eq!(s.origin, ORIGIN_WEB);
+
+        s.title = "改个标题".into();
+        s.origin = String::new(); // 模拟前端：完全不带该字段
+        save_chat_session_impl(&dir, s, Some(ORIGIN_WEB)).unwrap();
+
+        let after = find_chat_session(&dir, &id, None).unwrap();
+        assert_eq!(after.origin, ORIGIN_WEB, "缺字段绝不能把来源端改掉");
+        assert_eq!(after.title, "改个标题", "其余字段照常更新");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 跨来源端写入必须被拒（写入限同 origin），且被拒后原会话不被改动。
+    #[test]
+    fn cross_origin_write_is_rejected() {
+        let dir = temp_dir();
+        let id = create_chat_session_impl(&dir, ORIGIN_UI).unwrap();
+        let mut s = find_chat_session(&dir, &id, None).unwrap();
+        s.title = "被别端偷改".into();
+
+        let err = save_chat_session_impl(&dir, s, Some(ORIGIN_WEB)).unwrap_err();
+        assert!(err.contains("跨来源端写入被拒绝"), "unexpected: {err}");
+        assert_eq!(
+            find_chat_session(&dir, &id, None).unwrap().title,
+            "新会话",
+            "被拒的写入不得留下任何改动"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 50 上限**按来源端各自**计算：一端刷满不该挤掉另一端的会话。
+    #[test]
+    fn session_cap_is_per_origin() {
+        let dir = temp_dir();
+        for _ in 0..51 {
+            create_chat_session_impl(&dir, ORIGIN_WEB).unwrap();
+        }
+        create_chat_session_impl(&dir, ORIGIN_UI).unwrap();
+
+        assert_eq!(list_chat_sessions_filtered(&dir, Some(ORIGIN_WEB)).len(), 50, "web 端封顶 50");
+        assert_eq!(
+            list_chat_sessions_filtered(&dir, Some(ORIGIN_UI)).len(),
+            1,
+            "另一端不该被 web 端挤掉"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 未知来源端**报错**而不是静默回退 —— 静默回退会把别端会话认领过来。
+    #[test]
+    fn unknown_origin_is_an_error() {
+        assert!(parse_origin(Some("desktop")).is_err());
+        assert!(parse_origin(Some("")).is_err());
+        assert_eq!(parse_origin(None).unwrap(), None, "None = 不限来源");
+        assert_eq!(parse_origin(Some("lark")).unwrap().as_deref(), Some(ORIGIN_LARK));
+        assert_eq!(parse_origin(Some(" web ")).unwrap().as_deref(), Some(ORIGIN_WEB), "两侧空白容忍");
     }
 }

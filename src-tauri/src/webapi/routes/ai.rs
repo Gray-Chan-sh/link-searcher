@@ -99,9 +99,12 @@ async fn chat_sessions_handler(
     State(state): State<ApiState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let h = crate::commands::ai::read_history(&app_state.data_dir);
-    let mut sessions: Vec<_> = h.sessions;
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    // §5.5 阶段二：Web 端**只见本端**会话（`list_chat_sessions_filtered` 已按
+    // updated_at 倒序）。飞书 bot 在 P1 接入时会以 `lark` 身份调同一族路由。
+    let sessions = crate::commands::ai::list_chat_sessions_filtered(
+        &app_state.data_dir,
+        Some(crate::commands::ai::ORIGIN_WEB),
+    );
     let metas: Vec<serde_json::Value> = sessions
         .iter()
         .map(|s| {
@@ -109,6 +112,7 @@ async fn chat_sessions_handler(
                 "id": s.id,
                 "title": s.title,
                 "updated_at": s.updated_at,
+                "origin": s.origin,
             })
         })
         .collect();
@@ -119,10 +123,13 @@ async fn chat_session_create_handler(
     State(state): State<ApiState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let id = crate::commands::ai::create_chat_session_impl(&app_state.data_dir)
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
+    let id = crate::commands::ai::create_chat_session_impl(
+        &app_state.data_dir,
+        crate::commands::ai::ORIGIN_WEB,
+    )
+    .map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -131,8 +138,12 @@ async fn chat_session_load_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let h = crate::commands::ai::read_history(&app_state.data_dir);
-    let session = h.sessions.into_iter().find(|s| s.id == id);
+    // 跨端的会话按"不存在"处理 —— 不向别的端泄漏"这个 id 是否存在"。
+    let session = crate::commands::ai::find_chat_session(
+        &app_state.data_dir,
+        &id,
+        Some(crate::commands::ai::ORIGIN_WEB),
+    );
     match session {
         Some(s) => Ok(Json(serde_json::to_value(&s).unwrap_or_default())),
         None => Err(ApiError {
@@ -146,8 +157,12 @@ async fn chat_session_delete_handler(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::ai::delete_chat_session_impl(&app_state.data_dir, id)
-        .map_err(|e| ApiError { error: e })?;
+    crate::commands::ai::delete_chat_session_impl(
+        &app_state.data_dir,
+        id,
+        Some(crate::commands::ai::ORIGIN_WEB),
+    )
+    .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "deleted": true })))
 }
 
@@ -164,15 +179,21 @@ async fn chat_session_export_handler(
     axum::Json(body): axum::Json<ExportBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let md = crate::commands::ai::export_chat_session_impl(&app_state.data_dir, &id, body.turns.as_deref())
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
+    let md = crate::commands::ai::export_chat_session_impl(
+        &app_state.data_dir,
+        &id,
+        body.turns.as_deref(),
+        Some(crate::commands::ai::ORIGIN_WEB),
+    )
+    .map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
     let json = crate::commands::ai::export_chat_session_json_impl(
         &app_state.data_dir,
         &id,
         Some(&app_state.db),
         body.turns.as_deref(),
+        Some(crate::commands::ai::ORIGIN_WEB),
     )
     .map_err(|e| ApiError {
         error: e.to_string(),
@@ -464,8 +485,12 @@ async fn save_chat_session_handler(
         })?;
     session.id = id;
     let app_state = state.app_handle.state::<AppState>();
-    crate::commands::ai::save_chat_session(app_state.clone(), session)
-        .map_err(|e| ApiError { error: e })?;
+    crate::commands::ai::save_chat_session_impl(
+        &app_state.data_dir,
+        session,
+        Some(crate::commands::ai::ORIGIN_WEB),
+    )
+    .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "saved": true })))
 }
 
