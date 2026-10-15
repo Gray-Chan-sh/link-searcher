@@ -111,11 +111,18 @@ impl IndexerService {
     /// Extract text from a single file: read content, compute MD5, dedup
     /// against `content_index`, and run the extraction fallback chain.
     ///
-    /// Shared by [`batch_index`](Self::batch_index) Phase 1 and
+    /// Takes the **pool**, not a borrowed connection: the extraction itself
+    /// (which may spend minutes in OCR) must not hold a pooled connection,
+    /// otherwise the `batch_io_concurrency` extractor workers starve every
+    /// other DB user (UI IPC, Web API, embedding keepers) for the whole batch.
+    /// A connection is borrowed only for the short read before extraction and
+    /// the short write after it, and returned immediately.
+    ///
+    /// Shared by [`batch_index`](Self::batch_index) Phase 1 and
     /// [`index_file`](Self::index_file).
     fn extract_and_index_single(
         job: &BatchJob,
-        conn: &Connection,
+        db: &Pool<SqliteConnectionManager>,
         engine_override: Option<crate::extractor::ocr::OcrEngineType>,
     ) -> Result<ExtractedData, (String, String)> {
         let file_name = job
@@ -189,50 +196,73 @@ impl IndexerService {
 
         log::info!("[INDEX] [{}] 开始: {file_name} ({file_ext}, {file_size} B)", job.file_id);
 
-        // Dedup – reuse previously extracted content for the same hash.
-        let text = 'dedup: {
-            match crate::db::tracker::get_content(conn, &hash) {
-                Ok(Some(t)) => {
-                    log::info!(
-                        "[INDEX] 去重: {file_name} 复用 md5={}& 的已有内容",
-                        &hash[..8.min(hash.len())]
-                    );
-                    break 'dedup t;
-                }
-                Ok(None) => {}
+        // ── 阶段 A：提取前的 DB 读取（借用连接，读完立刻归还）────────────
+        //
+        // 「去重命中」+「OCR 语言/引擎」是提取所需的全部 DB 输入，一次取完即
+        // 可释放连接。这样下面的提取（可能数分钟 OCR）**不持有任何连接**，
+        // 提取 worker 不再长期占用连接池。
+        let (dedup_hit, ocr_lang, ocr_engine) = {
+            let conn = db
+                .get()
+                .map_err(|e| (job.file_id.clone(), format!("DB conn: {e}")))?;
+
+            // Dedup – reuse previously extracted content for the same hash.
+            let dedup_hit = match crate::db::tracker::get_content(&conn, &hash) {
+                Ok(Some(t)) => Some(t),
+                Ok(None) => None,
                 Err(e) => {
                     log::warn!("[INDEX] dedup query failed, falling back to extraction: {e}");
+                    None
                 }
-            }
-            let mut ocr_used = false;
-            let ocr_lang = crate::db::dir_config::get_dir(conn, &job.dir_id)
-                .ok()
-                .flatten()
-                .and_then(|c| {
-                    if c.ocr_lang.is_empty() || c.ocr_lang == "eng" {
-                        None
-                    } else {
-                        Some(c.ocr_lang)
-                    }
-                })
-                .or_else(|| {
-                    conn.query_row(
-                        "SELECT value FROM app_settings WHERE key = 'ocr_lang'",
-                        [],
-                        |row| row.get::<_, String>(0),
-                    )
+            };
+
+            // 去重命中时不会走提取，语言/引擎用不上（回传占位值）。
+            let ocr_lang = if dedup_hit.is_some() {
+                String::new()
+            } else {
+                crate::db::dir_config::get_dir(&conn, &job.dir_id)
                     .ok()
-                })
-                .unwrap_or_else(|| "eng".to_string());
-            let db_engine =
+                    .flatten()
+                    .and_then(|c| {
+                        if c.ocr_lang.is_empty() || c.ocr_lang == "eng" {
+                            None
+                        } else {
+                            Some(c.ocr_lang)
+                        }
+                    })
+                    .or_else(|| {
+                        conn.query_row(
+                            "SELECT value FROM app_settings WHERE key = 'ocr_lang'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| "eng".to_string())
+            };
+
+            let ocr_engine = engine_override.clone().or_else(|| {
                 conn.query_row(
                     "SELECT value FROM app_settings WHERE key = 'ocr_engine'",
                     [],
                     |row| row.get::<_, String>(0),
                 )
                 .ok()
-                .map(|v| crate::extractor::ocr::map_engine(&v));
-            let ocr_engine = engine_override.clone().or(db_engine);
+                .map(|v| crate::extractor::ocr::map_engine(&v))
+            });
+
+            (dedup_hit, ocr_lang, ocr_engine)
+        }; // ← 连接在此归还；下面整段提取不再持有连接
+
+        // ── 阶段 B：提取（零 DB 连接）────────────────────────────────
+        let text = if let Some(t) = dedup_hit {
+            log::info!(
+                "[INDEX] 去重: {file_name} 复用 md5={}& 的已有内容",
+                &hash[..8.min(hash.len())]
+            );
+            t
+        } else {
+            let mut ocr_used = false;
             let extracted = match crate::extractor::extract_text_with_meta(
                 &job.file_path,
                 &ocr_lang,
@@ -316,19 +346,31 @@ impl IndexerService {
             // 一条路），否则 content_index.ocr_used 对 PDF 永远是 0，质量审计
             // 与"哪些文件是 OCR 出来的"统计全部失真。
             let ocr_used = extracted.1.ocr_used || ocr_used;
-            if retry_busy("store_content", &job.file_id, || {
-                crate::db::tracker::store_content_with_quality(
-                    conn,
-                    &hash,
-                    &extracted.0,
-                    ocr_used,
-                    None,
-                    Some(&quality),
-                )
-            })
-            .is_none()
-            {
-                log::warn!("[INDEX] {}: 内容未落库（quality 将丢失，backfill 可补回）", job.file_id);
+            // ── 阶段 C（写）：取一条短连接落库，写完立刻归还 ──────────────
+            match db.get() {
+                Ok(conn) => {
+                    if retry_busy("store_content", &job.file_id, || {
+                        crate::db::tracker::store_content_with_quality(
+                            &conn,
+                            &hash,
+                            &extracted.0,
+                            ocr_used,
+                            None,
+                            Some(&quality),
+                        )
+                    })
+                    .is_none()
+                    {
+                        log::warn!(
+                            "[INDEX] {}: 内容未落库（quality 将丢失，backfill 可补回）",
+                            job.file_id
+                        );
+                    }
+                }
+                Err(e) => {
+                    // 内容暂未落库：本次判失败，下次扫描命中去重后补写。
+                    log::warn!("[INDEX] {}: 取连接失败，内容未落库: {e}", job.file_id);
+                }
             }
             extracted.0
         };
@@ -340,14 +382,19 @@ impl IndexerService {
             .map(|d| d.as_micros() as i64)
             .unwrap_or(0);
 
+        // ── 阶段 C（写）：chunk 存储 + mark_extracted（短连接）────────────
+        let conn = db
+            .get()
+            .map_err(|e| (job.file_id.clone(), format!("DB conn: {e}")))?;
+
         // Long-doc chunk storage for RAG retrieval (content-keyed by md5);
         // dedup reuse keeps existing chunks, below-threshold clears stale ones.
         if text.chars().count() > crate::db::chunks::CHUNK_THRESHOLD {
-            match crate::db::chunks::get_chunks(conn, &hash) {
+            match crate::db::chunks::get_chunks(&conn, &hash) {
                 Ok(existing) if existing.is_empty() => {
                     let chunks = crate::db::chunks::chunk_text(&text);
                     if retry_busy("replace_chunks", &job.file_id, || {
-                        crate::db::chunks::replace_chunks(conn, &hash, &chunks)
+                        crate::db::chunks::replace_chunks(&conn, &hash, &chunks)
                     })
                     .is_none()
                     {
@@ -357,13 +404,13 @@ impl IndexerService {
                 Ok(_) => {}
                 Err(e) => log::warn!("[INDEX] doc_chunks read failed {}: {e}", job.file_id),
             }
-        } else if let Err(e) = crate::db::chunks::delete_chunks(conn, &hash) {
+        } else if let Err(e) = crate::db::chunks::delete_chunks(&conn, &hash) {
             log::warn!("[INDEX] doc_chunks cleanup failed {}: {e}", job.file_id);
         }
 
         // CRITICAL: mark_extracted must succeed for Phase 1 progress visibility.
         if retry_busy("mark_extracted", &job.file_id, || {
-            crate::db::tracker::mark_extracted(conn, &job.file_id, Some(&hash))
+            crate::db::tracker::mark_extracted(&conn, &job.file_id, Some(&hash))
         })
         .is_none()
         {
@@ -372,6 +419,7 @@ impl IndexerService {
                 job.file_id
             );
         }
+        drop(conn);
 
         Ok(ExtractedData {
             file_id: job.file_id.clone(),
@@ -451,6 +499,7 @@ impl IndexerService {
 
             // ── Chunk Phase 1: parallel extraction ─────────────────────
             let chunk_start = Instant::now();
+            let ws_before_chunk = crate::load::sample().process_ws_mb;
             let pool = batch_io_pool(self.batch_io_concurrency.load(Ordering::Relaxed))?;
             let extracted: Vec<Result<ExtractedData, (String, String)>> = pool.install(|| {
                 chunk
@@ -460,18 +509,30 @@ impl IndexerService {
                             return Err((job.file_id.clone(), "scan cancelled".to_string()));
                         }
                         // 自适应并发闸门：限制同时展开的文档数（每篇 PDF 在内存里持有
-                        // 对象图 + 页位图）。必须放在取 DB 连接**之前**——限流/暂停时若
+                        // 对象图 + 页位图）。必须在任何取连接**之前**——限流/暂停时若
                         // 已持有连接去等待，会把连接池占满（实测过 55 次
                         // "DB conn: timed out waiting for connection" 失败）。
                         let _doc_permit = crate::load::acquire_doc();
-                        let conn = match db.get() {
-                            Ok(c) => c,
-                            Err(e) => return Err((job.file_id.clone(), format!("DB conn: {e}"))),
-                        };
-                        Self::extract_and_index_single(job, &conn, None)
+                        // 连接由 extract_and_index_single 内部按需短持有：这里不再
+                        // 跨整个提取期占着池连接。
+                        Self::extract_and_index_single(job, &db, None)
                     })
                     .collect()
             });
+
+            // ── 批屏障观测 ────────────────────────────────────────────
+            // 为"Phase-1 结果驻留到 Phase 2 才释放 ≈ 18GB"这一**未经证实**的
+            // 归因取证：同时打出「本块驻留的提取文本量」与「进程 WS」。
+            // 若文本量远小于 WS，则峰值来自提取期页位图（由 load.rs 的并发闸门
+            // 管辖），而不是本屏障 —— 据此再决定要不要改分批落库。
+            let extracted_len = extracted.len();
+            let retained_text_mb: f64 = extracted
+                .iter()
+                .filter_map(|r| r.as_ref().ok())
+                .map(|d| d.text.len() as f64)
+                .sum::<f64>()
+                / 1_048_576.0;
+            let ws_at_barrier = crate::load::sample().process_ws_mb;
 
             // ── Chunk Phase 2: serial Tantivy write + DB tracking ──────
             let mut guard = self.lock_writer()?;
@@ -573,6 +634,12 @@ impl IndexerService {
             drop(conn);
             drop(guard);
 
+            // 批屏障观测：Phase 2 落库后的 WS（对比 Phase-1 结束时的驻留文本量）。
+            let ws_after_flush = crate::load::sample().process_ws_mb;
+            log::info!(
+                "[PERF] 批屏障: 本块 {extracted_len} 份提取结果驻留 {retained_text_mb:.1}MB 文本; WS {ws_before_chunk}MB(块前) → {ws_at_barrier}MB(提取完) → {ws_after_flush}MB(落库后)"
+            );
+
             let chunk_elapsed = chunk_start.elapsed().as_secs_f64();
             log::info!(
                 "[PERF] 块完成: {}-{} ({} ok, {} err), {:.1}MB, {:.1}s, {:.1} 文件/s — 本块立即可搜",
@@ -654,15 +721,17 @@ impl IndexerService {
 
         // 自适应并发闸门（与批处理同一把）：先拿许可，再取 DB 连接。
         let _doc_permit = crate::load::acquire_doc();
-        let conn = self.db.get().context("failed to get DB connection")?;
 
-        // Compute relative path for index storage.
-        let file_path_str = match crate::db::dir_config::get_dir(&conn, dir_id) {
-            Ok(Some(cfg)) => crate::scanner::helpers::to_relative(&cfg.path, file_path)
-                .unwrap_or_else(|_| {
-                    crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy())
-                }),
-            _ => crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy()),
+        // Compute relative path for index storage（短连接读取，读完立刻归还）。
+        let file_path_str = {
+            let conn = self.db.get().context("failed to get DB connection")?;
+            match crate::db::dir_config::get_dir(&conn, dir_id) {
+                Ok(Some(cfg)) => crate::scanner::helpers::to_relative(&cfg.path, file_path)
+                    .unwrap_or_else(|_| {
+                        crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy())
+                    }),
+                _ => crate::scanner::helpers::normalize_os_path(&file_path.to_string_lossy()),
+            }
         };
 
         let job = BatchJob {
@@ -673,10 +742,14 @@ impl IndexerService {
         };
 
         let result = (|| -> Result<()> {
-            let data = Self::extract_and_index_single(&job, &conn, engine_override)
+            // 提取期不持有连接（见 `extract_and_index_single` 的文档）。
+            let data = Self::extract_and_index_single(&job, &self.db, engine_override)
                 .map_err(|(_, e)| anyhow::anyhow!(e))?;
 
-            Self::clear_stale_embeddings(&conn, file_id, &data.hash);
+            {
+                let conn = self.db.get().context("failed to get DB connection")?;
+                Self::clear_stale_embeddings(&conn, file_id, &data.hash);
+            }
 
             let mut guard = self.lock_writer()?;
             let w = guard
@@ -690,8 +763,11 @@ impl IndexerService {
             )
             .map_err(|e| anyhow::anyhow!("failed to add document to index: {e}"))?;
 
-            crate::db::tracker::update_indexed(&conn, &data.file_id, Some(&data.hash))
-                .context("failed to update indexed status")?;
+            {
+                let conn = self.db.get().context("failed to get DB connection")?;
+                crate::db::tracker::update_indexed(&conn, &data.file_id, Some(&data.hash))
+                    .context("failed to update indexed status")?;
+            }
 
             log::info!("[INDEX] [{}] 完成: {}", file_id, data.file_name);
 
@@ -710,7 +786,9 @@ impl IndexerService {
 
         if let Err(ref e) = result {
             let error_type = classify_error(e, &file_ext);
-            let _ = crate::db::tracker::log_index_error(&conn, file_id, &file_path.to_string_lossy(), error_type, &e.to_string());
+            if let Ok(conn) = self.db.get() {
+                let _ = crate::db::tracker::log_index_error(&conn, file_id, &file_path.to_string_lossy(), error_type, &e.to_string());
+            }
             log::warn!("[INDEX] 失败: {file_name}: {e}");
         }
 

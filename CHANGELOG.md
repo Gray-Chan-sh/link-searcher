@@ -1,5 +1,22 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：修「提取期长期持有 DB 连接」（界面/Web API 被池饿死的**根因**）+ 批屏障内存取证观测
+
+- **根因（结构性；前几轮只做了缓解）**：`indexer.rs` 的 `extract_and_index_single(job, conn, …)` 由**调用方先取连接、再传进来**，这条连接从「去重查询」一直持有到「`mark_extracted`」，**中途横跨整段提取（含数分钟的 PDF OCR）**。于是 `batch_io_concurrency` 个 Phase-1 worker 在整个批次里占着池连接 —— 并发 14 时曾把 24 连接池耗尽（实测 108 个文件超时误判失败），界面查询也被饿死。此前只靠"池 24→48 + 等待 60s + 界面 2s 超时 + 界面专用连接"缓解，本轮从根上改掉。
+- **修法**（`src-tauri/src/indexer.rs`）：签名由 `(job, conn: &Connection, engine_override)` 改为 `(job, db: &Pool<SqliteConnectionManager>, engine_override)`，函数内部按三阶段**各借各还**：
+  - **A 提取前读**：借一条连接跑「去重查询 + `dir_config.ocr_lang` + `app_settings[ocr_lang]` + `app_settings[ocr_engine]`」，取完立刻 `drop`；
+  - **B 提取**：**不持有任何连接**（OCR 全程零池占用）；
+  - **C 提取后写**：`store_content_with_quality` 借一次（取不到连接只 WARN，内容在下次扫描命中去重后补写），`doc_chunks` + `mark_extracted` 再借一次 → `drop`。
+  - 两处调用方同步改：`batch_index` 的 `par_iter`（不再在闭包里 `db.get()`）、`index_file`（`get_dir`/`clear_stale_embeddings`/`update_indexed`/`log_index_error` 各自短连接，不再跨提取期持有）。**`acquire_doc()` 仍在取连接之前** —— 原有契约（"许可必须在连接之前取，否则会把池占满"，55/108 次超时的成因）保持不变。
+  - 净效果：提取并发（8~14）不再占用池连接，池只服务毫秒级读写；提取期的内存/并发行为不变（仍由 `load.rs` 闸门管辖），提取/落库顺序与日志不变。
+- **批屏障内存取证（第 3 项的前置，不盲改落库路径）**：`docs/index-pipeline-eval.md` 把「~18GB 峰值」归因于「Phase-1 结果全部驻留到 Phase 2 才释放」，但核对代码后该归因**未经证实**（`par_iter().collect()` 只保留 `text`；文件字节 `raw` 在函数返回即释放；历史上真正的 18.7GB 是 `extractor/audio.rs` 整段解码那次，另一次 WS 10.2GB 来自并行大扫描件的页位图）。故在 `batch_index` **每块新增一条**观测日志（一次 `sysinfo` 采样，成本可忽略）：
+  `[PERF] 批屏障: 本块 N 份提取结果驻留 X MB 文本; WS A MB(块前) → B MB(提取完) → C MB(落库后)`
+  判定法：若 `X ≪ (B−A)`，峰值来自提取期页位图（受闸门管辖）而非屏障 → 只保留观测、不改「分批落库」。
+- **测试**：`cargo test --lib` **540 passed / 0 failed**（连跑 3 次全绿）；`cargo check --lib` 0 错误；`semgrep --severity ERROR`（custom + owasp-top-ten + secrets，124 规则 / 446 文件）**0 findings (0 blocking)**。
+- **顺带发现（未修，属既有问题、与本次改动无关）**：`extractor/paddleocr.rs` 的 `dict_with_space_token` 把输出写到 `%TEMP%\ls_ppocrv5_dict_space_<pid>.txt`，**与输入字典无关**；测试 `dict_with_space_token_appends_missing_space` 因此会与并行的引擎初始化（`try_build_engine` 同样调用它）抢同一个文件 → 全量并行跑时偶发失败（单独跑、连跑 3 次均绿）。修法很小（文件名带上字典路径的 hash），建议单独一轮处理。
+- ⚠️ **需重启应用生效**；验收指标见下条"待验证"。
+- **涉及文件**：`src-tauri/src/indexer.rs`、`CHANGELOG.md`、`docs/index-pipeline-eval.md`。
+
 ## 2026-10-15：飞书接入文档核对修订 + 可行性/跨平台补录（纯文档，未改代码）
 
 > 背景：按用户要求核对 `docs/LARK_BOT.md` 的（a）「文件:行号 + 路由」引用与代码实际是否一致、（b）方案本身在**本仓库**能否落地、（c）**跨平台**可用性。20 多处引用全部指对文件；发现 1 处**实质性错误**（会误导 P1 实现）、2 处计数不准，以及 3 条文档未写全的**可行性硬前提**，均已补入。
