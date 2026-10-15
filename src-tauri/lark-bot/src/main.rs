@@ -133,7 +133,7 @@ fn main() {
     // ── 3b. 卡片回调：**第二个消费者**（D）──────────────────────────────────
     // 实测（§8.4）：本地多消费者**是允许的** —— "同一 app 只能有一条 bus 连接"指**上游**（daemon→飞书）。
     // 回调是**另一条入口**，必须自己再过一次白名单（消息入口那套不会自动保护它）。
-    spawn_card_consumer(cfg.gate.allowed_users.clone());
+    spawn_card_consumer(Arc::clone(&http), cfg.gate.allowed_users.clone());
 
     // ── 4. 逐行消费标准输出 ────────────────────────────────────────────────
     let stdout = match child.stdout.take() {
@@ -680,7 +680,7 @@ fn spawn_consumer(event_key: &str) -> Result<Child, String> {
 ///
 /// **失败只记日志**：回调不可用不该影响消息主链路 —— "按钮点不动"与"机器人不能答"，
 /// 后者严重得多，绝不能因为回调起不来就整个退出。
-fn spawn_card_consumer(allowed_users: Vec<String>) {
+fn spawn_card_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
     let mut child = match spawn_consumer("card.action.trigger") {
         Ok(c) => c,
         Err(e) => {
@@ -704,7 +704,7 @@ fn spawn_card_consumer(allowed_users: Vec<String>) {
             if line.is_empty() {
                 continue;
             }
-            if let Err(e) = handle_card_line(line, &allowed_users) {
+            if let Err(e) = handle_card_line(&http, line, &allowed_users) {
                 log::warn!("[bot] 处理卡片回调失败：{e}");
             }
         }
@@ -716,7 +716,7 @@ fn spawn_card_consumer(allowed_users: Vec<String>) {
 ///
 /// ⚠️ 回调是**另一条入口** —— 消息入口的 L0/L1/L2 闸门**不会**自动保护它，所以这里必须再判一次
 /// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
-fn handle_card_line(line: &str, allowed_users: &[String]) -> Result<(), String> {
+fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result<(), String> {
     let raw: Value = serde_json::from_str(line).map_err(|e| {
         format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
     })?;
@@ -740,15 +740,48 @@ fn handle_card_line(line: &str, allowed_users: &[String]) -> Result<(), String> 
             Ok(())
         }
         Some(action) => {
-            // TODO(D-4)：执行动作（`打开详情` → 给 WebUI 入口；`换一批证据` → 重跑一轮）。
-            // 目前只记日志：卡片上**还没有按钮**，所以不会有用户可见的影响（先只把链路建起来）。
             log::info!(
                 "[bot] 收到卡片动作 {action:?}（chat={} operator={operator:?}）",
                 ev.chat_id
             );
-            Ok(())
+            match action {
+                crate::card::CardAction::OpenDetail { session_id } => {
+                    // 动作本身**不需要回调 token**：直接 reply 一条提示即可
+                    // （§8.1：回调 token 那条路有"最多 2 次更新"限制，能不用就不用）。
+                    let text = match webui_hint(http, &session_id) {
+                        Ok(t) => t,
+                        Err(e) => format!("暂时拿不到 WebUI 地址：{e}\n（会话 id：{session_id}）"),
+                    };
+                    reply(&ev.message_id, &text);
+                    Ok(())
+                }
+                crate::card::CardAction::Retry { session_id } => {
+                    // 卡片上**故意还没有**这个按钮（要等"在同一张卡上重跑一轮"的接线，D-4b）。
+                    // 保留这个分支是让类型封闭；万一真收到（老卡片/手工构造），**明确告知**而不是静默。
+                    log::info!("[bot] 收到 retry 动作（会话 {session_id}）—— 该按钮尚未上线");
+                    reply(&ev.message_id, "「换一批证据」尚未上线：请直接重新发送问题。");
+                    Ok(())
+                }
+            }
         }
     }
+}
+
+/// 生成"在 WebUI 里打开"的提示（含 **LAN 地址**）。
+///
+/// 地址取自 `GET /api/session` 的 `lan_ip` + `port` —— bot 自己只知道 `127.0.0.1`，
+/// 而用户多半在**手机/别的机器**上点按钮，给回环地址等于点不开。
+fn webui_hint(http: &Http, session_id: &str) -> Result<String, String> {
+    let st = http.get("/api/session")?;
+    let ip = st.get("lan_ip").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let port = st.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+    if ip.is_empty() || port == 0 {
+        return Err("webapi 未运行，或没取到 LAN 地址".to_string());
+    }
+    Ok(format!(
+        "在浏览器打开（需与电脑同一局域网）：\n{}\n\n会话 id：{session_id}",
+        crate::card::webui_url(&ip, port as u16)
+    ))
 }
 
 /// 阻塞读 stderr，直到出现就绪标记 `[event] ready event_key=`。

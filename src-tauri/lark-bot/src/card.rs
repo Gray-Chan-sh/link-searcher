@@ -462,10 +462,20 @@ pub fn action_payload(action: &str, session_id: &str) -> serde_json::Value {
     serde_json::json!({ "action": action, "session_id": session_id })
 }
 
+/// WebUI 的入口 URL（给「打开详情」按钮用）。
+///
+/// 必须用 **LAN 地址**、不能用 `127.0.0.1` —— 用户多半是在**手机/别的机器**上点这个按钮，
+/// 给回环地址等于点不开。纯函数：这是"点开到底能不能打开"的唯一决定因素，也是唯一值得单测的部分。
+pub fn webui_url(lan_ip: &str, port: u16) -> String {
+    format!("https://{}:{}/", lan_ip.trim(), port)
+}
+
 /// 给卡片**追加**动作按钮（只有"最后一张"该用）。
 ///
 /// - **只在最后一张**：多段回答时中间页挂按钮会让"点哪个"变含糊；
-/// - **没有 session_id 就不加**：动作都作用于某个会话，匿名按钮点不动反而是噪音。
+/// - **没有 session_id 就不加**：动作都作用于某个会话，匿名按钮点不动反而是噪音；
+/// - **只加真的能用的按钮**：`换一批证据` 需要"在同一张卡上重跑一轮"的接线（D-4b），
+///   在它落地之前**不放出来** —— 一个点了没反应的按钮比没有按钮更糟。
 pub fn append_actions(card: &mut serde_json::Value, session_id: &str) {
     let sid = session_id.trim();
     if sid.is_empty() {
@@ -482,12 +492,6 @@ pub fn append_actions(card: &mut serde_json::Value, session_id: &str) {
                 "text": { "tag": "plain_text", "content": "打开详情" },
                 "type": "default",
                 "value": action_payload("open_detail", sid),
-            },
-            {
-                "tag": "button",
-                "text": { "tag": "plain_text", "content": "换一批证据" },
-                "type": "default",
-                "value": action_payload("retry", sid),
             },
         ],
     }));
@@ -908,21 +912,31 @@ mod tests {
         let action = elems.last().expect("应追加 action 元素");
         assert_eq!(action["tag"], "action");
         let buttons = action["actions"].as_array().unwrap();
-        assert_eq!(buttons.len(), 2, "两个按钮：打开详情 / 换一批证据");
+        // 只放"真的能用"的按钮：`换一批证据` 要等重跑接线（D-4b）落地后再加
+        assert_eq!(buttons.len(), 1, "当前只应有『打开详情』");
         assert_eq!(buttons[0]["text"]["content"], "打开详情");
 
-        for (btn, expect) in [
-            (&buttons[0], CardAction::OpenDetail { session_id: "sess-9".into() }),
-            (&buttons[1], CardAction::Retry { session_id: "sess-9".into() }),
-        ] {
-            // 模拟飞书：把 value 对象字符串化后作为 action_value 交回来
-            let ev = CardActionEvent {
-                event_type: "card.action.trigger".into(),
-                action_value: btn["value"].to_string(),
-                ..Default::default()
-            };
-            assert_eq!(parse_card_action(&ev), Some(expect), "按钮往返失败：{btn}");
-        }
+        // 模拟飞书：把 value 对象字符串化后作为 action_value 交回来
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: buttons[0]["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::OpenDetail { session_id: "sess-9".into() }),
+            "按钮往返失败"
+        );
+    }
+
+    #[test]
+    fn webui_url_uses_the_lan_address_not_loopback() {
+        assert_eq!(webui_url("192.168.1.5", 8443), "https://192.168.1.5:8443/");
+        assert_eq!(webui_url("  10.0.0.7  ", 9000), "https://10.0.0.7:9000/", "首尾空白要清掉");
+        assert!(
+            !webui_url("192.168.1.5", 8443).contains("127.0.0.1"),
+            "必须给 LAN 地址 —— 用户在手机上点，回环地址点不开"
+        );
     }
 
     #[test]
