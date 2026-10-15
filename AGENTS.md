@@ -183,6 +183,11 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 → 若再现：用"脚本化连跑 N 轮 + 失败即抓 `Running <target>` 标记与 `left/right`"定位，
 **不要**靠重跑碰运气（重跑只会掩盖名字）。
 
+> **再现的第二个签名（2026-10-16，D 第 2b 步门禁）**：`error: linking with link.exe failed: exit code 1327/1158`
+> （多个目标同时报）—— 但**磁盘充足**（C 空 74GB / D 空 182GB），且**紧接着重跑 EXIT=0**。
+> → 同属环境性抖动（疑似并发链接 / 杀软 / 僵尸测试进程持锁）。**先重跑一次再下结论**，
+> 别急着改代码。顺带一提：`target/debug` 已 **51 GB**（AGENTS 里那条"曾达 21.9GB"的记录要更新认知）。
+
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 
 给应用**新增 bin 目标**、加 `default-run`、换入口点这类改动，`cargo build` / `cargo test` **都不会**

@@ -58,10 +58,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use card::{
-    render_answer_card, render_error, render_working, split_for_cards, SseAccum, Throttle,
-    MAX_BODY_BYTES, MAX_CARDS,
-};
+use card::{render_answer_card, render_error, render_working, split_for_cards, CardActionEvent, SseAccum, Throttle, MAX_BODY_BYTES, MAX_CARDS};
 use lark_gate::{
     gate, parse_allowed_users, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent,
     NON_P2P_NOTICE,
@@ -119,7 +116,7 @@ fn main() {
     );
 
     // ── 3. 起 lark-cli 长连接 ─────────────────────────────────────────────
-    let mut child = match spawn_consumer() {
+    let mut child = match spawn_consumer("im.message.receive_v1") {
         Ok(c) => c,
         Err(e) => {
             log::error!("{e}");
@@ -132,6 +129,11 @@ fn main() {
         std::process::exit(5);
     }
     log::info!("[bot] 长连接就绪，开始消费事件");
+
+    // ── 3b. 卡片回调：**第二个消费者**（D）──────────────────────────────────
+    // 实测（§8.4）：本地多消费者**是允许的** —— "同一 app 只能有一条 bus 连接"指**上游**（daemon→飞书）。
+    // 回调是**另一条入口**，必须自己再过一次白名单（消息入口那套不会自动保护它）。
+    spawn_card_consumer(cfg.gate.allowed_users.clone());
 
     // ── 4. 逐行消费标准输出 ────────────────────────────────────────────────
     let stdout = match child.stdout.take() {
@@ -655,16 +657,91 @@ fn lark_cli_program() -> PathBuf {
     PathBuf::from(if cfg!(windows) { "lark-cli.cmd" } else { "lark-cli" })
 }
 
-fn spawn_consumer() -> Result<Child, String> {
+fn spawn_consumer(event_key: &str) -> Result<Child, String> {
     let program = lark_cli_program();
-    log::info!("[bot] 启动事件消费：{}", program.display());
+    log::info!("[bot] 启动事件消费：{} （key={event_key}）", program.display());
     Command::new(&program)
-        .args(["event", "consume", "im.message.receive_v1", "--as", "bot"])
+        .args(["event", "consume", event_key, "--as", "bot"])
         .stdin(Stdio::piped()) // 保留 stdin：优雅停机靠"关 stdin"（Windows 没有可用的 SIGTERM）
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("无法启动 lark-cli（{}）：{e}", program.display()))
+}
+
+/// 起**卡片回调**消费者（`card.action.trigger`）并在后台线程里逐行处理。
+///
+/// **失败只记日志**：回调不可用不该影响消息主链路 —— "按钮点不动"与"机器人不能答"，
+/// 后者严重得多，绝不能因为回调起不来就整个退出。
+fn spawn_card_consumer(allowed_users: Vec<String>) {
+    let mut child = match spawn_consumer("card.action.trigger") {
+        Ok(c) => c,
+        Err(e) => {
+            log::warn!("[bot] 卡片回调消费者启动失败（按钮将不可用）：{e}");
+            return;
+        }
+    };
+    if let Err(e) = wait_ready(&mut child) {
+        log::warn!("[bot] 卡片回调长连接未就绪（按钮将不可用）：{e}");
+        let _ = child.kill();
+        return;
+    }
+    let Some(stdout) = child.stdout.take() else {
+        log::warn!("[bot] 拿不到卡片回调的 stdout（按钮将不可用）");
+        return;
+    };
+    log::info!("[bot] 卡片回调长连接就绪");
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Err(e) = handle_card_line(line, &allowed_users) {
+                log::warn!("[bot] 处理卡片回调失败：{e}");
+            }
+        }
+        log::warn!("[bot] 卡片回调 stdout 结束（按钮将不可用）");
+    });
+}
+
+/// 处理一条卡片回调：**先过身份闸门，再路由动作**。
+///
+/// ⚠️ 回调是**另一条入口** —— 消息入口的 L0/L1/L2 闸门**不会**自动保护它，所以这里必须再判一次
+/// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
+fn handle_card_line(line: &str, allowed_users: &[String]) -> Result<(), String> {
+    let raw: Value = serde_json::from_str(line).map_err(|e| {
+        format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
+    })?;
+    let ev: CardActionEvent =
+        serde_json::from_value(raw.clone()).map_err(|e| format!("回调字段解析失败：{e}"))?;
+    if ev.event_type != "card.action.trigger" {
+        return Ok(()); // 该消费者只接这一类
+    }
+
+    let operator = crate::card::operator_open_id(&raw);
+    if !crate::card::card_action_allowed(operator.as_deref(), allowed_users) {
+        log::info!(
+            "[bot] 拒绝卡片操作：operator={operator:?} 不在白名单（fail-closed）"
+        );
+        return Ok(());
+    }
+
+    match crate::card::parse_card_action(&ev) {
+        None => {
+            log::info!("[bot] 忽略无法识别的卡片动作（action_value={:?}）", ev.action_value);
+            Ok(())
+        }
+        Some(action) => {
+            // TODO(D-4)：执行动作（`打开详情` → 给 WebUI 入口；`换一批证据` → 重跑一轮）。
+            // 目前只记日志：卡片上**还没有按钮**，所以不会有用户可见的影响（先只把链路建起来）。
+            log::info!(
+                "[bot] 收到卡片动作 {action:?}（chat={} operator={operator:?}）",
+                ev.chat_id
+            );
+            Ok(())
+        }
+    }
 }
 
 /// 阻塞读 stderr，直到出现就绪标记 `[event] ready event_key=`。
