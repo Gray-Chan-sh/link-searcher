@@ -1,5 +1,17 @@
 # Link-Searcher 变更日志
 
+## 2026-10-15：飞书接入 P0.5 完成——卡片回调确认可走长连接（实测入档，无代码改动）
+
+> P0.5 ③ 是 P3「卡片回调」的唯一技术不确定项。本轮真机跑通：发一张带按钮的交互卡片、人工点击、捕获回调。**技术不确定项清单至此清空。**
+
+- **结论**：`card.action.trigger`（`subscription_type: callback`）**可以走长连接**。
+- **顺带发现的一处认知错误**：飞书有**两类订阅**——`event`（如 `im.message.receive_v1`，浏览器授权流程会一并订阅）与 `callback`（如 `card.action.trigger`，**必须单独订阅**）。此前以为"勾一次事件"即可；`--dry-run` 会给出 `console_event_published: blocked` + 一条订阅链接。已入档。
+- **4 条只有实测才知道的点**：① `action_value` 是**字符串形式的 JSON**（需二次 parse）而非对象；② **`card_content` 被飞书重写、非原文回显**（`config.wide_screen_mode` 丢失、按钮 `value` → `behaviors:[{type:callback}]` + `custom_action_id`、`text` 多 `i18n`）→ 路由必须靠 `action_value`/`custom_action_id`，**不能比对原文**；③ 两个 EventKey 的 `event_id` 语义不同（消息＝"delivery ID，不可用于去重"；卡片＝"Globally unique"）→ **去重键不能一把抓**；④ `timestamp` 精度不一致（消息＝毫秒 13 位、卡片＝微秒 16 位）。
+- **另**：回调里确实带 `token`（即 §8「30 分钟 / 最多更新 2 次」的落点）；`host: "im_message"` 为 schema 未见字段；发送侧 `--idempotency-key` 会落成 API 的 `uuid` 字段（顺带证实 §8 幂等要求发送侧天然支持）。
+- **踩到并对 bot 有影响的坑**：**PowerShell 5.1 向原生程序传 JSON 参数会把引号吃掉**（单引号、数组 splat、`$PSNativeCommandArgumentPassing`（5.1 无此变量）、`--%`（PS7 专有）均无效），必须手动写 `\"`。→ **若将来 bot 用 shell 调 `lark-cli` 发卡片会撞上**；走 HTTP/OpenAPI 可绕开。
+- **文档**：§2「P0 实测记录」补入卡片回调样本与 4 条发现；§9 P0.5 标记完成；§8「卡片更新次数上限」与 §6「卡片回调」补注实测结论。
+- **未做**：无代码改动；`semgrep --severity ERROR` 0 findings。
+
 ## 2026-10-15：飞书接入 P0 完成（实测入档，无代码改动）
 
 > P0 = 建自建应用并授权 + 拿到真实事件样本确认字段。本轮**真机跑通**，结论入档 `docs/LARK_BOT.md` §2 与 §9。

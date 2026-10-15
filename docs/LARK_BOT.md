@@ -27,6 +27,10 @@
 > **2026-10-15 P0 实测入档**：§2 新增「P0 实测记录」——应用 `cli_aa5a2e242e785c09` 已接通、
 > 长连接契约与真实事件样本逐字段确认（`content` 已预渲染、去重键为 `message_id`）、
 > **收 + 发闭环已验证**；§9 的 P0 标记完成、P0.5 仅剩卡片回调一项待验。
+>
+> **2026-10-15 P0.5 完成**：`card.action.trigger` **确认可走长连接**；§2 补入卡片回调样本与
+> 4 条实测发现（`action_value` 需二次 parse、`card_content` 被重写、两个 EventKey 的 `event_id`
+> 语义不同、`timestamp` 精度不一致）。**技术不确定项清单已清空**，后续为纯实现。
 
 ---
 
@@ -120,6 +124,29 @@
 
 **回程亦已验证**：`lark-cli im +messages-reply --message-id <收到的> --text …` 返回
 `{"ok":true,"identity":"bot","data":{"message_id":"om_…"}}`，飞书端可见 → **收 + 发闭环成立**。
+
+**卡片回调（P0.5 ③）✅ 长连接可行** —— `card.action.trigger` 的 `subscription_type` 是 **`callback`**，
+与 `im.message.receive_v1` 的 `event` 是**两类订阅**：浏览器授权流程只覆盖了后者，前者需**单独订阅**
+（`event consume … --dry-run` 会给出 `console_event_published: blocked` + 一条订阅链接）。订阅后实测样本：
+
+```json
+{"type":"card.action.trigger","event_id":"9baa361ac0deeb30ce7d9d8da075ed7f","timestamp":"1792054882978640",
+ "operator_id":"ou_…","message_id":"om_x100b623d2be07878ce8b7fa990baf21","chat_id":"oc_…","host":"im_message",
+ "token":"c-fd61f1c5…","action_tag":"button","action_value":"{\"probe\":\"card-action-20261015\"}",
+ "checked":false,"card_content":"{\"config\":{},\"elements\":[…,{\"actions\":[{\"behaviors\":[{\"type\":\"callback\"}],
+ \"custom_action_id\":\"act_v1_7696817043099012085\",…}],\"tag\":\"action\"}],\"header\":{…}}"}
+```
+
+四个**只有实测才知道**的点：
+
+| # | 发现 | 影响 |
+|---|---|---|
+| ① | `action_value` 是**字符串形式的 JSON**（`"{\"probe\":…}"`），不是对象 | bot 必须**二次 parse** 才能拿到自己埋的路由信息 |
+| ② | **`card_content` 被飞书重写、非原文回显**：`config.wide_screen_mode` 丢失；按钮 `value` 变成 `behaviors:[{type:callback}]` + **`custom_action_id`**；`text` 多出 `i18n` | **不能**靠"比对 `card_content` 与发送原文"判断卡片状态；路由要靠 `action_value` / `custom_action_id` |
+| ③ | 两个 EventKey 的 `event_id` **语义不同** | 消息：schema 明言 "delivery ID，**不可**用于去重"→ 用 `message_id`；卡片：schema 写作 "**Globally unique** event ID" → 可作去重键。**去重键不能一把抓** |
+| ④ | `timestamp` **精度不一致** | 消息事件是**毫秒**（13 位）、卡片事件是**微秒**（16 位）→ 不能按同一精度解析 |
+
+另：`token` 实测存在（即 §8「30 分钟 / 最多更新 2 次」的落点）；`host: "im_message"` 为 schema 未见字段。
 
 相关命令：
 
@@ -576,7 +603,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 |---|---|
 | **反向出口**：检索结果写成飞书文档/表格，或发成群文件（`docs`/`sheets`/`wiki` 域） | ⭐⭐ |
 | **会议纪要入站**：飞书妙记/会议记录 → 本地知识库（`minutes`/`vc`/`note` 域） | ⭐⭐ |
-| **卡片回调**：按钮"追问/反馈/打开详情"（`card` 域事件） | ⭐⭐ |
+| **卡片回调**：按钮"追问/反馈/打开详情"（`card` 域事件）✅ **2026-10-15 实测可行**（callback 类型可走长连接，见 §2） | ⭐⭐ |
 
 ### 弱复用（要额外业务逻辑）
 
@@ -619,7 +646,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 | **慢回答的体验** | RAG 要几秒到几十秒；飞书有消息长度、卡片更新次数、QPS 限制 | 先回"处理中"卡片 → 用 patch 逐步更新。**能用的 SSE 只有两条**：`POST /api/ai/conversation/ask/stream`（按 session 推流）与全局 `GET /api/events`（含 `ai-chunk`/`ai-progress`/`ai-done`）。`/api/ai/events` 是普通 GET，只能轮询已落库事件 |
 | **幂等** | 事件可能重投（官方文档明确提到订阅泄漏会导致重复投递） | 按 `message_id` 去重，否则重复回答。**2026-10-15 实测证实**：`id` 与 `message_id` 相同（前者是 legacy alias），而 `event_id` 不同、且官方明言**不得**用作去重键 |
 | **离线感知** | GUI 退出/重启时 webapi 不可用，机器人会"静默失联" | 健康检查 + 向指定群告警 |
-| **卡片更新次数上限** | 卡住 P1 的真实限制 | `card.action.trigger` 的 token **有效期 30 分钟、最多更新 2 次**（`lark-cli event schema card.action.trigger` 原文）；飞书对单条消息的卡片更新次数另有限制。**不能每个 SSE chunk 都 patch 一次** → 必须**节流合并**（按时间或 token 数批量更新），否则必然超限 |
+| **卡片更新次数上限** | 卡住 P1 的真实限制 | `card.action.trigger` 的 token **有效期 30 分钟、最多更新 2 次**（`lark-cli event schema card.action.trigger` 原文；**2026-10-15 实测回调里确实带 `token`**）；飞书对单条消息的卡片更新次数另有限制。**不能每个 SSE chunk 都 patch 一次** → 必须**节流合并**（按时间或 token 数批量更新），否则必然超限。另：`card_content` 会被飞书**重写**（非原文回显，见 §2 实测发现 ②） |
 | **会话续租** | 机器人是长时间常驻进程 | 见 §5.1「隐性硬前提」：同机 `127.0.0.1` + 周期 `POST /api/session/ping`，否则 600s 后被 403 |
 
 ---
@@ -629,7 +656,7 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 | 阶段 | 内容 | 前置 |
 |---|---|---|
 | **P0** ✅ **完成（2026-10-15）** | `config init --new` 建应用并授权（App ID `cli_aa5a2e242e785c09`）；已拿到真实样本并逐字段确认；**收 + 发闭环已验证** —— 全部记录见 §2「P0 实测记录」 | 前置由浏览器授权流程**一并满足**，无需手工补控制台事件/scope |
-| **P0.5**（仅剩一项） | ① ✅ 身份实测为 **`bot`**（`defaultAs: auto` 实际解析到 bot）<br>② ~~同机单会话租约实测~~ **已作废**（D1 已定＝放弃 IP 排他，租约将在阶段四拆除，无需再测）<br>③ ⏳ **待验**：`card.action.trigger` 的 **`callback` 类型**能否走长连接 | P0 ✅ |
+| **P0.5** ✅ **完成（2026-10-15）** | ① ✅ 身份实测为 **`bot`**（`defaultAs: auto` 解析到 bot）<br>② ~~同机单会话租约实测~~ **已作废**（D1 已定＝放弃 IP 排他，租约将在阶段四拆除）<br>③ ✅ **`card.action.trigger` 的 `callback` 类型确认可走长连接**（样本与 4 条实测发现见 §2） | P0 ✅ |
 | **P1** | 白名单群里 @机器人提问 → `POST /api/ai/conversation/ask/stream`（SSE）→ **节流更新**卡片；**autostart 开关**补上（带 data_dir）；只回摘要 | 数据边界规则定好 |
 | **P2** | 文件 / 语音 / 图片入站（下载 → 监控目录 → 自动入库 → 回执） | P1 稳定 |
 | **P3** | 定时摘要 + 出口（写飞书文档/表格）+ 卡片回调 | P0.5 ③ 已验证 `card.action.trigger` 可用 |
