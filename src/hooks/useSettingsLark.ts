@@ -183,6 +183,11 @@ export function useSettingsLark() {
 
   useEffect(() => {
     void runCheck()
+    // 绑定会话存在**服务端**（另一个进程里跑着 lark-cli），所以每次进面板都要问一次 ——
+    // 否则中途切走再回来会显示成"未开始"，而实际上还在跑（再点"开始"只会得到"已在进行中"）。
+    void larkBindStatus()
+      .then(setBind)
+      .catch(() => {})
   }, [runCheck])
 
   const startBind = async (req: LarkBindRequest) => {
@@ -218,8 +223,10 @@ export function useSettingsLark() {
   }
 
   // 会话期间每秒拉一次（`running || !finalized` —— 收尾还要联网判定，得等它完）。
+  // ⚠️ 必须先排除"没有会话"（`mode === ''`）：它的 `running`/`finalized` 都是 false，
+  // 少了这一句就会**永远每秒发一次请求**（空会话被当成"正在收尾"）。
   useEffect(() => {
-    if (!bind || (!bind.running && bind.finalized)) return
+    if (!bind || bind.mode === '' || (!bind.running && bind.finalized)) return
     const id = window.setTimeout(() => {
       void larkBindStatus()
         .then(setBind)
