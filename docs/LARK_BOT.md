@@ -1006,6 +1006,8 @@ GET /                             → 404 "Not Found"     ← 用户看到的
 **卡片提示**（bot 侧）：原本只写「需与电脑同一局域网」，用户撞上自签名证书告警时没有线索
 ⇒ 补一句「（自签名证书会先提示「不安全」，点「继续访问」信任一次即可）」，并把文案抽成
 纯函数 `webui_hint_text` 以便单测（`lark-bot/src/main.rs`）。
+> 链接本身随后在 **§5.12** 换成了**直达会话的深链**（`/#/chat?origin=lark&session=…`）：
+> 这一节解决的是"打不开"，§5.12 解决的是"打开后落在首页"。
 
 **自动化测试覆盖**：路径闸门（`is_safe_rel_path`）、编码解一次 + 拒双重编码
 （`normalize_asset_rel` / `percent_decode`）、MIME 补 charset（`with_utf8_charset`）。
@@ -1013,6 +1015,130 @@ GET /                             → 404 "Not Found"     ← 用户看到的
 而 `cargo test` 环境里 `dist/` 是否存在取决于是否跑过 `npm run build`
 （写成断言会让门禁在"全新克隆未 build"时假红）。
 ⇒ 这一条靠上面的**真机验收表**守住，**改这条路径时必须重跑一次**。
+
+---
+
+### 5.12 「打开详情」直达会话 + 追问检索的三个缺陷（2026-10-16，**已修**）
+
+**用户报的两件事**：
+
+1. 点卡片「打开详情」**落到首页**，不是那条会话；
+2. 与上文无关的连续追问答「材料中不足以回答」，点「换一批证据」却能答对。
+
+两条都在日志里留下了**逐行**证据（`<data_dir>/app.log`）。
+
+#### 5.12.1 「打开详情」：从站点根地址换成**直达会话的深链**
+
+**根因**：`card.rs::webui_url` 生成的是站点根地址 `https://<lan-ip>:<port>/`（旧单测就是断言这个），
+会话 id 只作为一行纯文本写在提示里；而会话按**来源端**隔离（§5.5 阶段二）：飞书会话是 `origin=lark`，
+浏览器默认 `web` ⇒ 即使手工把 id 拼进 URL，服务端也只会答 `{"error":"session not found"}`
+（实测：带 `?origin=lark` 返回 18050 字节，不带就是那个错误）。
+
+**修法**：`webui_deep_link(ip, port, session_id)` =
+`https://<lan-ip>:<port>/#/chat?origin=lark&session=<id>`
+
+- query **必须在 `#/chat?` 之后** —— 应用用的是 `HashRouter`。写成 `/chat?...` 虽然也能 200，
+  但那是 §5.11 的 SPA 兜底返回的 index.html，**前端读不到参数**，仍然退化到首页。
+- session id 做一次百分号编码（真实取值是 UUID，这步是**防御性**的）。
+
+**前端**（`src/utils/deepLink.ts` 新增；`src/pages/AiChat.tsx`、`src/api/client.ts`、
+`src/api/files.ts` 改动）：
+
+- `origin` 只认白名单 `ui|web|lark`，非法值**降级**而不是报错（`session` 只做去空白，存不存在由服务端判）；
+- **来源端是页面级**的：`setChatPageOrigin()` 让本页所有会话调用都落在同一个端上 —— 包括
+  `ai/streamStore` 的切页兜底落库（那里拿不到 URL）；`save_chat_session` 缺省取会话自带的 `origin`。
+  ⚠️ 服务端跨端写入是**显式拒绝**（不是静默改写）⇒ 不带 origin 的续聊**存不回去**，这条必须跟着端走；
+- 深链会话尚未落地前**禁止"自动建空会话"**抢先建一条无关会话（否则"打开详情"会落成新会话）；
+- 头部显示「飞书」来源徽标；
+- `api/client.ts` 新增 mapping 级**显式 `query`**：`invoke()` 原本只在"无 body 且 GET/DELETE"时拼 query，
+  而 `PUT save_chat_session` 恰好带 body ⇒ 必须有这条显式通道（没有它，浏览器里的续聊写不回去）。
+
+**真机验收**（release exe + 真 webapi；用**临时** lark 会话，验完即删）：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /api/chat/sessions?origin=lark` | 列出飞书会话（含真实那条） |
+| `GET /api/chat/sessions/<tmp>?origin=lark` | 200，`origin=lark`（浏览器深链路径可行） |
+| `GET /api/chat/sessions/<tmp>`（不带 origin） | `{"error":"session not found"}`（端隔离仍生效） |
+| `PUT …?origin=lark`（浏览器续聊路径） | `{"saved":true}` |
+| `PUT` 不带 origin | `跨来源端写入被拒绝：会话属于 'lark'，请求来自 'web'` |
+| `PUT …?origin=ui` | `…请求来自 'ui'`（桌面端也进不来） |
+
+⚠️ **UI 侧行为（真正点链接、页面高亮那条会话）靠用户视觉验收**：本轮只验到 API 层 + 前端单测
+（`deepLink.test.ts` 8 条）+ `tsc`，没有自动化覆盖"浏览器点开后页面是否直达会话"。
+
+#### 5.12.2 追问检索：P1（问题口径）+ P2（实体继承）+ 重跑（换词）
+
+**P1 —— 重跑把「上一条回答」当成了问题。**
+`prepare_conversation_prompt*` 取 `messages.last()` 不辨角色；而「换一批证据」重跑时会话里最后一条是
+上一轮的**回答**（bot 重跑分支不追加问题）。日志实证（修复前）：
+
+```
+18:03:51 [prompt] [AI] ▶ prepare q="**材料中不足以回答。**      ← 问题=上一条回答
+```
+
+修法：抽纯函数 `question_from_messages()`（= 最后一条 **user** 消息，去空白），
+与 bot 侧"重跑取最后一条 user 消息"的口径统一。
+
+**P2 —— 新话题继承了上一轮的实体。**
+`ensure_parent_entities()` **无条件**把父问句的实体补进检索 query，LLM 改写 prompt 也没有"新话题别继承"
+的约束。日志实证（修复前）：
+
+```
+16:49:22 [prompt] [AI] rewrite: "汪均益案的最终结果是什么？" → "陈正先 汪均益案 最终结果"
+16:49:22 [prompt] [AI] final_kws=["陈正先", "汪均益案", "最终", "结果"] bm25_query="陈正先 OR 汪均益案 OR 最终 OR 结果"
+```
+
+（上一轮问的是"陈正先"；新问题自带实体"汪均益案"却被塞进"陈正先" ⇒ 检索被带到旧材料上 ⇒ 模型只能诚实说
+"材料不足"。）
+
+修法：新增**继承准入** `may_inherit_parent_entities(current_q, parent_q)`：
+
+1. 本轮问句**需要借历史**（指代词开头 / 过短 / 无检索词）→ 允许；
+2. 否则必须与父问句**共享检索词**（= 同一话题，如父问"毛弟是否被人辱骂？"、本轮"列出清单，把时间、
+   辱骂人以及完整的辱骂内容列出"共享"辱骂"）→ 允许；
+3. 都不满足（自足问句 + 与父问句关键词**零交集** = 新话题）→ **不继承**。
+
+`ensure_parent_entities`、`rewrite_adds_foreign_entity`（拦下 LLM 凭空引入的上一轮实体）共用这一判据；
+LLM 改写 prompt 另加硬约束。
+
+⚠️ **第 2 条不能省**：只看第 1 条会让已修缺陷「泛词追问补实体」
+（`ensure_parent_entities_reinjects_missing_core_entity`）回退 —— 那条追问自带"清单/辱骂"等词，按第 1 条
+会被判成"自足问句"。
+
+**重跑（「换一批证据」）= 换一批检索词，不是原词再搜一遍。**
+新增可选参数 `retryPriorAnswer`（webapi `AskBody` + Tauri 命令；`Option` ⇒ 老调用方零影响，
+`ipc_test` 里"不传新参数"的向后兼容用例仍绿）：
+
+- `Some` ⇒ 走专用 prompt `llm_expand_retry_query(question, prior_answer)` 产出**新查询**；
+- 仍过 `valid_rewrite_output` + **扩查守卫** `retry_expansion_keeps_question_entity`；
+- 失败回退规则链（宁可答得少，也不能不答）；
+- `query_rewrite` 事件加 `retry: true` 便于复盘。
+
+⚠️ **扩查守卫与新话题守卫方向相反**：扩查**本来就该补词**（判决书/裁定书/结案/调解…正是首轮没命中的原因），
+所以只要求"至少保住一个锚点实体"，**不**禁止新增词。**第一版守卫写错了**（拿新话题守卫去管扩查），
+实测表现为 `retry=true` 但 `rewritten` 与原问题**一模一样** —— 用户点了等于白发：
+
+```
+19:28:47 [prompt] [AI] retry 扩查未产出（回退规则链）："汪均益案的最终结果是什么？"
+19:28:48 [prompt] [AI] rewrite: "汪均益案的最终结果是什么？" → "汪均益案最终结果"
+```
+
+改对之后的实测（同一问句，点「换一批证据」）：
+
+```
+19:41:30 [prompt] [AI] retry 扩查："汪均益案的最终结果是什么？" → "汪均益案 判决 裁定 结案 调解 处理结果 结论"
+```
+
+⇒ 命中从 3875 涨到 5549 篇，**答出了最终结果**（"原告撤回上诉，二审法院准许撤诉，一审判决生效 [30]"）。
+首轮同一问句的答案是"材料中不足以回答"。
+
+**自动化覆盖**：`question_from_messages`（P1）、`may_inherit_parent_entities`（准入四类）、
+`rewrite_adds_foreign_entity`（新话题拦截 vs 同义扩展放行）、`retry_expansion_keeps_question_entity`
+（锚点保留 / 补词放行 / 换人拒绝 / 无锚点放行）、`ensure_parent_entities_skips_new_topic`；
+原 3 条 `ensure_parent_entities_*` 补上"当前问句"参数（共享"辱骂"⇒ 仍继承，语义不变）。
+⚠️ **LLM 产出的扩查词本身无法单测**（模型行为），只能靠 prompt 约束 + 上面两轮**真机事件证据**守住；
+改 prompt 或换模型后要重跑一次真机验证。
 
 ---
 
@@ -1037,7 +1163,7 @@ GET /                             → 404 "Not Found"     ← 用户看到的
 |---|---|
 | **反向出口**：检索结果写成飞书文档/表格，或发成群文件（`docs`/`sheets`/`wiki` 域） | ⭐⭐ |
 | **会议纪要入站**：飞书妙记/会议记录 → 本地知识库（`minutes`/`vc`/`note` 域） | ⭐⭐ |
-| **卡片回调**：按钮"追问/反馈/打开详情"（`card` 域事件）✅ **2026-10-15 实测可行**（callback 类型可走长连接，见 §2） | ⭐⭐ |
+| **卡片回调**：按钮"打开详情 / 换一批证据"（`card` 域事件）✅ **2026-10-15 实测可行**（callback 类型可走长连接，见 §2；两个按钮的语义见 §5.12） | ⭐⭐ |
 
 ### 弱复用（要额外业务逻辑）
 
@@ -1428,7 +1554,8 @@ lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 25s
    **不能**靠"比对发送原文"判断卡片状态；
 3. 更新卡片**优先用 app 身份 `PATCH`**（§8.1 实测**无次数限制**），
    **不要**走回调 token 那条路（"最多 2 次"，那是另一条路）；
-4. 按钮语义（§6 路线）：`打开详情`（链到 WebUI）/ `换一批证据`（重新检索）——
+4. 按钮语义（§6 路线）：`打开详情`（**深链直达该条会话**，§5.12.1）/ `换一批证据`（**换一批检索词重搜**，
+   不是原词再搜一遍，§5.12.2）——
    注意与"回答已收尾"的状态机配合（回调可能**晚到**，要能忽略过期回调）。
 
 > **另**："分页"已由**自动续发卡片**解决（§8.2）→ D 的按钮应做**交互类**（详情 / 重试），

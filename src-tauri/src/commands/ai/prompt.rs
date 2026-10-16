@@ -212,10 +212,12 @@ pub(crate) async fn prepare_conversation_prompt(
     app: Option<&tauri::AppHandle>,
     session_id: &str,
     clarify_reply: Option<&ClarifyReply>,
+    // 重跑（卡片「换一批证据」）：上一轮的回答正文。`Some` ⇒ 走"查询扩展 + 重新检索"。
+    retry_prior_answer: Option<&str>,
 ) -> Result<PreparedConversation, String> {
     prepare_conversation_prompt_with_cancel(
         state, messages, source_ids, scope, session_retrieval_scope, strict_docs,
-        full_recall, skip_llm_rewrite, app, session_id, clarify_reply, None,
+        full_recall, skip_llm_rewrite, app, session_id, clarify_reply, retry_prior_answer, None,
     )
     .await
 }
@@ -235,6 +237,8 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     app: Option<&tauri::AppHandle>,
     session_id: &str,
     clarify_reply: Option<&ClarifyReply>,
+    // 重跑（卡片「换一批证据」）：上一轮的回答正文。`Some` ⇒ 走"查询扩展 + 重新检索"。
+    retry_prior_answer: Option<&str>,
     cancel: Option<&crate::ai::CancelToken>,
 ) -> Result<PreparedConversation, String> {
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
@@ -255,7 +259,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             }
         };
     }
-    let last_q = messages.last().map(|m| m.content.clone()).unwrap_or_default();
+    let last_q = question_from_messages(messages);
     // 澄清回填：用户回答追问时，前端只发答案本身（如"汪均益"），原问题随 binding
     // 回传。此处用「原问题 + 答案」作为本轮问题，答案即强锚点，检索才不会退化成
     // 对"汪均益"的单词查询。
@@ -278,27 +282,58 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     emit_progress("query_rewrite", "查询改写中...", 0, 0);
     let rule = rewrite_query(&last_q, messages);
     let original_rule_query = rule.query.clone();
-    let search_q = if skip_llm_rewrite {
+    // 上一条 user 消息（父问句）：实体继承与"新话题"判定的参照物。
+    let parent_q = messages
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.trim())
+        .find(|c| !c.is_empty() && *c != last_q.trim())
+        .unwrap_or("");
+    let is_retry = retry_prior_answer.is_some_and(|s| !s.trim().is_empty());
+    // 重跑（卡片「换一批证据」）：问题仍是**原问题**（`question_from_messages` 保证），
+    // 但检索词要换一批 —— 首轮用原词没找到能回答的材料，重跑的意义就在"换组词再搜"。
+    // 扩展失败一律回退规则链（宁可答得少，也不能不答；更不能原词再搜一遍假装重跑）。
+    let retry_q = if is_retry {
+        let prior = retry_prior_answer.unwrap_or("").trim().to_string();
+        match llm_expand_retry_query(&last_q, &prior).await {
+            // 扩查守卫与"新话题守卫"相反：这里只要求**锚点实体还在**（补词是目的，见函数注释）
+            Some(q) if retry_expansion_keeps_question_entity(&q, &last_q) => Some(q),
+            Some(q) => {
+                log::warn!("[AI]   retry 扩查丢了本轮问句的锚点实体，弃用：{:?}", truncate_text(&q, 40));
+                None
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    if is_retry {
+        match &retry_q {
+            Some(q) => log::info!("[AI]   retry 扩查：\"{}\" → \"{}\"", truncate_text(&last_q, 30), truncate_text(q, 40)),
+            None => log::info!("[AI]   retry 扩查未产出（回退规则链）：\"{}\"", truncate_text(&last_q, 30)),
+        }
+    }
+    let search_q = if let Some(q) = retry_q {
+        q
+    } else if skip_llm_rewrite {
         rule.query.clone()
     } else {
         let context_paths = prior_evidence_paths(state, session_id);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
-            Some(llm) if llm != rule.query => llm,
+            // 不许继承的场合（新话题）改写不得引入本轮问句之外的实体（见 rewrite_adds_foreign_entity）
+            Some(llm) if llm != rule.query && !rewrite_adds_foreign_entity(&llm, &last_q, parent_q) => llm,
+            Some(llm) if llm != rule.query => {
+                log::warn!("[AI]   llm rewrite 引入了本轮问句之外的实体，弃用：{:?}", truncate_text(&llm, 40));
+                rule.query.clone()
+            }
             _ => rule.query.clone(),
         }
     };
     // 硬性兜底：LLM 重写可能丢失上一轮问句的核心实体（人名/案名/项目名）。
     // 把父问句缺失的实体词补进检索 query，保证三通道能命中正确的实体文档。
-    let search_q = {
-        let parent_q = messages
-            .iter()
-            .rev()
-            .filter(|m| m.role == "user")
-            .map(|m| m.content.trim())
-            .find(|c| !c.is_empty() && *c != last_q.trim())
-            .unwrap_or("");
-        ensure_parent_entities(&search_q, parent_q)
-    };
+    // 只对"可以继承"的追问生效 —— 新话题继承实体反而跑偏（P2）。
+    let search_q = ensure_parent_entities(&search_q, parent_q, &last_q);
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
     log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten);
@@ -307,6 +342,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         "rewritten": search_q,
         "was_rewritten": rewritten,
         "rewrite_method": if rewritten { if search_q != original_rule_query { "llm" } else { "rule" } } else { "none" },
+        "retry": is_retry,
     })));
 
     // 从 scope 提取检索过滤参数

@@ -12,6 +12,12 @@ interface HttpSpec {
   transform?: (data: unknown, args: InvokeArgs) => unknown;
   paramMap?: Record<string, string>;
   dynamicPath?: (args: InvokeArgs) => string;
+  /**
+   * 显式放进 query 的参数（值取自 `args`）。用于**带 body / 非 GET-DELETE** 的请求 ——
+   * 那种情况下上面的 `paramMap` 不生效（见 `invoke`），而个别端点要求参数**必须**在
+   * query 上（如会话来源端 `origin`：服务端按它做跨端写入校验，放 body 不算数）。
+   */
+  query?: Record<string, unknown>;
 }
 
 type Mapping = HttpSpec | ((args: InvokeArgs) => HttpSpec);
@@ -27,6 +33,16 @@ function buildQuery(args: InvokeArgs, paramMap?: Record<string, string>): string
     } else {
       parts.push(`${mappedKey}=${encodeURIComponent(String(v))}`);
     }
+  }
+  return parts.length ? '?' + parts.join('&') : '';
+}
+
+/** 由 mapping 里显式的 `query` 字段拼 query（跳过空值；与 `buildQuery` 无关）。 */
+function buildExplicitQuery(query: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const [k, v] of Object.entries(query)) {
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
   }
   return parts.length ? '?' + parts.join('&') : '';
 }
@@ -151,25 +167,42 @@ const MAPPINGS: Record<string, Mapping> = {
   get_turn_ai_events: { method: 'GET', path: '/api/ai/events/turn', paramMap: { sessionId: 'session_id', turnNumber: 'turn_number' } },
 
   // ── Chat sessions ──
-  list_chat_sessions: {
+  // `origin` 一律走显式 query：服务端按它判定「这条会话属于哪个端」，
+  // 读写都校验（跨端写入会被拒，见 docs/LARK_BOT.md §5.5 阶段二）。
+  // 桌面端走 IPC，多出来的 `origin` 会被按参数名逐个取值时忽略（Tauri `ipc/command.rs` 只 get(key)）。
+  list_chat_sessions: (a) => ({
     method: 'GET', path: '/api/chat/sessions',
+    query: { origin: a.origin },
     transform: (data) => (data as Record<string, unknown>)?.sessions ?? data ?? [],
-  },
-  create_chat_session: { method: 'POST', path: '/api/chat/sessions', transform: (data) => (data as Record<string, unknown>)?.id },
-  load_chat_session: (a) => ({ method: 'GET', path: `/api/chat/sessions/${a.id}` }),
-  delete_chat_session: (a) => ({ method: 'DELETE', path: `/api/chat/sessions/${a.id}` }),
+  }),
+  create_chat_session: (a) => ({
+    method: 'POST', path: '/api/chat/sessions',
+    query: { origin: a.origin },
+    transform: (data) => (data as Record<string, unknown>)?.id,
+  }),
+  load_chat_session: (a) => ({
+    method: 'GET', path: `/api/chat/sessions/${a.id}`,
+    query: { origin: a.origin },
+  }),
+  delete_chat_session: (a) => ({
+    method: 'DELETE', path: `/api/chat/sessions/${a.id}`,
+    query: { origin: a.origin },
+  }),
   save_chat_session: (a) => ({
     method: 'PUT',
     path: `/api/chat/sessions/${(a.session as Record<string, unknown> | undefined)?.id ?? a.id}`,
+    query: { origin: a.origin },
     body: a,
   }),
   export_chat_session: (a) => ({
     method: 'POST', path: `/api/chat/sessions/${a.id}/export`,
+    query: { origin: a.origin },
     body: { turns: a.turns },
     transform: (data) => (data as Record<string, unknown>)?.markdown,
   }),
   export_chat_session_json: (a) => ({
     method: 'POST', path: `/api/chat/sessions/${a.id}/export`,
+    query: { origin: a.origin },
     body: { turns: a.turns },
     transform: (data) => (data as Record<string, unknown>)?.json,
   }),
@@ -309,9 +342,12 @@ export async function invoke<T = unknown>(command: string, args?: InvokeArgs): P
 
   const spec = typeof entry === 'function' ? entry(args || {}) : entry;
   const hasBody = spec.body !== undefined && spec.body !== null;
-  const qs = !hasBody && (spec.method === 'GET' || spec.method === 'DELETE')
-    ? buildQuery(args || {}, spec.paramMap)
-    : '';
+  // mapping 里显式声明的 query 优先（带 body / 非 GET-DELETE 时也要能传参）。
+  const qs = spec.query
+    ? buildExplicitQuery(spec.query)
+    : !hasBody && (spec.method === 'GET' || spec.method === 'DELETE')
+      ? buildQuery(args || {}, spec.paramMap)
+      : '';
   const url = getApiBase() + spec.path + qs;
 
   const headers: Record<string, string> = { Authorization: `Bearer ${getToken()}` };

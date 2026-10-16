@@ -475,10 +475,10 @@ pub async fn smart_search_stream(
 }
 
 mod rewrite;
-pub use rewrite::{RewriteOutcome, llm_rewrite_query, rewrite_query};
-use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords};
+pub use rewrite::{RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
+use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords, question_from_messages, retry_expansion_keeps_question_entity, rewrite_adds_foreign_entity};
 #[cfg(test)]
-use rewrite::{rewrite_history, valid_rewrite_output};
+use rewrite::{rewrite_history, valid_rewrite_output, may_inherit_parent_entities};
 
 mod retrieval;
 pub use retrieval::{merge_scope_prefixes, weighted_mix};
@@ -526,6 +526,8 @@ pub async fn conversation_ask(
     strict_docs: bool,
     full_recall: Option<bool>,
     clarify_reply: Option<ClarifyReply>,
+    // 重跑（卡片「换一批证据」）：上一轮回答正文；见 `prompt::llm_expand_retry_query`。
+    retry_prior_answer: Option<String>,
 ) -> Result<String, String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -545,7 +547,7 @@ pub async fn conversation_ask(
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
     let PreparedConversation { system, user_msg, evidence, has_evidence, visible_nums, clarify_note, clarify_blocking, .. } =
-        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "", clarify_reply.as_ref()).await?;
+        prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, None, "", clarify_reply.as_ref(), retry_prior_answer.as_deref()).await?;
     if clarify_blocking {
         log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
         return Ok(clarify_note.unwrap_or_default());
@@ -592,6 +594,8 @@ pub async fn conversation_ask_stream(
     strict_docs: bool,
     full_recall: Option<bool>,
     clarify_reply: Option<ClarifyReply>,
+    // 重跑（卡片「换一批证据」）：上一轮回答正文；见 `prompt::llm_expand_retry_query`。
+    retry_prior_answer: Option<String>,
 ) -> Result<(), String> {
     if !crate::ai::llm_enabled() {
         return Err(crate::ai::llm_unavailable_reason()
@@ -611,7 +615,7 @@ pub async fn conversation_ask_stream(
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
-    let prepared = prepare_conversation_prompt_with_cancel(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref(), Some(inflight.token())).await;
+    let prepared = prepare_conversation_prompt_with_cancel(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref(), retry_prior_answer.as_deref(), Some(inflight.token())).await;
     match &prepared {
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
@@ -1321,7 +1325,7 @@ mod history_tests {
         let session_scope = vec!["案件/X/庭审录音".to_string()];
 
         let prep = prepare_conversation_prompt(
-            &state, &messages, &[], &scope, &session_scope, true, false, true, None, "", None,
+            &state, &messages, &[], &scope, &session_scope, true, false, true, None, "", None, None,
         )
         .await
         .expect("strict 目录引用在检索零命中时应回退注入范围内文件，而非报错");
@@ -2159,11 +2163,13 @@ mod chunk_budget_tests {
     /// 追问泛词（检索关键词为空）时，LLM 重写丢失父问句核心实体 → 硬性兜底补全。
     /// 对应缺陷 1：首问"毛弟是否被人辱骂？"，追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"
     /// 改写后 query 若不包含"毛弟"，必须把父问句实体合并进去。
+    /// （本轮问句与父问句共享"辱骂"⇒ 同一话题 ⇒ 允许继承。）
     #[test]
     fn ensure_parent_entities_reinjects_missing_core_entity() {
         let parent = "毛弟是否被人辱骂？";
+        let current = "列出清单，把时间、辱骂人以及完整的辱骂内容列出";
         let rewritten = "辱骂清单 时间 辱骂人 完整辱骂内容"; // 假设 LLM 丢了"毛弟"
-        let merged = ensure_parent_entities(rewritten, parent);
+        let merged = ensure_parent_entities(rewritten, parent, current);
         assert!(merged.contains("毛弟"), "父问句核心实体必须补回: {merged}");
         assert!(merged.contains("辱骂清单"), "原改写 query 内容应保留: {merged}");
         // 顺序：父实体在前
@@ -2174,15 +2180,105 @@ mod chunk_budget_tests {
     #[test]
     fn ensure_parent_entities_noop_when_entity_present() {
         let parent = "毛弟是否被人辱骂？";
+        let current = "把辱骂清单列出来";
         let rewritten = "毛弟 辱骂清单";
-        assert_eq!(ensure_parent_entities(rewritten, parent), rewritten);
+        assert_eq!(ensure_parent_entities(rewritten, parent, current), rewritten);
     }
 
     /// 父消息为空 / 与当前问句相同 → 兜底跳过。
     #[test]
     fn ensure_parent_entities_skips_empty_or_same_parent() {
-        assert_eq!(ensure_parent_entities("abc", ""), "abc");
-        assert_eq!(ensure_parent_entities("问句", "问句"), "问句");
+        assert_eq!(ensure_parent_entities("abc", "", "abc"), "abc");
+        assert_eq!(ensure_parent_entities("问句", "问句", "问句"), "问句");
+    }
+
+    /// P2：**新话题**（自足问句 + 与父问句零交集）不得继承上一轮实体。
+    /// 2026-10-16 实测：`汪均益案的最终结果是什么？` 被塞进了上一轮的"陈正先"，
+    /// 检索被带到旧材料上，模型只能答"材料不足"。
+    #[test]
+    fn ensure_parent_entities_skips_new_topic() {
+        let parent = "陈正先的身份证号是多少？";
+        let current = "汪均益案的最终结果是什么？";
+        let merged = ensure_parent_entities(current, parent, current);
+        assert_eq!(merged, current, "新话题不得被塞入上一轮的人名: {merged}");
+        assert!(!merged.contains("陈正先"), "{merged}");
+    }
+
+    /// 继承准入的唯一判据：需要借历史（指代/过短/无检索词）**或**与父问句共享检索词。
+    #[test]
+    fn parent_entity_inheritance_requires_shared_topic_or_history_need() {
+        // ① 与父问句共享"辱骂"⇒ 同一话题 ⇒ 可继承
+        assert!(may_inherit_parent_entities(
+            "列出清单，把时间、辱骂人以及完整的辱骂内容列出",
+            "毛弟是否被人辱骂？",
+        ));
+        // ② 指代追问 ⇒ 必须借历史 ⇒ 可继承
+        assert!(may_inherit_parent_entities("它的风险有哪些", "季度报告的主要结论是什么"));
+        // ③ 过短追问（<4 字）⇒ 可继承
+        assert!(may_inherit_parent_entities("增量呢", "如何配置索引目录"));
+        // ④ 自足问句 + 与父问句零交集 ⇒ 新话题 ⇒ 不可继承
+        assert!(!may_inherit_parent_entities("汪均益案的最终结果是什么？", "陈正先的身份证号是多少？"));
+    }
+
+    /// 新话题的改写里凭空多出上一轮实体 ⇒ 弃用（回退规则链）；
+    /// 只做同义/结论性扩展（判决/裁定这类泛词不算实体）不违规。
+    #[test]
+    fn rewrite_adds_foreign_entity_flags_stale_entity_only_for_new_topics() {
+        let parent = "陈正先的身份证号是多少？";
+        let current = "汪均益案的最终结果是什么？";
+        assert!(
+            rewrite_adds_foreign_entity("陈正先 汪均益案 最终结果", current, parent),
+            "新话题带入上一轮实体必须被拦下"
+        );
+        assert!(
+            !rewrite_adds_foreign_entity("汪均益案 最终结果 判决 裁定", current, parent),
+            "同义/结论性泛词不算违规（它们会在停用词过滤里被丢掉）"
+        );
+        // 需要借历史的追问允许继承 → 不拦
+        assert!(!rewrite_adds_foreign_entity(
+            "季度 报告 风险",
+            "它的风险有哪些",
+            "季度报告的主要结论是什么"
+        ));
+    }
+
+    /// 重跑扩查的守卫与"新话题守卫"相反：扩查**必须**保住本轮问句的锚点实体，
+    /// 但**允许**补同义/结论性词 —— 否则"换一批证据"就退化成"原词再搜一遍"。
+    #[test]
+    fn retry_expansion_keeps_anchor_but_allows_added_terms() {
+        let q = "汪均益案的最终结果是什么？";
+        assert!(
+            retry_expansion_keeps_question_entity("汪均益 判决书 裁定书 结案 调解", q),
+            "补同义/结论性词是扩查的目的，不算违规"
+        );
+        assert!(retry_expansion_keeps_question_entity("汪均益案 最终结果 判决", q));
+        assert!(
+            !retry_expansion_keeps_question_entity("陈正先 判决 裁定", q),
+            "把本轮的人名换掉 = 搜的已经不是同一个问题"
+        );
+        // 问句本身没有锚点实体 ⇒ 无从判定，放行（空/泛输出由 valid_rewrite_output 挡）；
+        // 用退化问句构造"检索词为空"这一分支（`<2` 字即空）。
+        assert!(retry_expansion_keeps_question_entity("任何东西", "？"));
+    }
+
+    /// P1：本轮问题 = **最后一条 user 消息**。重跑时会话最后一条是上一轮回答，
+    /// 曾经因此把"重跑"变成"对上一条回答再问一遍"（查询都跑偏了）。
+    #[test]
+    fn question_from_messages_uses_last_user_message() {
+        let m = |role: &str, content: &str| ChatMessage { role: role.into(), content: content.into() };
+        let history = vec![
+            m("user", "汪均益案的最终结果是什么？"),
+            m("assistant", "按要求，材料中不足以回答。"),
+        ];
+        assert_eq!(question_from_messages(&history), "汪均益案的最终结果是什么？");
+        let trailing = vec![
+            m("user", "  汪均益案的最终结果是什么？  "),
+            m("assistant", "答一"),
+            m("assistant", "答二"),
+        ];
+        assert_eq!(question_from_messages(&trailing), "汪均益案的最终结果是什么？", "取最后一条 user 且去空白");
+        assert_eq!(question_from_messages(&[]), "");
+        assert_eq!(question_from_messages(&[m("assistant", "只有回答")]), "");
     }
 
     /// 缺陷 3：追问泛词（未点名文件名）时，上一轮证据仍应被保留为保底依据。
@@ -2273,7 +2369,7 @@ mod chunk_budget_tests {
         let session_scope = vec!["案件/和嘉案/聊天记录".to_string()];
         let strict = false;
 
-        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None).await.unwrap();
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None, None).await.unwrap();
 
         // 缺陷 1：改写 query 必须保留父问句实体"毛弟"
         assert!(prep.search_query.contains("毛弟"), "改写 query 必须含毛弟: {:?}", prep.search_query);
@@ -2347,7 +2443,7 @@ mod chunk_budget_tests {
 
         // skip_llm_rewrite=true 走规则改写（无 LLM 网关）→ 追问"帮我整理一下摘要"检索关键词为空，
         // 父实体经 rewrite 补入 → 但父文件内容无词重叠 → BM25 0 命中 → 历史注入兜底。
-        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None).await.unwrap();
+        let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None, None).await.unwrap();
         assert!(
             prep.evidence.iter().any(|e| e.from_history && e.file_id == f1),
             "BM25 0 命中时历史证据必须经 Layer 0.5 注入且带 from_history: {:?}",

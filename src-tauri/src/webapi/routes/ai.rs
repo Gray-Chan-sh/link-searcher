@@ -354,6 +354,10 @@ struct AskBody {
     strict_docs: bool,
     #[serde(default)]
     full_recall: bool,
+    /// 重跑（飞书卡片「换一批证据」）：上一轮回答正文。`Some` ⇒ 服务端**换一批检索词**
+    /// 重新检索（见 `commands::ai::prompt` 的 retry 分支），而不是原词再搜一遍。
+    #[serde(default)]
+    retry_prior_answer: Option<String>,
 }
 
 async fn conversation_ask_handler(
@@ -370,6 +374,7 @@ async fn conversation_ask_handler(
         body.strict_docs,
         Some(body.full_recall),
         None,
+        body.retry_prior_answer,
     )
     .await
     .map_err(|e| ApiError { error: e })?;
@@ -479,6 +484,7 @@ async fn conversation_ask_stream_handler(
             body.strict_docs,
             Some(body.full_recall),
             None,
+            body.retry_prior_answer,
         )
         .await
         {

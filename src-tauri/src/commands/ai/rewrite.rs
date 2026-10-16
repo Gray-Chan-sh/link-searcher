@@ -8,27 +8,43 @@ pub struct RewriteOutcome {
     pub query: String,
 }
 
-/// Query rewrite for follow-up questions: when `last_q` starts with a
-/// deictic pronoun (它/这个/那个/上述/该/那/此/刚才/上面/之前/前面) or is
-/// too short to retrieve on, prepend keywords from the most recent
-/// *previous* user message so BM25 sees the referents the pronoun points
-/// back to. The LLM branch (see [`llm_rewrite_query`]) replaces pronouns
-/// contextually when the gateway is available.
-pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
-    const DEICTIC: &[&str] =
-        &["它", "这个", "那个", "上述", "上文", "该", "那", "此", "刚才", "上面", "之前", "前面"];
-    let q = last_q.trim();
-    // 触发改写：
-    // 1) 问句过短（<4 字）
-    // 2) 以指代词开头（它/这个/那个…）
-    // 3) 检索关键词为空（extract_retrieval_keywords 已过滤停用词，返回空
-    //    ⇒ 问句不含任何可检索实体词，如"把时间列出来"这类依赖上文的追问，
-    //    必须借助历史补全实体词。）
-    let keywords_empty = extract_retrieval_keywords(&q).is_empty();
-    let needs_rewrite = q.chars().count() < 4
+/// 指代词：以它们开头的追问在检索上基本无从落地，必须借历史补全。
+const DEICTIC: &[&str] =
+    &["它", "这个", "那个", "上述", "上文", "该", "那", "此", "刚才", "上面", "之前", "前面"];
+
+/// 本轮问题 = **最后一条 user 消息**（不是"最后一条消息"）。
+///
+/// 曾经用 `messages.last()`：卡片「换一批证据」重跑时，会话里最后一条是上一轮的
+/// **回答**，于是"重跑"变成了"对上一条回答再问一遍"（2026-10-16 实测事件里，
+/// 重跑那轮的 `query_rewrite.original` 正是上一轮回答正文）。
+pub(super) fn question_from_messages(messages: &[ChatMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find(|m| m.role == "user")
+        .map(|m| m.content.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 本轮问句是否**需要借历史才能检索**：过短、以指代词开头、或过滤后一个检索词都不剩。
+///
+/// 两处共用：`rewrite_query` 用它决定是否前置父问句关键词；
+/// [`may_inherit_parent_entities`] 用它判定"必须借历史"的场合。
+pub(super) fn needs_history_rewrite(q: &str) -> bool {
+    let q = q.trim();
+    q.chars().count() < 4
         || DEICTIC.iter().any(|p| q.starts_with(p))
-        || keywords_empty;
-    if !needs_rewrite {
+        || extract_retrieval_keywords(q).is_empty()
+}
+
+/// Query rewrite for follow-up questions: when the current question needs history
+/// (see [`needs_history_rewrite`]) prepend keywords from the most recent *previous*
+/// user message so BM25 sees the referents the pronoun points back to.
+/// The LLM branch (see [`llm_rewrite_query`]) replaces pronouns contextually when
+/// the gateway is available.
+pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
+    let q = last_q.trim();
+    if !needs_history_rewrite(q) {
         return RewriteOutcome { query: q.to_string() };
     }
     let parent = messages
@@ -94,7 +110,7 @@ pub async fn llm_rewrite_query(
         return None;
     }
     let history_str = rewrite_history(messages, context_paths);
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。**继承的前提是当前问题确实需要借历史才能读懂**（有指代词、过短、或没有任何可检索的实体词）；若当前问题本身已经是一个完整、独立的新问题，就只围绕它改写，**绝不**引入历史里的人物 / 机构 / 案件 / 主题。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
     let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
@@ -102,6 +118,109 @@ pub async fn llm_rewrite_query(
         Ok(Ok(Some(s))) => valid_rewrite_output(&s, last_q),
         _ => None,
     }
+}
+
+/// 本轮问句是否**可以**继承上一轮的实体（人名/案名/机构名）。
+///
+/// 两条准入（任一成立即可）：
+/// 1. 本轮问句**本身就需要借历史**（[`needs_history_rewrite`]：指代词开头/过短/无检索词）
+///    —— 这正是"实体继承"的原始用途（"它的风险有哪些"要靠上轮的主体）；
+/// 2. 否则必须是**与父问句共享检索词**的追问（= 同一话题，如父问"毛弟是否被人辱骂"、
+///    本轮"列出清单，把时间、辱骂人列出"共享"辱骂"）。
+///
+/// 反过来就是 P2 那条规则：**自足问句 + 与父问句关键词零交集 = 新话题** ⇒ 不继承。
+/// 2026-10-16 实测踩到：`汪均益案的最终结果是什么？`（自带实体）被硬塞了上一轮的人名，
+/// 检索被带到旧材料上，模型只能答"材料不足"。
+pub(super) fn may_inherit_parent_entities(current_q: &str, parent_q: &str) -> bool {
+    if needs_history_rewrite(current_q) {
+        return true;
+    }
+    let cur = extract_retrieval_keywords(current_q);
+    if cur.is_empty() {
+        return true;
+    }
+    let par = extract_retrieval_keywords(parent_q);
+    cur.iter().any(|a| par.iter().any(|b| a == b))
+}
+
+/// 自足问句的改写结果里**不得出现本轮问句没有的实体**。
+///
+/// 与 [`may_inherit_parent_entities`] 成对：不许继承的场合（新话题），改写只能围绕本轮
+/// 问句做取舍（去泛词、换同义词），**不能引入**上一轮的人名/案名 —— 那会把检索引到
+/// 无关材料上，"材料里没有"的假象正是这么来的（2026-10-16 实测：新话题被 LLM 加上
+/// 上一轮的人名，三通道都被带偏）。
+///
+/// 返回 `true` 表示这份改写应当**弃用**（回退规则链）。
+///
+/// 注意判据是"实体词"（`extract_retrieval_keywords`，已滤掉"判决/裁定/材料"这类泛词），
+/// 所以重跑扩查刻意补的结论性词**不会**被误判违规。
+pub(super) fn rewrite_adds_foreign_entity(rewritten: &str, current_q: &str, parent_q: &str) -> bool {
+    let cur = current_q.trim();
+    if cur.is_empty() || may_inherit_parent_entities(cur, parent_q) {
+        return false;
+    }
+    let lower = cur.to_lowercase();
+    extract_retrieval_keywords(rewritten)
+        .iter()
+        .any(|kw| !lower.contains(&kw.to_lowercase()))
+}
+
+/// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
+/// 的材料，这次换一组**不一样**但更可能命中的检索词。
+///
+/// 与 [`llm_rewrite_query`] 的分工：
+/// - 输入是**本轮原始问句**（不是上一条回答 —— 那正是被修掉的 bug）外加上一轮回答；
+/// - 任务不是"补全指代"，而是"换词"：首轮没答上多半是检索词过于具体、或用了语料里
+///   没有的说法，所以要求保留区分性实体（人名/案号/年份），补上同义词、上位词与
+///   结论性词（判决/裁定/调解/结案…看问题而定）；
+/// - 仍走 [`valid_rewrite_output`]：泛词化、空输出、原样回显一律视为无效。
+///
+/// 返回 `None` ⇒ 调用方回退规则链：**"换一批"绝不能退化成"同一个查询再搜一次"
+/// （那就是白点一次），但更不能因为扩展失败就不回答。**
+pub async fn llm_expand_retry_query(question: &str, prior_answer: &str) -> Option<String> {
+    let q = question.trim();
+    if q.is_empty() || !crate::ai::llm_enabled() {
+        return None;
+    }
+    let system = "你在为本地文档检索**换一批检索词**。上一轮用问题原词检索失败（材料里找不到能回答的内容），现在必须换一组**不同的**词再搜。硬性要求：1) 只围绕同一个问题，不换话题，不引入问题之外的人名/机构名/案名；2) **必须保留**问题里的区分性实体（人名/机构/案号/年份/项目名），一个字都不能改；3) **必须换词**：不许只把原句删掉“的/是/什么”变短一点就交差，要补上同义表述、上位词，以及这类问题在文档里通常出现的**结论性词** —— 例如问结果的补：判决/裁定/调解/结案/结论/处理结果；问时间的补：签订/履行/起止；问金额的补：金额/结算/付款（按问题类型自己判断）；4) 输出 6～12 个检索词，用空格分隔；不要解释、不要引号、不要照抄上一轮回答。";
+    let user = format!(
+        "问题：{q}\n上一轮回答（供参考，不要照抄）：{}\n新的检索词：",
+        truncate_text(prior_answer.trim(), 300)
+    );
+    let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&system.to_string(), &user));
+    match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
+        Ok(Ok(Some(s))) => valid_rewrite_output(&s, q),
+        _ => None,
+    }
+}
+
+/// 重跑扩查的守卫：**本轮问句的锚点实体必须还在**。
+///
+/// 与 [`rewrite_adds_foreign_entity`] 防的是**相反**的两件事，判据也相反：
+/// - 新话题守卫防"**多**出上一轮的人名/案名"；
+/// - 这里防"**丢**掉本轮问句的人名/案号"。
+///
+/// 扩查**本来就该补词**（判决书 / 裁定书 / 结案 / 调解…这些正是首轮没命中的原因），
+/// 若把"补词"当违规拦下来，重跑就退化成"原词再搜一遍" —— 用户点了等于白发
+/// （2026-10-16 实测踩到：`汪均益案 最终结果` 被这条判据之外的守卫拦掉，`retry` 标记
+/// 变成 true 但 `rewritten` 与原问题一模一样）。故只要求"至少保住一个锚点实体"。
+pub(super) fn retry_expansion_keeps_question_entity(expanded: &str, question: &str) -> bool {
+    let anchors = extract_retrieval_keywords(question);
+    if anchors.is_empty() {
+        // 问句本身没有区分性实体（如"把时间列出来"）→ 无从判定；空输出/泛词由
+        // `valid_rewrite_output` 挡住。
+        return true;
+    }
+    let lower_expanded = expanded.to_lowercase();
+    if anchors.iter().any(|a| lower_expanded.contains(&a.to_lowercase())) {
+        return true;
+    }
+    // 反向包含也要认：锚点常是**复合词**（"汪均益案"），而扩查可能只用其中的人名
+    // （"汪均益"）—— 那同样是锚定在本轮问句的实体上，不能判成"丢了锚点"。
+    let lower_anchors: Vec<String> = anchors.iter().map(|a| a.to_lowercase()).collect();
+    extract_retrieval_keywords(expanded)
+        .iter()
+        .any(|t| t.chars().count() >= 2 && lower_anchors.iter().any(|a| a.contains(&t.to_lowercase())))
 }
 
 fn is_rewrite_stopword(w: &str) -> bool {
@@ -208,7 +327,12 @@ fn parent_keywords(text: &str, max: usize) -> Vec<String> {
 /// Uses `extract_retrieval_keywords` (Search tokenization mode) on the
 /// parent to capture proper nouns like "毛弟" / "常宏" / "万城" that jieba
 /// cut mode may split.
-pub(super) fn ensure_parent_entities(search_q: &str, parent_q: &str) -> String {
+pub(super) fn ensure_parent_entities(search_q: &str, parent_q: &str, current_q: &str) -> String {
+    // 只能是"可以继承"的场合：新话题（自足问句 + 与父问句零交集）**不**硬塞父问句实体，
+    // 否则这条兜底会把 LLM 那侧刚修掉的"继承上一轮实体"重新加回去（P2）。
+    if !may_inherit_parent_entities(current_q, parent_q) {
+        return search_q.to_string();
+    }
     if parent_q.trim().is_empty() || parent_q.trim() == search_q.trim() {
         return search_q.to_string();
     }

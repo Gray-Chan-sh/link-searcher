@@ -332,7 +332,7 @@ pub fn run_cli() -> Result<()> {
                     .build()
                     .context("failed to create tokio runtime")?
                 .block_on(crate::commands::ai::prepare_conversation_prompt(
-                    &state, &messages, &[], &turn_scope, &[], false, full_recall, true, None, "", binding.as_ref(),
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, true, None, "", binding.as_ref(), None,
                 ))
                     .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
                 drop(prepared.events);
@@ -442,7 +442,7 @@ pub fn run_cli() -> Result<()> {
                 .build()
                 .context("failed to create tokio runtime")?
                 .block_on(crate::commands::ai::prepare_conversation_prompt(
-                    &state, &messages, &[], &turn_scope, &[], false, full_recall, false, None, "", binding.as_ref(),
+                    &state, &messages, &[], &turn_scope, &[], false, full_recall, false, None, "", binding.as_ref(), None,
                 ))
                 .map_err(|e| anyhow::anyhow!("检索失败: {e}"))?;
             if !prepared.has_evidence {

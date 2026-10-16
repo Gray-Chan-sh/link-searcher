@@ -462,12 +462,34 @@ pub fn action_payload(action: &str, session_id: &str) -> serde_json::Value {
     serde_json::json!({ "action": action, "session_id": session_id })
 }
 
-/// WebUI 的入口 URL（给「打开详情」按钮用）。
+/// WebUI 的**深链**（给「打开详情」按钮用）：直达某条会话，用户可以在浏览器里继续追问。
 ///
-/// 必须用 **LAN 地址**、不能用 `127.0.0.1` —— 用户多半是在**手机/别的机器**上点这个按钮，
-/// 给回环地址等于点不开。纯函数：这是"点开到底能不能打开"的唯一决定因素，也是唯一值得单测的部分。
-pub fn webui_url(lan_ip: &str, port: u16) -> String {
-    format!("https://{}:{}/", lan_ip.trim(), port)
+/// 两个要点：
+/// - 必须用 **LAN 地址**、不能用 `127.0.0.1` —— 用户多半是在**手机/别的机器**上点这个按钮，
+///   给回环地址等于点不开；
+/// - 必须带上 `origin=lark&session=<id>` —— 应用是 `HashRouter`（故 query 在 `#/chat?` 之后），
+///   而会话按端隔离：不带 `origin=lark` 去读飞书会话只会得到 `session not found`。
+///
+/// 纯函数：这是"点开到底能不能打开到那一条"的唯一决定因素，也是唯一值得单测的部分。
+pub fn webui_deep_link(lan_ip: &str, port: u16, session_id: &str) -> String {
+    format!(
+        "https://{}:{}/#/chat?origin=lark&session={}",
+        lan_ip.trim(),
+        port,
+        encode_query_value(session_id.trim())
+    )
+}
+
+/// query 值的最小百分号编码（会话 id 实际是 UUID，这里只为**防御性收敛**任意输入）。
+fn encode_query_value(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 /// 给卡片**追加**动作按钮（只有"最后一张"该用）。
@@ -936,13 +958,40 @@ mod tests {
     }
 
     #[test]
-    fn webui_url_uses_the_lan_address_not_loopback() {
-        assert_eq!(webui_url("192.168.1.5", 8443), "https://192.168.1.5:8443/");
-        assert_eq!(webui_url("  10.0.0.7  ", 9000), "https://10.0.0.7:9000/", "首尾空白要清掉");
+    fn webui_deep_link_uses_the_lan_address_not_loopback() {
+        assert_eq!(
+            webui_deep_link("192.168.1.5", 8443, "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"),
+            "https://192.168.1.5:8443/#/chat?origin=lark&session=3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"
+        );
+        assert_eq!(
+            webui_deep_link("  10.0.0.7  ", 9000, "s"),
+            "https://10.0.0.7:9000/#/chat?origin=lark&session=s",
+            "首尾空白要清掉"
+        );
         assert!(
-            !webui_url("192.168.1.5", 8443).contains("127.0.0.1"),
+            !webui_deep_link("192.168.1.5", 8443, "s").contains("127.0.0.1"),
             "必须给 LAN 地址 —— 用户在手机上点，回环地址点不开"
         );
+    }
+
+    /// 深链必须**指名到那一条会话**、且带上 `origin=lark`：
+    /// 应用是 HashRouter（query 在 `#/chat?` 之后），会话又按端隔离 —— 少了 origin 只会
+    /// 得到 `session not found`（2026-10-16 实测：带 origin 18050 字节，不带就是那个错误）。
+    #[test]
+    fn webui_deep_link_targets_one_session_and_declares_its_origin() {
+        let url = webui_deep_link("192.168.1.5", 8443, "  sess-1  ");
+        assert!(url.contains("/#/chat?"), "HashRouter：query 必须在 hash 之后：{url}");
+        assert!(url.contains("origin=lark"), "缺 origin 读不到飞书会话：{url}");
+        assert!(url.contains("session=sess-1"), "必须指名会话（且去掉空白）：{url}");
+    }
+
+    #[test]
+    fn deep_link_encodes_session_id_defensively() {
+        let url = webui_deep_link("10.0.0.7", 9000, "a b&c=1");
+        assert!(url.contains("session=a%20b%26c%3D1"), "特殊字符必须编码，否则会截断 query：{url}");
+        // UUID 这类正常取值不应被改动（真实会话 id 就是这种形状）
+        let normal = webui_deep_link("10.0.0.7", 9000, "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb");
+        assert!(normal.contains("session=3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"), "{normal}");
     }
 
     #[test]

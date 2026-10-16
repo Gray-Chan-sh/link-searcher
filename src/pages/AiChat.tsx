@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
-import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
+import { useSearchParams } from 'react-router-dom'
+import { aiCapabilities, listChatSessions, createChatSession, deleteChatSession, loadChatSession as loadChatSessionById, saveChatSession, exportChatSession, exportChatSessionJson, setChatPageOrigin, type AiCapabilities, type ChatSession, type ChatSessionMeta } from '../api/files'
 import { listDirs, getDirChildren, type DirTreeNode } from '../api/dirs'
 import { searchTreePrune } from '../api/files'
 import { useI18n } from '../i18n'
 import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { pickScopeDir } from '../utils/scopeResolve'
+import { parseDeepLink } from '../utils/deepLink'
 import { saveFile, confirm } from '../utils/platform'
 import { toast } from '../utils/toast'
 import { PlusIcon, TrashIcon, FolderIcon, FolderOpenIcon, FileTextIcon, ChevronDownIcon, LoadingSpinner } from '../icons'
@@ -57,6 +59,44 @@ export default function AiChat() {
     if (v) sessionStorage.setItem(NO_AUTO_CREATE_KEY, '1')
     else sessionStorage.removeItem(NO_AUTO_CREATE_KEY)
   }, [])
+
+  // ── 深链：`#/chat?origin=lark&session=<id>`（飞书回答卡片「打开详情」） ──
+  // query 在 **hash** 里（应用用 HashRouter），故走 useSearchParams 而不是 location.search；
+  // 桌面端 hash 无参数 → 全为 null，行为与从前完全一致。
+  const [searchParams] = useSearchParams()
+  const deepLinkKey = searchParams.toString()
+  const deepLink = useMemo(() => parseDeepLink(deepLinkKey), [deepLinkKey])
+  /** 本页来源端：深链进来时置好，本页所有会话调用都用它兜底。 */
+  const pageOrigin = deepLink?.origin
+  // 深链指定的会话尚未落地前，禁止「自动建空会话」抢先建一个无关会话。
+  const [deepLinkPending, setDeepLinkPending] = useState(deepLink?.session != null)
+  const deepLinkLoadRef = useRef(false)
+
+  // 来源端是**页面级**的：也交给 files.ts 兜底，这样 streamStore 的切页落库（拿不到 URL）
+  // 也落在同一个端上。声明得比下面几个 effect 早，保证它们跑时它已经就位。
+  useEffect(() => { setChatPageOrigin(pageOrigin) }, [pageOrigin])
+
+  // 深链直达：拉起 URL 指定的会话（可继续追问，回答写回同一条会话）。
+  useEffect(() => {
+    const sid = deepLink?.session
+    if (!sid || deepLinkLoadRef.current) return
+    deepLinkLoadRef.current = true
+    void (async () => {
+      try {
+        const s = await loadChatSessionById(sid, deepLink?.origin)
+        if (s) {
+          setActiveId(sid)
+          setActiveSession(s)
+        } else {
+          toast(t('deep_link_missing'), 'error')
+        }
+      } catch (e) {
+        toast(t('deep_link_failed', { error: e instanceof Error ? e.message : String(e) }), 'error')
+      } finally {
+        setDeepLinkPending(false)
+      }
+    })()
+  }, [deepLink, t])
   // 树状文件浏览器
   const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
   const [treeExpanded, setTreeExpanded] = useState(false)
@@ -72,6 +112,12 @@ export default function AiChat() {
     const saved = Number(localStorage.getItem('ls_chat_sidebar_w'))
     return saved >= 160 && saved <= 480 ? saved : 224
   })
+
+  // 会话自身的来源端：读取 / 删除 / 导出都要带上它（服务端会校验跨端）。
+  const originOf = useCallback((id: string) =>
+    sessions.find(s => s.id === id)?.origin
+      ?? (activeSession?.id === id ? activeSession.origin : undefined),
+  [sessions, activeSession])
 
   // 会话最后活跃时间的本地化显示：今天 → HH:mm，否则 → 日期
   const fmtSessionTime = useCallback((ts: number) => {
@@ -256,6 +302,8 @@ export default function AiChat() {
   useEffect(() => {
     if (!aiCap.llm || activeId) return
     if (!sessionsLoaded) return
+    // 深链指定的会话还在加载 → 别抢先建一个无关的空会话（否则"打开详情"落成新会话）。
+    if (deepLinkPending) return
     // 切页返回：优先恢复到离开前的会话，让 streamStore 缓冲的 ai-done 能被消费落库。
     const stored = sessionStorage.getItem(ACTIVE_CHAT_KEY)
     if (stored && sessions.some(s => s.id === stored)) {
@@ -275,12 +323,12 @@ export default function AiChat() {
       loadSession(latest)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [aiCap.llm, sessionsLoaded, sessions, activeId])
+  }, [aiCap.llm, sessionsLoaded, sessions, activeId, deepLinkPending])
 
   const loadSession = useCallback(async (id: string) => {
     setActiveId(id)
     try {
-      const s = await loadChatSessionById(id)
+      const s = await loadChatSessionById(id, originOf(id))
       if (s) {
         setActiveSession(s)
       } else {
@@ -292,15 +340,15 @@ export default function AiChat() {
     } catch {
       setActiveId(null)
     }
-  }, [refreshList])
+  }, [refreshList, originOf])
 
   // streamStore 在切页期间已代为落库时，只把最新会话拉回视图（不再保存）。
   const reloadSession = useCallback(async (id: string) => {
     try {
-      const s = await loadChatSessionById(id)
+      const s = await loadChatSessionById(id, originOf(id))
       if (s) setActiveSession(s)
     } catch { /* ignore */ }
-  }, [])
+  }, [originOf])
 
   const handleNewSession = useCallback(async () => {
     try {
@@ -317,7 +365,7 @@ export default function AiChat() {
     if (!confirmed) return
     setSuppressAutoCreate(true)
     try {
-      await deleteChatSession(id)
+      await deleteChatSession(id, originOf(id))
       if (sessionStorage.getItem(ACTIVE_CHAT_KEY) === id) sessionStorage.removeItem(ACTIVE_CHAT_KEY)
       if (id === activeId) {
         setActiveSession(null)
@@ -330,7 +378,7 @@ export default function AiChat() {
       console.error('[AiChat] delete session failed:', e)
       toast(t('delete_failed'), 'error')
     }
-  }, [activeId, refreshList, setSuppressAutoCreate, t])
+  }, [activeId, refreshList, setSuppressAutoCreate, t, originOf])
 
   // 导出文件名时间序列：YYYYMMDD_HHMMSS（本地时区）
   const exportStamp = useCallback(() => {
@@ -359,15 +407,15 @@ export default function AiChat() {
     if (turns.length === 0) return
     try {
       const content = format === 'json'
-        ? await exportChatSessionJson(activeId, turns)
-        : await exportChatSession(activeId, turns)
+        ? await exportChatSessionJson(activeId, turns, originOf(activeId))
+        : await exportChatSession(activeId, turns, originOf(activeId))
       const title = (activeSession?.title ?? 'ai-chat').replace(/[\\/:*?"<>|]/g, '_').trim() || 'ai-chat'
       await saveFile(content, `${title}_${exportStamp()}.${format}`)
     } catch (e) {
       // 不再静默吞错 — 保存失败（如路径无写权限）必须让用户可见。
       alert(`导出失败: ${e instanceof Error ? e.message : String(e)}`)
     }
-  }, [activeId, activeSession?.title, exportPick, exportStamp])
+  }, [activeId, activeSession?.title, exportPick, exportStamp, originOf])
 
   // 批量管理模式
   const [selectMode, setSelectMode] = useState(false)
@@ -401,7 +449,7 @@ export default function AiChat() {
     const ids = [...selectedIds]
     let failed = 0
     for (const id of ids) {
-      try { await deleteChatSession(id) } catch (e) {
+      try { await deleteChatSession(id, originOf(id)) } catch (e) {
         failed += 1
         console.error('[AiChat] delete session failed:', id, e)
       }
@@ -416,7 +464,7 @@ export default function AiChat() {
     setSelectedIds(new Set())
     setSelectMode(false)
     refreshList()
-  }, [selectedIds, activeId, refreshList, setSuppressAutoCreate, t])
+  }, [selectedIds, activeId, refreshList, setSuppressAutoCreate, t, originOf])
 
   // 批量导出：逐会话导出并合并为一个 Markdown 文件
   const handleBatchExport = useCallback(async () => {
@@ -424,7 +472,7 @@ export default function AiChat() {
     try {
       const parts: string[] = []
       for (const id of selectedIds) {
-        try { parts.push(await exportChatSession(id)) } catch { /* ignore 单个失败跳过 */ }
+        try { parts.push(await exportChatSession(id, undefined, originOf(id))) } catch { /* ignore 单个失败跳过 */ }
       }
       if (parts.length === 0) { alert(t('export_failed', { error: t('no_sessions_match') })); return }
       const combined = parts.join('\n\n---\n\n')
@@ -432,7 +480,7 @@ export default function AiChat() {
     } catch (e) {
       alert(t('export_failed', { error: e instanceof Error ? e.message : String(e) }))
     }
-  }, [selectedIds])
+  }, [selectedIds, exportStamp, originOf, t])
 
   // 侧栏宽度持久化
   useEffect(() => {
@@ -694,8 +742,18 @@ export default function AiChat() {
       {/* Chat area */}
       <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg overflow-hidden">
         <div className="px-4 py-2 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
-          <span className="text-sm font-medium text-gray-900 dark:text-gray-100">
-            {activeSession?.title || t('ai_chat')}
+          <span className="flex items-center gap-2 min-w-0">
+            <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate">
+              {activeSession?.title || t('ai_chat')}
+            </span>
+            {activeSession?.origin === 'lark' && (
+              <span
+                className="shrink-0 px-1.5 py-0.5 text-[10px] rounded border border-blue-200 bg-blue-50 text-blue-600 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-300"
+                title={t('origin_lark_hint')}
+              >
+                {t('origin_lark')}
+              </span>
+            )}
           </span>
           <div className="flex items-center gap-2">
             <button

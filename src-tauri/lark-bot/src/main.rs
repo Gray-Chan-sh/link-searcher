@@ -245,12 +245,12 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     // 但**卡片还没发出去之前**的任何失败 → 完全退回纯文本，用户不会看到两套答案。
     // `LS_LARK_CARDS=off` 是逃生阀（排查卡片问题时强制走纯文本）。
     if cards_enabled() {
-        match answer_with_card(http, &ev, &question, &session_id, session.clone(), messages.clone()) {
+        match answer_with_card(http, &ev, &question, &session_id, session.clone(), messages.clone(), None) {
             Ok(()) => return Ok(()),
             Err(e) => log::warn!("[bot] 卡片流程未能启动（{e}）→ 退回纯文本"),
         }
     }
-    answer_with_text(http, &ev, &question, &session_id, session, messages)
+    answer_with_text(http, &ev, &question, &session_id, session, messages, None)
 }
 
 /// 截断过长回答，并说明原因。
@@ -273,8 +273,12 @@ fn truncate_reply(answer: &str) -> String {
 ///   （这正是"追问时「他」指代不明确"的根因，见 §8.1）。
 ///
 /// `scope` 直接发 `{}`：服务端字段全是 `#[serde(default)]`，语义等同全默认。
-fn ask_body(session_id: &str, messages: &[Value]) -> Value {
-    json!({
+///
+/// `retry_prior_answer`：**只有重跑**（卡片「换一批证据」）才带这个键 —— 值 = 上一轮
+/// 回答正文。服务端据此**换一批检索词**重搜（见 `commands::ai::prompt` 的 retry 分支）。
+/// 其余请求保持原来的请求体形状，不塞空字段。
+fn ask_body(session_id: &str, messages: &[Value], retry_prior_answer: Option<&str>) -> Value {
+    let mut body = json!({
         "messages": messages,
         "sourceIds": [],
         "scope": {},
@@ -282,7 +286,11 @@ fn ask_body(session_id: &str, messages: &[Value]) -> Value {
         "strictDocs": false,
         "fullRecall": false,
         "sessionId": session_id,
-    })
+    });
+    if let Some(prior) = retry_prior_answer {
+        body["retryPriorAnswer"] = json!(prior);
+    }
+    body
 }
 
 /// 把这一轮写回会话（`origin=lark`；`origin` 已在会话里，回写时不必带）。
@@ -308,8 +316,9 @@ fn answer_with_text(
     session_id: &str,
     mut session: Value,
     messages: Vec<Value>,
+    retry_prior_answer: Option<&str>,
 ) -> Result<(), String> {
-    let asked = http.post("/api/ai/conversation/ask", &ask_body(session_id, &messages))?;
+    let asked = http.post("/api/ai/conversation/ask", &ask_body(session_id, &messages, retry_prior_answer))?;
     let answer = asked
         .get("answer")
         .and_then(|v| v.as_str())
@@ -353,11 +362,12 @@ fn answer_with_card(
     session_id: &str,
     mut session: Value,
     messages: Vec<Value>,
+    retry_prior_answer: Option<&str>,
 ) -> Result<(), String> {
     let card_id = reply_card(&ev.message_id, &render_working("正在检索…", ""))?;
     log::info!("[bot] 已回卡片 {card_id}（chat={}）", ev.chat_id);
 
-    match stream_turn(http, session_id, &messages, &card_id) {
+    match stream_turn(http, session_id, &messages, &card_id, retry_prior_answer) {
         Ok(turn) => {
             let mut done = messages;
             done.push(json!({ "role": "assistant", "content": turn.full_text }));
@@ -428,14 +438,14 @@ struct Turn {
 /// 事件契约（`webapi/routes/ai.rs`）：具名事件 `ai-progress` / `ai-chunk` / `ai-done`，
 /// 各自 data 是 JSON。**只有 `ai-done` 的 `full_text` 是权威结果** —— 中间 chunk 只用于显示，
 /// 广播通道在接收端落后时会丢事件（axum `BroadcastStream` 的 `Lagged`），丢了也不影响最终答案。
-fn stream_turn(http: &Http, session_id: &str, messages: &[Value], card_id: &str) -> Result<Turn, String> {
+fn stream_turn(http: &Http, session_id: &str, messages: &[Value], card_id: &str, retry_prior_answer: Option<&str>) -> Result<Turn, String> {
     let mut throttle = Throttle::standard();
     let mut acc = SseAccum::default();
     let mut partial = String::new();
     let mut progress = String::from("正在检索…");
     let mut done_payload: Option<Value> = None;
 
-    http.stream("/api/ai/conversation/ask/stream", &ask_body(session_id, messages), |line| {
+    http.stream("/api/ai/conversation/ask/stream", &ask_body(session_id, messages, retry_prior_answer), |line| {
         let Some((event, data)) = acc.push_line(line) else {
             return Ok(true);
         };
@@ -815,6 +825,18 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                         reply(&ev.message_id, "找不到可重跑的问题（这会话里没有用户消息）。");
                         return Ok(());
                     }
+                    // 上一轮回答：作为 `retry_prior_answer` 交给服务端，让它**换一批检索词**
+                    // 重搜（原词再搜一遍等于白点一次）。注意服务端的"问题"口径也是
+                    // **最后一条 user 消息**（`commands/ai/rewrite.rs::question_from_messages`）——
+                    // 两边一致，重跑才是"对原问题换词重搜"，而不是"对上一条回答再问一遍"（那是 P1 的旧行为）。
+                    let prior_answer = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
                     let synth = LarkMessageEvent {
                         event_type: "im.message.receive_v1".to_string(),
                         message_id: ev.message_id.clone(),
@@ -826,10 +848,12 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                         content: question.clone(),
                     };
                     log::info!(
-                        "[bot] 重跑会话 {session_id} 的最后一问（{} 字）",
-                        question.chars().count()
+                        "[bot] 重跑会话 {session_id} 的最后一问（{} 字；带上轮回答 {} 字用于换词扩查）",
+                        question.chars().count(),
+                        prior_answer.chars().count()
                     );
-                    answer_with_card(http, &synth, &question, &session_id, session, messages)
+                    let retry = (!prior_answer.is_empty()).then(|| prior_answer.as_str());
+                    answer_with_card(http, &synth, &question, &session_id, session, messages, retry)
                         .map_err(|e| format!("重跑失败：{e}"))
                 }
             }
@@ -852,6 +876,8 @@ fn webui_hint(http: &Http, session_id: &str) -> Result<String, String> {
 ///
 /// 证书那句是 2026-10-16 实测后补的：点开链接**先撞自签名证书告警**，用户不知道要信任一次，
 /// 只会以为链接坏了（当时还叠加了 release 下静态资源 404，见 docs/LARK_BOT.md §5.11）。
+/// 链接本身换成**直达该条会话的深链**（同一实测日期）：以前给的是站点根地址，
+/// 点开只到首页，"打开详情"名不副实。
 fn webui_hint_text(ip: &str, port: u64, session_id: &str) -> Result<String, String> {
     let ip = ip.trim();
     // 0 或超出端口范围都说明没取到可用地址（`as u16` 会静默截断成错误端口，故先判）。
@@ -859,8 +885,8 @@ fn webui_hint_text(ip: &str, port: u64, session_id: &str) -> Result<String, Stri
         return Err("webapi 未运行，或没取到 LAN 地址".to_string());
     }
     Ok(format!(
-        "在浏览器打开（需与电脑同一局域网；自签名证书会先提示「不安全」，点「继续访问」信任一次即可）：\n{}\n\n会话 id：{session_id}",
-        crate::card::webui_url(ip, port as u16)
+        "在浏览器打开（需与电脑同一局域网；自签名证书会先提示「不安全」，点「继续访问」信任一次即可）：\n{}\n\n这个链接直达该条会话，可以直接在浏览器里继续追问。",
+        crate::card::webui_deep_link(ip, port as u16, session_id)
     ))
 }
 
@@ -1179,13 +1205,16 @@ mod tests {
         assert_eq!(arg_value("--parent-pid"), None);
     }
 
-    /// 「打开详情」的提示：必须给 **LAN 地址**（回环在手机/别的机器上点不开），
+    /// 「打开详情」的提示：必须给 **LAN 地址**（回环在手机/别的机器上点不开）、
+    /// **直达会话的深链**（而不是站点根地址，否则点开只到首页），
     /// 且必须提醒自签名证书（否则用户看到"不安全"就以为链接坏了）。
     #[test]
-    fn webui_hint_text_gives_lan_url_and_cert_warning() {
+    fn webui_hint_text_gives_lan_deep_link_and_cert_warning() {
         let text = webui_hint_text("192.168.1.54", 8443, "sess-1").unwrap();
-        assert!(text.contains("https://192.168.1.54:8443/"), "必须是 LAN 地址：{text}");
-        assert!(text.contains("sess-1"), "带上会话 id 便于排查：{text}");
+        assert!(
+            text.contains("https://192.168.1.54:8443/#/chat?origin=lark&session=sess-1"),
+            "必须是 LAN 地址 + 直达会话的深链：{text}"
+        );
         assert!(text.contains("证书"), "自签名证书的提醒不能少：{text}");
 
         assert!(webui_hint_text("", 8443, "s").is_err(), "没 IP = 没地址");

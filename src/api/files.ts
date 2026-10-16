@@ -265,33 +265,52 @@ export async function listenAiProgress(
   return un
 }
 
-export async function listChatSessions(): Promise<ChatSessionMeta[]> {
-  return client.invoke<ChatSessionMeta[]>('list_chat_sessions')
+/**
+ * 会话封装里的 `origin` = **来源端**（`ui` / `web` / `lark`）。
+ *
+ * 服务端按它判定会话归属，读写都校验；不传则按调用端推断（浏览器 → `web`）。
+ * 深链从飞书卡片进来时要显式带 `lark`，否则读不到、也写不回那条会话。
+ * （桌面端走 IPC，多带的 `origin` 被 IPC 按参数名取值时忽略，行为与从前一致。）
+ *
+ * 下面的 `pageOrigin` 是「本页来源端」：深链进来自动置好，之后**本页所有**会话调用
+ * 都用它兜底 —— 包括 `ai/streamStore` 的切页兜底落库（那里拿不到 URL）。
+ * 未设置时保持 `undefined`，由服务端按调用端推断（与改动前完全一致）。
+ */
+let pageOrigin: string | undefined
+
+/** 由聊天页在深链进来时调用一次（`undefined` = 恢复默认）。 */
+export function setChatPageOrigin(origin?: string): void {
+  pageOrigin = origin
 }
 
-export async function createChatSession(): Promise<string> {
-  return client.invoke<string>('create_chat_session')
+export async function listChatSessions(origin?: string): Promise<ChatSessionMeta[]> {
+  return client.invoke<ChatSessionMeta[]>('list_chat_sessions', { origin: origin ?? pageOrigin })
 }
 
-export async function deleteChatSession(id: string): Promise<void> {
-  return client.invoke<void>('delete_chat_session', { id })
+export async function createChatSession(origin?: string): Promise<string> {
+  return client.invoke<string>('create_chat_session', { origin: origin ?? pageOrigin })
 }
 
-export async function loadChatSession(id: string): Promise<ChatSession | null> {
-  return client.invoke<ChatSession | null>('load_chat_session', { id })
+export async function deleteChatSession(id: string, origin?: string): Promise<void> {
+  return client.invoke<void>('delete_chat_session', { id, origin: origin ?? pageOrigin })
 }
 
-export async function saveChatSession(session: ChatSession): Promise<void> {
-  return client.invoke<void>('save_chat_session', { session })
+export async function loadChatSession(id: string, origin?: string): Promise<ChatSession | null> {
+  return client.invoke<ChatSession | null>('load_chat_session', { id, origin: origin ?? pageOrigin })
 }
 
-export async function exportChatSession(id: string, turns?: number[]): Promise<string> {
-  return client.invoke<string>('export_chat_session', { id, turns })
+/** 落库来源端默认取会话自带的 `origin` —— 跨端写入（如浏览器续聊飞书会话）靠它通过校验。 */
+export async function saveChatSession(session: ChatSession, origin?: string): Promise<void> {
+  return client.invoke<void>('save_chat_session', { session, origin: origin ?? session.origin ?? pageOrigin })
+}
+
+export async function exportChatSession(id: string, turns?: number[], origin?: string): Promise<string> {
+  return client.invoke<string>('export_chat_session', { id, turns, origin: origin ?? pageOrigin })
 }
 
 /** JSON 导出；turns 为 1-based 轮次编号，缺省导出全部轮次。 */
-export async function exportChatSessionJson(id: string, turns?: number[]): Promise<string> {
-  return client.invoke<string>('export_chat_session_json', { id, turns })
+export async function exportChatSessionJson(id: string, turns?: number[], origin?: string): Promise<string> {
+  return client.invoke<string>('export_chat_session_json', { id, turns, origin: origin ?? pageOrigin })
 }
 
 export async function getFile(id: string): Promise<FileDetail> {
