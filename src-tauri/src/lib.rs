@@ -26,6 +26,7 @@ use crate::commands::config::{add_provider, delete_provider, get_config, migrate
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, preview_file, preview_file_by_path, reveal_in_folder};
 use crate::commands::index::{backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, retry_failed_files, trigger_scan, verify_index_content};
+use crate::commands::lark::{get_lark_bindings, get_lark_config, get_lark_status, lark_pairing_cancel, lark_pairing_start, lark_restart, set_lark_config};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{
     autostart_state, get_settings, get_version, set_autostart, update_settings,
@@ -218,6 +219,13 @@ get_dir_children,
             test_provider,
             migrate_data,
             restart_app,
+            get_lark_config,
+            set_lark_config,
+            get_lark_status,
+            lark_restart,
+            lark_pairing_start,
+            lark_pairing_cancel,
+            get_lark_bindings,
         ])
         .setup(|app| {
             // Pick up tools installed (e.g. by winget) since this process

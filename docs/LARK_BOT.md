@@ -697,6 +697,42 @@ src-tauri/
 > 所以正确做法是 **先关一次、再开一次**（而不是"点一次"），否则会像我这次一样把它点成 OFF。
 > 已用 `Get-ItemProperty …Run` 复核：现在指向安装路径 ✅。
 
+### 5.9 结构化接口与命令层（C4，2026-10-16）
+
+**为什么要有"结构化接口"**：飞书策略原先经 `/api/settings` 以**平铺字符串**下发（bool 存成
+`"true"`、数组存成 JSON 字符串），每个消费者各自剥壳、各自容错。改成结构化后**形状由服务端
+保证**，bot 只消费 —— 也是将来接第二个平台时能复用的接缝。
+
+| 层 | 入口 | 说明 |
+|---|---|---|
+| Web API | `GET /api/integrations/lark` | 结构化读策略（bot 启动时读它） |
+| Web API | `PUT /api/integrations/lark` | 结构化写策略；**写后重启 bot**；只碰 `integrations.lark` 这一块 |
+| Web API | `POST /api/integrations/lark/pairing/consume` | **配对消费（白名单写入口）** |
+| Tauri 命令 | `get_lark_config` / `set_lark_config` | 设置页读写策略 |
+| Tauri 命令 | `get_lark_status` | 策略 + **运行态**（`running` / `pairing_active` / 剩余秒数 / 绑定数） |
+| Tauri 命令 | `lark_restart` | 手动重启 bot（手改文件由 §5.6 C3 的热重载自动触发，这里是兜底） |
+| Tauri 命令 | `lark_pairing_start` / `lark_pairing_cancel` | 进入 / 退出配对模式 |
+| Tauri 命令 | `get_lark_bindings` | 已绑定的 p2p 会话 |
+
+**三条收在代码里的纪律**：
+
+1. **改策略必须重启 bot**：策略是 bot **启动时读一次**的，不重启＝改了不生效。这条收在
+   命令层/端点里，而不是指望每个调用方记得（这是最容易漏的一步）。
+2. **配对消费必须先校验配对有效**：`POST …/pairing/consume` 是**白名单写入口**，若不校验就
+   等于"凭一个 token 往白名单塞任意 `open_id`"（绕过 L1）。校验口径是 `pairing_active(now)`，
+   即 `pairing && pairing_expires_at > now` —— **`0` 也算已过期**（fail-closed：漏设截止时刻
+   ＝没开配对，而不是永久敞开）。
+3. **`running` 要问进程，不是问配置**：`lark_bot::is_running()` 用 `try_wait` 顺手回收已退出的
+   子进程 —— bot 可能**自己退出**（读到 `enabled = false`、缺 lark-cli、崩溃），只看
+   `Option<Child>` 会一直显示"运行中"。
+
+**顺带修掉的 W5**：`lark-bot` 是 console 子系统程序，而 GUI 进程没有控制台 → Windows 会为它
+**新建控制台窗口**（黑框一闪）。已加 `CREATE_NO_WINDOW`（`lark_bot.rs`）。
+
+> **规范化的单一收口点**：`set_lark_integration` 内部统一做 `sanitized()`（去空白、去重、
+> "没在配对就不留截止时刻"）。所有写入口（设置页 / Web API / 一次性迁移 / 手改热重载）都汇到
+> 那里，因此调用方**不必各自记得**清理。
+
 ---
 
 ## 六、能干什么（功能清单）
@@ -834,7 +870,7 @@ src-tauri/
 | `allowed_chats` | 数组（`chat_id`） | `[]` | 拒绝全部 | **当前不参与判定**（见 ④） |
 | `export_allow_dirs` | 数组（路径） | `[]` | **不限制** | 内容外发收紧阀 |
 | `pairing` | bool | `false` | — | 配对模式（见 ⑥） |
-| `pairing_expires_at` | unix 秒 | `0` | — | 配对**截止时刻**；`0`＝不限时（不推荐，见 ⑥ 第 4 条） |
+| `pairing_expires_at` | unix 秒 | `0` | — | 配对**截止时刻**；**`0` 或已过去都算失效**（fail-closed：漏设＝没开配对，见 ⑥ 第 4 条） |
 
 > bot **不直接读** `config.json`：它经 `GET /api/integrations/lark` 拿**结构化**结果
 > （见 §4.1 的数据流）。形状由服务端保证 —— bot 不再自己剥 `"true"`、也不再解析 JSON 字符串。

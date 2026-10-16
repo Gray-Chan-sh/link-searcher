@@ -1,3 +1,34 @@
+## 2026-10-16（第十七轮）：飞书接入 —— C4 结构化接口 + 命令层 + bot 生命周期
+
+> 目的：把飞书策略的**读写口**从"平铺字符串"改成**结构化**接口，并补齐设置页要用的
+> 命令层与 bot 运行态。bot 从此不再自己剥 `"true"` / 解析 JSON 字符串（形状由服务端保证）。
+
+- **Web API（`webapi/routes/lark.rs`）**：
+  - `GET /api/integrations/lark`（C1 已加）结构化读
+  - `PUT /api/integrations/lark` 结构化写 —— **只碰 `integrations.lark` 这一块**，写后**重启 bot**
+  - `POST /api/integrations/lark/pairing/consume` —— **配对消费（白名单写入口）**，必须先校验
+    配对**确实开着且未过期**，否则等于"凭一个 token 往白名单塞任意 `open_id`"（绕过 L1）
+- **Tauri 命令（新 `commands/lark.rs`，已在 `lib.rs` 注册）**：`get_lark_config` / `set_lark_config`
+  / `get_lark_status` / `lark_restart` / `lark_pairing_start` / `lark_pairing_cancel` / `get_lark_bindings`
+- **三条收在代码里的纪律**：
+  1. **改策略必须重启 bot** —— 策略是 bot 启动时读一次的，不重启＝改了不生效（收在命令层/端点里，
+     不指望调用方记得）
+  2. **配对有效性 fail-closed**：`pairing_active(now) = pairing && pairing_expires_at > now`
+     —— **`0` 也算已过期**（漏设截止时刻＝没开配对，而不是永久敞开）
+  3. **`running` 问进程而不是问配置**：新增 `lark_bot::is_running()`，用 `try_wait` 顺手回收
+     已退出的子进程（bot 可能自己退出：读到 `enabled=false` / 缺 lark-cli / 崩溃）
+- **规范化单一收口点**：`set_lark_integration` 内部统一 `sanitized()`（去空白 / 去重 /
+  "没在配对就不留截止时刻"）—— 所有写入口都汇到那里，调用方不必各自记得
+- **修 W5**：`lark-bot` 是 console 子系统程序，GUI 进程没有控制台 → Windows 会新建控制台窗口
+  （黑框一闪）。加 `CREATE_NO_WINDOW`（`lark_bot.rs`）
+- **配对必须先启用**：没启用就没有 bot 收那条私聊，`lark_pairing_start` 直接拒绝并给出可操作提示
+- **测试**：`pairing_active_is_fail_closed`、`sanitized_normalizes_lists_and_pairing_expiry`；
+  `link_searcher_lib` 564 个用例；`cargo test --workspace` / `tsc` / `vitest` / `semgrep(ERROR)` 全绿
+- **文档**：`docs/LARK_BOT.md` 新增 §5.9（结构化接口与命令层一览）；§7.1 ⑤ 更正
+  `pairing_expires_at` 的语义（`0`＝失效，而不是"不限时"）
+- **未做**：C5（`lark-gate` 配对判定 `GateVerdict::Pair` + bot 消费配对）、C6（设置页「集成」面板）、
+  C7（mac/Linux npm 前缀）
+
 ## 2026-10-16（第十六轮）：飞书接入 —— C3 `config.json` 热重载 + 自写抑制（§5.6 B 档收尾）
 
 > §5.6 三类故障里的第 2 条：**我改了、被应用覆盖**。C1 已把"唯一整份重建的写者"改成读-改-写，

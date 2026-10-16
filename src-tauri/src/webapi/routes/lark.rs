@@ -7,6 +7,9 @@
 //! - `GET /api/lark/bindings`           —— 全量（诊断 / 将来的统一管理视图）
 //! - `POST /api/lark/seen`              —— 按 `message_id` 去重，返回是否首次
 //! - `GET /api/integrations/lark`       —— **结构化**读飞书策略（`config.json`）
+//! - `PUT /api/integrations/lark`       —— 结构化写策略（写后**重启 bot**）
+//! - `POST /api/integrations/lark/pairing/consume` —— 配对消费（**白名单写入口**，
+//!   必须先校验配对有效，见 `docs/LARK_BOT.md` §7.1 ⑥）
 //!
 //! `created_at` / `updated_at` 一律**服务端**生成，bot 不需要（也不应该）自己算。
 
@@ -19,6 +22,7 @@ use serde::Deserialize;
 use tauri::Manager;
 
 use crate::commands::sessions::lark::{self, LarkBinding, DEFAULT_SEEN_CAP};
+use crate::config::LarkIntegration;
 use crate::state::AppState;
 use crate::webapi::state::ApiState;
 
@@ -32,7 +36,14 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         )
         .route("/api/lark/bindings", get(list_bindings))
         .route("/api/lark/seen", post(mark_seen))
-        .route("/api/integrations/lark", get(get_lark_config))
+        .route(
+            "/api/integrations/lark",
+            get(get_lark_config).put(put_lark_config),
+        )
+        .route(
+            "/api/integrations/lark/pairing/consume",
+            post(consume_pairing),
+        )
 }
 
 /// 结构化读飞书集成配置（`config.json` 的 `integrations.lark`）。
@@ -46,6 +57,67 @@ async fn get_lark_config() -> Result<Json<serde_json::Value>, ApiError> {
     serde_json::to_value(lark)
         .map(Json)
         .map_err(|e| ApiError { error: e.to_string() })
+}
+
+/// 结构化**写**飞书集成配置（CLI / 远程客户端用；桌面设置页走 Tauri 命令）。
+///
+/// 与 `PUT /api/settings` 的区别：键名与类型由**服务端**保证，且**只碰
+/// `integrations.lark` 这一块**（不是"整份重建"，不会顺带抹掉别人的字段）。
+/// 写后**重启 bot** —— 策略是 bot 启动时读一次，不重启就等于没改。
+async fn put_lark_config(
+    Json(body): Json<LarkIntegration>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::config::set_lark_integration(&body).map_err(|e| ApiError { error: e })?;
+    crate::lark_bot::restart();
+    let saved = crate::config::lark_integration();
+    serde_json::to_value(saved)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
+}
+
+#[derive(Deserialize)]
+struct PairingConsumeBody {
+    open_id: String,
+}
+
+/// 配对消费：把发送者写入白名单，并**自动关闭**配对（§7.1 ⑥）。
+///
+/// ⚠️ **这是白名单写入口** —— 必须先校验配对**确实开着且未过期**，否则它就成了
+/// "凭一个 token 往白名单里塞任意 `open_id`"的口子（等于绕过 L1 准入）。校验不过一律拒绝。
+///
+/// 是否私聊由**闸门**判定（bot 只在 p2p 配对时才调这里）—— 服务端看不到 `chat_type`，
+/// 因此不重复判定，但正因如此才更要把"配对是否有效"守死。
+async fn consume_pairing(
+    Json(body): Json<PairingConsumeBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let open_id = body.open_id.trim().to_string();
+    if open_id.is_empty() {
+        return Err(ApiError {
+            error: "open_id is required".into(),
+        });
+    }
+    let now = chrono::Utc::now().timestamp();
+    let mut lark = crate::config::lark_integration();
+    if !lark.pairing_active(now) {
+        return Err(ApiError {
+            error: "pairing is not active（未开启或已过期）".into(),
+        });
+    }
+    if !lark.allowed_users.iter().any(|u| u == &open_id) {
+        lark.allowed_users.push(open_id.clone());
+    }
+    // 配对是"一次性"的：消费即关闭（留着等于没有白名单）。
+    lark.pairing = false;
+    lark.pairing_expires_at = 0;
+    crate::config::set_lark_integration(&lark).map_err(|e| ApiError { error: e })?;
+    // 白名单变了 → 让 bot 重读，否则新配的用户仍会被拒。
+    crate::lark_bot::restart();
+
+    let saved = crate::config::lark_integration();
+    log::info!("[LARK] 配对成功：{open_id} 已加入白名单，配对模式自动关闭");
+    Ok(Json(
+        serde_json::json!({ "ok": true, "allowed_users": saved.allowed_users }),
+    ))
 }
 
 #[derive(Deserialize)]

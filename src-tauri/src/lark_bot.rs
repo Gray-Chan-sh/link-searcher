@@ -18,6 +18,15 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
+// W5：`lark-bot` 是 **console 子系统**程序，而 GUI 进程没有控制台 —— Windows 会为它
+// **新建一个控制台窗口**（用户看到黑框一闪）。`CREATE_NO_WINDOW` 让子进程无窗口运行。
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+/// `CreateProcess` 的 `CREATE_NO_WINDOW` 标志。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// 已拉起的 bot 子进程。`None` ＝ 没在跑。
 static BOT: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -103,6 +112,10 @@ pub fn spawn_if_enabled() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // W5（见文件头注释）：不加这个标志，Windows 上会闪一个黑框。
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
     // ── lark-cli 的发现权归**应用侧**（依赖中心），经环境变量交给 bot ────────────────
     // bot 刻意不依赖应用 lib（上一轮拆 crate 的成果），所以两边**不能共享实现**；
     // 这条环境变量就是接缝：应用解析 → 注入 → bot 直接用（bot 自带探测仅作手动运行的兜底）。
@@ -173,4 +186,26 @@ pub fn shutdown() {
 pub fn restart() {
     shutdown();
     spawn_if_enabled();
+}
+
+/// bot 进程当前是否**在跑**（顺手回收已退出的子进程）。
+///
+/// 为什么要 `try_wait` 而不是只看 `Option`：bot 可能**自己退出**（读到
+/// `enabled = false`、lark-cli 缺失、崩溃…），若不回收，`Some(child)` 会一直
+/// 在，状态显示就会撒谎（"运行中"）。回收后由下一次 `restart` / `spawn_if_enabled`
+/// 决定要不要再拉起。
+pub fn is_running() -> bool {
+    let mut slot = BOT.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(child) = slot.as_mut() else {
+        return false;
+    };
+    match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(_)) => {
+            *slot = None;
+            false
+        }
+        // 查询失败（权限/句柄异常）：无法证明它死了，保守当"在跑"。
+        Err(_) => true,
+    }
 }

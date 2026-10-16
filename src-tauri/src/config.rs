@@ -270,8 +270,48 @@ pub struct LarkIntegration {
     pub export_allow_dirs: Vec<String>,
     /// 冷启动配对模式（§7.1 ⑥）。
     pub pairing: bool,
-    /// 配对模式的截止时刻（unix 秒）；`0` 表示不限时（不推荐）。
+    /// 配对模式的**截止时刻**（unix 秒）。
+    ///
+    /// **`0` 或已经过去都算失效**（见 [`LarkIntegration::pairing_active`]）——
+    /// fail-closed：忘记设截止时刻＝没开配对，而不是"永远有效"
+    /// （长期开着等于没有白名单）。
     pub pairing_expires_at: i64,
+}
+
+impl LarkIntegration {
+    /// 规整化：去掉空白项、去重，并维持"**没在配对就没有截止时刻**"这个不变量。
+    ///
+    /// 由 [`set_lark_integration`] 统一执行 —— 所有写入口（设置页 / Web API /
+    /// 一次性迁移 / 手改后的热重载）都汇到那里，调用方**不必各自记得**清理。
+    pub fn sanitized(mut self) -> Self {
+        for list in [
+            &mut self.allowed_users,
+            &mut self.allowed_chats,
+            &mut self.export_allow_dirs,
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            list.retain_mut(|v| {
+                let trimmed = v.trim().to_string();
+                if trimmed.is_empty() {
+                    return false;
+                }
+                *v = trimmed.clone();
+                seen.insert(trimmed)
+            });
+        }
+        if !self.pairing {
+            self.pairing_expires_at = 0;
+        }
+        self
+    }
+
+    /// 配对是否**此刻有效**（§7.1 ⑥）。
+    ///
+    /// **fail-closed**：`pairing_expires_at <= now` 一律无效 —— **包括 `0`**。
+    /// 于是"配对必须带一个将来的截止时刻"，漏设＝没开，而不是永久敞开。
+    pub fn pairing_active(&self, now: i64) -> bool {
+        self.pairing && self.pairing_expires_at > now
+    }
 }
 
 impl Default for LarkIntegration {
@@ -453,10 +493,12 @@ pub fn lark_integration() -> LarkIntegration {
 pub fn set_lark_integration(lark: &LarkIntegration) -> Result<(), String> {
     let _g = lock_config();
     let mut cfg = read_config_file();
-    if cfg.integrations.lark == *lark {
+    // 规整化**在这里统一做**：所有写入口都汇到本函数，调用方不必各自记得清理。
+    let next = lark.clone().sanitized();
+    if cfg.integrations.lark == next {
         return Ok(());
     }
-    cfg.integrations.lark = lark.clone();
+    cfg.integrations.lark = next;
     write_config_file(&cfg)
 }
 
@@ -1186,6 +1228,59 @@ mod tests {
         let json = serde_json::to_string(&AppConfig::default()).unwrap();
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.integrations.lark, LarkIntegration::default());
+    }
+
+    /// 配对有效性 **fail-closed**：`0` / 已过去 / `pairing = false` 一律无效。
+    /// 这挡住了"忘了设截止时刻＝永久敞开"这条最危险的解读（§7.1 ⑥ 第 4 条）。
+    #[test]
+    fn pairing_active_is_fail_closed() {
+        let mut lark = LarkIntegration {
+            pairing: true,
+            pairing_expires_at: 0,
+            ..LarkIntegration::default()
+        };
+        assert!(
+            !lark.pairing_active(1_000),
+            "截止时刻为 0 必须视为已过期（而不是\"不限时\"）"
+        );
+        lark.pairing_expires_at = 999;
+        assert!(!lark.pairing_active(1_000), "已过去的时刻必须无效");
+        lark.pairing_expires_at = 1_001;
+        assert!(lark.pairing_active(1_000), "将来的时刻应有效");
+        lark.pairing = false;
+        assert!(!lark.pairing_active(0), "没开配对必须无效");
+    }
+
+    /// 规整化：去空白 / 去重 / 丢空项；**没在配对就不留截止时刻**。
+    #[test]
+    fn sanitized_normalizes_lists_and_pairing_expiry() {
+        let lark = LarkIntegration {
+            allowed_users: vec![
+                " ou_a ".into(),
+                "ou_a".into(),
+                String::new(),
+                "   ".into(),
+                "ou_b".into(),
+            ],
+            allowed_chats: vec![" ".into()],
+            export_allow_dirs: vec!["  /tmp/a  ".into(), "/tmp/a".into()],
+            pairing: false,
+            pairing_expires_at: 12_345,
+            ..LarkIntegration::default()
+        }
+        .sanitized();
+        assert_eq!(lark.allowed_users, vec!["ou_a".to_string(), "ou_b".to_string()]);
+        assert!(lark.allowed_chats.is_empty());
+        assert_eq!(lark.export_allow_dirs, vec!["/tmp/a".to_string()]);
+        assert_eq!(lark.pairing_expires_at, 0, "没在配对就不该留下截止时刻");
+
+        let lark = LarkIntegration {
+            pairing: true,
+            pairing_expires_at: 12_345,
+            ..LarkIntegration::default()
+        }
+        .sanitized();
+        assert_eq!(lark.pairing_expires_at, 12_345, "在配对时必须保留截止时刻");
     }
 
     /// 跨进程锁**真的**互斥：另一个句柄持锁时本句柄必须拿不到（而不是"假装拿到"）。

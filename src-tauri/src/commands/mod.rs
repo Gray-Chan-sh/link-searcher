@@ -8,6 +8,7 @@ pub mod files;
 pub mod funasr;
 pub mod helpers;
 pub mod index;
+pub mod lark;
 pub mod logs;
 pub mod performance;
 pub mod rerank;
