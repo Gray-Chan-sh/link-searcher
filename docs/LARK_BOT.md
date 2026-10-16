@@ -426,14 +426,18 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 **结论：核心链路（webapi + bot + `lark-cli`）三平台都能跑；
 真正的跨平台短板在「交付与常驻形态」，不在功能本身。**
 
-**① 应用本体：代码真跨平台，但交付只配了 Windows**
+**① 应用本体：代码真跨平台；打包 target 已补，但仍未在 mac/Linux 实测**
 
 | 层 | 跨平台证据 | 交付状态 |
 |---|---|---|
 | Rust 应用 | 三平台 cfg 分叉齐全：`process.rs`（Win `CREATE_NO_WINDOW`／mac `path_helper`／Linux PATH 刷新）、`deps/commands.rs:117-148`（winget／brew／apt）、三套 OCR（mac Vision／win OCR／paddleocr） | ✅ 可编译 |
-| 打包 | — | ⚠️ `tauri.conf.json:30` `"targets": ["msi"]` **只有 MSI**；`bundle.macOS.infoPlist` 已配但**无 dmg / deb / appimage**，且**无 CI**（无 `.github/workflows`） |
+| 打包 | 平台专属配置：Tauri v2 支持 `tauri.<platform>.conf.json`，按 **JSON Merge Patch** 与主配置合并（**数组是整体替换**，不是追加） | ✅ **已补（2026-10-16）**：base `bundle.targets = "all"`（＝该平台的默认目标集合），新增 `src-tauri/tauri.windows.conf.json` 把 Windows **钉回 `["msi"]`** ⇒ **Windows 产物与本轮之前完全一致**；macOS ⇒ `app`+`dmg`；Linux ⇒ `deb`+`rpm`+`appimage`。sidecar 命名本来就按宿主 triple 生成（`scripts/build-sidecar.mjs` 用 `rustc -vV` 取 host triple，仅 Windows 加 `.exe`）——**无需改** |
+| 构建流程 | — | ⚠️ 仍**无 CI**（无 `.github/workflows`）、无一键出多平台包 |
 
-→ 即"跨平台可编译"≠"跨平台可交付"。要支持 macOS/Linux 装机，需补打包 target 与构建流程。
+→ 即"跨平台可编译"≠"跨平台可交付"。本轮只补齐了**配置层**：Windows 侧用真实
+`npm run tauri:build` 验过（照旧产出 MSI，说明平台专属配置的合并生效）；
+**mac/Linux 从未被打包实测**（本机是 Windows，跨平台打包需要对应机器）——
+不要把这一行读成"mac/Linux 交付已验证"。
 
 **② `lark-cli` 本体：官方支持三平台**
 
@@ -612,9 +616,23 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 **没有 `doctor --fix` 之类的修复入口**。此外 `commands/backup.rs` 的测试用 `{"theme":"dark"}`
 当 config fixture，硬拒绝会连带把那些测试打红。等有了修复路径再切硬拒绝。
 
-**仍待处理（B 档的前置）**：`embed_plans` 是**运行期高频写**的字段，却待在会被整文件重写的
-`config.json` 里；`web_api_token` 仍**双存储**（config.json + DB `app_settings`，靠
-`resolve_token()` 的 env > config.json > DB 优先级对齐）。若走 B 档，这两处应一并重新分工。
+**曾待处理（B 档的前置）→ 2026-10-16 已处理**
+
+- **`embed_plans` 的"运行期高频写"** —— 实情比"高频"更糟：`ai::next_embed_plan` 的平台期分支
+  每轮都把 `tok_per_s` 乘 0.97（`updated` 也变），于是 `next != prev` **恒真** ⇒
+  `embed_batched` 那句"变了就存"让**每次嵌入调用**都要走一遍"跨进程锁 + 读 113 KB + fsync 写回"。
+  两处改动：① 计算起点改为**优先读内存计划**（`ai::last_plan_for`，顺带省掉一次整份解析）；
+  ② 落盘门槛改为 `ai::plan_should_persist` —— **只看结构性变化**（`batch`/`conc`），
+  纯吞吐量/时间戳的衰减留在内存里累计 ⇒ 写盘从"每次调用"降到"每个爬坡台阶"（单测守住）。
+- **`web_api_token` 双存储**：**保留**（这是刻意的，不是历史包袱）—— bot 是**另一个进程**，
+  只能读 `config.json`；鉴权中间件则每请求从 DB 读（才能"改完立即生效、不必重启"）。
+  原先三个入口各写各的，现已**收口到 `webapi::apply_token`**（先写权威的 `config.json`、
+  再写 DB、最后作废旧会话），Tauri `update_settings` / Web `PUT /api/settings` /
+  启动 `resolve_token` 都只调它 ⇒ 不再有"漏写一侧 → 改了 token 却被 401"。
+- **新增写入守卫 `read_config_for_write()`**："读-改-写"的读取**读不懂就返回 `None`、放弃本次写入**
+  （文件不存在仍按默认配置处理）。`save_embed_plan` / `set_lark_integration` / `set_web_api_token`
+  此前都回退 `AppConfig::default()` —— 等于"读不懂就整份重写"：**一次手改到一半的 `config.json`
+  就会被默认值冲掉**（providers / `api_key` / token / 用户未知键全丢）。
 
 > **2026-10-16 决策与进度：走 B 档，分三步落地（C1→C3）**
 >
@@ -651,7 +669,9 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 >   （闸门 `L1′` + 服务端裁决 `pairing_active`）、**C6** 设置页「集成」面板（含
 >   `config-changed` 刷新、Tauri 命令与 Web 端点**共用同一实现**）、**C7** `lark-cli`
 >   发现跨平台（不再只认 Windows）。详见 §5.9 与 §5.3 ②。
-> - **仍未解决（如实记录）**：`embed_plans` 运行期高频写、`web_api_token` 双存储（同上一段）。
+> - **2026-10-16 补齐（与上一段同一批改动）**：`embed_plans` 落盘门槛（只写结构性变化）+
+>   **写入守卫** `read_config_for_write`（读不懂就拒写，不再"整份冲成默认值"）+
+>   `web_api_token` **三入口收口**（`webapi::apply_token`）。**两处存储本身保留**（有意为之）。
 
 ### 5.7 bot sidecar 的打包（**已解决**：拆 crate → 打开 `externalBin`）
 
@@ -1044,11 +1064,16 @@ event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/
 >   也就没有可测的行为 —— 给它写个断言只会是**假测试**（断言规整结果，冒充语义回归）。
 >   → 一旦真的出现"内容外发"路径，**必须在同一处**同时落地判定与该用例（fail-open 的方向也要
 >   和 `allowed_users` 的 fail-closed 一起写清楚，这一对最容易被"顺手统一"改错）。
+>   **2026-10-16 处置：不实现能力，改为在界面与文档里如实描述** —— 设置页那行 hint 此前写着
+>   "允许把检索结果写成飞书文档 / 表格的本地目录"，**暗示了一个并不存在的出口**；现四个语言都改成
+>   "⚠️ 预留项：当前版本还没有该出口，暂不生效"，`docs/06-settings.md` 同步。值仍会被存储 + 规整
+>   （留作将来收紧用的阀门），**仍然没有假测试**。
 > - **#8 是**真机**用例，不是单测**：它验的是 bot 收到群消息后**回了固定提示**
 >   （`NON_P2P_NOTICE`，`lark-bot/src/main.rs` 的 `DenyNonP2p` 分支）；而 `handle_line` 要真发
 >   HTTP + 真回复，属人工验收（与"飞书面板真机点击"同类）。闸门层**等价的 #1 已覆盖判定**，
 >   且 L2 **只看 `chat_type`**、不看 `chat_id` —— 真实群 id 夹具对这条判定**不增加信息量**，
 >   它的价值在于"这条消息真的来自那个群"（E2E 语境）。
+>   → **2026-10-16 已补做（通过）**：见本节 ⑪ 的"群消息真机 E2E"。
 
 **⑧ 实测真实值（2026-10-15，供配对/校验参考）**
 
@@ -1058,7 +1083,7 @@ event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/
 | 你的 `open_id` | `ou_bfdf6618eacf1f52eaa1911ca71ace6a` |
 | 你的 p2p `chat_id` | `oc_be9fcfffcb9b1b46349fc347c608914b` |
 | 回调模式 | `websocket`（长连接） |
-| 机器人当前所在群 | **0 个**（`im +chat-list --types=group` 实测） |
+| 机器人当前所在群 | **1 个**：`oc_5ed092dfb438fc24cd8c2378c15046e2`「智商在线!」，群主＝**你本人**（`im +chat-list --as bot` 实测 2026-10-16）—— 10-15 记录的"0 个"此后被拉进（见 ③） |
 
 **⑨ 三层防线分工（重申）**
 
@@ -1087,6 +1112,25 @@ event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/
 | `content` = `"@二飞 hello"` | ⚠️ 预渲染把 `@_user_1` 换成了 `@二飞` → **送入检索前必须剥掉 @ 前缀**，否则查询词带噪音 |
 | 字段集随场景变化 | 群事件多出 `update_time` / `mentions`（p2p 没有）→ 解析必须**宽松**（字段可选），不得假设固定字段集 |
 | 唯一稳定的类型判别 | `chat_type`（`"p2p"` / `"group"`）—— L2 就靠它 |
+
+**⑪ 群消息真机 E2E（2026-10-16，**通过**）—— #8 的收尾**
+
+在群「智商在线!」发一条被 @ 的群消息（真实飞书 → 真实 `lark-bot`）：
+
+```text
+2026-10-16 14:49:10 WARN [lark_bot] [lark-bot] [bot] 拒绝：非私聊（chat_type=group）
+```
+
+| 断言 | 证据 |
+|---|---|
+| 消息**真的到达** bot（不是夹具） | 上面这行是 `lark-bot` 进程自己打的（`D:\index\app.log`），时间戳为真实到达时刻 |
+| 走的是 **L2 分支**（`DenyNonP2p`）而不是"没响应" | 日志文案即 `main.rs` 的 `DenyNonP2p` 分支：`拒绝：非私聊（chat_type=group）` |
+| **没有回答**（不该把答案发进群） | 同一时刻**没有**任何 `[bot] 收到卡片动作` / 检索 / 回答类日志 |
+| 固定提示已发出 | `reply()` 只在失败时打 `[bot] 回复失败：…`；本次**没有**该行（成功路径不打日志） |
+
+> ⚠️ 据实说明：**"提示是否真的出现在群里"没有自动化证据** —— 那需要在飞书客户端里用眼睛看
+> （`reply()` 走 `lark-cli im +messages-reply`，成功时不落任何日志）。日志能证明的是
+> "拒绝发生了 + 没有回答 + 回复命令未报错"。
 
 **（附）拒绝推进的边界**：若将来要进群 / 多人使用，必须回到闸门 1–3（外发白名单、只回摘要、脱敏），
 并启用 `lark_allowed_chats` 且**显式定义**其与 `lark_allowed_users` 的组合语义 ——
@@ -1234,6 +1278,27 @@ lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 25s
 
 > **另**："分页"已由**自动续发卡片**解决（§8.2）→ D 的按钮应做**交互类**（详情 / 重试），
 > 而不是翻页按钮（那是重复建设）。
+
+**⚠️ 实现坑（2026-10-16 修）：回调消费者的子进程被"自己"提前 drop ⇒ 按钮**从未**可用**
+
+按"双消费者"落地后，真机日志每次启动都成对出现（间隔 < 1 秒）：
+
+```text
+[bot] 卡片回调长连接就绪
+[bot] 卡片回调 stdout 结束（按钮将不可用）
+[lark-cli] [event] … stdin closed → shutting down          ← 子进程自己说"stdin 被关了"
+[lark-cli] [event] exited — received 0 event(s) in 0s (reason: signal)
+```
+
+**根因**：`spawn_card_consumer()` 里 `let mut child = spawn_consumer(…)`，只把 `stdout`
+移进了读取线程，**函数一返回 `child` 就被 drop** ⇒ 它持有的 **stdin 管道被关闭**；而 lark-cli 的
+**优雅停机方式就是"关 stdin"**（Windows 没有可用的 SIGTERM，见 `spawn_consumer` 上方的注释）
+—— 于是子进程收到 EOF 立刻自杀。消息主链路没事，只是因为 `main()` 把它的 `child` 一直攥着。
+
+**修法**：把 `child` 也 move 进读取线程（喂给 `BufReader` 的仍是 `stdout`），读完循环后
+`child.wait()` 回收。**教训**："起子进程"和"**保活**子进程"是两件事 —— 只搬走一个管道，
+等于在函数返回时亲手按下了停机信号。这条也解释了"为什么 §8.4 的双消费者实验**是通的**
+（手工在 shell 里跑，stdin 没被关），而**产品里按钮一直是死的**"。
 
 ---
 

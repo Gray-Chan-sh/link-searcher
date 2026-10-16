@@ -347,7 +347,11 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
     let adaptive = embed_adaptive_enabled();
     let key = embed_plan_key(&ep.base_url, &ep.model_id);
     let plan = if adaptive {
-        crate::config::load_embed_plan(&key).unwrap_or_default()
+        // 优先用**内存里**那份（`last_plan`）：① 省掉一次整份 config.json 解析；
+        // ② 让下面"只在结构性变化时落盘"不破坏 AIMD 爬坡连续性 —— 平台期的
+        // `tok_per_s` 衰减仍逐轮在内存里累计，只是不必每次都写盘。
+        last_plan_for(&key)
+            .unwrap_or_else(|| crate::config::load_embed_plan(&key).unwrap_or_default())
     } else {
         crate::config::EmbedPlan { batch: batch_size, conc: 1, tok_per_s: 0.0, updated: 0 }
     };
@@ -361,7 +365,7 @@ pub fn embed_batched(texts: &[String], batch_size: usize) -> Vec<Option<Vec<f32>
     );
 
     let effective = if adaptive { next_embed_plan(plan, sample) } else { plan };
-    if adaptive && effective != plan {
+    if adaptive && plan_should_persist(plan, effective) {
         crate::config::save_embed_plan(&key, effective);
     }
     *last_plan().lock().unwrap_or_else(|e| e.into_inner()) = Some((key, effective));
@@ -393,6 +397,26 @@ const IMPROVE_RATIO: f32 = 1.03;
 
 fn round_up_8(n: usize) -> usize {
     n.div_ceil(8) * 8
+}
+
+/// 取**本进程内存里**那份计划（key 匹配才用 —— `last_plan` 只存最近一条）。
+fn last_plan_for(key: &str) -> Option<crate::config::EmbedPlan> {
+    last_plan()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .filter(|(k, _)| k == key)
+        .map(|(_, p)| *p)
+}
+
+/// 这一次算出的计划是否**值得落盘**：只看结构性变化（`batch` / `conc`）。
+///
+/// 为什么不能"变了就写"：平台期分支每轮都会把 `tok_per_s` 乘 0.97（`updated` 也变），
+/// 于是 `next != prev` **恒真** ⇒ 每一次嵌入调用都要"加跨进程锁 + 读 113 KB + fsync 写回"。
+/// 而纯吞吐量/时间戳的变化对下次启动几乎没有意义（顶多起点略保守），结构参数才是要害。
+/// 落盘次数因此从"每次调用"降到"每个爬坡台阶"（一次 backfill 约十几次）。
+fn plan_should_persist(prev: crate::config::EmbedPlan, next: crate::config::EmbedPlan) -> bool {
+    next.batch != prev.batch || next.conc != prev.conc
 }
 
 /// Pure tuner step: given the previous plan and one sample, compute the next
@@ -1977,6 +2001,21 @@ mod tests {
         let n = next_embed_plan(p, EmbedSample { tok_per_s: 0.0, items: 256, errors: 1 });
         assert!(n.batch < 128 && n.batch >= EMBED_BATCH_MIN, "batch {} out of range", n.batch);
         assert!(n.conc <= 2 && n.conc >= EMBED_CONC_MIN, "conc {} out of range", n.conc);
+    }
+
+    /// 落盘门槛：只有**结构**（batch/conc）变化才值得写盘 —— 平台期每轮都会改
+    /// `tok_per_s`/`updated`，若按"变了就写"就变成**每次嵌入调用**都整份 fsync 写回。
+    #[test]
+    fn plan_persists_only_on_structural_change() {
+        use crate::config::EmbedPlan;
+        let base = EmbedPlan { batch: 128, conc: 2, tok_per_s: 1000.0, updated: 1 };
+        // 平台期衰减 / 时间戳变化（纯数值）→ 不落盘
+        let decayed = EmbedPlan { tok_per_s: 970.0, updated: 2, ..base };
+        assert!(!plan_should_persist(base, decayed));
+        // 爬坡台阶 / 退避（结构变化）→ 落盘
+        assert!(plan_should_persist(base, EmbedPlan { batch: 192, ..base }));
+        assert!(plan_should_persist(base, EmbedPlan { conc: 3, ..base }));
+        assert!(plan_should_persist(base, EmbedPlan { batch: 64, conc: 1, ..base }));
     }
 
     #[test]

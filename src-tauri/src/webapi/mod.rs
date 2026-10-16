@@ -186,19 +186,50 @@ fn resolve_token(app_state: &AppState) -> String {
         (uuid::Uuid::new_v4().simple().to_string(), true)
     };
 
-    if cfg_dirty {
-        crate::config::set_web_api_token(&token);
-        log::info!("[WEBAPI] token 已写入 config.json");
-    }
-    if db_token.as_deref() != Some(token.as_str())
-        && let Ok(conn) = app_state.db.get()
-    {
-        let _ = conn.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
-            rusqlite::params![KEY_TOKEN, &token],
-        );
+    if cfg_dirty || db_token.as_deref() != Some(token.as_str()) {
+        // 收口：一处同时写完 config.json + app_settings（漏写任一侧都会"改了 token 却被 401"）
+        match apply_token(app_state, &token) {
+            Ok(()) => log::info!("[WEBAPI] token 已同步进 config.json 与 app_settings"),
+            Err(e) => log::error!("[WEBAPI] token 回写失败（两处可能不一致）：{e}"),
+        }
     }
     token
+}
+
+/// **单一收口**：把 Web API token 同时写进两处存储，并作废当前 Web 会话。
+///
+/// 两处存储是**刻意的**（不是历史包袱）：
+/// - `config.json` 是**权威**存储 —— bot 是**另一个进程**，只能读配置文件；
+/// - `app_settings.web_api_token` 是[鉴权中间件](crate::webapi::auth)每请求读取的副本
+///   （放 DB 才能"改完立即生效、不必重启"）。
+///
+/// 因此每个入口都必须走这里：漏写任何一侧都会表现为"改了 token 却被 401"（DB 旧）
+/// 或"bot 还拿着旧 token"（config 旧）。入口＝Tauri `update_settings`、
+/// Web `PUT /api/settings`、启动时的 [`resolve_token`]。
+///
+/// 顺序＝**权威先行**：先 config.json（失败则整体失败，DB 仍是旧 token、旧 token 继续可用），
+/// 再 DB，最后才作废会话 —— 只有两处都已是新值，旧会话才该失效。
+pub fn apply_token(app_state: &AppState, token: &str) -> Result<(), String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return Err("token cannot be empty".into());
+    }
+    // ① 权威存储
+    crate::config::set_web_api_token(token)?;
+    // ② 鉴权中间件读这里
+    {
+        let conn = app_state.db.get().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
+            rusqlite::params![KEY_TOKEN, token],
+        )
+        .map_err(|e| format!("写 app_settings.web_api_token 失败: {e}"))?;
+    }
+    // ③ 旧 token 的会话立即失效（持旧 token 的客户端下一次请求 401）
+    if crate::webapi::session::clear(None) {
+        log::info!("[WEBAPI-SESSION] token changed → session reset");
+    }
+    Ok(())
 }
 
 /// 本机局域网 IP：UDP connect 只做路由选择、不发包，用于选出对外网卡地址。

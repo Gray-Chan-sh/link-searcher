@@ -1,0 +1,6 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasio/tauri/refs/heads/dev/crates/tauri-cli/schema.json",
+  "bundle": {
+    "targets": ["msi"]
+  }
+}

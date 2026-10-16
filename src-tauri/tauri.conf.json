@@ -27,7 +27,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi"],
+    "targets": "all",
     "externalBin": ["binaries/lark-bot"],
     "macOS": {
       "infoPlist": "Info.plist"

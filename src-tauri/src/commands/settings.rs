@@ -80,6 +80,11 @@ pub async fn update_settings(
         if !ALLOWED_KEYS.contains(&key.as_str()) {
             return Err(format!("unknown setting key: {key}"));
         }
+        // token **不走这条通用路径**：它有两处存储（`config.json` 权威 + `app_settings`
+        // 给鉴权中间件），必须一次写完两侧才不留分叉 —— 收口在 [`crate::webapi::apply_token`]。
+        if key == "web_api_token" {
+            continue;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?1, ?2)",
             rusqlite::params![key, value],
@@ -87,15 +92,14 @@ pub async fn update_settings(
         .map_err(|e| format!("failed to update setting '{key}': {e}"))?;
     }
     drop(conn);
-    // token 双端（设置页 / Web 端走同一实现）可改：改了就同步进 config.json
-    // （token 的持久化来源）并作废当前 Web 会话——持旧 token 的客户端会在下
-    // 一次请求收到 401，本机（同 IP）下一次请求则重新建立会话。
-    if let Some(token) = settings.get("web_api_token")
-        && !token.trim().is_empty()
-    {
-        crate::config::set_web_api_token(token.trim());
-        if crate::webapi::session::clear(None) {
-            log::info!("[WEBAPI-SESSION] token changed → session reset");
+    // token 双端（设置页 / Web 端走**同一实现**）可改：一次写完两处存储并作废当前 Web
+    // 会话——持旧 token 的客户端会在下一次请求收到 401，本机（同 IP）下一次请求则重新建立会话。
+    // 空值按"没改"处理：历史行为是把它写进 DB，那会让 `db_token` 变成空串 ⇒ 鉴权**全线失效**。
+    if let Some(token) = settings.get("web_api_token") {
+        if token.trim().is_empty() {
+            log::warn!("[WEBAPI] 忽略空的 web_api_token（按未修改处理）");
+        } else {
+            crate::webapi::apply_token(state.inner(), token)?;
         }
     }
     Ok(())

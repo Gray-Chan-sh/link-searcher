@@ -409,7 +409,7 @@ const ja: Record<string, string> = {
     lark_allowed_users: '許可する open_id',
     lark_allowed_users_hint: '1 行に 1 件。空＝誰も許可しない（既定）—— 最初は下の「ペアリング開始」で自分を追加してください。',
     lark_export_dirs: '送信を許可するディレクトリ',
-    lark_export_dirs_hint: '1 行に 1 件。空＝制限なし（上の許可リストとは逆の意味）。',
+    lark_export_dirs_hint: '1 行に 1 件。空＝制限なし（上の許可リストとは逆の意味）。⚠️ 予約項目：Feishu ドキュメント/シートへの書き出し機能は未実装のため、現在は効きません。',
     lark_save_failed: '保存に失敗',
     lark_saved: '保存しました。ボットは新しい設定で再起動済みです。',
     lark_restart: 'ボットを再起動',

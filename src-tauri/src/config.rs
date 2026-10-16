@@ -441,11 +441,11 @@ pub fn load_embed_plan(key: &str) -> Option<EmbedPlan> {
 /// serialize instead of clobbering each other. Best-effort — a failure only logs.
 pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
     let _g = lock_config();
-    let path = config_dir().join(CONFIG_FILE);
-    let mut cfg: AppConfig = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // ⚠️ 解析失败时必须**放弃写入**：这里原本回退 `AppConfig::default()`，等于"读不懂就整份
+    // 重写"，一次手改到一半的 config.json 会被默认值冲掉（见 [`read_config_for_write`]）。
+    let Some(mut cfg) = read_config_for_write() else {
+        return;
+    };
     cfg.embed_plans.insert(key.to_string(), plan);
     if let Err(e) = write_config_file(&cfg) {
         log::warn!("[AI] 保存嵌入调优计划失败: {e}");
@@ -459,21 +459,24 @@ pub fn web_api_token() -> String {
 }
 
 /// 把 Web API token 写回 `config.json`（加锁的整文件读-改-写，避免与
-/// provider CRUD / embed plan 更新互相覆盖）。值未变化时不落盘。
-/// 设置页与 Web 端改 token 都会调用，保证配置文件与 DB 中的 token 一致。
-pub fn set_web_api_token(token: &str) {
+/// provider CRUD / embed plan 更新互相覆盖）。值未变化时**不落盘但仍返回 `Ok`**。
+///
+/// ⚠️ 本函数只动 `config.json` 这一侧 —— 另一侧（`app_settings`，鉴权中间件读它）必须由
+/// [`crate::webapi::apply_token`] 在**同一处**写完。想改 token 请调它，不要在这里再包一层，
+/// 否则又会留下"两处不一致 → 改了 token 却被 401"的分叉。
+pub fn set_web_api_token(token: &str) -> Result<(), String> {
+    let token = token.trim();
     if token.is_empty() {
-        return;
+        return Err("web api token 不能为空".into());
     }
     let _g = lock_config();
-    let mut cfg = read_config_file();
+    let mut cfg = read_config_for_write()
+        .ok_or_else(|| "config.json 不可读，已放弃写入 web_api_token".to_string())?;
     if cfg.web_api_token == token {
-        return;
+        return Ok(());
     }
     cfg.web_api_token = token.to_string();
-    if let Err(e) = write_config_file(&cfg) {
-        log::warn!("[CONFIG] 写入 web_api_token 失败: {e}");
-    }
+    write_config_file(&cfg)
 }
 
 /// 读飞书集成配置（`config.json` 的 `integrations.lark`）。
@@ -497,7 +500,9 @@ pub fn lark_integration() -> LarkIntegration {
 /// （`commands/lark.rs` 保持原样：写完就重启）。
 pub fn set_lark_integration(lark: &LarkIntegration) -> Result<bool, String> {
     let _g = lock_config();
-    let mut cfg = read_config_file();
+    // 读不懂现有配置就**放弃写入**（否则会把整份配置冲成默认值，见 [`read_config_for_write`]）
+    let mut cfg = read_config_for_write()
+        .ok_or_else(|| "config.json 不可读，已放弃写入（避免覆盖整份配置）".to_string())?;
     // 规整化**在这里统一做**：所有写入口都汇到本函数，调用方不必各自记得清理。
     let next = lark.clone().sanitized();
     if cfg.integrations.lark == next {
@@ -519,6 +524,33 @@ fn read_config_file() -> AppConfig {
         .ok()
         .and_then(|s| serde_json::from_str::<AppConfig>(&s).ok())
         .unwrap_or_default()
+}
+
+/// 供"读-改-写"使用的配置读取：**读不懂就返回 `None`**，调用方据此**放弃本次写入**。
+///
+/// 与 [`read_config_file`] 的关键区别：那里解析失败会**回退到默认配置** —— 对"只要值"的
+/// 读者没问题，但写入是"读-改-写"，一旦把"解析失败"当成"空配置"，一次**手改到一半 / 被
+/// 截断**的 `config.json` 就会让整份配置（providers、`api_key`、`web_api_token`、用户的未知键）
+/// **被默认值冲掉**。文件**不存在**不算损坏（全新安装，没有可覆盖的东西）→ 按默认配置处理。
+fn read_config_for_write() -> Option<AppConfig> {
+    let path = config_dir().join(CONFIG_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => match serde_json::from_str::<AppConfig>(&raw) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                log::warn!(
+                    "[CONFIG] {} 解析失败，已放弃本次写入以免覆盖整份配置: {e}",
+                    path.display()
+                );
+                None
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AppConfig::default()),
+        Err(e) => {
+            log::warn!("[CONFIG] 读取 {} 失败，已放弃本次写入: {e}", path.display());
+            None
+        }
+    }
 }
 
 fn config_dir() -> PathBuf {

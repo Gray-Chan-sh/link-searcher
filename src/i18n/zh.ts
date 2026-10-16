@@ -413,7 +413,7 @@ const zh: Record<string, string> = {
     lark_allowed_users: '允许的用户 open_id',
     lark_allowed_users_hint: '每行一个。留空＝谁都不允许（默认如此）—— 首次请用下方“开始配对”把自己加进来。',
     lark_export_dirs: '允许外发的目录',
-    lark_export_dirs_hint: '每行一个。留空＝不限制（方向与上面的白名单相反，别记混）。',
+    lark_export_dirs_hint: '每行一个。留空＝不限制（方向与上面的白名单相反，别记混）。⚠️ 预留项：当前版本还没有"把内容写成飞书文档/表格"的出口，此项暂不生效。',
     lark_save_failed: '保存失败',
     lark_saved: '已保存，机器人已按新配置重启。',
     lark_restart: '重启机器人',

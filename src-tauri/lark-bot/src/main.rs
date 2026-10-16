@@ -731,6 +731,12 @@ fn spawn_card_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
     };
     log::info!("[bot] 卡片回调长连接就绪");
     std::thread::spawn(move || {
+        // ⚠️ `child` 必须**被这个线程持有到读完为止**：lark-cli 的优雅停机方式就是
+        // "关 stdin"，所以 `Child` 一旦 drop（stdin 管道 EOF）子进程会**立刻退出**。
+        // 2026-10-16 修：原先只把 `stdout` 移进线程、`child` 随函数返回被 drop，
+        // 于是回调消费者在"就绪"后 1 秒内就死（日志：`stdin closed → shutting down`
+        // 紧跟 `卡片回调 stdout 结束`）—— **卡片按钮从来没能用**。
+        let mut child = child;
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let line = line.trim();
             if line.is_empty() {
@@ -741,6 +747,7 @@ fn spawn_card_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
             }
         }
         log::warn!("[bot] 卡片回调 stdout 结束（按钮将不可用）");
+        let _ = child.wait(); // 回收子进程，别留僵尸
     });
 }
 

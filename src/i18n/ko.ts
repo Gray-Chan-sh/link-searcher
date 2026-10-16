@@ -409,7 +409,7 @@ const ko: Record<string, string> = {
     lark_allowed_users: '허용할 open_id',
     lark_allowed_users_hint: '한 줄에 하나. 비어 있으면 아무도 허용되지 않습니다(기본값) —— 처음에는 아래 "페어링 시작"으로 자신을 추가하세요.',
     lark_export_dirs: '외부 전송을 허용할 디렉터리',
-    lark_export_dirs_hint: '한 줄에 하나. 비어 있으면 제한 없음(위 허용 목록과 방향이 반대입니다).',
+    lark_export_dirs_hint: '한 줄에 하나. 비어 있으면 제한 없음(위 허용 목록과 방향이 반대입니다). ⚠️ 예약 항목: Feishu 문서/시트로 내보내는 기능이 아직 없어 현재는 동작하지 않습니다.',
     lark_save_failed: '저장 실패',
     lark_saved: '저장했습니다. 봇이 새 설정으로 재시작되었습니다.',
     lark_restart: '봇 재시작',

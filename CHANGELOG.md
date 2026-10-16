@@ -1,3 +1,54 @@
+## 2026-10-16（第二十二轮）：清上一轮遗留 —— 修卡片回调秒退（真缺陷）+ 配置写入守卫 + token 收口 + 跨平台打包
+
+> 上一轮末留了 6 条"未做"。本轮把**已确诊**的都改掉，两条原本"卡在没条件"的据实收口：
+> `export_allow_dirs` 在 UI/文档里如实标注「预留·暂未生效」（不为它写假测试），
+> `#8` 群消息真机 E2E **补做**（有日志证据）。
+
+- **缺陷（真机可见）：卡片回调消费者"就绪"后 1 秒内自杀 ⇒ 卡片按钮从来没生效**
+  （`src-tauri/lark-bot/src/main.rs::spawn_card_consumer`）：只把 `stdout` move 进读取线程，
+  `child` 随函数返回被 **drop** ⇒ 它的 **stdin 管道被关**；而 lark-cli 的**优雅停机就是"关 stdin"**
+  （Windows 没有可用的 SIGTERM）→ 子进程收到 EOF 立刻退出。
+  证据：真机日志每次启动都成对出现 `[bot] 卡片回调长连接就绪` → **<1 秒** `[bot] 卡片回调 stdout 结束（按钮将不可用）`，
+  子进程侧是 `stdin closed → shutting down` / `exited — received 0 event(s) in 0s`。
+  修：把 `child` 一并 move 进线程（读的仍是 `stdout`），循环结束 `child.wait()` 回收。
+- **`embed_plans` 不是"高频写"，是"每次嵌入都整份 fsync 写回"**
+  （`src-tauri/src/ai/mod.rs` + `config.rs::save_embed_plan`）：`next_embed_plan` 的平台期分支
+  每轮都把 `tok_per_s` 乘 0.97（`updated` 也变），于是 `effective != plan` **恒真** ⇒ 每次嵌入调用
+  都要"加跨进程锁 + 读 113 KB + fsync 写 113 KB"。修：① 计算起点**优先读内存计划**
+  （`last_plan_for`，顺带省掉一次整份解析）；② 落盘门槛改为 `plan_should_persist` ——
+  **只看结构性变化**（`batch`/`conc`），纯吞吐量/时间戳的衰减留在内存里累计。
+  新增单测 `plan_persists_only_on_structural_change`。
+- **`web_api_token` 三入口收口**（`webapi/mod.rs` 新增 `apply_token`；`webapi/routes/settings.rs`、
+  `commands/settings.rs`、`resolve_token` 都只调它）：两处存储是**刻意的**（bot 是另一个进程、
+  只能读 `config.json`；鉴权中间件每请求从 DB 读才能"改完即生效"），但原先三个入口各写各的 ⇒
+  漏写一侧就是"改了 token 却被 401"。现按**权威先行**（config.json → DB → 作废会话）一次写完。
+  顺带修掉一个静默 bug：`update_settings` 收到**空** `web_api_token` 时原先会把它写进 DB
+  ⇒ `db_token` 变空 ⇒ **鉴权全线失效**；现按"未修改"处理并 WARN。
+- **配置写入守卫 `read_config_for_write()`**（`config.rs`）："读-改-写"的读取**读不懂就放弃写入**
+  （文件不存在仍按默认配置处理）。`save_embed_plan` / `set_lark_integration` / `set_web_api_token`
+  原先都回退 `AppConfig::default()` —— 等于"读不懂就整份重写"，**一次手改到一半的 `config.json`
+  就会被默认值冲掉**（providers / `api_key` / token / 用户的未知键全丢）。
+- **跨平台打包 target 补齐**（`tauri.conf.json` + 新增 `tauri.windows.conf.json`）：原先写死
+  `"targets": ["msi"]`（Windows 专有）⇒ mac/Linux 上 `tauri build` 出不了包。现 base 改 `"all"`
+  （＝该平台默认目标集），Windows 用平台专属配置**钉回 `["msi"]`**（产物与本轮之前一致）；
+  macOS ⇒ `app`+`dmg`，Linux ⇒ `deb`+`rpm`+`appimage`。**未在 mac/Linux 实测**（本机是 Windows）。
+- **`export_allow_dirs` 如实标注为预留项**（4 语言 `lark_export_dirs_hint` + `docs/06-settings.md`）：
+  它仍然**没有消费点**（bot 里没有"内容外发"路径，`lark-gate` 也没有这个字段），
+  但界面此前写着"允许把检索结果写成飞书文档/表格的本地目录"，**暗示了一个不存在的能力** ⇒
+  改为明确写"预留项：当前版本没有该出口，暂不生效"。**不为它写假测试**（同上一轮结论）。
+- **`#8` 群消息真机 E2E 补做（通过）**：在群「智商在线!」（`oc_5ed092…`，群主＝你）发一条
+  被 @ 的群消息 → 真机日志 `2026-10-16 14:49:10 [bot] 拒绝：非私聊（chat_type=group）`
+  —— L2 按 `chat_type` 拒了且**没有回答**；`reply()` 无 `回复失败` 记录（固定提示已发出）。
+- **门禁**：`cargo test --workspace` 全绿（lib **571** + 2 ignored、`lark-bot` 38、`lark-gate` 13、
+  `ai_chat_stream_wire` 15、`auto_ui_e2e` 15、`ipc_test` 8、`integration` 9 …）、
+  `npx tsc --noEmit`、`npx vitest run`（9 文件/73 用例）、`semgrep --severity ERROR`（0 发现）、
+  `npm run tauri:build`（真实出包：Windows 仍出 MSI）。期间遇到一次
+  `error[E0463]: can't find crate for link_searcher_lib`（**同一目标上一轮 9/9 通过**）——
+  按 AGENTS 记录属构建缓存抖动，**重跑即过**，未改任何代码。
+- **文档**：`docs/LARK_BOT.md` §5.3 ①（打包 target + "未在 mac/Linux 实测"）、
+  §5.6（写入守卫 / `embed_plans` 落盘门槛 / token 收口）、§7.1 ⑦（#6 预留、#8 真机证据）、
+  §7.1 ⑧（机器人所在群 0 → 1）、§8.4（回调子进程被 drop 的坑）
+
 ## 2026-10-16（第二十一轮）：飞书接入 —— 真机验收（31/31）修掉两个「面板不刷新」缺陷
 
 > 上一轮的"未做"就是这条：**真机验收**。本轮起真实应用 + 真实 `lark-bot` 连真实飞书，

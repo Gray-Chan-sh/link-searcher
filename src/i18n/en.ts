@@ -413,7 +413,7 @@ const en: Record<string, string> = {
     lark_allowed_users: 'Allowed user open_ids',
     lark_allowed_users_hint: 'One per line. Empty means nobody is allowed (the default) — use "Start pairing" below to add yourself first.',
     lark_export_dirs: 'Directories allowed to be sent',
-    lark_export_dirs_hint: 'One per line. Empty means no restriction (the opposite of the allowlist above).',
+    lark_export_dirs_hint: 'One per line. Empty means no restriction (the opposite of the allowlist above). ⚠️ Reserved: there is no "export to a Feishu doc/sheet" path yet, so this setting has no effect today.',
     lark_save_failed: 'Save failed',
     lark_saved: 'Saved — the bot was restarted with the new policy.',
     lark_restart: 'Restart bot',
