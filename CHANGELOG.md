@@ -66,7 +66,8 @@
   prompt 约束 + 上面那两轮真机事件证据）。
 - **bot**（`lark-bot/src/main.rs`）：重跑分支把上一轮回答正文作为 `retryPriorAnswer` 传下去；
   `ask_body` 只在重跑时带这个键（其余请求保持原形状）。
-- **文档**：`docs/LARK_BOT.md` 新增 §5.12（含上面两张表的证据与"UI 靠人工验收"的如实说明）。
+- **文档**：`docs/LARK_BOT.md` 新增 §5.12（含上面两张表的证据与"UI 靠人工验收"的如实说明）；
+  `docs/RAG_PIPELINE.md` §2 改写链路同步更新（实体继承的准入条件 + 重跑换词扩查）。
 
 ## 2026-10-16（第二十四轮）：release 下浏览器 Web 版打不开（`GET /` 恒 404）——「打开详情」的 not found
 
