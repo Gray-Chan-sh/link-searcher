@@ -1,3 +1,52 @@
+## 2026-10-16（第二十四轮）：release 下浏览器 Web 版打不开（`GET /` 恒 404）——「打开详情」的 not found
+
+> 用户原话：*「打开详情，出现了链接，但无法打开，说是 not found」*（同时确认上一轮问的群内固定提示
+> 「本机器人仅支持私聊」**可见**，卡片入口本身是通的）。查下来这**不是本轮新引入的**：
+> `webapi/static_files.rs` 只在**磁盘**上找前端，而 release 包 / 安装包里前端是**编译期内嵌进 exe** 的
+> —— 磁盘上根本没有 `dist` ⇒ 恒 404。影响面比这个按钮大：文档承诺的
+> 「局域网地址 → 其它机器浏览器打开输入 Token 即可使用」在 release 下**整体打不开**。
+
+- **根因（真机复现，双向验证）**：`serve_from_dist` 的候选只有 `../dist` → `./dist` → `<exe 目录>/dist`；
+  release 包里三处都不存在（`tauri.conf.json: frontendDist` + `default = ["custom-protocol"]`
+  ⇒ `dev = !custom_protocol = false` ⇒ tauri-build 把前端打进 exe，磁盘上不留副本）。
+  实测：`GET /` → `404 "Not Found"`（正是用户看到的）；**只往 `target/release/` 放一份 dist、不动任何源码**
+  立刻变 `200 text/html`；删掉又回 404。`/api/*` 不受影响 —— 所以 bot 收发 / 自检 / 配对一直正常。
+  长期没被发现的原因：该探测**依赖进程 CWD**，此前所有「浏览器模式」验收都是在 dev + 仓库目录下做的
+  （`../dist` 恰好存在）。
+- **修法：内嵌优先**（`webapi/static_files.rs`）：先 `app_handle.asset_resolver().get(rel)`
+  （生产＝命中 exe 内嵌资源；dev＝解析器自己按 `config_parent()` 读 `frontendDist`，**不依赖 CWD**），
+  未命中再退回原磁盘探测，最后 SPA 兜底 / 404。**顺序即全部**（代码注释与 `docs/LARK_BOT.md §5.11` 都写明不要反过来）。
+- **顺带查清并收紧两处（都是实测，不是推测）**：
+  ① 解析器**自带 SPA 兜底**（`精确 → {path}.html → {path}/index.html → index.html`）⇒ 未知路径返回的其实是
+  **index.html 资产**、其 MIME 为 `text/html`（不带 charset）。故 MIME 改取**资产自带**的再补 `charset=utf-8`，
+  **不按请求路径猜扩展名** —— 实测按路径猜会把 `/foo.js` 返回的 HTML 正文标成 `application/javascript`。
+  ② 解析器**内部会 percent-decode**，且只过滤 `RootDir` 分量、**不过滤 `..`**：旧实现从不解码所以天然安全，
+  换成解析器后必须自己**解一次再判**，并**拒绝双重编码**（`%252e%252e` 我解一次、解析器再解一次就是 `..`）。
+- **卡片提示补一句**（`lark-bot/src/main.rs`）：原本只写「需与电脑同一局域网」，用户撞上自签名证书告警时毫无线索
+  ⇒ 补「（自签名证书会先提示「不安全」，点「继续访问」信任一次即可）」，并把文案抽成纯函数 `webui_hint_text`
+  以便单测（顺带挡住端口 0 / 超范围 —— `as u16` 会静默截断成错误端口）。
+- **测试**：新增 3 条纯函数单测（路径闸门 `is_safe_rel_path`；解一次 + 拒双重编码
+  `normalize_asset_rel`/`percent_decode`；MIME 补 charset `with_utf8_charset`）+ bot 1 条（提示含 LAN 地址 /
+  会话 id / 证书提醒）。共 lib 586 → **588**、lark-bot 38 → **39**。
+- **真机验收（Windows release exe，CWD 置于仓库外、磁盘上无任何 `dist` —— 任何 200 都只可能来自内嵌资源）**：
+  `/`、`/index.html` → 200 `text/html; charset=utf-8`（修复前 404）；`/assets/index-*.js` → 200
+  `text/javascript; charset=utf-8`；`/favicon.svg` → 200 `image/svg+xml; charset=utf-8`；
+  `/chat/anything`、`/foo.js`、`/nope/deep/deep` → 200 `text/html; charset=utf-8`（SPA 兜底）；
+  六种编码 / 字面 / 混合穿越（`%2e%2e%2f`、`%252e%252e%252f`、`/../`、`/..%2f`、`%2e%2e%5c`、
+  `/assets/%2e%2e%2f%2e%2e%2f`）一律只回 index.html 且**正文不含仓库文件内容**；
+  `/api/session` 带 token 200 / 无 token 401（鉴权不受影响）。
+- **文档**：`docs/LARK_BOT.md` 新增 §5.11（现象 / 根因 / 决定性实验 / 两处顺带收紧 / 真机验收表 /
+  「顺序本身没有自动化测试」的如实说明）+ §3.1 补一句指向；`docs/06-settings.md` 步骤 16 注明
+  「前端随应用内嵌，install 包里不需要额外文件、也不依赖启动目录」；`docs/ARCHITECTURE.md` 补一条改动高亮。
+- **门禁**：`cargo test --workspace` 全绿（lib 588 + 2 ignored、lark-bot 39、lark-gate 13、ai_chat_stream_wire 15、
+  auto_ui_e2e 15、ipc_test 8、integration 9 …）、`npx tsc --noEmit` 0 错误、`npx vitest run` 9 文件 / 73 例、
+  `semgrep --severity ERROR` 0 发现。
+- **没能验的部分（如实记录）**：① **「内嵌优先」这个顺序本身没有自动化测试** —— 复现它必须有一个
+  **内嵌了资源**的构建，而 `cargo test` 环境里 `dist/` 是否存在取决于有没有跑过 `npm run build`
+  （写成断言会让门禁在「全新克隆还没 build」时**假红**）⇒ 这一条靠上面的真机验收表守住，
+  **改这条路径必须重跑一次**；② MSI 安装后的目录行为与直跑同一 exe 等价，但**没实际装一遍**；
+  ③ Mac/Linux 打包仍未实测（同上一轮）。
+
 ## 2026-10-16（第二十三轮）：飞书接入自检 + 一键绑定 —— 回答「新用户怎么绑定？我看不到 appid」
 
 > 需求原话：*「新用户怎么绑定机器人？我没有看到 appid 等内容」*。查下来是两个真实断点：

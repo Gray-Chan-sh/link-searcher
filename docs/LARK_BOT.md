@@ -172,6 +172,8 @@ lark-cli event consume im.message.receive_v1 --as bot
 
 `webapi/static_files.rs` 把**完整前端**一起发出去（`serve_from_dist` + SPA fallback 到
 `index.html`）——浏览器打开就是完整 Web 版应用。
+（前端在 release 包 / 安装包里是**内嵌进 exe** 的，磁盘上没有 `dist` —— 2026-10-16 修的那条
+「打开详情 → not found」就是没取内嵌资源导致的，见 §5.11。）
 
 因此机器人有两条路：
 
@@ -948,6 +950,69 @@ lark-cli event consume card.action.trigger --dry-run        # 3) 卡片按钮：
 - **应用侧的回滚执行没有真机证据**：失败路径是在**隔离 HOME** 里跑的，`rollback_config` 的两条分支
   （写回 / 删除）只有代码评审 + 纯函数单测（`app_id_from_config` 等）。
 - **面板渲染**：由人眼确认（同 5.9 的说明：本机浏览器不信任应用自签证书）。
+
+---
+
+### 5.11 release 下 Web 版打不开（`GET /` → "Not Found"）（2026-10-16，**已修**）
+
+**现象**（用户点卡片「打开详情」后报）：链接出来了，打开却显示 **not found**。
+
+**根因**：`webapi/static_files.rs::serve_from_dist` 只在**磁盘**上找前端
+（`../dist` → `./dist` → `<exe 目录>/dist`），而 release 包 / 安装包里前端是
+**编译期内嵌进 exe** 的（`tauri.conf.json: frontendDist` + `default = ["custom-protocol"]`
+⇒ `dev = !custom_protocol = false` ⇒ tauri-build 把 `dist/` 打进二进制）。
+磁盘上根本没有 `dist` ⇒ 三个候选全落空 ⇒ `404 "Not Found"`。
+
+**决定性实验**（只往 `target/release/` 放一份 dist，不动源码）：
+
+```
+GET /                             → 404 "Not Found"     ← 用户看到的
+（把 dist 复制到 exe 旁后）GET /  → 200 text/html       ← 因果成立
+（删掉后）GET /                   → 404                 ← 可复现
+```
+
+⚠️ **影响面比这个按钮大**：`docs/06-settings.md` 承诺的「局域网远程地址 → 其它机器浏览器
+打开输入 Token 即可使用」在 **release / 安装包里整体打不开**。之所以长期没被发现：
+那个探测**依赖进程 CWD**，而此前所有"浏览器模式"验收都是在 dev + 仓库目录下做的
+（`../dist` 恰好存在）。`/api/*` 不受影响 —— 所以 bot 收发、自检、配对一直正常。
+
+**修法**：`serve_from_dist` 改为**内嵌优先** —— 先 `app_handle.asset_resolver().get(rel)`
+（生产＝命中 exe 内嵌资源；dev＝解析器自己去读 `frontendDist`，且按 `config_parent()` 定位、
+**不依赖 CWD**），未命中再退回原磁盘探测，最后 SPA/404。**顺序是全部关键，不要反过来。**
+
+**顺带查清的两件事**（都是实测，不是推测）：
+
+1. **解析器自带 SPA 兜底**：`get_for_scheme` 的顺序是
+   `精确 → {path}.html → {path}/index.html → index.html`。所以未知路径（`/chat/xxx`）
+   返回的其实是 **index.html 资产**，其 MIME 是 `text/html`（不带 charset）。
+   ⇒ MIME 必须取**资产自带**的，再补 `charset=utf-8`；
+   **不能按请求路径的扩展名猜**（实测按路径猜会把 `/foo.js` 的 HTML 正文标成
+   `application/javascript`）。
+2. **解析器内部会 percent-decode**（`percent_encoding::percent_decode`），且它只过滤
+   `RootDir` 分量、**不过滤 `..`**。旧实现从不解码 ⇒ 天然安全；换成解析器后必须自己
+   **解一次再判**，并拒绝**双重编码**（`%252e%252e` 我解一次、解析器再解一次就是 `..`）。
+
+**真机验收**（release exe，CWD 置于**仓库外**、磁盘上没有任何 `dist` —— 任何 200 都只可能来自内嵌资源）：
+
+| 请求 | 结果 |
+|---|---|
+| `/` | 200 `text/html; charset=utf-8`（修复前 404） |
+| `/assets/index-*.js` | 200 `text/javascript; charset=utf-8` |
+| `/favicon.svg` | 200 `image/svg+xml; charset=utf-8` |
+| `/chat/anything`、`/foo.js`、`/nope/deep/deep` | 200 `text/html; charset=utf-8`（SPA 兜底） |
+| `/%2e%2e%2fCargo.toml`、`/%252e%252e%252f…`、`/../Cargo.toml`、`/..%2fCargo.toml`、`/%2e%2e%5c…` | 200 index.html，**无泄漏**（正文不含仓库文件内容） |
+| `/api/session`（带 / 不带 token） | 200 / 401（鉴权不受影响） |
+
+**卡片提示**（bot 侧）：原本只写「需与电脑同一局域网」，用户撞上自签名证书告警时没有线索
+⇒ 补一句「（自签名证书会先提示「不安全」，点「继续访问」信任一次即可）」，并把文案抽成
+纯函数 `webui_hint_text` 以便单测（`lark-bot/src/main.rs`）。
+
+**自动化测试覆盖**：路径闸门（`is_safe_rel_path`）、编码解一次 + 拒双重编码
+（`normalize_asset_rel` / `percent_decode`）、MIME 补 charset（`with_utf8_charset`）。
+⚠️ **"内嵌优先"这个顺序本身没有自动化测试**：要复现它必须有一个**内嵌了资源**的构建，
+而 `cargo test` 环境里 `dist/` 是否存在取决于是否跑过 `npm run build`
+（写成断言会让门禁在"全新克隆未 build"时假红）。
+⇒ 这一条靠上面的**真机验收表**守住，**改这条路径时必须重跑一次**。
 
 ---
 

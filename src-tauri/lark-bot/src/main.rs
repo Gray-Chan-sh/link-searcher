@@ -845,12 +845,22 @@ fn webui_hint(http: &Http, session_id: &str) -> Result<String, String> {
     let st = http.get("/api/session")?;
     let ip = st.get("lan_ip").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     let port = st.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-    if ip.is_empty() || port == 0 {
+    webui_hint_text(&ip, port, session_id)
+}
+
+/// 提示文案（纯函数，便于单测）。
+///
+/// 证书那句是 2026-10-16 实测后补的：点开链接**先撞自签名证书告警**，用户不知道要信任一次，
+/// 只会以为链接坏了（当时还叠加了 release 下静态资源 404，见 docs/LARK_BOT.md §5.11）。
+fn webui_hint_text(ip: &str, port: u64, session_id: &str) -> Result<String, String> {
+    let ip = ip.trim();
+    // 0 或超出端口范围都说明没取到可用地址（`as u16` 会静默截断成错误端口，故先判）。
+    if ip.is_empty() || port == 0 || port > u16::MAX as u64 {
         return Err("webapi 未运行，或没取到 LAN 地址".to_string());
     }
     Ok(format!(
-        "在浏览器打开（需与电脑同一局域网）：\n{}\n\n会话 id：{session_id}",
-        crate::card::webui_url(&ip, port as u16)
+        "在浏览器打开（需与电脑同一局域网；自签名证书会先提示「不安全」，点「继续访问」信任一次即可）：\n{}\n\n会话 id：{session_id}",
+        crate::card::webui_url(ip, port as u16)
     ))
 }
 
@@ -1167,5 +1177,23 @@ mod tests {
         // 只测"解析规则"本身：`--key value` 成对取值，孤立 key 取不到。
         //（不能改进程 args，故这里只覆盖无参场景。）
         assert_eq!(arg_value("--parent-pid"), None);
+    }
+
+    /// 「打开详情」的提示：必须给 **LAN 地址**（回环在手机/别的机器上点不开），
+    /// 且必须提醒自签名证书（否则用户看到"不安全"就以为链接坏了）。
+    #[test]
+    fn webui_hint_text_gives_lan_url_and_cert_warning() {
+        let text = webui_hint_text("192.168.1.54", 8443, "sess-1").unwrap();
+        assert!(text.contains("https://192.168.1.54:8443/"), "必须是 LAN 地址：{text}");
+        assert!(text.contains("sess-1"), "带上会话 id 便于排查：{text}");
+        assert!(text.contains("证书"), "自签名证书的提醒不能少：{text}");
+
+        assert!(webui_hint_text("", 8443, "s").is_err(), "没 IP = 没地址");
+        assert!(webui_hint_text("   ", 8443, "s").is_err(), "空白 IP 同理");
+        assert!(webui_hint_text("192.168.1.54", 0, "s").is_err(), "没端口 = 没地址");
+        assert!(
+            webui_hint_text("192.168.1.54", 70000, "s").is_err(),
+            "超范围端口会被 `as u16` 静默截断成错误端口，必须拒绝"
+        );
     }
 }

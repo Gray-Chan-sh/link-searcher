@@ -526,6 +526,7 @@ LLM 的上下文窗口有限，不能把几万条命中全塞进去。所以设�
 - **PDF 水印识别/去除**：`src-tauri/src/extractor/pdf/watermark.rs` 仅用当前 PDF 的 `pdftotext -bbox-layout` 词坐标做**几何判定**（独占短行 + 负斜率对角链 + 页内/跨页几何证据）；命中后剔除碎片，正文过稀则升级图像 OCR，正文不可恢复时回退带水印文字层（新增 `QualityFlag::WatermarkResidual`）。不使用跨文档水印字典，避免一个文档的真实姓名或机构名影响其它文档。
 - **首启向导合并**：`SetupWizard` 统一「功能介绍 → 依赖检测/下载 → 准备就绪」，设置页可重跑。
 - **Web API 安全加固**：`/api/auth/token` 移入鉴权中间件、静态文件路径穿越修复、恒定时间 token 比较。
+- **Web 版静态资源改为内嵌优先**（2026-10-16）：`webapi/static_files.rs::serve_from_dist` 先取 Tauri 内嵌资源 —— release 包 / 安装包里前端在 exe 内、磁盘上根本没有 `dist`（修复前 `GET /` 恒 404，"打开详情"与整个浏览器 Web 版都打不开）；未命中再退回磁盘探测。顺带修正 SPA 兜底的 MIME（取资产自带 + 补 `charset=utf-8`）与 percent-encoded 路径穿越（解析器内部会 decode，故自己做一次解码并拒绝双重编码）。
 - **索引状态页信息架构**：5 张统计卡 + 独立扫描进度卡片 +「维护工具」折叠区。
 
 ---
