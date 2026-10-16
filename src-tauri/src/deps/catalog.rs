@@ -72,36 +72,28 @@ pub struct DepDef {
 ///
 /// 顺序：
 /// 1. 环境变量 `LS_LARK_CLI`（用户 / CI 显式指定）；
-/// 2. npm 全局的原生二进制 —— Windows 上 `lark-cli` 只是 `.cmd` 包装，而 `CreateProcess`
-///    **不能**直接执行 `.cmd`（要经 cmd.exe，届时参数会被二次重解析，而回复正文任意 → 坑很深）；
-/// 3. PATH 上的 `lark-cli`（只认 `.exe`；`.cmd` 交给 bot 自己那层兜底）。
+/// 2. **npm 全局包 `node_modules` 里的原生二进制** —— Windows 上 `lark-cli` 只是 `.cmd`
+///    包装，而 `CreateProcess` **不能**直接执行 `.cmd`（要经 cmd.exe，届时参数会被二次重解析，
+///    而回复正文任意 → 坑很深）。候选根目录见 [`npm_node_modules_roots`]；
+/// 3. PATH 上的 `lark-cli`（Windows 只认 `.exe`；`.cmd` 交给 bot 自己那层兜底）。
 ///
 /// 找不到返回 `None` —— **不报错**："还没装 lark-cli"是可接受的初始状态。
 ///
 /// 不写单测是**有意的**：它读进程级 env / PATH，写单测就得 `set_var`（正是 AGENTS ④ 那类
-/// "全局可变状态导致并行假红"）。它的正确性由运行时链路保证。
+/// "全局可变状态导致并行假红"）。它的正确性由运行时链路保证 —— 但其中的**纯路径推导**
+/// （[`bin_dir_roots`]）单独做了单测，因为"mac/Linux 的 npm 前缀"恰恰是最容易写错的那一步。
 pub fn lark_cli_path() -> Option<std::path::PathBuf> {
-    use std::path::PathBuf;
     if let Ok(p) = std::env::var("LS_LARK_CLI") {
-        let p = PathBuf::from(p);
+        let p = std::path::PathBuf::from(p);
         if p.is_file() {
             return Some(p);
         }
     }
-    if cfg!(windows)
-        && let Ok(local) = std::env::var("LOCALAPPDATA")
+    if let Some(found) = npm_node_modules_roots()
+        .iter()
+        .find_map(|root| lark_cli_in(root))
     {
-        let native = PathBuf::from(local)
-            .join("Programs")
-            .join("nodejs")
-            .join("node_modules")
-            .join("@larksuite")
-            .join("cli")
-            .join("bin")
-            .join("lark-cli.exe");
-        if native.is_file() {
-            return Some(native);
-        }
+        return Some(found);
     }
     let exe = if cfg!(windows) { "lark-cli.exe" } else { "lark-cli" };
     std::env::var_os("PATH").and_then(|paths| {
@@ -109,6 +101,103 @@ pub fn lark_cli_path() -> Option<std::path::PathBuf> {
             .map(|dir| dir.join(exe))
             .find(|p| p.is_file())
     })
+}
+
+/// npm 全局包里的 `lark-cli`：`<node_modules>/@larksuite/cli/bin/lark-cli[.exe]`。
+fn lark_cli_in(node_modules: &std::path::Path) -> Option<std::path::PathBuf> {
+    let exe = if cfg!(windows) { "lark-cli.exe" } else { "lark-cli" };
+    let p = node_modules
+        .join("@larksuite")
+        .join("cli")
+        .join("bin")
+        .join(exe);
+    p.is_file().then_some(p)
+}
+
+/// 由"可执行文件所在目录"推出可能的 `node_modules` 根（**纯路径推导**，可单测）。
+///
+/// 三种真实布局：
+/// - **Unix（含 macOS / nvm）**：`/usr/local/bin/node` → `/usr/local/lib/node_modules`
+///   （npm 的默认前缀；Homebrew 的 `/opt/homebrew`、发行版的 `/usr` 同理，
+///   nvm 则是 `<版本目录>/lib/node_modules`）
+/// - **`--prefix` / nvm-windows**：`<前缀>/bin` → `<前缀>/node_modules`
+/// - **Windows 官方安装器**：`node.exe` 与 `node_modules` **同级** → `<bin>/node_modules`
+pub fn bin_dir_roots(bin_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(prefix) = bin_dir.parent() {
+        out.push(prefix.join("lib").join("node_modules"));
+        out.push(prefix.join("node_modules"));
+    }
+    out.push(bin_dir.join("node_modules"));
+    out
+}
+
+/// 候选 `node_modules` 根目录（去重、保持顺序）。
+///
+/// 为什么不直接写死一个前缀：npm 的全局前缀**各平台、各装机方式都不同**
+/// （Unix `/usr/local`、Homebrew `/opt/homebrew`、nvm 藏在版本目录下、Windows 官方安装器是
+/// `%APPDATA%\npm`、便携版则与 `node.exe` 同级）。挨个平台写死必然会漏 —— 这里改成
+/// "从能拿到的线索**反推**前缀"：npm 自己导出的前缀变量、nvm、以及 PATH 上的 node/npm。
+fn npm_node_modules_roots() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut push = |p: PathBuf| {
+        if !roots.contains(&p) {
+            roots.push(p);
+        }
+    };
+
+    // ① npm 自己导出的全局前缀（大写是用户显式设的，小写是 npm 给生命周期脚本设的）
+    for key in ["NPM_CONFIG_PREFIX", "npm_config_prefix"] {
+        if let Some(prefix) = std::env::var_os(key).map(PathBuf::from) {
+            push(prefix.join("lib").join("node_modules"));
+            push(prefix.join("node_modules"));
+        }
+    }
+
+    // ② Windows：官方安装器的 `%APPDATA%\npm`；便携/解包布局的 `%LOCALAPPDATA%\Programs\nodejs`
+    if cfg!(windows) {
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            push(PathBuf::from(roaming).join("npm").join("node_modules"));
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            push(
+                PathBuf::from(local)
+                    .join("Programs")
+                    .join("nodejs")
+                    .join("node_modules"),
+            );
+        }
+    }
+
+    // ③ nvm（mac/Linux）：`<NVM_DIR>/versions/node/<版本>/lib/node_modules`
+    if let Some(nvm) = std::env::var_os("NVM_DIR").map(PathBuf::from) {
+        if let Ok(entries) = std::fs::read_dir(nvm.join("versions").join("node")) {
+            for e in entries.flatten() {
+                push(e.path().join("lib").join("node_modules"));
+                push(e.path().join("node_modules"));
+            }
+        }
+    }
+
+    // ④ 反推：PATH 上 node/npm 所在目录 → 前缀 → `node_modules`
+    if let Some(paths) = std::env::var_os("PATH") {
+        let probes: &[&str] = if cfg!(windows) {
+            &["node.exe", "npm.cmd", "npm.exe"]
+        } else {
+            &["node", "npm"]
+        };
+        for dir in std::env::split_paths(&paths) {
+            if !probes.iter().any(|n| dir.join(n).is_file()) {
+                continue;
+            }
+            for root in bin_dir_roots(&dir) {
+                push(root);
+            }
+        }
+    }
+
+    roots
 }
 
 /// All catalog entries (fresh copy each call; cheap, pure).
@@ -433,7 +522,31 @@ fn files_ready(dir: &Path, files: &[FileSpec]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    /// **mac/Linux 的 npm 前缀**是这条探测最容易写错的一步（历史上只覆盖了 Windows 的
+    /// `%LOCALAPPDATA%\Programs\nodejs`）。这里钉住纯路径推导：
+    /// `…/bin/node` → `…/lib/node_modules`（npm 在 Unix 上的默认布局）。
+    #[test]
+    fn bin_dir_roots_covers_the_unix_npm_prefix() {
+        let bin = Path::new("/usr/local/bin");
+        let roots = bin_dir_roots(bin);
+        assert_eq!(
+            roots.first(),
+            Some(&Path::new("/usr/local").join("lib").join("node_modules")),
+            "Unix：npm 默认前缀的布局必须排在第一候选"
+        );
+        assert_eq!(roots.len(), 3);
+        assert_eq!(
+            roots.get(2),
+            Some(&bin.join("node_modules")),
+            "Windows 官方安装器：node.exe 与 node_modules 同级"
+        );
+
+        // 相对/无父目录的输入不得 panic（只给出它能推出的候选）。
+        let odd = bin_dir_roots(Path::new("bin"));
+        assert_eq!(odd.last(), Some(&Path::new("bin").join("node_modules")));
+    }
 
     /// `lark-cli` 的就绪探测必须**等于真实探测**（不写死 true/false）。
     ///

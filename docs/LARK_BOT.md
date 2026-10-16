@@ -435,6 +435,14 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 - 它是**原生二进制**（`bin/lark-cli.exe`，Windows 上 49 MB），`scripts/run.js` 只是 Node 薄壳
   → **可直连原生二进制，不必让用户装 Node**（对打包友好）
 - 定位可执行文件可复用现成基础设施：`process.rs` 的 `new()` / `probe_ok()` / `windows_exe_name()`
+- **✅ 已修（2026-10-16，C7）：npm 前缀不再只认 Windows**。原先只硬编码了
+  `%LOCALAPPDATA%\Programs\nodejs\node_modules`（本机布局），mac/Linux 上等于**只能靠 PATH 碰运气**。
+  现改为**反推前缀**（`deps/catalog.rs::npm_node_modules_roots`）：`NPM_CONFIG_PREFIX` ／ `NVM_DIR` ／
+  **PATH 上 node/npm 所在目录** → `bin_dir_roots`（`…/bin/node` ⇒ `…/lib/node_modules`，即
+  npm 在 Unix 的默认布局；另含 `…/node_modules` 与 `node.exe` 同级两种 Windows 布局）。
+  Windows 另补 `%APPDATA%\npm`（官方安装器的 npm 默认前缀）。纯路径推导（`bin_dir_roots`）有单测。
+  > Unix 上本来就能工作（npm 的全局 `bin` 目录在 PATH 上，裸名 `lark-cli` 即可解析），
+  > 但这个"靠 PATH 碰运气"并不是**保证** —— 现在它与 Windows 走同一条显式解析。
 
 **③ ⚠️ 一条跨平台共有的运维风险：`lark-cli` 会自更新**
 
@@ -631,7 +639,12 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 >   ③ **绝不 panic、绝不阻塞启动** —— watcher 起不来只是"没有热重载"。
 >   生效范围（如实记录）：飞书策略 → **重启 bot**（它启动时把策略读进内存，不会自己发现文件变了）；
 >   其它配置项本来就每次现读（`load_config()` 无缓存）故天然生效；`web_api_enabled` / 端口这类
->   **进程级**开关仍要重启应用；前端经 `config-changed` 事件刷新（设置页在 C6 消费）。
+>   **进程级**开关仍要重启应用；前端经 `config-changed` 事件刷新（设置页在 C6 已消费）。
+> - **C4→C7（已合并，2026-10-16）**：本节的后续落地 —— **C4** 结构化接口
+>   （`/api/integrations/lark`，bot 只消费服务端保证的形状）、**C5** 配对模式闭环
+>   （闸门 `L1′` + 服务端裁决 `pairing_active`）、**C6** 设置页「集成」面板（含
+>   `config-changed` 刷新、Tauri 命令与 Web 端点**共用同一实现**）、**C7** `lark-cli`
+>   发现跨平台（不再只认 Windows）。详见 §5.9 与 §5.3 ②。
 > - **仍未解决（如实记录）**：`embed_plans` 运行期高频写、`web_api_token` 双存储（同上一段）。
 
 ### 5.7 bot sidecar 的打包（**已解决**：拆 crate → 打开 `externalBin`）

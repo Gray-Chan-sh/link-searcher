@@ -1,3 +1,27 @@
+## 2026-10-16（第二十轮）：飞书接入 —— C7 `lark-cli` 发现不再只认 Windows
+
+> **问题**：`lark_cli_path()`（依赖中心的前置探测）只硬编码了本机的
+> `%LOCALAPPDATA%\Programs\nodejs\node_modules`，mac/Linux 上等于**没有实现**（只能靠 PATH 碰运气）。
+> npm 的全局前缀**各平台/各装机方式都不同**，所以不能"再补一条路径"，只能改成**反推前缀**。
+
+- **`lark_cli_path()` 重写为反推候选根**（`src-tauri/src/deps/catalog.rs`）：新增
+  `npm_node_modules_roots()`，线索四条 —— ① `NPM_CONFIG_PREFIX`／`npm_config_prefix`；
+  ② Windows 的 `%APPDATA%\npm`（官方安装器的默认前缀，原先完全没有）+ `%LOCALAPPDATA%\Programs\nodejs`；
+  ③ `NVM_DIR/versions/node/<版本>`；④ **PATH 上 node/npm 所在目录**反推。命中顺序即此顺序（去重、保序）。
+- **新增纯函数 `bin_dir_roots()`**（`…/bin/node` ⇒ `…/lib/node_modules`，即 npm 在 Unix 的默认布局；
+  另含 `…/node_modules`＝`--prefix`/nvm-windows、`<bin>/node_modules`＝Windows 官方安装器两种布局），
+  **这是"mac/Linux 前缀"最容易写错的一步，故单独写单测**
+  （`bin_dir_roots_covers_the_unix_npm_prefix`：候选顺序 + 相对路径输入不 panic）
+- **本机行为不变**（实测：`node.exe` 在 `%LOCALAPPDATA%\Programs\nodejs` 且在 PATH 上 →
+  候选④ 反推出同一条真实路径），只是不再依赖那条硬编码
+- **`lark-bot` 的 `lark_cli_program()`**（bot 的兜底探测）补 `%APPDATA%\npm` 候选，并把注释写清
+  **Unix 为何不需要前缀推导**（npm 的全局 `bin` 在 PATH 上，裸名 `lark-cli` 即可解析）；
+  模块头那条"发现应交给依赖中心"的 TODO 改为**已落地**（应用经 `LS_LARK_CLI` 注入）
+- **文档**：`docs/LARK_BOT.md` §5.3 ② 补 C7 说明（含"靠 PATH 碰运气 ≠ 保证"的理由）
+- **测试**：`link_searcher_lib` **568** 个用例（+1）；`cargo test --workspace`、
+  `npx tsc --noEmit`、`npx vitest run`（9 文件/73 用例）、`semgrep --severity ERROR`（0 发现）全绿
+- **未做**：飞书面板**真机点击验收**（门禁只覆盖类型、单测与打包）；mac/Linux 交付打包 target（§5.3 ①，另议）
+
 ## 2026-10-16（第十九轮）：飞书接入 —— C6 设置页「集成」面板 + 传输对称
 
 > 前五轮把策略搬进 `config.json`、加了热重载/锁/结构化接口/配对闭环，但**用户还没有入口**。

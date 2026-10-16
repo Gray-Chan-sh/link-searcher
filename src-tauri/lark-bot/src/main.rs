@@ -47,7 +47,9 @@
 //!
 //! - 卡片**按钮/交互**（P3；`card.action.trigger` 回调已实测可走长连接，但需要
 //!   `custom_action_id` 路由，且那条路的更新有"最多 2 次"限制，见 §8.1）
-//! - `lark-cli` 的可执行文件发现应交给**依赖中心**（现在是探测 + `LS_LARK_CLI` 覆盖）
+//! - `lark-cli` 的可执行文件发现**已交给依赖中心**：应用解析出的路径经 `LS_LARK_CLI`
+//!   注入给本进程；本进程自带的 [`lark_cli_program`] 只是"被手工拉起"时的兜底
+//!   （Unix 上直接交回裸名 `lark-cli`，由 PATH 解析 —— 见该函数注释）
 
 mod card;
 
@@ -658,24 +660,37 @@ fn watch_parent(parent_pid: u32) {
 /// （会被要求经 cmd.exe，届时参数还要再被重解析一次 —— 而回复正文任意，那个坑很深）。
 /// 所以优先用 npm 包里的**原生二进制**。
 ///
+/// **Unix（mac/Linux）不需要这套前缀推导**：npm 全局安装的 `lark-cli` 就是
+/// `<prefix>/bin/lark-cli`（软链或 shim），而那个 `bin` 目录本来就在 PATH 上 ——
+/// 直接交回裸名 `lark-cli`，由 `Command::new` 按 PATH 解析即可（这也是末尾兜底做的事）。
+///
+/// 正常情况下这里根本不会被用到：**应用**（依赖中心）解析出的路径会经 `LS_LARK_CLI` 注入
+/// （见 `lark_bot.rs`），本函数只是"bot 被手工拉起"时的兜底。
+///
 /// TODO(依赖中心)：这段发现逻辑应迁到"依赖中心"（见 §十 的 `lark-cli` 决策）。
 fn lark_cli_program() -> PathBuf {
     if let Ok(p) = std::env::var("LS_LARK_CLI") {
         return PathBuf::from(p);
     }
-    if cfg!(windows)
-        && let Ok(local) = std::env::var("LOCALAPPDATA")
-    {
-        let native = PathBuf::from(local)
-            .join("Programs")
-            .join("nodejs")
-            .join("node_modules")
-            .join("@larksuite")
-            .join("cli")
-            .join("bin")
-            .join("lark-cli.exe");
-        if native.is_file() {
-            return native;
+    if cfg!(windows) {
+        // 与依赖中心同源的两个候选根：便携/解包布局（node.exe 旁边）与官方安装器的 %APPDATA%\npm
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            roots.push(PathBuf::from(local).join("Programs").join("nodejs"));
+        }
+        if let Some(roaming) = std::env::var_os("APPDATA") {
+            roots.push(PathBuf::from(roaming).join("npm"));
+        }
+        for root in roots {
+            let native = root
+                .join("node_modules")
+                .join("@larksuite")
+                .join("cli")
+                .join("bin")
+                .join("lark-cli.exe");
+            if native.is_file() {
+                return native;
+            }
         }
     }
     PathBuf::from(if cfg!(windows) { "lark-cli.cmd" } else { "lark-cli" })
