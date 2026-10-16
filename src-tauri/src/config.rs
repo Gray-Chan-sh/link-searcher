@@ -26,6 +26,14 @@ static CONFIG_LOCK: Mutex<()> = Mutex::new(());
 /// 跨进程锁文件句柄。**全进程共用一个**（理由见 [`lock_handle`]）。
 static CONFIG_LOCK_HANDLE: OnceLock<File> = OnceLock::new();
 
+/// 本进程**已知**的 `config.json` 内容 hash（自己写的，或已接受的外部改动）。
+/// 热重载监听靠它区分"自己的写"与"外部手改"（见 [`observe_config_content`]）。
+static KNOWN_CONFIG_HASH: Mutex<Option<String>> = Mutex::new(None);
+
+/// 本进程**已知**的飞书策略快照：一次外部改动**只有真动了这一块**才需要重启 bot
+/// （bot 启动时把策略读进了内存，不会自己发现文件变了）。
+static KNOWN_LARK: Mutex<Option<LarkIntegration>> = Mutex::new(None);
+
 /// 配置写锁的守卫：Drop 时释放跨进程锁。
 struct ConfigGuard {
     /// 进程内互斥（外层）。只为持有，不读其值。
@@ -374,6 +382,7 @@ impl Default for AppConfig {
     }
 }
 
+/// `config.json` 的绝对路径（备份 / 热重载监听等使用）。
 pub fn config_file_path() -> PathBuf {
     config_dir().join(CONFIG_FILE)
 }
@@ -493,7 +502,59 @@ fn write_config_file(config: &AppConfig) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
     let path = dir.join(CONFIG_FILE);
     let content = serde_json::to_string_pretty(config).map_err(|e| format!("{e}"))?;
-    write_config_atomic(&path, &content)
+    write_config_atomic(&path, &content)?;
+    // 记下"这份内容是我们写的"：热重载监听（`config_watch`）靠它**忽略自己触发的事件**。
+    note_known(&content, &config.integrations.lark);
+    Ok(())
+}
+
+/// `config.json` 内容的稳定 hash（Sha256 hex）。
+pub fn content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/// 本进程已知的 `config.json` 内容 hash；`None` ＝ 还没有基线。
+pub fn known_config_hash() -> Option<String> {
+    KNOWN_CONFIG_HASH
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// 记下"这份内容我们已知"（自己写的，或外部改动已被接受）。
+fn note_known(content: &str, lark: &LarkIntegration) {
+    *KNOWN_CONFIG_HASH.lock().unwrap_or_else(|e| e.into_inner()) = Some(content_hash(content));
+    *KNOWN_LARK.lock().unwrap_or_else(|e| e.into_inner()) = Some(lark.clone());
+}
+
+/// 一次**外部** `config.json` 改动被接受后的结论。
+pub struct ExternalConfigChange {
+    /// 飞书策略是否与上一次已知值不同（**只有真变了**才需要重启 bot）。
+    pub lark_changed: bool,
+}
+
+/// 判定并记录磁盘上的 `config.json` 内容（由 `config_watch` 调用）。
+///
+/// - 与已知 hash 相同 → `None`：**我们自己的写**，或已处理过。按**内容**判定而不是
+///   mtime —— 按 mtime 会把应用自己的每次保存都当成"外部改动"，触发重载风暴。
+/// - 解析失败（手改写到一半）→ `None` 且**不动基线**，等下一次去抖事件。
+/// - 否则 → 刷新基线并返回结论。
+pub fn observe_config_content(content: &str) -> Option<ExternalConfigChange> {
+    let hash = content_hash(content);
+    if known_config_hash().as_deref() == Some(hash.as_str()) {
+        return None;
+    }
+    let cfg: AppConfig = serde_json::from_str(content).ok()?;
+    let prev = KNOWN_LARK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let lark_changed = prev.as_ref() != Some(&cfg.integrations.lark);
+    note_known(content, &cfg.integrations.lark);
+    Some(ExternalConfigChange { lark_changed })
 }
 
 /// 原子写：写同目录临时文件 → `fsync` → `rename` 覆盖目标。
@@ -1164,5 +1225,50 @@ mod tests {
         assert!(!try_lock_with(None, Duration::ZERO, Duration::from_millis(5)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 热重载的**自写抑制**：按**内容**判定 —— 同一份内容第二次必须返回 `None`，
+    /// 否则应用自己的每次保存都会被当成"外部改动"（重载风暴）。
+    #[test]
+    fn observe_config_content_suppresses_self_writes_and_reports_lark_change() {
+        let base = AppConfig::default();
+        let base_json = serde_json::to_string_pretty(&base).unwrap();
+
+        // 建立基线：无论此前是什么状态，这里都把它固定为 base_json。
+        assert!(observe_config_content(&base_json).is_some());
+        assert!(
+            observe_config_content(&base_json).is_none(),
+            "内容相同必须静默（自写抑制按内容，而不是按 mtime/事件本身）"
+        );
+
+        // 只改无关字段 → 接受，但报告"飞书没变"。
+        let other = AppConfig {
+            language: "en".into(),
+            ..AppConfig::default()
+        };
+        let other_json = serde_json::to_string_pretty(&other).unwrap();
+        let change = observe_config_content(&other_json).expect("内容变了就该被接受");
+        assert!(!change.lark_changed, "只改 language 不该报告飞书变了");
+
+        // 改飞书策略 → 报告"变了"（调用方据此重启 bot）。
+        let lark_cfg = AppConfig {
+            integrations: Integrations {
+                lark: LarkIntegration {
+                    enabled: true,
+                    ..LarkIntegration::default()
+                },
+            },
+            ..AppConfig::default()
+        };
+        let lark_json = serde_json::to_string_pretty(&lark_cfg).unwrap();
+        let change = observe_config_content(&lark_json).expect("内容变了就该被接受");
+        assert!(change.lark_changed, "飞书策略变了必须报告");
+
+        // 解析失败（手改写到一半）→ 静默，且**不动基线**（等下一次去抖事件）。
+        assert!(observe_config_content("{ 这不是 json").is_none());
+        assert!(
+            observe_config_content(&lark_json).is_none(),
+            "一次解析失败不得破坏已知基线"
+        );
     }
 }

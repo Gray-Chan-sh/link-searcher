@@ -1,3 +1,26 @@
+## 2026-10-16（第十六轮）：飞书接入 —— C3 `config.json` 热重载 + 自写抑制（§5.6 B 档收尾）
+
+> §5.6 三类故障里的第 2 条：**我改了、被应用覆盖**。C1 已把"唯一整份重建的写者"改成读-改-写，
+> 本轮补上 B 档的另一半：**文件监听热重载** —— 手改 `config.json` 后无需重启应用即可生效。
+
+- **新模块 `config_watch.rs`**：监听 `config.json` **所在目录**（不是文件本身 —— 原子写是 `rename` 覆盖，
+  监听文件会在替换后失效），`notify` + `notify-debouncer-full`（300ms 去抖，两者**都已是依赖**，零新增）
+- **自写抑制按内容 hash，不按 mtime**：`write_config_file` 成功后记下内容 hash；watcher 只在
+  "磁盘内容 ≠ 已知 hash" 时才当成外部改动。按 mtime/按事件判定会把应用自己的每次保存都当成外部改动
+  → **重载风暴**（`config.rs::observe_config_content`，**纯函数**，可单测）
+- **改动的实际生效路径**：飞书策略 → `lark_bot::restart()`（bot 启动时把策略读进内存，不会自己发现
+  文件变了）；其它配置项本来就每次现读（`load_config()` 无缓存）故天然生效；前端广播
+  `config-changed` 事件（设置页在 C6 消费）
+- **如实记录的范围**：`web_api_enabled` / 端口这类**进程级**开关仍需重启应用；`embed_plans` 高频写与
+  `web_api_token` 双存储仍未重新分工（§5.6 已记录）
+- **绝不 panic / 绝不阻塞启动**：watcher 起不来只是"没有热重载"，不影响应用（同 `spawn_if_enabled` 姿态）
+- **解析失败（手改写到一半）→ 静默且不动基线**，等下一次去抖事件
+- **新增 `lark_bot::restart()`**：先停再按当前配置拉起（未启用时**真的停掉**在跑的旧 bot）
+- **测试**：`observe_config_content_suppresses_self_writes_and_reports_lark_change`（同内容→静默、
+  只改无关字段→不报飞书变化、改飞书→报变化、解析失败不破坏基线）；`link_searcher_lib` 562 个用例；
+  `cargo test --workspace` / `tsc` / `vitest` / `semgrep(ERROR)` 全绿
+- **文档**：`docs/LARK_BOT.md` §5.6（三类故障**全部 ✅**，C1→C3 进度收尾）
+
 ## 2026-10-16（第十五轮）：飞书接入 —— C2 跨进程配置锁（§5.6 "多写者"）
 
 > §5.6 的三类故障里最后一条：**两进程同时写、互相覆盖**。此前只有进程内 `CONFIG_LOCK`

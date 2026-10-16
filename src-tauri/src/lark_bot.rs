@@ -162,3 +162,15 @@ pub fn shutdown() {
         let _ = child.wait();
     }
 }
+
+/// 重启 bot：**先停再按当前配置拉起**。
+///
+/// 为什么需要它：策略是 bot **启动时读一次**的（`GET /api/integrations/lark`），
+/// 之后不会自己发现 `config.json` 变了。所以"改设置即生效"与"手改文件热重载"
+/// 两条路都汇到这里。
+///
+/// 未启用时等价于 [`shutdown`] —— 这一点很重要：关掉开关必须**真的停掉**在跑的旧 bot。
+pub fn restart() {
+    shutdown();
+    spawn_if_enabled();
+}

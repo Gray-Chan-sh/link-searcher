@@ -3,6 +3,7 @@ pub mod boot;
 pub mod cli;
 pub mod commands;
 pub mod config;
+pub mod config_watch;
 pub mod db;
 pub mod deps;
 pub mod extractor;
@@ -441,6 +442,10 @@ get_dir_children,
             // 飞书 bot sidecar（§5.4 的 C3）：webapi 之后再拉，因为它要经 webapi 读设置。
             // bot 侧对"webapi 还没监听上"有重试（见 bin/lark-bot.rs），故这里不必等。
             lark_bot::spawn_if_enabled();
+
+            // `config.json` 热重载（§5.6 B 档）：手改配置文件后自动生效。
+            // 放在 bot 之后 —— 它可能在"飞书策略变了"时重启 bot。
+            config_watch::spawn(app.handle().clone());
 
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
