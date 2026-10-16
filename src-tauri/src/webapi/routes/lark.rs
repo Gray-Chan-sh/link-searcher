@@ -13,6 +13,12 @@
 //! - `POST /api/integrations/lark/pairing/start|cancel` —— 进入 / 退出配对模式
 //! - `POST /api/integrations/lark/pairing/consume` —— 配对消费（**白名单写入口**，
 //!   必须先校验配对有效，见 `docs/LARK_BOT.md` §7.1 ⑥）
+//! - `GET  /api/integrations/lark/self-check` —— 接入自检（App ID / 身份联网校验 / 卡片订阅）
+//! - `POST /api/integrations/lark/bind/start|cancel|dismiss` —— 绑定飞书应用（`config init`）
+//! - `GET  /api/integrations/lark/bind/status` —— 绑定会话进度（前端每秒拉）
+//!
+//! ⚠️ 绑定接口**不是完全对称**的：`start` 的 `existing` 模式要传 App Secret，
+//! 只允许桌面端（Web 走自签证书的局域网通道，别把应用密钥往网络上递）。
 //!
 //! **传输对称**：这几个端点的实现与 Tauri 命令**共用** `commands/lark.rs` 的 `pub fn`，
 //! 因此桌面与 Web 端行为一致（设置页两种模式都能用）。
@@ -60,6 +66,11 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/integrations/lark/pairing/consume",
             post(consume_pairing),
         )
+        .route("/api/integrations/lark/self-check", get(self_check))
+        .route("/api/integrations/lark/bind/start", post(bind_start))
+        .route("/api/integrations/lark/bind/status", get(bind_status))
+        .route("/api/integrations/lark/bind/cancel", post(bind_cancel))
+        .route("/api/integrations/lark/bind/dismiss", post(bind_dismiss))
 }
 
 /// 结构化读飞书集成配置（`config.json` 的 `integrations.lark`）。
@@ -167,6 +178,59 @@ async fn consume_pairing(
     Ok(Json(
         serde_json::json!({ "ok": true, "allowed_users": allowed_users }),
     ))
+}
+
+// ───────────────── 接入自检 / 绑定（实现见 `crate::lark_setup`） ─────────────────
+
+/// 接入自检（**只读**）：`lark-cli` 在哪、绑了哪个 App、身份能否联网校验、卡片回调订阅。
+///
+/// 与 Tauri 命令 `lark_self_check` 同一条实现 —— 它要起子进程（`doctor` 约 2s、含联网），
+/// 所以放进 `spawn_blocking`，别把只有几个 worker 的异步运行时堵住。
+async fn self_check() -> Result<Json<serde_json::Value>, ApiError> {
+    let check = tokio::task::spawn_blocking(crate::lark_setup::self_check)
+        .await
+        .map_err(|e| ApiError { error: e.to_string() })?;
+    serde_json::to_value(check)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
+}
+
+/// 开始绑定飞书应用；**不阻塞**（进度靠 `GET …/bind/status` 拉）。
+///
+/// ⚠️ **`existing` 模式（要传 App Secret）只允许桌面端**：Web API 是给局域网 / 远程客户端用的
+/// （自签证书），把应用密钥经网络送进来是**新增**的暴露面，而桌面端就在本机、走 Tauri IPC。
+/// 这里显式拒绝 —— "传输对称"是为了**行为一致**，不是为了扩大攻击面。
+async fn bind_start(
+    Json(body): Json<crate::lark_setup::BindRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.mode.trim().eq_ignore_ascii_case("existing") {
+        return Err(ApiError {
+            error: "绑定已有应用（需要 App Secret）只能在桌面端设置页操作".into(),
+        });
+    }
+    tokio::task::spawn_blocking(move || crate::lark_setup::bind_start(&body))
+        .await
+        .map_err(|e| ApiError { error: e.to_string() })?
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn bind_status() -> Result<Json<serde_json::Value>, ApiError> {
+    serde_json::to_value(crate::lark_setup::bind_status())
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
+}
+
+async fn bind_cancel() -> Result<Json<serde_json::Value>, ApiError> {
+    let cancelled = tokio::task::spawn_blocking(crate::lark_setup::bind_cancel)
+        .await
+        .map_err(|e| ApiError { error: e.to_string() })?;
+    Ok(Json(serde_json::json!({ "ok": true, "cancelled": cancelled })))
+}
+
+async fn bind_dismiss() -> Result<Json<serde_json::Value>, ApiError> {
+    crate::lark_setup::bind_dismiss();
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(Deserialize)]

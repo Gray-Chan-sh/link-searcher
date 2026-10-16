@@ -870,6 +870,85 @@ event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/
   （CLI 无集成子命令、bot 只经 HTTP），因此无法真机复现"两个写者"。这不算"验过"。
 
 
+### 5.10 接入自检与绑定（2026-10-16）—— 回答"新用户怎么绑定？我看不到 appid"
+
+**触发**：用户问「新用户怎么绑定机器人？我没有看到 appid 等内容」。查下来是两个真实断点：
+依赖中心的"就绪"**只探可执行文件在不在**（`deps::catalog::lark_cli_path`），"装了但没绑定"照样 ✅；
+集成页只有「进程：运行中/未运行」+「详见日志」—— 用户知道去读日志，却**不知道缺哪一步**。
+
+**① 先把"绑定"拆成三层**（只有第三层归本应用）：
+
+| 层 | 内容 | 存在哪 | 本应用有没有界面 |
+|---|---|---|---|
+| ① 凭证层 | 用哪个飞书应用（App ID / App Secret） | **`lark-cli` 自己的配置**：`%USERPROFILE%\.lark-cli\config.json` → `apps[0]`（Secret 存**系统凭据库**，文件里只留 `{source:"keychain", id:…}` 指针） | 原本**完全没有** |
+| ② 授权层 | 事件订阅 / scope / token | 也在 `lark-cli`（`config init` 浏览器流程 + `auth login`） | 原本完全没有 |
+| ③ 策略层 | 谁能用、能不能外发、配对 | 本应用 `config.json` 的 `integrations.lark` | ✅ 就是集成标签页 |
+
+**② 关键实测：`lark-cli auth status` 会撒谎，判死活的是 `doctor`**（隔离 `USERPROFILE` 做对照，真配置未被动过）：
+
+```text
+# 假 appId（cli_bogus000000000，凭据根本不存在）下：
+auth status  → {"appId":"cli_bogus000000000", "identities":{"bot":{"status":"ready"…}}}   EXIT=0   ← 只看本地结构！
+doctor       → bot_identity : warn "Bot identity: verify failed: The specified app does not exist."
+               identity_ready: fail "no usable bot or user identity is available"          EXIT=1   ← 联网校验
+```
+
+→ 所以"能不能用"**一律以 `doctor` 为准**，判据是 `app_resolved` 有 appId **且** `bot_identity = pass`
+（**不是** `identity_ready = pass`：那只要求"bot 或 user 有一个可用"，而机器人**必须有 bot 身份**）。
+真机 `doctor` 实测 **1.74s**、exit 0、9 项全过（`cli_version` 1.0.96 / `app_resolved` /
+`bot_identity` / `user_identity`(warn，本机没登 user) / `identity_ready` / `endpoint_open` / `endpoint_mcp`）。
+
+**③ 第二个关键实测：`config init` 是"先写盘、再校验"** —— 填错会**冲掉原本能用的绑定**：
+
+```text
+# 隔离 HOME，故意给不存在的 appId：
+stdin: "s3cr3t-bogus" | lark-cli config init --app-id cli_bogus000000000 --app-secret-stdin
+→ "OK: Configuration saved to C:\…\.lark-cli\config.json"     ← 已经写进去了
+→ {"ok":false,"error":{"type":"config","subtype":"invalid_client","code":20048,…}}   EXIT=3
+```
+
+→ 实现里因此有**快照 / 回滚**：绑定前读一次配置，收尾判定**失败即写回**（原本**没有**这个文件就**删掉**，
+否则会留下一个"看着已绑定"的假 appId）。收尾判据用**行为**而不是退出码文本：`exit 0` **且**
+`doctor` 现在能用。
+
+**④ 实现**（`src-tauri/src/lark_setup.rs`，传输对称：Tauri 命令 + `webapi/routes/lark.rs`）：
+
+| 动作 | 端点 / 命令 | 说明 |
+|---|---|---|
+| 自检 | `GET …/lark/self-check` · `lark_self_check` | 跑 `doctor` + `event consume card.action.trigger --dry-run`；返回 App ID / 两种身份 / 卡片订阅 / **下一条该做的事**（`install_cli`→`bind_app`→`rebind_app`→`card_callback`，只报第一个阻塞项）+ `doctor` 全部检查项原文 |
+| 绑定 | `POST …/lark/bind/start` · `lark_bind_start` | `new`＝`config init --new`（浏览器流程，会**新建一个飞书应用**）；`existing`＝`--app-id` + `--app-secret-stdin` |
+| 进度 | `GET …/lark/bind/status` · `lark_bind_status` | 纯内存读；前端在 `running || !finalized` 时每秒拉一次 |
+| 取消 / 收起 | `…/bind/cancel` · `…/bind/dismiss` | 取消＝杀掉子进程 + **照样走收尾**（可能已写盘）；取消分支只在"确实新绑上了一个**能用**的应用"时才算成功 |
+
+四条刻意边界：**Secret 只走 stdin**（不进 argv / 进程列表 / 日志 / 本应用配置；前端起步后立即清空输入框）；
+**子进程一律带超时**（`doctor`/`dry-run` 都联网，20s 上限）；**收尾的慢操作不持锁**（否则设置页轮询一起卡住）；
+**`existing` 模式不允许经 Web API**（自签证书的局域网通道，不该把应用密钥递到网络上）—— 这是**有意的不对称**。
+
+另外：`--new` 在 Agent 工作区（`OPENCLAW_HOME`/`HERMES_HOME`）里会被 lark-cli **拒绝**（其 `--help` 明说），
+检测到就给一个 `--force-init` 重试按钮（原文一律进日志，不靠猜）；绑定成功后**重启 bot**，让新凭据立刻生效
+（**不自动启用** —— 外发内容必须显式开启）。
+
+**⑤ 新用户接入清单（界面上的顺序就是它）**
+
+```bash
+lark-cli config init --new                                  # 1) 绑定：新建应用（浏览器流程）
+lark-cli config init --app-id cli_xxx --app-secret-stdin    #    或绑定已有应用（Secret 走 stdin）
+lark-cli auth login                                         # 2) 仅当需要 user 身份（bot 收发不需要）
+lark-cli event consume card.action.trigger --dry-run        # 3) 卡片按钮：单独订阅（会给出订阅链接）
+# 4) 回设置页：启用机器人（12.2）→ 配对把自己加进白名单（12.4）
+```
+
+**⑥ 没能验的部分（如实记录）**
+
+- **`config init --new` 的真实浏览器流程没跑过**：它会**在用户租户里真的新建一个应用**，不能拿它做实验。
+  因此"验证链接的提取"只有**合成字符串**的单测，真实输出的 URL 形态**未验证**；
+  `--force-init` 分支也**从未被触发过**（本机没有 `OPENCLAW_HOME`/`HERMES_HOME`）。
+- **`existing` 成功路径没跑过**：只跑了**失败路径**（假 appId → exit 3 → 先写盘后校验，见 ③）。
+  用真凭据再 `config init` 会**覆盖**现有可用绑定，属"能重复但会打扰"的操作，本轮没做。
+- **应用侧的回滚执行没有真机证据**：失败路径是在**隔离 HOME** 里跑的，`rollback_config` 的两条分支
+  （写回 / 删除）只有代码评审 + 纯函数单测（`app_id_from_config` 等）。
+- **面板渲染**：由人眼确认（同 5.9 的说明：本机浏览器不信任应用自签证书）。
+
 ---
 
 ## 六、能干什么（功能清单）
@@ -1131,6 +1210,17 @@ event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/
 > ⚠️ 据实说明：**"提示是否真的出现在群里"没有自动化证据** —— 那需要在飞书客户端里用眼睛看
 > （`reply()` 走 `lark-cli im +messages-reply`，成功时不落任何日志）。日志能证明的是
 > "拒绝发生了 + 没有回答 + 回复命令未报错"。
+
+**⑫ 接入自检与绑定（2026-10-16）—— 本节 ⑦ 的"依赖中心看不出授权"落地**
+
+| 项 | 结论 |
+|---|---|
+| 判据 | **只认 `lark-cli doctor`**（联网校验）。实测：假 appId 下 `auth status` 仍报 `bot ready` + exit 0，而 `doctor` 报 `bot_identity: warn (verify failed…)` + `identity_ready: fail` + exit 1 |
+| 判"能用"的确切条件 | `app_resolved` 有 appId **且** `bot_identity = pass`（**不**用 `identity_ready`：user-only 也算 pass，但机器人必须有 bot 身份） |
+| 绑定 | 代跑 `config init`：`--new`（新建应用，浏览器流程）/ `--app-id` + `--app-secret-stdin`（已有应用） |
+| ⚠️ 冲库风险 | `config init` **先写盘再校验**（实测 exit 3 时已写盘）→ 绑定前**快照**、失败**回滚**（无原文件则删除） |
+| ⚠️ Secret 边界 | 只走 **stdin**（不进 argv / 进程列表 / 日志 / 本应用配置）；`existing` 模式**不允许经 Web API**（自签证书的局域网通道） |
+| 未验 | `--new` 真实浏览器流程（会在用户租户里真建应用，不能拿来做实验）、`existing` 成功路径、`--force-init` 分支 —— 详见 §5.10 ⑥ |
 
 **（附）拒绝推进的边界**：若将来要进群 / 多人使用，必须回到闸门 1–3（外发白名单、只回摘要、脱敏），
 并启用 `lark_allowed_chats` 且**显式定义**其与 `lark_allowed_users` 的组合语义 ——

@@ -1,3 +1,49 @@
+## 2026-10-16（第二十三轮）：飞书接入自检 + 一键绑定 —— 回答「新用户怎么绑定？我看不到 appid」
+
+> 需求原话：*「新用户怎么绑定机器人？我没有看到 appid 等内容」*。查下来是两个真实断点：
+> ①「用哪个飞书应用」这件事**压根不归本应用管**（凭证在 `lark-cli` 自己的配置里，Secret 在 OS 凭据库），
+> 集成页从来没有读过它 ⇒ 用户**看不到 App ID**；② 依赖中心的"就绪"**只探可执行文件在不在**，
+> "装了但没绑定"照样 ✅，而集成页"未运行"的提示是「详见日志」⇒ 用户**不知道缺哪一步**。
+> 本轮按用户选定的 **A+B+D** 落地：A 只读自检、B 一键绑定、D 文档清单。
+
+- **新增 `src-tauri/src/lark_setup.rs`（A：接入自检，只读）**：跑 `lark-cli doctor` 与
+  `event consume card.action.trigger --dry-run`，把结果**如实摊开** —— App ID / brand / lark-cli 版本 /
+  bot 与 user 身份 / 卡片回调订阅 / **下一条该做的事**（`install_cli`→`bind_app`→`rebind_app`→`card_callback`，
+  只报第一个阻塞项）+ `doctor` 全部检查项原文。全部解析逻辑写成接受 `&str` 的纯函数并配单测（14 条）。
+- **判「能不能用」一律以 `doctor` 为准**（本轮最关键的一条实测）：隔离 `USERPROFILE` 下给一个
+  **根本不存在的** appId，`lark-cli auth status` 依然报 `identities.bot.status = "ready"` 且 **exit 0**
+  —— 它只做**本地结构**检查；同一配置下 `doctor` 报 `bot_identity: warn "verify failed: The specified app
+  does not exist."` + `identity_ready: fail` + **exit 1**。判据取 `app_resolved` 有 appId **且**
+  `bot_identity = pass`（**不**用 `identity_ready`：user-only 也算 pass，但机器人必须有 bot 身份）。
+  真机 `doctor` 实测 1.74s / exit 0 / 9 项全过。
+- **`config init` 是「先写盘、再校验」**（第二个实测，隔离 HOME）：假 appId 会先打印
+  `OK: Configuration saved to …`，随后才报 `invalid_client` + **exit 3** ⇒ 手滑填错会**冲掉原本能用的绑定**。
+  因此绑定前**快照** `~/.lark-cli/config.json`，收尾判定失败即**回滚**（原本没有该文件则删除，
+  否则会留下一个"看着已绑定"的假 appId）。
+- **（B：一键绑定）绑定会话**：`bind_start` / `bind_status` / `bind_cancel` / `bind_dismiss`。
+  `new`＝`config init --new`（浏览器流程，**会新建一个飞书应用**）；`existing`＝`--app-id` +
+  `--app-secret-stdin`。四条边界：**Secret 只走 stdin**（不进 argv / 进程列表 / 日志 / 本应用配置，
+  前端起步后立即清空输入框）；**子进程一律带超时**（`doctor`/`dry-run` 联网，20s 上限）；
+  **收尾的慢操作不持锁**（否则设置页 1s 轮询一起卡住）；**`existing` 模式不允许经 Web API**
+  （自签证书的局域网通道，不该把应用密钥递到网络上）—— **有意的不对称**。
+  成功判据＝`exit 0` **且** `doctor` 现在能用（行为优先于退出码文本）；成功后**重启 bot** 让新凭据立刻生效，
+  但**不自动启用**（外发内容必须显式开启）。`--new` 在 Agent 工作区被 lark-cli 拒绝时给 `--force-init`
+  重试按钮（原文一律进日志，不靠猜）。
+- **传输对称**：新命令做薄包装（`commands/lark.rs`，走 `spawn_blocking` —— `doctor` 约 2s，别堵异步运行时），
+  `webapi/routes/lark.rs` 加 `GET …/lark/self-check` 与 `POST …/lark/bind/{start,status,cancel,dismiss}`。
+- **前端**（`src/api/lark.ts` + `client.ts` 映射、`hooks/useSettingsLark.ts`、`components/settings/LarkTab.tsx`）：
+  新增两个区块 ——「飞书接入自检」（App ID / 两种身份 / 卡片订阅 / 下一步 / `doctor` 检查项可展开）
+  与「绑定飞书应用」（方式选择、App ID + **password** 输入框、品牌、覆盖警告、进度、验证链接 + 复制、
+  原始输出、取消 / 关闭 / `--force-init` 重试）。绑定进度用**前端轮询**（1s，`running || !finalized` 时），
+  不新增事件桥接。4 语言各 42 个新键。
+- **（D）文档**：`docs/06-settings.md` 集成标签页前补「步骤 12.1 前置：绑定飞书应用」+ 4 步清单；
+  `docs/LARK_BOT.md` 新增 §5.10（三层结构 / 两个关键实测 / 实现 / 接入清单 / **没能验的部分**）
+  与 §7.1 ⑫。`lark_enable_hint`（4 语言）的「详见日志」改指本次的自检结论。
+- **没能验的部分（如实记录）**：`config init --new` 的真实浏览器流程**没跑**（会在用户租户里**真的新建应用**，
+  不能拿它做实验）⇒ 验证链接提取只有合成字符串单测，真实 URL 形态未验；`--force-init` 分支**从未触发**；
+  `existing` **成功**路径没跑（只跑了失败路径，因为它会覆盖现有可用绑定）；应用侧回滚的真机证据只有
+  隔离 HOME 的失败路径 + 纯函数单测。
+
 ## 2026-10-16（第二十二轮）：清上一轮遗留 —— 修卡片回调秒退（真缺陷）+ 配置写入守卫 + token 收口 + 跨平台打包
 
 > 上一轮末留了 6 条"未做"。本轮把**已确诊**的都改掉，两条原本"卡在没条件"的据实收口：

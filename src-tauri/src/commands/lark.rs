@@ -237,6 +237,48 @@ pub fn get_lark_bindings(
     bindings_of(state.inner())
 }
 
+// ───────────────── 接入自检 / 绑定（实现见 `crate::lark_setup`） ─────────────────
+//
+// 为什么这些走 `spawn_blocking`：它们都要**起子进程**（`lark-cli doctor` 约 2s、含联网），
+// Tauri 的 `async` 命令跑在异步运行时上 —— 直接在里面等子进程会把别的命令一起堵住。
+
+/// 接入自检（**只读**）：`lark-cli` 在哪、绑了哪个 App、身份能否联网校验、卡片回调订阅。
+#[tauri::command]
+pub async fn lark_self_check() -> Result<crate::lark_setup::LarkSelfCheck, String> {
+    tokio::task::spawn_blocking(crate::lark_setup::self_check)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 开始绑定飞书应用（`config init`）；**不阻塞**，进度靠 [`lark_bind_status`] 拉。
+#[tauri::command]
+pub async fn lark_bind_start(req: crate::lark_setup::BindRequest) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || crate::lark_setup::bind_start(&req))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// 绑定会话状态（纯内存读，不用 `async`）。
+#[tauri::command]
+pub fn lark_bind_status() -> Result<crate::lark_setup::LarkBindStatus, String> {
+    Ok(crate::lark_setup::bind_status())
+}
+
+/// 取消绑定（杀掉子进程；收尾与回滚在后台线程完成，所以这里立刻返回）。
+#[tauri::command]
+pub async fn lark_bind_cancel() -> Result<bool, String> {
+    tokio::task::spawn_blocking(crate::lark_setup::bind_cancel)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 收起已结束的绑定会话（让面板回到"未开始"）。
+#[tauri::command]
+pub fn lark_bind_dismiss() -> Result<(), String> {
+    crate::lark_setup::bind_dismiss();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

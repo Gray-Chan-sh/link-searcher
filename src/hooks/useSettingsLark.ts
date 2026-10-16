@@ -4,10 +4,18 @@ import { useI18n } from '../i18n'
 import {
   cancelLarkPairing,
   getLarkStatus,
+  larkBindCancel,
+  larkBindDismiss,
+  larkBindStart,
+  larkBindStatus,
+  larkSelfCheck,
   restartLarkBot,
   setLarkConfig,
   startLarkPairing,
+  type LarkBindRequest,
+  type LarkBindStatus,
   type LarkIntegration,
+  type LarkSelfCheck,
   type LarkStatus,
 } from '../api/lark'
 
@@ -54,6 +62,13 @@ export function useSettingsLark() {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [secondsLeft, setSecondsLeft] = useState(0)
+  // ── 接入自检 / 绑定（`lark_setup.rs`）──
+  const [check, setCheck] = useState<LarkSelfCheck | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [checkError, setCheckError] = useState<string | null>(null)
+  const [bind, setBind] = useState<LarkBindStatus | null>(null)
+  const [bindStarting, setBindStarting] = useState(false)
+  const [bindError, setBindError] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -151,11 +166,88 @@ export function useSettingsLark() {
   const cancelPairing = () => run(t('lark_pairing_cancel'), () => cancelLarkPairing())
   const restart = () => run(t('lark_restart'), () => restartLarkBot())
 
+  // ── 接入自检 / 绑定 ─────────────────────────────────────────────────────────
+  // 自检要**起子进程**（`lark-cli doctor` 约 2s、含联网），所以：进面板跑一次 + 手动"重新自检"，
+  // **绝不放进轮询** —— 轮询只拉绑定会话状态（纯内存读）。
+  const runCheck = useCallback(async () => {
+    setChecking(true)
+    setCheckError(null)
+    try {
+      setCheck(await larkSelfCheck())
+    } catch (e) {
+      setCheckError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setChecking(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void runCheck()
+  }, [runCheck])
+
+  const startBind = async (req: LarkBindRequest) => {
+    setBindStarting(true)
+    setBindError(null)
+    try {
+      await larkBindStart(req)
+      setBind(await larkBindStatus())
+    } catch (e) {
+      setBindError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBindStarting(false)
+    }
+  }
+
+  const cancelBind = async () => {
+    setBindError(null)
+    try {
+      await larkBindCancel()
+      setBind(await larkBindStatus())
+    } catch (e) {
+      setBindError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const dismissBind = async () => {
+    try {
+      await larkBindDismiss()
+    } catch {
+      // 收起失败无所谓：下次进来还是会拉到同一个会话
+    }
+    setBind(null)
+  }
+
+  // 会话期间每秒拉一次（`running || !finalized` —— 收尾还要联网判定，得等它完）。
+  useEffect(() => {
+    if (!bind || (!bind.running && bind.finalized)) return
+    const id = window.setTimeout(() => {
+      void larkBindStatus()
+        .then(setBind)
+        .catch(() => {})
+    }, 1000)
+    return () => window.clearTimeout(id)
+  }, [bind])
+
+  // 会话收尾 → 自检重跑 + 策略状态重拉（绑定成功会重启 bot，进程态跟着变）。
+  const bindDoneSeen = useRef(false)
+  useEffect(() => {
+    if (!bind || !bind.finalized) {
+      bindDoneSeen.current = false
+      return
+    }
+    if (bindDoneSeen.current) return
+    bindDoneSeen.current = true
+    void runCheck()
+    void reload()
+  }, [bind, runCheck, reload])
+
   return {
     loading, status, current, dirty, secondsLeft,
     usersText, dirsText, setUsersText, setDirsText,
     saving, busy, error, notice,
     setEnabled, setRequireP2p,
     save, beginPairing, cancelPairing, restart,
+    check, checking, checkError, runCheck,
+    bind, bindStarting, bindError, startBind, cancelBind, dismissBind,
   }
 }

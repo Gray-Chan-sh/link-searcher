@@ -263,6 +263,17 @@ const MAPPINGS: Record<string, Mapping> = {
     method: 'GET', path: '/api/lark/bindings',
     transform: (data) => (data as Record<string, unknown>)?.bindings ?? [],
   },
+  // 接入自检 / 绑定（服务端实现见 `webapi/routes/lark.rs`）
+  lark_self_check: { method: 'GET', path: '/api/integrations/lark/self-check' },
+  // 服务端按 `BindRequest` 反序列化（直接吃 req 本体，不是包一层）
+  lark_bind_start: (a) => ({ method: 'POST', path: '/api/integrations/lark/bind/start', body: a.req }),
+  lark_bind_status: { method: 'GET', path: '/api/integrations/lark/bind/status' },
+  // 服务端返回 `{ ok, cancelled }`；Tauri 命令直接返回 bool。
+  lark_bind_cancel: {
+    method: 'POST', path: '/api/integrations/lark/bind/cancel',
+    transform: (data) => !!(data as Record<string, unknown>)?.cancelled,
+  },
+  lark_bind_dismiss: { method: 'POST', path: '/api/integrations/lark/bind/dismiss' },
 };
 
 /** 会话被他人占用时的 403 响应体（session_guard 返回）。 */
