@@ -289,12 +289,46 @@ pub(super) fn extract_retrieval_keywords(query: &str) -> Vec<String> {
         }
         out.push(w.to_string());
     }
-    // 丢弃被更长候选包含的子词片段（"不动"/"动产" ⊆ "不动产"）
+    // 「X案」补回实体 X：jieba 会把类别后缀"案"粘在实体后（"汪均益案的最终结果"
+    // → "汪均益案"），而语料里通常没有"X案"这种写法（正文写"汪均益"、"汪均益诉…"），
+    // 该词就是**零命中词**；只保留它的话，实体将从 BM25/路径/向量三通道全部消失
+    // （2026-10-16 实测："汪均益案的最终结果是什么？"首轮 30 份材料全噪声、答"材料不足"；
+    // 同一条管线只要带上"汪均益"就能注入一审判决书/48号裁定并答对）。
+    // 只对去尾后 ≥2 字、非泛词、非动作短语（"已立案"→"已立"）的词生效。
+    for w in out.clone() {
+        let prefix: Option<String> = if let Some(p) = w.strip_suffix("案件") {
+            Some(p.to_string())
+        } else {
+            w.strip_suffix('案').map(|p| p.to_string())
+        };
+        let Some(prefix) = prefix else { continue };
+        if prefix.chars().count() < 2 || is_retrieval_stopword(&prefix) {
+            continue;
+        }
+        // 动作短语（立案/结案/撤案/办案/受案…）不得产出"已立"这类碎片。
+        if prefix
+            .chars()
+            .last()
+            .is_some_and(|c| matches!(c, '立' | '诉' | '审' | '结' | '撤' | '办' | '受' | '查' | '处'))
+        {
+            continue;
+        }
+        if !out.contains(&prefix) {
+            out.push(prefix);
+        }
+    }
+    // 丢弃被更长候选包含的子词片段（"不动"/"动产" ⊆ "不动产"）；例外：**"X案"/"X案件"
+    // 不覆盖实体"X"** —— 前者可能根本不在语料里，让"X"活下来才有召回锚点（见上）。
     out
         .iter()
         .filter(|a| {
             !out.iter().any(|b| {
-                b.as_str() != a.as_str() && b.chars().count() > a.chars().count() && b.contains(a.as_str())
+                b.as_str() != a.as_str()
+                    && b.chars().count() > a.chars().count()
+                    && b.contains(a.as_str())
+                    && !(b.ends_with('案')
+                        && (b.trim_end_matches('案') == a.as_str()
+                            || b.trim_end_matches("案件") == a.as_str()))
             })
         })
         .cloned()

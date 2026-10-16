@@ -169,6 +169,14 @@ pub fn split_query_terms(query: &str) -> String {
         if word.is_empty() || word.len() < 2 {
             continue; // skip whitespace/single-char noise like "的"
         }
+        // 布尔连接词不是检索词：调用方用 " OR " 拼接已分词结果后可能再次经过本函数
+        // （RAG 的 BM25 通道 `bm25_relevant_hits` 对 final_kws 拼接串二次分词），
+        // 若不滤掉，小写 "or" 会变成字面检索词 —— 英文文档（含大量 "or"）会系统性
+        // 挤进任意中文多词查询的头部（2026-10-16 实测：汪均益查询的 BM25 头部是
+        // 英文许可文件与侨外英文合同）。单词 "or" 仍走空词回退、按字面检索。
+        if word.eq_ignore_ascii_case("or") || word.eq_ignore_ascii_case("and") {
+            continue;
+        }
         terms.push(word.to_string());
     }
     if terms.is_empty() {
@@ -205,6 +213,16 @@ mod tests {
             tokens.push(t.text.clone());
         }
         assert_eq!(tokens, vec!["hello", " ", "world"]);
+    }
+
+    #[test]
+    fn boolean_glue_is_not_a_search_term() {
+        // 回归（2026-10-16）：RAG 的 BM25 通道把 "A OR B" 已拼好的串再次分词，
+        // 小写 "or" 成为字面检索词 —— 英文文档（含大量 "or"）系统性挤进头部。
+        assert_eq!(split_query_terms("汪均益案 or 最终 or 结果"), "汪均益案 OR 最终 OR 结果");
+        assert_eq!(split_query_terms("alpha and beta"), "alpha OR beta");
+        // 单词 "or" 仍走空词回退、按字面检索（直接搜该词的行为不变）。
+        assert_eq!(split_query_terms("or"), "or");
     }
 
 

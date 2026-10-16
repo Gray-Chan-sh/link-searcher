@@ -2000,6 +2000,43 @@ mod retrieval_keyword_tests {
         let short = extract_retrieval_keywords("第 12 号");
         assert!(short.iter().all(|k| k != "12"), "短数字无区分度，应丢弃: {short:?}");
     }
+
+    #[test]
+    fn case_suffix_keeps_entity_name() {
+        // 回归（2026-10-16 汪均益案）：jieba 把"案"粘在实体后（"汪均益案"），
+        // 而语料里没有该写法（实测全库零命中）—— 必须补回实体"汪均益"，
+        // 否则 BM25/路径/向量三通道全部丢锚点，首轮 30 份材料全是噪声。
+        let kws = extract_retrieval_keywords("汪均益案的最终结果是什么？");
+        assert!(kws.contains(&"汪均益".to_string()), "got: {kws:?}");
+
+        let kws = extract_retrieval_keywords("万城案的仲裁结果");
+        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
+
+        // "X案件" 形式同样取回 X。
+        let kws = extract_retrieval_keywords("汪均益案件的最终结果");
+        assert!(kws.contains(&"汪均益".to_string()), "got: {kws:?}");
+    }
+
+    #[test]
+    fn case_suffix_strip_rejects_action_phrases() {
+        // 动作短语（立案/结案/撤案…）去尾会得到"已立""未结"这类碎片，必须放弃。
+        // 注意只断言**去尾路径才会产生**的碎片；"该案/结案/已经"是改动前就有的普通
+        // 分词结果，不在本测试范围内。
+        for q in ["本案是否已立案", "该案已经结案", "撤回撤案申请", "已立案"] {
+            let kws = extract_retrieval_keywords(q);
+            for frag in ["已立", "未立", "已结", "未结"] {
+                assert!(!kws.contains(&frag.to_string()), "fragment leaked in {q:?}: {kws:?}");
+            }
+        }
+        // 短词/泛词不产出碎片："立案/本案/方案/专案" 去尾 <2 字或本身是泛词。
+        for q in ["请给出方案", "专案组名单"] {
+            let kws = extract_retrieval_keywords(q);
+            assert!(
+                !kws.iter().any(|k| k == "方" || k == "专"),
+                "fragment leaked in {q:?}: {kws:?}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
