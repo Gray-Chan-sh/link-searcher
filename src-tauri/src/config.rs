@@ -115,6 +115,59 @@ impl Default for EmbedPlan {
     }
 }
 
+/// 对外集成（飞书等）的配置块。
+///
+/// 放 `config.json` 而不是 DB `app_settings`：这是 §5.6「配置写入」的一次收口 ——
+/// 飞书那条链路的策略此前是 6 个平铺的 DB 字符串键，散落且无法整体备份/审阅。
+/// `#[serde(default)]`（容器级）保证**老 `config.json` 原样可加载**：
+/// 缺 `integrations` 就用默认值，不会因为读不懂就把整份配置判为损坏。
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Integrations {
+    pub lark: LarkIntegration,
+}
+
+/// 飞书机器人策略（`docs/LARK_BOT.md` §7.1 ⑤）。
+///
+/// ⚠️ **空数组语义方向相反，别"顺手统一"**（§7.1 ②）：
+/// - `allowed_users` / `allowed_chats` 空 ⇒ **拒绝全部**（fail-closed）
+/// - `export_allow_dirs` 空 ⇒ **不限制**（fail-open）
+///
+/// `enabled` 默认 **false**，与 `web_api_enabled` 的"默认开"**刻意相反**：
+/// 把本地私有库的内容发到飞书必须显式开启。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(default)]
+pub struct LarkIntegration {
+    pub enabled: bool,
+    /// L2：是否要求私聊（非私聊一律拒绝）。
+    pub require_p2p: bool,
+    /// L1：允许触发机器人的 `open_id`；**空 ⇒ 拒绝全部**。
+    pub allowed_users: Vec<String>,
+    /// `chat_id` 白名单。**当前不参与判定**（§7.1 ④），保留键名以备将来支持群。
+    pub allowed_chats: Vec<String>,
+    /// 内容外发收紧阀；**空 ⇒ 不限制**。
+    pub export_allow_dirs: Vec<String>,
+    /// 冷启动配对模式（§7.1 ⑥）。
+    pub pairing: bool,
+    /// 配对模式的截止时刻（unix 秒）；`0` 表示不限时（不推荐）。
+    pub pairing_expires_at: i64,
+}
+
+impl Default for LarkIntegration {
+    fn default() -> Self {
+        // 安全默认：关闭 + 要求私聊 + 空名单（＝谁都不许）。
+        Self {
+            enabled: false,
+            require_p2p: true,
+            allowed_users: Vec::new(),
+            allowed_chats: Vec::new(),
+            export_allow_dirs: Vec::new(),
+            pairing: false,
+            pairing_expires_at: 0,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AppConfig {
     #[serde(default)]
@@ -173,6 +226,9 @@ pub struct AppConfig {
     /// 用户可查看/分发。运行期由设置页 / Web 端修改（`set_web_api_token` 同步回写）。
     #[serde(default)]
     pub web_api_token: String,
+    /// 对外集成（飞书机器人等）。见 [`Integrations`]。
+    #[serde(default)]
+    pub integrations: Integrations,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -200,6 +256,7 @@ impl Default for AppConfig {
             pending_cleanup_dir: None,
             embed_plans: std::collections::HashMap::new(),
             web_api_token: String::new(),
+            integrations: Integrations::default(),
         }
     }
 }
@@ -255,6 +312,30 @@ pub fn set_web_api_token(token: &str) {
     if let Err(e) = write_config_file(&cfg) {
         log::warn!("[CONFIG] 写入 web_api_token 失败: {e}");
     }
+}
+
+/// 读飞书集成配置（`config.json` 的 `integrations.lark`）。
+///
+/// 不跑迁移、不写盘 —— 读者只要值（bot 生命周期 / 命令层 / Web API）。
+pub fn lark_integration() -> LarkIntegration {
+    read_config_file().integrations.lark
+}
+
+/// 写回飞书集成配置（加锁的整文件读-改-写）。
+///
+/// 与 [`set_web_api_token`] 同款：先读**当前文件**，只替换 `integrations.lark`，
+/// 其余字段（providers / embed_plans / 用户的未知键）**原样保留**。这正是
+/// `docs/LARK_BOT.md` §5.6 故障②（"我手改了 config.json 却被应用整份覆盖"）的
+/// 收口点 —— 所以飞书配置**绝不**走 [`save_config`] 那种"整份重建"的路径。
+/// 值未变化时不落盘。
+pub fn set_lark_integration(lark: &LarkIntegration) -> Result<(), String> {
+    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = read_config_file();
+    if cfg.integrations.lark == *lark {
+        return Ok(());
+    }
+    cfg.integrations.lark = lark.clone();
+    write_config_file(&cfg)
 }
 
 /// 持锁读取配置文件；文件缺失/损坏时返回默认配置。
@@ -399,6 +480,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "pending_cleanup_dir",
     "embed_plans",
     "web_api_token",
+    "integrations",
 ];
 
 /// 手改了 `config.json` 但键名拼错时给出告警。`$schema` 是唯一允许的例外

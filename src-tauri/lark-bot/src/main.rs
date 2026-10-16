@@ -60,8 +60,7 @@ use std::time::{Duration, Instant};
 
 use card::{render_answer_card, render_error, render_working, split_for_cards, CardActionEvent, SseAccum, Throttle, MAX_BODY_BYTES, MAX_CARDS};
 use lark_gate::{
-    gate, parse_allowed_users, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent,
-    NON_P2P_NOTICE,
+    gate, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent, NON_P2P_NOTICE,
 };
 use serde_json::{json, Value};
 
@@ -103,11 +102,11 @@ fn main() {
         }
     };
     if !cfg.enabled {
-        log::warn!("lark_bot_enabled != \"true\" —— 机器人未启用，退出");
+        log::warn!("integrations.lark.enabled = false —— 机器人未启用，退出");
         return;
     }
     if cfg.gate.allowed_users.is_empty() {
-        log::warn!("lark_allowed_users 为空 ⇒ 按 fail-closed **拒绝一切消息**（§7.1 ②）");
+        log::warn!("integrations.lark.allowed_users 为空 ⇒ 按 fail-closed **拒绝一切消息**（§7.1 ②）");
     }
     log::info!(
         "[bot] 策略：require_p2p={} 白名单 {} 人",
@@ -983,27 +982,21 @@ impl Http {
         }
     }
 
-    /// 读 `app_settings` 里的飞书策略（§7.1 ⑤）。
+    /// 读飞书策略：`config.json` 的 `integrations.lark`，经 webapi **结构化**暴露
+    /// （`GET /api/integrations/lark`）。不再自己剥 `"true"` / 解析 JSON 字符串。
     fn load_gate_config(&self) -> Result<BotConfig, String> {
-        let settings = self.get("/api/settings")?;
-        let s = |key: &str| {
-            settings
-                .get(key)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string()
-        };
-        let raw_users = s("lark_allowed_users");
-        let users = parse_allowed_users(&raw_users);
-        if !raw_users.trim().is_empty() && users.is_empty() {
-            // 解析失败 ⇒ 空名单（＝拒绝全部）。这里额外喊一声，否则会表现为"机器人不理我"。
-            log::error!("lark_allowed_users 无法解析（{raw_users:?}）⇒ 按拒绝全部处理");
-        }
+        let cfg = self.get("/api/integrations/lark")?;
+        let bool_of = |key: &str| cfg.get(key).and_then(Value::as_bool);
+        let users: Vec<String> = cfg
+            .get("allowed_users")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+            .unwrap_or_default();
         Ok(BotConfig {
-            enabled: s("lark_bot_enabled").eq_ignore_ascii_case("true"),
+            enabled: bool_of("enabled").unwrap_or(false),
             gate: LarkGateConfig {
-                // 缺省即 true：没配置时也必须要求私聊
-                require_p2p: !s("lark_require_p2p").eq_ignore_ascii_case("false"),
+                // 缺省即 true：没配置时也必须要求私聊。
+                require_p2p: bool_of("require_p2p").unwrap_or(true),
                 allowed_users: users,
             },
         })

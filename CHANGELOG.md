@@ -1,3 +1,34 @@
+## 2026-10-16（第十四轮）：飞书接入 —— C1 存储收口（策略迁进 `config.json`）
+
+> 背景：飞书策略（6 个平铺 DB 键）与 `config.json` 里的模型/AI 配置割裂，无法整体备份/审阅；
+> 且 `update_config` 会**整份重建** `AppConfig` —— 每新增一个配置块都要记得手工搬一行，漏一个就把
+> 用户写在 `config.json` 里的东西抹掉（`docs/LARK_BOT.md` §5.6 故障②）。走 **B 档**（配置文件为中心）
+> 的第一步：先**收口存储**，热重载/文件锁随后（C2/C3）。
+
+- **存储迁移**：6 个 `lark_*` 键 → `config.json` 的 `integrations.lark`（`AppConfig.integrations`）。
+  `#[serde(default)]` ⇒ **老 `config.json` 原样可加载**（不会因读不懂被判损坏）；`KNOWN_CONFIG_KEYS`
+  同步加 `integrations`，由既有的"键名 vs 字段"同步测试守住（`config.rs`）
+- **一次性迁移**：启动时读 DB `app_settings` 的遗留 `lark_*` → 写入 `config.json` → 置幂等标记
+  `lark_config_migrated` → 删 DB 行。顺序刻意是「先写 config → 再置标记 → 最后删行」，任何一步崩溃
+  重跑都得到**同样结果**；迁移用的列表解析**复用闸门自己的** `lark_gate::parse_allowed_users`
+  （同一套 fail-closed 规则 —— 迁移绝不能成为一次静默放宽）（`commands/settings.rs`、`lib.rs`）
+- **退役旧键**：`lark_*` 从 `update_settings::ALLOWED_KEYS` 移除；原"必须可写入"的测试**反转为
+  "必须不在白名单"**（防止有人加回去 —— bot 只读 `config.json`，写到 DB 的键没人读，表现为"改了没反应"）（`commands/settings.rs`）
+- **消除唯一的"整份重建"写者**：`update_config`（AI 设置页）从"从零重建 `AppConfig`"改为**读-改-写**，
+  只覆盖自己拥有的字段 ⇒ `integrations` / `embed_plans` / `web_api_token` / 用户手加的未知键**自动保住**，
+  不再依赖"新增字段时记得搬一行"（`commands/config.rs`）
+- **读者一起搬**（否则 bot 会读到**已被删**的 DB 键而静默失效）：
+  - 应用侧 `lark_bot::spawn_if_enabled` 改读 `config.json`（`lark_bot.rs`）
+  - 新增 `GET /api/integrations/lark`：**结构化**返回策略，形状由**服务端**保证（`webapi/routes/lark.rs`）
+  - bot 的 `load_gate_config` 改读该接口 —— 不再自己剥 `"true"`、也不再解析 JSON 字符串（`lark-bot/src/main.rs`）
+- **新增依赖**：主程序包 `lark-gate = { path = "lark-gate" }`（仅为复用 `parse_allowed_users`；该 crate 零重依赖，只吃 serde）
+- **测试**：`link_searcher_lib` 561 个用例（新增迁移映射：无遗留键→不迁移、**显式 `false` 才放宽私聊**、
+  空串名单→空列表 fail-closed、只覆盖出现的键）；`cargo test --workspace` 全绿、`tsc`/`vitest`/`semgrep ERROR` 零发现
+- **文档**：`docs/LARK_BOT.md` §5.6（B 档进度 C1→C3）、§7.1 ⑤（字段规格改为 `integrations.lark.*`）
+  与 ⑥（配对截止时刻由服务端记）
+- **未做（如实记录）**：C2 跨进程文件锁、C3 `notify` 热重载 + 自写抑制；`embed_plans` 运行期高频写与
+  `web_api_token` 双存储仍未重新分工
+
 ## 2026-10-16（第十三轮）：D 项 —— 卡片交互（按钮）实现完成
 
 > 前置：§8.4 的**决定性实验已通过**（本地多消费者允许）→ 按"双消费者"架构实现。

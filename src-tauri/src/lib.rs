@@ -432,9 +432,15 @@ get_dir_children,
                 }
             }
 
+            // 一次性把 DB 里遗留的飞书策略搬进 config.json（幂等；见 settings.rs）。
+            // 必须在拉 bot **之前**跑：bot 读的是 config.json，晚一步就会用旧默认值启动。
+            if let Ok(conn) = app.state::<AppState>().db.get() {
+                crate::commands::settings::migrate_legacy_lark_settings(&conn);
+            }
+
             // 飞书 bot sidecar（§5.4 的 C3）：webapi 之后再拉，因为它要经 webapi 读设置。
             // bot 侧对"webapi 还没监听上"有重试（见 bin/lark-bot.rs），故这里不必等。
-            lark_bot::spawn_if_enabled(app.handle());
+            lark_bot::spawn_if_enabled();
 
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();

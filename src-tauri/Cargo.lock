@@ -4096,6 +4096,7 @@ dependencies = [
  "image",
  "imageproc",
  "jieba-rs",
+ "lark-gate",
  "log",
  "lopdf 0.34.0",
  "md-5 0.10.6",

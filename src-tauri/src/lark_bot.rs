@@ -18,10 +18,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager};
-
-use crate::state::AppState;
-
 /// 已拉起的 bot 子进程。`None` ＝ 没在跑。
 static BOT: Mutex<Option<Child>> = Mutex::new(None);
 
@@ -76,27 +72,15 @@ fn lark_cli_path() -> Option<PathBuf> {
     crate::deps::catalog::lark_cli_path()
 }
 
-/// 若 `lark_bot_enabled == "true"` 则拉起 bot。**任何失败都只记日志**，
-/// 绝不因此影响应用启动。
-pub fn spawn_if_enabled(app: &AppHandle) {
-    let enabled = app
-        .state::<AppState>()
-        .db
-        .get()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row::<String, _, _>(
-                "SELECT value FROM app_settings WHERE key = 'lark_bot_enabled'",
-                [],
-                |r| r.get(0),
-            )
-            .ok()
-        })
-        .map(|v| v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-
+/// 若飞书集成已启用（`config.json` 的 `integrations.lark.enabled`）则拉起 bot。
+/// **任何失败都只记日志**，绝不因此影响应用启动。
+///
+/// 配置来源在 C1 从 DB `lark_bot_enabled` 改为 `config.json` —— 后者是唯一
+/// 真相来源，重启进程/重启 bot 都读同一处（见 `docs/LARK_BOT.md` §5.6）。
+pub fn spawn_if_enabled() {
+    let enabled = crate::config::lark_integration().enabled;
     if !enabled {
-        log::info!("[LARK-BOT] 未启用（lark_bot_enabled != \"true\"），不拉起");
+        log::info!("[LARK-BOT] 未启用（integrations.lark.enabled = false），不拉起");
         return;
     }
 

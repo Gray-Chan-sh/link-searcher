@@ -82,10 +82,13 @@ pub enum GateVerdict {
 /// 非私聊时的固定提示（§7.1 ③）。
 pub const NON_P2P_NOTICE: &str = "本机器人仅支持私聊";
 
-/// 解析 `lark_allowed_users`（`app_settings` 里的 JSON 数组字符串）。
+/// 解析"白名单/名单"值（JSON 数组字符串）。
 ///
-/// **任何异常都返回空**（＝拒绝全部）：解析失败、不是数组、元素非字符串。
+/// **任何异常都返回空**（＝拒绝全部）：解析失败、不是数组、元素非字符串、空串元素。
 /// 宁可把自己锁在外面，也不能因为"读不懂"就放行（§7.1 ②）。
+///
+/// 也是应用侧把 DB 遗留策略迁进 `config.json` 时所用的解析器（同一套 fail-closed
+/// 规则 —— 迁移不能成为一次静默放宽）。
 pub fn parse_allowed_users(raw: &str) -> Vec<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {

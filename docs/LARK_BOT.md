@@ -570,8 +570,8 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 | 故障 | 谁造成 | 解法 | 现状 |
 |---|---|---|---|
 | **写到一半**（半截 / 0 字节） | **任何**写入方（含我们自己的代码） | **原子写**（tmp → fsync → rename） | ✅ 本轮已修 |
-| **我改了、被应用覆盖** | 多个写入方：手改 vs 应用整文件重写 | **文件监听（热重载）+ 意外覆盖防护** | ❌ 未做 |
-| **两进程同时写、互相覆盖** | 多进程（CLI / headless / bot sidecar） | **文件锁** | ❌ 未做（`CONFIG_LOCK` 只是**进程内** Mutex） |
+| **我改了、被应用覆盖** | 多个写入方：手改 vs 应用整文件重写 | **文件监听（热重载）+ 意外覆盖防护** | 🟡 部分（C1：唯一"整份重建"写者 `update_config` 已改为**读-改-写**；热重载见 C3） |
+| **两进程同时写、互相覆盖** | 多进程（CLI / headless / bot sidecar） | **文件锁** | ❌ 未做（`CONFIG_LOCK` 只是**进程内** Mutex；C2 补跨进程锁） |
 
 ⚠️ 三者不可互相替代：**原子的写照样能吞掉另一个原子的写**；热重载也不防"写到一半"。
 
@@ -601,6 +601,26 @@ webapi 拿到的仍是真 `AppHandle`，71 处调用与 `commands::*` 签名一�
 **仍待处理（B 档的前置）**：`embed_plans` 是**运行期高频写**的字段，却待在会被整文件重写的
 `config.json` 里；`web_api_token` 仍**双存储**（config.json + DB `app_settings`，靠
 `resolve_token()` 的 env > config.json > DB 优先级对齐）。若走 B 档，这两处应一并重新分工。
+
+> **2026-10-16 决策与进度：走 B 档，分三步落地（C1→C3）**
+>
+> - **已定**：走 **B 档**（配置文件为中心、允许手改）。飞书策略是**第一块**搬进
+>   `config.json` 的集成配置（`integrations.lark`），也是把本节从纸面推到落地的样板。
+> - **C1（已合并）**：
+>   1. `integrations.lark` 进 `config.json`（`AppConfig.integrations`，`#[serde(default)]`
+>      ⇒ **老 `config.json` 原样可加载**，不会因读不懂被判损坏）；
+>   2. 启动时把 DB `app_settings` 里 6 个遗留 `lark_*` 键**一次性迁移**过去
+>      （幂等标记 `lark_config_migrated`；顺序"先写 config → 再置标记 → 最后删行"，
+>      任何一步崩溃重跑都得到同样结果）；
+>   3. `lark_*` 从 `update_settings` 的 `ALLOWED_KEYS` **退役** —— bot 只读 `config.json`，
+>      写进 DB 的键没人读，那种"改了没反应"正是本文件历史上踩过的静默失败；
+>   4. **消除唯一的"整份重建"写者**：`update_config`（AI 设置页）改为**读-改-写**，
+>      此后所有写入方都只覆盖自己拥有的字段 —— `integrations` / `embed_plans` /
+>      `web_api_token` / 用户手加的未知键**自动**保住，不再依赖"新增字段时记得手工搬一行"。
+> - **C2（待做）**：跨进程文件锁（`CONFIG_LOCK` 目前只是进程内 Mutex）。
+> - **C3（待做）**：`notify` 热重载（依赖已在用）+ **自写抑制**（按内容 hash ——
+>   按 mtime 判定会把应用自己的写当成"外部改动"，触发重载风暴）。
+> - **仍未解决（如实记录）**：`embed_plans` 运行期高频写、`web_api_token` 双存储（同上一段）。
 
 ### 5.7 bot sidecar 的打包（**已解决**：拆 crate → 打开 `externalBin`）
 
@@ -790,24 +810,35 @@ src-tauri/
 
 **⑤ 配置键完整规格**
 
-| 键 | 类型 | 默认 | 空值语义 | 用途 |
+**存储（2026-10-16 起）**：`config.json` 的 `integrations.lark`。原先平铺在 DB `app_settings`
+里的 6 个字符串键由**启动时的一次性迁移**搬过来（见 §5.6 C1）；`lark_*` 已从
+`update_settings` 白名单退役，DB 键名此后只作历史/迁移来源。
+
+| 字段（`integrations.lark.*`） | 类型 | 默认 | 空值语义 | 用途 |
 |---|---|---|---|---|
-| `lark_bot_enabled` | bool | **`false`** | — | 总开关。**默认关**，与 `web_api_enabled` 的"默认开"**刻意相反**：把内容发出去必须显式开启 |
-| `lark_require_p2p` | bool | **`true`** | — | L2：非私聊一律拒绝 |
-| `lark_allowed_users` | JSON 数组（`open_id`） | **`[]`（＝拒绝全部）** | 拒绝全部 | L1：允许触发机器人的用户 |
-| `lark_allowed_chats` | JSON 数组（`chat_id`） | `[]` | 拒绝全部 | **当前不参与判定**（见 ④） |
-| `lark_export_allow_dirs` | JSON 数组（路径） | `[]` | **不限制** | 内容外发收紧阀 |
-| `lark_pairing` | bool | `false` | — | 配对模式（见 ⑥） |
+| `enabled` | bool | **`false`** | — | 总开关。**默认关**，与 `web_api_enabled` 的"默认开"**刻意相反**：把内容发出去必须显式开启 |
+| `require_p2p` | bool | **`true`** | — | L2：非私聊一律拒绝 |
+| `allowed_users` | 数组（`open_id`） | **`[]`（＝拒绝全部）** | 拒绝全部 | L1：允许触发机器人的用户 |
+| `allowed_chats` | 数组（`chat_id`） | `[]` | 拒绝全部 | **当前不参与判定**（见 ④） |
+| `export_allow_dirs` | 数组（路径） | `[]` | **不限制** | 内容外发收紧阀 |
+| `pairing` | bool | `false` | — | 配对模式（见 ⑥） |
+| `pairing_expires_at` | unix 秒 | `0` | — | 配对**截止时刻**；`0`＝不限时（不推荐，见 ⑥ 第 4 条） |
+
+> bot **不直接读** `config.json`：它经 `GET /api/integrations/lark` 拿**结构化**结果
+> （见 §4.1 的数据流）。形状由服务端保证 —— bot 不再自己剥 `"true"`、也不再解析 JSON 字符串。
 
 **⑥ 冷启动：白名单为空＝谁都不许，那第一次怎么配对？**
 
 默认"拒绝全部"会把自己也锁在外面，解法是**配对模式**（规格）：
 
-1. 设置页首次启用机器人时进入配对模式：`lark_pairing = true`
+1. 设置页首次启用机器人时进入配对模式：`pairing = true`，并写入
+   `pairing_expires_at = now + 5 分钟`（截止时刻由**服务端**记，不靠 UI 计时 ——
+   用户点完就去干别的了，UI 一关计时就没了）
 2. 配对模式下 L1 暂放行，但**仅放行 p2p**，且**不回答**；收到消息即把该消息的 `sender open_id`
-   写入 `lark_allowed_users`，随后**自动关闭**配对
+   写入 `allowed_users`，随后**自动关闭**配对（消费入口必须校验 `pairing` **仍在有效期内**，
+   否则它就成了"凭 token 任意加白名单"的口子）
 3. 设置页显示「等待配对：请用飞书私聊机器人一次」
-4. **超时**（默认 5 分钟）自动关闭 —— 长期开着等于没有白名单
+4. **超时**（默认 5 分钟，即 `pairing_expires_at` 到期）自动失效 —— 长期开着等于没有白名单
 
 > 备选（更简单但不推荐）：让用户手动粘贴 `open_id` —— 用户通常不知道自己的 `open_id`，也容易粘错。
 

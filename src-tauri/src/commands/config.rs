@@ -3,7 +3,7 @@ use std::path::Path;
 use tauri::{AppHandle, Emitter, State};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::Connection;
-use crate::config::{AppConfig, INDEX_DIR_NAME, load_config, save_config};
+use crate::config::{INDEX_DIR_NAME, load_config, save_config};
 use crate::db;
 use crate::state::AppState;
 
@@ -74,28 +74,30 @@ pub fn update_config(
         }
     }
 
-    let mut config = AppConfig {
-        data_dir: new_config.data_dir.into(),
-        language: new_config.language,
-        ai_api_base: new_config.ai_api_base,
-        ai_api_key: new_config.ai_api_key,
-        embedding_api_base: new_config.embedding_api_base,
-        embedding_api_key: new_config.embedding_api_key,
-        embedding_model: new_config.embedding_model,
-        llm_api_base: new_config.llm_api_base,
-        llm_api_key: new_config.llm_api_key,
-        llm_model: new_config.llm_model,
-        providers: new_config.providers,
-        active_embedding_model_id: new_config.active_embedding_model_id,
-        active_llm_model_id: new_config.active_llm_model_id,
-        semantic_weight: new_config.semantic_weight,
-        active_reranker_model_id: new_config.active_reranker_model_id,
-        pending_cleanup_dir: current.pending_cleanup_dir.clone(),
-        embed_plans: current.embed_plans.clone(),
-        // token 的持久化来源是 config.json；本函数会整文件重写，必须原样保留，
-        // 否则一次「保存配置」就把 Web token 抹掉了。
-        web_api_token: current.web_api_token.clone(),
-    };
+    // 整文件**读-改-写**：只覆盖本命令「拥有」的字段（AI 网关 / 模型 / 语言 /
+    // 数据目录），其余字段（`integrations` / `embed_plans` / `pending_cleanup_dir` /
+    // `web_api_token` / 用户手加的未知键）**原样保留**。
+    //
+    // 这是 `docs/LARK_BOT.md` §5.6 故障② 的收口点：以前这里从零重建整份
+    // `AppConfig`，每新增一个配置块（如 `integrations`）就得记得手工搬一次，
+    // 漏一个就把用户写在 `config.json` 里的东西抹掉。改成 RMW 后这类字段
+    // **自动**保留，不再依赖"记得加一行"。
+    let mut config = current;
+    config.data_dir = new_config.data_dir.into();
+    config.language = new_config.language;
+    config.ai_api_base = new_config.ai_api_base;
+    config.ai_api_key = new_config.ai_api_key;
+    config.embedding_api_base = new_config.embedding_api_base;
+    config.embedding_api_key = new_config.embedding_api_key;
+    config.embedding_model = new_config.embedding_model;
+    config.llm_api_base = new_config.llm_api_base;
+    config.llm_api_key = new_config.llm_api_key;
+    config.llm_model = new_config.llm_model;
+    config.providers = new_config.providers;
+    config.active_embedding_model_id = new_config.active_embedding_model_id;
+    config.active_llm_model_id = new_config.active_llm_model_id;
+    config.semantic_weight = new_config.semantic_weight;
+    config.active_reranker_model_id = new_config.active_reranker_model_id;
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.
     config.ai_api_base = config.embedding_api_base.clone();

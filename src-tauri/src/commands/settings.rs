@@ -45,15 +45,10 @@ const ALLOWED_KEYS: &[&str] = &[
     "perf_writer_buffer_mb",
     "embed_parallelism",
     "embed_adaptive",
-    // 飞书机器人（`docs/LARK_BOT.md` §7.1 ⑤）。
-    // ⚠️ `lark_allowed_users` / `lark_allowed_chats` 的**空值语义是"拒绝全部"**（fail-closed），
-    //    而 `lark_export_allow_dirs` 的空值是"不限制"（fail-open）—— 方向相反，别"顺手统一"。
-    "lark_bot_enabled",
-    "lark_require_p2p",
-    "lark_allowed_users",
-    "lark_allowed_chats",
-    "lark_export_allow_dirs",
-    "lark_pairing",
+    // 飞书机器人策略**不在此**：它已迁到 `config.json` 的 `integrations.lark`
+    // （见 [`migrate_legacy_lark_settings`] 与 `docs/LARK_BOT.md` §5.6）。
+    // 这里刻意不保留 `lark_*` 直通键 —— bot 只读 config.json，写进 DB 也没人读，
+    // 那种"改了没反应"的静默失败正是本文件历史上踩过的坑。
 ];
 
 #[tauri::command]
@@ -104,6 +99,103 @@ pub async fn update_settings(
         }
     }
     Ok(())
+}
+
+/// 遗留的飞书策略键（曾经平铺在 `app_settings` 里，现已迁到 `config.json`）。
+const LEGACY_LARK_KEYS: &[&str] = &[
+    "lark_bot_enabled",
+    "lark_require_p2p",
+    "lark_allowed_users",
+    "lark_allowed_chats",
+    "lark_export_allow_dirs",
+    "lark_pairing",
+];
+
+/// 纯函数：把遗留键的读取结果套到当前配置上，返回迁移后的值。
+/// **一个遗留键都没有**时返回 `None`（表示无需迁移、保持 config.json 现状）。
+///
+/// 拆成纯函数是为了可单测：真实迁移会写 `config.json`（真实用户目录），
+/// 不适合在单测里跑。
+fn legacy_lark_into<F>(mut lark: crate::config::LarkIntegration, read: F) -> Option<crate::config::LarkIntegration>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut any = false;
+    if let Some(v) = read("lark_bot_enabled") {
+        lark.enabled = v.eq_ignore_ascii_case("true");
+        any = true;
+    }
+    if let Some(v) = read("lark_require_p2p") {
+        // 与 lark-gate 同取向：只有**显式** "false" 才放宽，其余（缺失/拼错）都保持要求私聊。
+        lark.require_p2p = !v.eq_ignore_ascii_case("false");
+        any = true;
+    }
+    if let Some(v) = read("lark_allowed_users") {
+        lark.allowed_users = lark_gate::parse_allowed_users(&v);
+        any = true;
+    }
+    if let Some(v) = read("lark_allowed_chats") {
+        lark.allowed_chats = lark_gate::parse_allowed_users(&v);
+        any = true;
+    }
+    if let Some(v) = read("lark_export_allow_dirs") {
+        lark.export_allow_dirs = lark_gate::parse_allowed_users(&v);
+        any = true;
+    }
+    if let Some(v) = read("lark_pairing") {
+        lark.pairing = v.eq_ignore_ascii_case("true");
+        any = true;
+    }
+    any.then_some(lark)
+}
+
+/// 把 DB `app_settings` 里遗留的飞书策略**一次性**搬进 `config.json` 的
+/// `integrations.lark`，然后删掉这些 DB 行并留下 `lark_config_migrated` 标记。
+///
+/// 为什么要搬：飞书策略原先散在 DB 里，与 `config.json` 的模型/AI 配置割裂，
+/// 备份/审阅/回滚都拿不到一起（`docs/LARK_BOT.md` §5.6 存储收口）。
+///
+/// **幂等**，且顺序刻意是「先写 config → 再置标记 → 最后删行」：
+/// 任何一步崩溃后再启动都得到**同样的结果**，不会把用户之后在设置页改的值
+/// 用旧的 DB 值覆盖回去。
+pub fn migrate_legacy_lark_settings(conn: &rusqlite::Connection) {
+    let read = |k: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT value FROM app_settings WHERE key = ?1",
+            rusqlite::params![k],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    };
+
+    if read("lark_config_migrated").as_deref() == Some("1") {
+        return;
+    }
+
+    if let Some(lark) = legacy_lark_into(crate::config::lark_integration(), &read) {
+        match crate::config::set_lark_integration(&lark) {
+            Ok(()) => log::info!("[CONFIG] 已把遗留飞书策略迁移进 config.json 的 integrations.lark"),
+            Err(e) => {
+                // 保留 DB 行，下次启动重试；绝不置标记。
+                log::error!("[CONFIG] 迁移飞书策略失败（保留 DB 行下次重试）: {e}");
+                return;
+            }
+        }
+    }
+
+    // 置标记：即使没有遗留键也置，避免每次启动都做无谓查找。
+    if let Err(e) = conn.execute(
+        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('lark_config_migrated', '1')",
+        [],
+    ) {
+        log::warn!("[CONFIG] 写入 lark_config_migrated 标记失败: {e}");
+        return;
+    }
+    for k in LEGACY_LARK_KEYS {
+        if let Err(e) = conn.execute("DELETE FROM app_settings WHERE key = ?1", rusqlite::params![k]) {
+            log::warn!("[CONFIG] 清理遗留飞书键 '{k}' 失败: {e}");
+        }
+    }
 }
 
 #[tauri::command]
@@ -190,19 +282,72 @@ mod tests {
         );
     }
 
-    /// 飞书策略键必须可通过设置接口写入 —— 否则 bot 侧读到的永远是默认值，
-    /// 表现为"机器人不响应任何消息"（2026-10-15 E2E 实测：`unknown setting key`）。
+    /// 飞书策略键**已退役**：它们不再是 `app_settings` 的可写键，而是
+    /// `config.json` 的 `integrations.lark`（存储收口）。
+    ///
+    /// 留这条测试是为了挡住"顺手加回 `ALLOWED_KEYS`" —— 那会写到**没人读**的键上
+    /// （bot 只读 config.json），表现为"改了没反应"，正是本模块踩过的静默失败。
     #[test]
-    fn allowed_keys_contain_lark_policy() {
-        for key in [
-            "lark_bot_enabled",
-            "lark_require_p2p",
-            "lark_allowed_users",
-            "lark_allowed_chats",
-            "lark_export_allow_dirs",
-            "lark_pairing",
-        ] {
-            assert!(ALLOWED_KEYS.contains(&key), "ALLOWED_KEYS 缺少 '{key}'");
+    fn legacy_lark_keys_are_retired_from_allowed_keys() {
+        for key in LEGACY_LARK_KEYS {
+            assert!(
+                !ALLOWED_KEYS.contains(key),
+                "'{key}' 已迁到 config.json 的 integrations.lark，不应再出现在 ALLOWED_KEYS"
+            );
         }
+    }
+
+    /// 迁移映射：显式 "false" 才放宽私聊要求；空串名单解析成空列表（fail-closed）。
+    #[test]
+    fn legacy_lark_mapping_follows_fail_closed() {
+        let from = |pairs: Vec<(&str, &str)>| {
+            let owned: Vec<(String, String)> =
+                pairs.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            move |k: &str| owned.iter().find(|(key, _)| key == k).map(|(_, v)| v.clone())
+        };
+
+        // 无遗留键 → 不迁移。
+        assert!(legacy_lark_into(crate::config::LarkIntegration::default(), from(vec![])).is_none());
+
+        // 只有显式 false 才关掉"要求私聊"。
+        let l = legacy_lark_into(
+            crate::config::LarkIntegration::default(),
+            from(vec![("lark_require_p2p", "false")]),
+        )
+        .expect("有遗留键就应返回");
+        assert!(!l.require_p2p, "显式 false 才放宽");
+
+        let l = legacy_lark_into(
+            crate::config::LarkIntegration::default(),
+            from(vec![("lark_require_p2p", "maybe")]),
+        )
+        .expect("有遗留键就应返回");
+        assert!(l.require_p2p, "拼错/非 false 一律保持要求私聊");
+
+        // 空串名单 → 空列表（拒绝全部），而不是报错。
+        let l = legacy_lark_into(
+            crate::config::LarkIntegration::default(),
+            from(vec![("lark_allowed_users", ""), ("lark_bot_enabled", "true")]),
+        )
+        .expect("有遗留键就应返回");
+        assert!(l.allowed_users.is_empty());
+        assert!(l.enabled);
+
+        // 正常 JSON 数组照常解析。
+        let l = legacy_lark_into(
+            crate::config::LarkIntegration::default(),
+            from(vec![("lark_allowed_users", r#"["ou_a","ou_b"]"#)]),
+        )
+        .expect("有遗留键就应返回");
+        assert_eq!(l.allowed_users, vec!["ou_a".to_string(), "ou_b".to_string()]);
+
+        // 只覆盖出现的键：未出现的保持传入的当前配置。
+        let current = crate::config::LarkIntegration {
+            allowed_users: vec!["ou_keep".into()],
+            ..Default::default()
+        };
+        let l = legacy_lark_into(current, from(vec![("lark_bot_enabled", "true")]))
+            .expect("有遗留键就应返回");
+        assert_eq!(l.allowed_users, vec!["ou_keep".to_string()]);
     }
 }

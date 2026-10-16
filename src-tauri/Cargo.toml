@@ -39,6 +39,10 @@ harness = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 飞书准入策略（仅私聊 + 白名单，fail-closed）。应用侧只用到它的**解析**语义
+# （`parse_allowed_users`）：把 DB 里的遗留策略迁移进 `config.json` 时必须与
+# 闸门**同一套** fail-closed 规则，否则"迁移"本身就是一次静默放宽。
+lark-gate = { path = "lark-gate" }
 base64 = "0.22"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"
