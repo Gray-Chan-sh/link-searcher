@@ -1,3 +1,49 @@
+## 2026-10-17（第二十九轮）：飞书会话名可见化 + `/rename` 改名
+
+> 跟进第二十八轮（多组多轮会话）的用户反馈："飞书上能不能看到当前会话名？""会话名是怎么定的？"
+> 排查确认：标题机制**早已存在**（首问前 20 字自动命名），只是飞书侧从未显示；且除"整会话保存"
+> 外没有改名的窄入口。本轮把标题**用起来**并补上改名。
+
+### A. 自动命名机制（存量行为，本轮只做核对与文档化）
+
+- 新建会话标题固定"新会话"（占位）；**首次保存**时若为空/占位 → 取第一条 `user` 消息的前 20 字
+  （`session.rs::title_from_first_message`），此后不再自动变；UI 也没有改名入口。
+- 落进飞书的含义：标题 = 首问前 20 字截断，长问题可能"被拦腰"，且永不变 → 引出 B/C。
+
+### B. 会话名可见化（`lark-bot/src/card.rs` + `main.rs`）
+
+- `render_answer_card` / `render_working` 新增 `title` 参数：页眉渲染成 `回答 · 合同审查` /
+  `正在检索… · 合同审查` / `回答（1 / 3） · 合同审查`。
+- **占位标题不显示**（空、"新会话"、纯空白 → 退回无标题）—— 统一收在 `card::headline`，
+  首轮回答（保存前标题还是"新会话"）不会挂一个没信息量的尾巴。
+- `/switch` 锚点带上会话名（`已切换到会话「合同审查」，上一个问题是：…`），
+  名字缺省时退回无名版文案（`anchor_text` 纯函数，含单测）。
+
+### C. `/rename <新名字>`（新命令，前端无改名 UI）
+
+- 命令解析：`rename` 的**剩余整段**当标题（含空格保留）；缺参数回用法提示。
+- **窄写入口**：新增 `rename_chat_session_impl`（只改 `title` 字段；`sanitize_session_title`
+  去空白 + 30 字上限；**不刷新 `updated_at`** —— 改名是元数据整理，不该顶到"最近使用"首位；
+  与其他写路径一样受 `origin` 约束/跨端拒绝）+ 标题长度上限常量。
+- 传输对称：WebAPI `PUT /api/chat/sessions/{id}/rename?origin=…`（`webapi/routes/ai.rs`）
+  + Tauri 命令 `rename_chat_session`（`lib.rs` 注册）；bot 侧 `reply_rename` 调端点后回
+  "已改名" + 最新会话列表卡。
+- 改名对三端**立即可见**（共用 `chat_history.json`）：飞书 `/sessions`、桌面侧栏、Web 端一致。
+
+### D. 测试
+
+- bot：`card_headline_carries_session_title_but_hides_placeholder`、
+  `rename_keeps_full_title_with_spaces`、`anchor_text_shows_title_and_last_question`、
+  `session_title_of_filters_blank_titles`（bot 合计 63 项）。
+- app：`sanitize_session_title_trims_limits_and_rejects_blank`、
+  `rename_only_touches_title_and_honours_origin`（含"updated_at 不动"断言）；
+  `webapi_http.rs` 新增改名全链路：改后列表立刻反映 / 空标题 400 / 跨端 400 / 不存在 400。
+
+### 门禁
+
+`cargo test --workspace` 全绿（lib 602 + lark-bot 63 + lark-gate 13 + 集成/HTTP/……）
++ `npx tsc --noEmit` 0 错 + `npx vitest run` 81/81 + semgrep ERROR 0 发现。
+
 ## 2026-10-16（第二十八轮）：飞书集成搜索与多组多轮 AI 会话（命令 + 卡片点选 + 可选菜单）
 
 > 需求："在飞书中集成搜索、AI 聊天功能，并且可以和 UI 一样，AI 聊天可以分成多组、每组可以多轮"；

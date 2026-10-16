@@ -424,6 +424,50 @@ pub fn find_chat_session(
         .find(|s| s.id == id && belongs_to(s, origin))
 }
 
+/// 显式改标题的**长度上限**（按字符；UI 侧栏与飞书卡片列表都只有一行空间）。
+pub const MAX_SESSION_TITLE_CHARS: usize = 30;
+
+/// 校验并按上限截断一个用户输入的会话标题。
+///
+/// 空/纯空白是**错误**（不是静默忽略）：调用方（`/rename`）必须能把这个反馈给用户。
+pub fn sanitize_session_title(title: &str) -> Result<String, String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err("标题不能为空".to_string());
+    }
+    Ok(trimmed.chars().take(MAX_SESSION_TITLE_CHARS).collect())
+}
+
+/// **只改标题**的窄写入口（`/rename` 用；前端没有改名 UI，整会话保存走 `save_chat_session_impl`）。
+///
+/// 与其他写路径一样受**来源端**约束（跨端拒绝）。刻意不写 `updated_at`：
+/// 改名是元数据整理，不该把它顶到"最近使用"的第一位（列表排序按它）。
+pub fn rename_chat_session_impl(
+    data_dir: &std::path::Path,
+    id: &str,
+    title: &str,
+    origin: Option<&str>,
+) -> Result<String, String> {
+    let title = sanitize_session_title(title)?;
+    let saved = title.clone();
+    mutate_history(data_dir, |h| {
+        let Some(s) = h.sessions.iter_mut().find(|s| s.id == id) else {
+            return Err("会话不存在".to_string());
+        };
+        if let Some(o) = origin
+            && effective_origin(s) != o
+        {
+            return Err(format!(
+                "跨来源端改名被拒绝：会话属于 '{}'，请求来自 '{o}'",
+                effective_origin(s)
+            ));
+        }
+        s.title = title;
+        Ok(())
+    })?;
+    Ok(saved)
+}
+
 /// Load a full session by id. Returns None if not found **or not owned by `origin`**.
 pub fn load_chat_session(
     state: State<'_, AppState>,
@@ -1115,5 +1159,49 @@ mod tests {
         assert_eq!(parse_origin(None).unwrap(), None, "None = 不限来源");
         assert_eq!(parse_origin(Some("lark")).unwrap().as_deref(), Some(ORIGIN_LARK));
         assert_eq!(parse_origin(Some(" web ")).unwrap().as_deref(), Some(ORIGIN_WEB), "两侧空白容忍");
+    }
+
+    /// 标题清洗：去空白、按 30 字截断；空/纯空白**报错**（不能把会话改成没名字）。
+    #[test]
+    fn sanitize_session_title_trims_limits_and_rejects_blank() {
+        assert_eq!(sanitize_session_title("  合同审查  ").unwrap(), "合同审查");
+        assert_eq!(
+            sanitize_session_title(&"字".repeat(50)).unwrap(),
+            "字".repeat(MAX_SESSION_TITLE_CHARS),
+            "超长按字符截到上限（不切碎 UTF-8）"
+        );
+        assert!(sanitize_session_title("").is_err());
+        assert!(sanitize_session_title("   ").is_err());
+    }
+
+    /// 改名：只动 `title`（`updated_at` 不刷新——改名不该把它顶到"最近使用"首位）；
+    /// 空标题与跨端改名都被拒。
+    #[test]
+    fn rename_only_touches_title_and_honours_origin() {
+        let dir = temp_dir();
+        let id = create_chat_session_impl(&dir, ORIGIN_LARK).unwrap();
+        // 让 updated_at 与改名时刻拉开差距（now_ts 是秒级）
+        let before = find_chat_session(&dir, &id, None).unwrap();
+
+        let saved = rename_chat_session_impl(&dir, &id, "  合同审查  ", Some(ORIGIN_LARK)).unwrap();
+        assert_eq!(saved, "合同审查", "返回值是清洗后的标题");
+
+        let after = find_chat_session(&dir, &id, None).unwrap();
+        assert_eq!(after.title, "合同审查");
+        assert_eq!(after.updated_at, before.updated_at, "改名不得刷新 updated_at");
+        assert_eq!(after.origin, ORIGIN_LARK, "来源端不受影响");
+        assert_eq!(after.messages.len(), 0, "不改动消息");
+
+        // 空标题被拒（且不得发生任何改动）
+        assert!(rename_chat_session_impl(&dir, &id, "   ", Some(ORIGIN_LARK)).is_err());
+        assert_eq!(find_chat_session(&dir, &id, None).unwrap().title, "合同审查");
+
+        // 跨端改名被拒
+        assert!(rename_chat_session_impl(&dir, &id, "偷改", Some(ORIGIN_WEB)).is_err());
+        assert_eq!(find_chat_session(&dir, &id, None).unwrap().title, "合同审查");
+
+        // 不存在的会话报错
+        assert!(rename_chat_session_impl(&dir, "nope", "x", Some(ORIGIN_LARK)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

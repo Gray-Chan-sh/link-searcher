@@ -21,6 +21,7 @@ pub const HELP_TEXT: &str = "**可用命令**\n\
 - `/new` — 新建会话并切换过去\n\
 - `/sessions` — 查看会话列表\n\
 - `/switch 3` — 切换到第 3 个会话（也可用标题前缀，如 `/switch 合同`）\n\
+- `/rename 新名字` — 给当前会话改个名字（侧栏与列表显示的就是它）\n\
 - `/delete 3` — 删除第 3 个会话（会先让你确认）\n\
 - `/find 关键词` — 搜索本地库（`/find 关键词 2` 翻到第 2 页）\n\
 \n\
@@ -36,6 +37,8 @@ pub enum Command {
     New,
     List,
     Switch(String),
+    /// 给**当前活动会话**改标题（新名字含空格时整体保留）。
+    Rename(String),
     Delete(String),
     Find { query: String, page: usize },
     /// 不是命令（空正文 / 未命中前缀）或未识别的命令 → 走 AI 问答。
@@ -67,6 +70,15 @@ pub fn parse_command(text: &str) -> Command {
             // 缺参数：当作列出会话（用户多半想看"能切到哪几个"）
             _ => Command::List,
         },
+        "rename" => {
+            // 名字可含空格 → 把剩余整段当标题（而不是只取第一个词）
+            let name: Vec<&str> = args.clone();
+            if name.is_empty() {
+                Command::Rename(String::new()) // 缺参数 → 上层回用法提示
+            } else {
+                Command::Rename(name.join(" "))
+            }
+        }
         "delete" => match args.first() {
             Some(a) if !a.is_empty() => Command::Delete((*a).to_string()),
             _ => Command::List,
@@ -164,6 +176,18 @@ mod tests {
         // 缺参数的 switch/delete → 列出来让用户看着选，而不是报错
         assert_eq!(parse_command("/switch"), Command::List);
         assert_eq!(parse_command("/delete"), Command::List);
+    }
+
+    #[test]
+    fn rename_keeps_full_title_with_spaces() {
+        assert_eq!(parse_command("/rename 合同审查"), Command::Rename("合同审查".into()));
+        assert_eq!(
+            parse_command("/rename 汪均益 案卷 整理"),
+            Command::Rename("汪均益 案卷 整理".into()),
+            "标题里的空格要保留（整段都是名字）"
+        );
+        assert_eq!(parse_command("/rename"), Command::Rename(String::new()), "缺参数 → 空（上层给用法提示）");
+        assert_eq!(parse_command("/rename   "), Command::Rename(String::new()));
     }
 
     #[test]

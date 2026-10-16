@@ -46,6 +46,10 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             post(conversation_ask_stream_handler),
         )
         .route("/api/chat/sessions/{id}", put(save_chat_session_handler))
+        .route(
+            "/api/chat/sessions/{id}/rename",
+            put(rename_chat_session_handler),
+        )
         .route("/api/ai/gateways/test", get(test_gateway_handler))
         .route("/api/ai/cancel", post(cancel_ai_request_handler))
         .route("/api/ai/events", get(ai_events_handler))
@@ -514,6 +518,34 @@ async fn save_chat_session_handler(
     crate::commands::ai::save_chat_session_impl(&app_state.data_dir, session, Some(&origin))
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "saved": true })))
+}
+
+#[derive(serde::Deserialize)]
+struct RenameChatSessionBody {
+    title: String,
+}
+
+/// **只改标题**（`/rename` 的落点；§11.6）。
+///
+/// 为什么不复用 `PUT /api/chat/sessions/{id}`：那条路要求把**整个会话载荷**送回来
+/// （含全部消息），对"只想改个名字"的调用方既笨重又有"旧载荷覆盖新消息"的竞态风险。
+/// 这里只碰标题字段，且与其他写路径一样受 `origin` 约束（跨端拒绝）。
+async fn rename_chat_session_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<OriginQuery>,
+    Json(body): Json<RenameChatSessionBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let origin = session_origin(&q)?;
+    let saved = crate::commands::ai::rename_chat_session_impl(
+        &app_state.data_dir,
+        &id,
+        &body.title,
+        Some(&origin),
+    )
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": true, "title": saved })))
 }
 
 async fn test_gateway_handler() -> Result<Json<serde_json::Value>, ApiError> {

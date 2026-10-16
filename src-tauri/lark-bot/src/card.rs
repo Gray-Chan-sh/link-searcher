@@ -243,21 +243,40 @@ pub fn render_card(title: &str, body_md: &str, footer: Option<&str>) -> serde_js
 }
 
 /// "检索中"卡片：进度阶段 + 已经生成的部分内容。
-pub fn render_working(progress: &str, partial: &str) -> serde_json::Value {
+///
+/// `title`：当前会话名（`/rename` 或首问自动生成）—— 回答卡与流式卡都带上它，
+/// 用户始终能看到"现在在哪个会话里问答"。空/占位（见 [`crate::card::display_title`]）
+/// 时退回无标题。
+pub fn render_working(progress: &str, partial: &str, title: Option<&str>) -> serde_json::Value {
     let body = if partial.trim().is_empty() {
         format!("⏳ {progress}")
     } else {
         format!("{partial}\n\n---\n⏳ {progress}")
     };
-    render_card("正在检索…", &body, None)
+    render_card(&headline("正在检索…", title), &body, None)
+}
+
+/// 卡片标题的组合规则：有会话名 → `基础 · 会话名`；否则就用基础标题。
+///
+/// "新会话"是**占位标题**（首轮回答保存时才自动命名）→ 不显示它，
+/// 免得每张卡都挂一个没信息量的"新会话"。
+fn headline(base: &str, title: Option<&str>) -> String {
+    match title.map(str::trim).filter(|t| !t.is_empty() && *t != "新会话") {
+        Some(t) => format!("{base} · {t}"),
+        None => base.to_string(),
+    }
 }
 
 /// 渲染**分页**的最终卡片（`page` 从 1 开始）。
+///
+/// `title` = 会话名（首问后自动生成，或 `/rename` 指定）→ 页眉显示 `回答 · <标题>`，
+/// 让用户一眼知道这条回答属于哪个会话（多会话切换时的关键信息）。
 ///
 /// 证据条数与耗时**只标在最后一张**：否则一张长回答会连着刷三遍同样的脚注，
 /// 反而把"读到第几段"这个真正有用的信息淹掉。
 pub fn render_answer_card(
     body: &str,
+    title: Option<&str>,
     page: usize,
     pages: usize,
     evidence_count: usize,
@@ -275,9 +294,9 @@ pub fn render_answer_card(
             meta.push(format!("{}s", took_ms / 1000));
         }
     }
-    let title = if pages > 1 { format!("回答（{page} / {pages}）") } else { "回答".to_string() };
+    let base = if pages > 1 { format!("回答（{page} / {pages}）") } else { "回答".to_string() };
     let footer = if meta.is_empty() { None } else { Some(meta.join(" · ")) };
-    render_card(&title, body, footer.as_deref())
+    render_card(&headline(&base, title), body, footer.as_deref())
 }
 
 /// 把长回答切成**多张卡片**（每张 ≤ `max_bytes`），最多 `max_cards` 张。
@@ -787,7 +806,7 @@ mod tests {
     #[test]
     fn whole_card_json_stays_under_feishu_30kb_limit() {
         let long = "字".repeat(20_000); // 60KB，必被截断
-        let card = render_answer_card(&long, 1, 1, 3, 1000);
+        let card = render_answer_card(&long, None, 1, 1, 3, 1000);
         let json = serde_json::to_string(&card).unwrap();
         assert!(json.len() < 30_000, "整张卡片 JSON 必须 < 30KB，实际 {} 字节", json.len());
         assert!(json.contains("已截断"));
@@ -834,9 +853,28 @@ mod tests {
 
     // ── 卡片渲染 ──
 
+    /// 会话名出现在卡片页眉；占位标题（"新会话"）与空值不显示。
+    #[test]
+    fn card_headline_carries_session_title_but_hides_placeholder() {
+        let with = render_answer_card("答案", Some("合同审查"), 1, 1, 2, 3400);
+        assert_eq!(with["header"]["title"]["content"], "回答 · 合同审查");
+        let working = render_working("正在检索…", "", Some("合同审查"));
+        assert_eq!(working["header"]["title"]["content"], "正在检索… · 合同审查");
+        let paged = render_answer_card("第一段", Some("合同审查"), 1, 3, 0, 0);
+        assert_eq!(paged["header"]["title"]["content"], "回答（1 / 3） · 合同审查");
+
+        for placeholder in [None, Some(""), Some("   "), Some("新会话")] {
+            let c = render_answer_card("答案", placeholder, 1, 1, 0, 0);
+            assert_eq!(
+                c["header"]["title"]["content"], "回答",
+                "占位标题不该显示：{placeholder:?}"
+            );
+        }
+    }
+
     #[test]
     fn card_shape_is_valid_1_0() {
-        let c = render_answer_card("答案 [1]", 1, 1, 2, 3400);
+        let c = render_answer_card("答案 [1]", None, 1, 1, 2, 3400);
         assert!(c.get("config").is_some());
         assert_eq!(c["header"]["title"]["content"], "回答");
         assert_eq!(c["elements"][0]["tag"], "markdown");
@@ -849,9 +887,9 @@ mod tests {
 
     #[test]
     fn working_card_shows_progress_and_marks_partial() {
-        let c = render_working("正在检索文档…", "");
+        let c = render_working("正在检索文档…", "", None);
         assert!(c["elements"][0]["content"].as_str().unwrap_or("").contains("⏳"));
-        let c2 = render_working("生成回答中…", "已经写了一半");
+        let c2 = render_working("生成回答中…", "已经写了一半", None);
         let body = c2["elements"][0]["content"].as_str().unwrap_or("");
         assert!(body.contains("已经写了一半") && body.contains("生成回答中"));
         assert_eq!(c2["elements"].as_array().unwrap().len(), 1, "没有 footer 时不该多出元素");
@@ -921,18 +959,18 @@ mod tests {
 
     #[test]
     fn paged_card_marks_pages_and_only_last_shows_evidence() {
-        let c1 = render_answer_card("第一段", 1, 3, 19, 67000);
+        let c1 = render_answer_card("第一段", None, 1, 3, 19, 67000);
         assert_eq!(c1["header"]["title"]["content"], "回答（1 / 3）");
         let f1 = &c1["elements"][2]["elements"][0]["content"];
         assert_eq!(f1, "第 1 / 3 段", "非最后一张不该标证据/耗时");
-        let c3 = render_answer_card("末段", 3, 3, 19, 67000);
+        let c3 = render_answer_card("末段", None, 3, 3, 19, 67000);
         let f3 = c3["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
         assert!(f3.contains("第 3 / 3 段") && f3.contains("19 条证据") && f3.contains("67s"), "实际：{f3}");
     }
 
     #[test]
     fn single_page_card_has_no_page_marker() {
-        let c = render_answer_card("就一段", 1, 1, 2, 3400);
+        let c = render_answer_card("就一段", None, 1, 1, 2, 3400);
         assert_eq!(c["header"]["title"]["content"], "回答");
         let f = c["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
         assert!(!f.contains("段"), "只有一段时不该出现分页标记：{f}");
@@ -1088,7 +1126,7 @@ mod tests {
     /// 它们一旦漂移，症状是"按钮点了没反应"—— 最难查的那种。
     #[test]
     fn action_buttons_round_trip_into_parseable_actions() {
-        let mut card = render_answer_card("答", 1, 1, 1, 1000);
+        let mut card = render_answer_card("答", None, 1, 1, 1, 1000);
         append_actions(&mut card, "sess-9");
         let elems = card["elements"].as_array().unwrap();
         let action = elems.last().expect("应追加 action 元素");
@@ -1151,7 +1189,7 @@ mod tests {
 
     #[test]
     fn actions_are_skipped_without_a_session_id() {
-        let mut card = render_answer_card("答", 1, 1, 1, 1000);
+        let mut card = render_answer_card("答", None, 1, 1, 1, 1000);
         let before = card["elements"].as_array().unwrap().len();
         append_actions(&mut card, "   ");
         assert_eq!(

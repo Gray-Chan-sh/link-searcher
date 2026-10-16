@@ -6,7 +6,7 @@
 //! 消费 lark-cli 的 NDJSON 事件（三条流汇进同一个处理循环）：
 //!   ├─ im.message.receive_v1  消息  → §7.1 准入判定（`lark-gate`）→ /api/lark/seen 去重
 //!   │     ├─ 命中斜杠命令（commands::parse_command）→ 命令实现（/help /new /sessions
-//!   │     │   /switch /delete /find）→ 回卡片/文本，结束
+//!   │     │   /switch /rename /delete /find）→ 回卡片/文本，结束
 //!   │     └─ 否则 → 取/建**活动会话**（chat_id ↔ 多会话表的 is_active 行）
 //!   │           → 回"检索中"卡片 → 消费 `POST /api/ai/conversation/ask/stream`（SSE）
 //!   │           → **节流**更新卡片（§8.1）→ 收尾成最终卡片 → 这一轮落回会话（origin=lark）
@@ -296,6 +296,7 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
         Cmd::New => return reply_new_session(http, &ev),
         Cmd::List => return reply_session_list(http, &ev),
         Cmd::Switch(arg) => return reply_switch(http, &ev, &arg),
+        Cmd::Rename(name) => return reply_rename(http, &ev, &name),
         Cmd::Delete(arg) => return reply_delete_confirm(http, &ev, &arg),
         Cmd::Find { query, page } => return reply_find(http, &ev, &query, page),
         // 不是命令 / 是空正文：走 AI 问答
@@ -362,6 +363,18 @@ fn ask_with_session(
     answer_with_text(http, ev, question, session_id, session, messages, retry_prior_answer)
 }
 
+/// 从会话响应的 `title` 字段读会话名（`Option<&str>` 直接喂给卡片渲染）。
+///
+/// 占位标题（"新会话"）由 [`card::headline`] 统一隐藏 —— 这里只管取值。
+fn session_title_of(session: &Value) -> Option<String> {
+    session
+        .get("title")
+        .and_then(|t| t.as_str())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
 /// 截断过长回答，并说明原因。
 ///
 /// **只用于纯文本兜底路径**（卡片路径有自己的 `card::clip`，且飞书卡片本身能承载更多内容）。
@@ -409,7 +422,7 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-// ───────────────── 命令实现（§11：/help /new /sessions /switch /delete /find） ─────────────────
+// ───────────────── 命令实现（§11：/help /new /sessions /switch /rename /delete /find） ─────────────────
 
 /// 一条会话（供列表展示与切换）。
 struct SessionBrief {
@@ -539,14 +552,21 @@ fn reply_new_session(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
     reply_session_list(http, ev)
 }
 
-/// 切换后的"锚点"说明：让用户知道接上了哪条对话（最后一条提问）。
+/// 切换后的"锚点"说明：让用户知道接上了**哪条**对话（会话名 + 最后一条提问）。
+///
+/// §11.6：标题是"知道自己在哪"的主要线索 —— 自动命名（首问前 20 字）或 `/rename`
+/// 显式命名，这里原样带出（占位"新会话"/空则由 [`anchor_text`] 省略）。
 fn switch_anchor(http: &Http, session_id: &str) -> Result<String, String> {
     let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
     Ok(anchor_text(&session))
 }
 
-/// 从会话里取"最后一条用户提问"（纯函数，便于单测）。
+/// 从会话里组装切换锚点文本（纯函数，便于单测）。
 fn anchor_text(session: &Value) -> String {
+    let name = session_title_of(session)
+        .filter(|t| t != "新会话")
+        .map(|t| format!("「{t}」"))
+        .unwrap_or_default();
     let last_q = session
         .get("messages")
         .and_then(|m| m.as_array())
@@ -560,13 +580,22 @@ fn anchor_text(session: &Value) -> String {
         .trim()
         .to_string();
     if last_q.is_empty() {
-        "这是一条新会话，直接提问即可。".to_string()
+        if name.is_empty() {
+            "已切换：这是一条新会话，直接提问即可。".to_string()
+        } else {
+            format!("已切换到会话 {name} —— 这还是一条新会话，直接提问即可。")
+        }
     } else {
         let short: String = last_q.chars().take(60).collect();
-        if last_q.chars().count() > 60 {
-            format!("已接上这条会话，上一个问题是：{short}…")
+        let tail = if last_q.chars().count() > 60 {
+            format!("{short}…")
         } else {
-            format!("已接上这条会话，上一个问题是：{short}")
+            short
+        };
+        if name.is_empty() {
+            format!("已接上这条会话，上一个问题是：{tail}")
+        } else {
+            format!("已切换到会话 {name}，上一个问题是：{tail}")
         }
     }
 }
@@ -662,6 +691,46 @@ fn reply_delete_confirm(http: &Http, ev: &LarkMessageEvent, arg: &str) -> Result
     )?;
     log::info!("[bot] 删除确认卡已发（chat={}，目标 {n}）", ev.chat_id);
     Ok(())
+}
+
+/// `/rename <新名字>`：只改**当前活动会话**的标题。
+///
+/// 命名是"知道自己在哪"的主要线索（卡片页眉、`/sessions` 列表、`/switch` 锚点都用它）。
+/// 空参数回用法提示而不是静默；改名后回一张最新列表（用户直接看到新名字）。
+fn reply_rename(http: &Http, ev: &LarkMessageEvent, name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        reply(
+            &ev.message_id,
+            "用法：`/rename 新名字`（给**当前会话**改名；先 `/sessions` 切换到目标会话）",
+        );
+        return Ok(());
+    }
+    // 当前活动会话（没有绑定 → 先让用户有个会话可改）
+    let active = http.chat_sessions(&ev.chat_id)?.into_iter().find(|b| b.is_active);
+    let Some(active) = active else {
+        reply(&ev.message_id, "当前还没有会话。先发 `/new` 或直接提问，再来改名。");
+        return Ok(());
+    };
+    let body = http.put(
+        &format!("/api/chat/sessions/{}/rename?origin=lark", active.id),
+        &json!({ "title": name }),
+    )?;
+    let saved = body
+        .get("title")
+        .and_then(|t| t.as_str())
+        .unwrap_or(name)
+        .to_string();
+    reply(
+        &ev.message_id,
+        &format!("已把当前会话改名为「{saved}」（超长会截到 30 字）。"),
+    );
+    log::info!(
+        "[bot] 已改名会话 {} → 「{saved}」（chat={}）",
+        active.id,
+        ev.chat_id
+    );
+    reply_session_list(http, ev)
 }
 
 /// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
@@ -826,13 +895,14 @@ fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Resul
         Cmd::New => reply_new_session(http, &ev),
         Cmd::List => reply_session_list(http, &ev),
         Cmd::Switch(arg) => reply_switch(http, &ev, &arg),
+        Cmd::Rename(name) => reply_rename(http, &ev, &name),
         Cmd::Delete(arg) => reply_delete_confirm(http, &ev, &arg),
         Cmd::Find { query, page } => reply_find(http, &ev, &query, page),
         // 菜单项配成了别的文案（不是命令）：回帮助，别猜
         Cmd::Ai => {
             reply(
                 &ev.message_id,
-                "菜单项未配置为命令。可选：/new、/sessions、/switch <序号或标题>、/delete <序号>、/find <关键词>、/help",
+                "菜单项未配置为命令。可选：/new、/sessions、/switch <序号或标题>、/rename <新名字>、/delete <序号>、/find <关键词>、/help",
             );
             Ok(())
         }
@@ -932,8 +1002,7 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                     );
                     let retry = (!prior_answer.is_empty()).then(|| prior_answer.as_str());
                     answer_with_card(http, &synth, &question, &session_id, session, messages, retry)
-                        .map_err(|e| format!("重跑失败：{e}"))
-                }
+                        .map_err(|e| format!("重跑失败：{e}"))                }
                 crate::card::CardAction::NewSession => {
                     // 合成一条"用户发了 /new"的事件：与手打 /new 完全同一条路径
                     let synth = LarkMessageEvent {
@@ -1100,10 +1169,15 @@ fn answer_with_card(
     messages: Vec<Value>,
     retry_prior_answer: Option<&str>,
 ) -> Result<(), String> {
-    let card_id = reply_card(&ev.message_id, &render_working("正在检索…", ""))?;
+    // 会话名（页眉用）：占位标题由 `card::headline` 隐藏，这里只管取。
+    let title = session_title_of(&session);
+    let card_id = reply_card(
+        &ev.message_id,
+        &render_working("正在检索…", "", title.as_deref()),
+    )?;
     log::info!("[bot] 已回卡片 {card_id}（chat={}）", ev.chat_id);
 
-    match stream_turn(http, session_id, &messages, &card_id, retry_prior_answer) {
+    match stream_turn(http, session_id, &messages, &card_id, retry_prior_answer, title.as_deref()) {
         Ok(turn) => {
             let mut done = messages;
             done.push(json!({ "role": "assistant", "content": turn.full_text }));
@@ -1115,7 +1189,7 @@ fn answer_with_card(
             let chunks = split_for_cards(&turn.full_text, MAX_BODY_BYTES, MAX_CARDS);
             let pages = chunks.len();
             let mut sent_pages = 0usize;
-            let mut first = render_answer_card(&chunks[0], 1, pages, turn.evidence_count, turn.took_ms);
+            let mut first = render_answer_card(&chunks[0], title.as_deref(), 1, pages, turn.evidence_count, turn.took_ms);
             if pages == 1 {
                 // 只有一张 → 按钮挂它；多张 → 挂最后一张（见下）
                 card::append_actions(&mut first, session_id);
@@ -1127,7 +1201,7 @@ fn answer_with_card(
             } else {
                 sent_pages = 1;
                 for (i, chunk) in chunks.iter().enumerate().skip(1) {
-                    let mut card = render_answer_card(chunk, i + 1, pages, turn.evidence_count, turn.took_ms);
+                    let mut card = render_answer_card(chunk, title.as_deref(), i + 1, pages, turn.evidence_count, turn.took_ms);
                     if i + 1 == pages {
                         card::append_actions(&mut card, session_id);
                     }
@@ -1174,7 +1248,14 @@ struct Turn {
 /// 事件契约（`webapi/routes/ai.rs`）：具名事件 `ai-progress` / `ai-chunk` / `ai-done`，
 /// 各自 data 是 JSON。**只有 `ai-done` 的 `full_text` 是权威结果** —— 中间 chunk 只用于显示，
 /// 广播通道在接收端落后时会丢事件（axum `BroadcastStream` 的 `Lagged`），丢了也不影响最终答案。
-fn stream_turn(http: &Http, session_id: &str, messages: &[Value], card_id: &str, retry_prior_answer: Option<&str>) -> Result<Turn, String> {
+fn stream_turn(
+    http: &Http,
+    session_id: &str,
+    messages: &[Value],
+    card_id: &str,
+    retry_prior_answer: Option<&str>,
+    title: Option<&str>,
+) -> Result<Turn, String> {
     let mut throttle = Throttle::standard();
     let mut acc = SseAccum::default();
     let mut partial = String::new();
@@ -1209,7 +1290,7 @@ fn stream_turn(http: &Http, session_id: &str, messages: &[Value], card_id: &str,
         }
         // 中间更新：节流决定"这次要不要真发"（把高频 chunk 合并掉）
         if throttle.should_send(Instant::now(), false)
-            && let Err(e) = patch_card(card_id, &render_working(&progress, &partial))
+            && let Err(e) = patch_card(card_id, &render_working(&progress, &partial, title))
         {
             // 中间更新失败**不**中断回答：抖动不值得让用户拿不到答案
             log::warn!("[bot] 中间卡片更新失败（继续）：{e}");
@@ -2012,10 +2093,11 @@ mod tests {
         assert!(parse_session_briefs(&serde_json::json!({})).is_empty());
     }
 
-    /// 切换后的"锚点"：有上一问就给出来，没有就明说"这是新会话"。
+    /// 切换后的"锚点"：会话名 + 上一问；新会话/无名字时如实说明。
     #[test]
-    fn anchor_text_shows_last_question_and_marks_empty_sessions() {
+    fn anchor_text_shows_title_and_last_question() {
         let session = serde_json::json!({
+            "title": "合同审查",
             "messages": [
                 { "role": "user", "content": "第一问" },
                 { "role": "assistant", "content": "第一答" },
@@ -2023,17 +2105,41 @@ mod tests {
             ]
         });
         let text = anchor_text(&session);
+        assert!(text.contains("合同审查"), "必须带上会话名：{text}");
         assert!(text.contains("最后一问"), "必须给最后一条 user 消息：{text}");
         assert!(!text.contains("第一问"), "不能给更早的问题：{text}");
 
-        assert!(anchor_text(&serde_json::json!({ "messages": [] })).contains("新会话"));
-        assert!(anchor_text(&serde_json::json!({})).contains("新会话"));
+        // 占位标题（"新会话"）不显示；没有标题也不显示
+        let untitled = serde_json::json!({
+            "title": "新会话",
+            "messages": [{ "role": "user", "content": "问一句" }]
+        });
+        let text = anchor_text(&untitled);
+        assert!(!text.contains("新会话"), "占位标题不该出现：{text}");
+        assert!(text.contains("问一句"), "{text}");
+        assert!(!anchor_text(&serde_json::json!({})).contains("「"), "没有名字就没有引号");
+
+        // 空会话：给"新会话"的说明（带名字时也要有）
+        let empty_named = serde_json::json!({ "title": "发票整理", "messages": [] });
+        let text = anchor_text(&empty_named);
+        assert!(text.contains("新会话") && text.contains("发票整理"), "{text}");
         // 超长问题被截到 60 字以内 + 省略号
         let long = "字".repeat(100);
         let text = anchor_text(&serde_json::json!({
             "messages": [{ "role": "user", "content": long }]
         }));
         assert!(text.contains('…'), "超长要截断：{text}");
+    }
+
+    /// 会话名提取：空白与缺失都归 `None`（页眉/锚点据此省略名字）。
+    #[test]
+    fn session_title_of_filters_blank_titles() {
+        let s = |j: &str| session_title_of(&serde_json::from_str::<Value>(j).unwrap());
+        assert_eq!(s(r#"{"title":"合同审查"}"#).as_deref(), Some("合同审查"));
+        assert_eq!(s(r#"{"title":"  合同审查  "}"#).as_deref(), Some("合同审查"), "两侧空白要清掉");
+        assert_eq!(s(r#"{"title":"   "}"#), None);
+        assert_eq!(s(r#"{"title":""}"#), None);
+        assert_eq!(s("{}"), None);
     }
 
     /// 搜索响应解析 + 命中说明（路径与片段各一行，空白压成单个空格）。

@@ -764,7 +764,8 @@ pub use session::{
     PerTurnEvidence, PerTurnScope, ScopeCondition, TurnScope, chat_history_path,
     create_chat_session_impl, delete_chat_session_impl, effective_origin, export_chat_session_impl,
     export_chat_session_json_impl, find_chat_session, list_chat_sessions_filtered, mutate_history,
-    parse_origin, read_history, save_chat_session_impl, write_history,
+    parse_origin, read_history, rename_chat_session_impl, sanitize_session_title,
+    save_chat_session_impl, write_history,
 };
 use session::{
     assign_material_no, prior_evidence_paths, prior_material_order, visible_material_numbers,
@@ -813,6 +814,17 @@ pub fn save_chat_session(
     session: ChatSession,
 ) -> Result<(), String> {
     session::save_chat_session(state, session, Some(session::ORIGIN_UI.to_string()))
+}
+
+/// Rename a session (title only) — same narrow write entry the Feishu bot's
+/// `/rename` uses; kept symmetric so both transports behave identically.
+#[tauri::command]
+pub fn rename_chat_session(
+    state: State<'_, AppState>,
+    id: String,
+    title: String,
+) -> Result<String, String> {
+    session::rename_chat_session_impl(&state.data_dir, &id, &title, Some(session::ORIGIN_UI))
 }
 
 /// Export a session as Markdown (chat transcript with full traceability).

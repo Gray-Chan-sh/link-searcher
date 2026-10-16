@@ -1690,7 +1690,8 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 | `/help`（或单独 `/`） | 命令卡片（附「新建会话」按钮） | 零配置的"弹出列表"替代 |
 | `/new` | 新建 lark 会话并置活动，回会话列表卡 | |
 | `/sessions` | 会话列表卡（活动置顶，带时间与标题） | 记点选映射 |
-| `/switch <序号或标题前缀>` | 切换并回"锚点"（上一个问题）；前缀多命中时列表让选 | 序号优先按**上次列表快照**解析 |
+| `/switch <序号或标题前缀>` | 切换并回"锚点"（会话名 + 上一个问题）；前缀多命中时列表让选 | 序号优先按**上次列表快照**解析 |
+| `/rename <新名字>` | 给**当前活动会话**改标题（§11.6） | 新名字取剩余整段（含空格）；上限 30 字 |
 | `/delete <序号>` | **先确认卡**（按钮二次确认才真删） | 防误删 |
 | `/find <关键词> [页码]` | 调 `GET /api/search`（每页 5 条）→ 结果卡（文件名/路径/片段） | 页码规则：末位数字 **≤99** 才算页码（`判决书 2024` 这类"数字关键词"不被误判） |
 
@@ -1724,3 +1725,38 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 > ⚠️ **教训（本轮排查）**：容量测试首版把"最后插入的 s-52"误写成"s-0"（时间戳递减时
 > **编号越大越旧**），断言失败一度被怀疑成"活动指针漂移"的产品 bug。**先怀疑断言、再怀疑实现**
 > —— 尤其当"每步断言都过、最终状态却不对"时，先核对**期望值本身**（详见 `CHANGELOG.md` 本轮条目）。
+
+### 11.6 会话名：自动命名 + 显示 + `/rename`（2026-10-17）
+
+**标题机制（存量行为，第二十九轮核对后文档化）**：
+
+- 新建会话 → 标题固定 **"新会话"**（占位）；**首次保存**时若为空/占位 →
+  取**第一条 `user` 消息的前 20 字**（`session.rs::title_from_first_message`），此后**不再自动变**；
+- 桌面 UI 没有改名按钮 → 改名此前只有"整会话保存"一条路（对"只想改个名字"既笨重又有覆盖竞态）。
+
+**本轮落地**：
+
+| 改动 | 落点 |
+|---|---|
+| **回答卡页眉带会话名**（含流式） | `card::headline` 统一拼 `基础 · 会话名`；**占位标题（空/"新会话"）不显示** —— 首轮保存前不会挂没信息量的尾巴。`render_answer_card` / `render_working` 增加 `title` 参数 |
+| `/switch` 锚点带会话名 | `anchor_text`（纯函数）：`已切换到会话「合同审查」，上一个问题是：…`；无名时退回旧文案 |
+| **`/rename <新名字>`** | 命令取**剩余整段**（含空格）；30 字上限（`MAX_SESSION_TITLE_CHARS`）；空参数回用法提示 |
+| 窄写入口 | `rename_chat_session_impl`：只改 `title`；去空白 + 截断；**不刷新 `updated_at`**（改名不该顶到"最近使用"首位）；跨端被拒 |
+| 传输对称 | WebAPI `PUT /api/chat/sessions/{id}/rename?origin=…` + Tauri 命令 `rename_chat_session`（`lib.rs` 注册） |
+
+**三端一致性**：共用 `chat_history.json` ⇒ 飞书改完名，桌面侧栏/Web 端**立刻**看到新名字；反之亦然
+（自动命名也同一份逻辑）。
+
+**边界**：改名目标是**当前活动会话**（非列表序号）—— 想改别的会话先 `/switch` 过去；
+绕过 UI 的"首问自动命名"仍会触发（改名后 `updated_at` 不动，即使随后保存会话，
+命名条件"标题为空/占位"也不成立 → 不会被覆盖）。
+
+### 11.7 第二十九轮验收（2026-10-17）
+
+| 项 | 证据 |
+|---|---|
+| bot | `card_headline_carries_session_title_but_hides_placeholder`（页眉拼接 + 占位隐藏）、`rename_keeps_full_title_with_spaces`、`anchor_text_shows_title_and_last_question`、`session_title_of_filters_blank_titles`（lark-bot 合计 **63** 项） |
+| app | `sanitize_session_title_trims_limits_and_rejects_blank`、`rename_only_touches_title_and_honours_origin`（含 **updated_at 不动** 断言） |
+| WebAPI | `webapi_http.rs`：改后列表立刻反映新名 / 空标题 400 / 跨端 400 / 不存在 400 |
+| 门禁 | `cargo test --workspace` 全绿（lib 602 + lark-bot 63 + lark-gate 13 + 集成/HTTP/……）+ `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
+| 真机 | ⏳ 待用户验收（`/rename`、回答卡页眉的会话名） |

@@ -431,6 +431,61 @@ fn main() {
     assert_eq!(sessions[0]["session_id"], Value::String(s1.clone()));
     assert_eq!(sessions[0]["is_active"], Value::Bool(true));
 
+    // ── 8c. 会话改名（§11.6）：只改标题，列表立刻反映；空标题与跨端都要被拒 ──
+    let (status, body) = request_with_body(
+        addr,
+        "PUT",
+        &format!("/api/chat/sessions/{s1}/rename?origin=lark"),
+        Some(good),
+        Some(r#"{"title":"  合同审查  "}"#),
+    );
+    assert_eq!(status, 200, "rename must succeed: {body}");
+    assert_eq!(
+        json(&body)["title"],
+        Value::String("合同审查".into()),
+        "标题应去空白后返回：{body}"
+    );
+
+    // 列表里立刻能看到新名字
+    let (status, body) = request(
+        addr,
+        "GET",
+        &format!("/api/lark/chat-sessions?chat_id={chat}"),
+        Some(good),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["sessions"][0]["title"], Value::String("合同审查".into()), "{body}");
+
+    // 空标题 → 400（不能把会话改成没名字）
+    let (status, _) = request_with_body(
+        addr,
+        "PUT",
+        &format!("/api/chat/sessions/{s1}/rename?origin=lark"),
+        Some(good),
+        Some(r#"{"title":"   "}"#),
+    );
+    assert_eq!(status, 400, "空标题必须被拒");
+
+    // 跨端改名 → 400（lark 会话不允许从 web 端改）
+    let (status, _) = request_with_body(
+        addr,
+        "PUT",
+        &format!("/api/chat/sessions/{s1}/rename?origin=web"),
+        Some(good),
+        Some(r#"{"title":"偷改"}"#),
+    );
+    assert_eq!(status, 400, "跨来源端改名必须被拒");
+
+    // 不存在的会话 → 400
+    let (status, _) = request_with_body(
+        addr,
+        "PUT",
+        "/api/chat/sessions/does-not-exist/rename?origin=lark",
+        Some(good),
+        Some(r#"{"title":"x"}"#),
+    );
+    assert_eq!(status, 400, "不存在的会话必须报错");
+
     // ── 9. 飞书集成：结构化接口可达、形状正确（**只读**，不碰真实 config.json） ──
     let (status, body) = request(addr, "GET", "/api/integrations/lark", Some(good));
     assert_eq!(status, 200, "lark config must be reachable: {body}");
