@@ -277,15 +277,21 @@ lark-cli event consume im.message.receive_v1 --as bot
 
 ### 4.4 事件桥
 
-`webapi/mod.rs:33-46` 定义 `BRIDGED_EVENTS`，把 Tauri 事件转发给 Web 客户端（SSE）：
+`webapi/mod.rs:33-51` 定义 `BRIDGED_EVENTS`，把 Tauri 事件转发给 Web 客户端（SSE）：
 
 ```
 scan-progress / scan-completed / ai-chunk / ai-progress / ai-done
 migration-progress / migration-warning / funasr-install-done / bge-install-done
 restore-completed / dep-progress / dep-install-done
+config-changed
 ```
 
 机器人可以用 `/api/events`（SSE）拿进度，做"处理中"卡片。
+
+> ⚠️ **这张表是白名单，漏一条的后果只在浏览器里出现**（桌面走 Tauri IPC，照发照收）。
+> `config-changed` 曾是漏的（见 §5.9 真机验收 · 缺陷①），现在由 `webapi/mod.rs` 的
+> `bridged_events_cover_frontend_subscriptions` 测试守住：**前端订阅的事件必须在这张表里**
+> （确实桌面专属的则要登记进测试里的 `TAURI_ONLY_EVENTS` 并写明理由）。
 
 ---
 
@@ -732,9 +738,12 @@ src-tauri/
 | 设置页 | 设置 → **集成**（`LarkTab.tsx`） | 开关 / 白名单 / 外发目录 / 运行态 / 配对按钮 |
 
 > **传输对称**：Web API 那几行与 Tauri 命令**共用** `commands/lark.rs` 的 `pub fn`
-> （`status_of` / `save_config` / `pairing_start` / `pairing_cancel` / `consume_pairing_into`），
-> 命令与端点只做薄包装。因此桌面端与 Web 端**行为一致**，不会出现"桌面能用、浏览器不同"的分叉；
-> 前端 `api/client.ts` 的 MAPPINGS 也逐条镜像了这些端点。
+> （`status_of` / `save_config` / `pairing_consume` / `pairing_start` / `pairing_cancel`
+> / `consume_pairing_into`），命令与端点只做薄包装。因此桌面端与 Web 端**行为一致**，
+> 不会出现"桌面能用、浏览器不同"的分叉；前端 `api/client.ts` 的 MAPPINGS 也逐条镜像了这些端点。
+>
+> ⚠️ **每个写入口都要在写成功后广播 `config-changed`**（`commands/lark.rs::announce_config_changed`）——
+> 原因见下面「真机验收 · 缺陷②」：本进程的写会被自写抑制挡掉，`config_watch` **不会**替它补一发。
 
 **三条收在代码里的纪律**：
 
@@ -752,8 +761,9 @@ src-tauri/
 
 - **两个名单的文本方向相反**：`allowed_users` 空＝**拒绝全部**；`export_allow_dirs` 空＝**不限制**。
   两个 hint 各自写明，避免"顺手统一"。
-- **订阅 `config-changed`**：手改 `config.json`（C3 热重载）或 bot 配对消费成功都会改这份配置，
-  面板据此刷新 —— 否则会一直显示旧值。
+- **订阅 `config-changed`**：手改 `config.json`（C3 热重载）、**经服务端的任何写**（本页保存 /
+  远程 PUT / bot 配对消费）都会改这份配置，面板据此刷新 —— 否则会一直显示旧值。
+  这条链曾断过两处，见下面「真机验收 · 缺陷①②」；前端另有"倒计时归零再问一次服务端"兜底。
 
 **顺带修掉的 W5**：`lark-bot` 是 console 子系统程序，而 GUI 进程没有控制台 → Windows 会为它
 **新建控制台窗口**（黑框一闪）。已加 `CREATE_NO_WINDOW`（`lark_bot.rs`）。
@@ -780,6 +790,65 @@ bot 闸门 L2 通过（必须 p2p）──► L1 未命中 ──► L1′ pairi
 > 为什么"消费"要重启 bot：策略是 bot **启动时读一次**的 —— 不重启，新配的白名单与
 > 已关闭的配对都不会生效。重启会让**正在处理这条消息的** bot 进程退出，因此那次 HTTP
 > 响应可能收不到（`Err` 只记 WARN）—— 反正这条消息**本来就不回答**，无影响。
+
+#### 真机验收（2026-10-16，真应用 + 真 bot）
+
+不靠 mock：`npx tauri dev` 起真实应用、真实 `lark-bot` 连真实飞书，用 `curl.exe -sk` 打
+`https://127.0.0.1:8443`（自签证书，故用 `-k`）跑 31 条断言 —— **31/31 通过**。
+
+**验过的**（每条都有现场证据，不是"看代码觉得对"）：
+
+| 项 | 结论 |
+|---|---|
+| C1 迁移（**真实旧数据**） | DB 里原有的 `lark_bot_enabled` / `lark_allowed_users` / `require_p2p` 落进 `config.json` 的 `integrations.lark`；DB 只剩幂等标记 `lark_config_migrated=1` |
+| bot 真的起来 | `running:true`；日志 `feishu-websocket: connected` + `ready event_key=im.message.receive_v1` |
+| C7 `lark-cli` 解析 | bot 实际加载的就是新解析器给出的路径（本机与旧硬编码同一条，行为不变） |
+| C4 结构化接口 | `GET …/lark` 带派生 `pairing_active`；`/status` 带 `running` / `bindings` / `pairing_seconds_left` |
+| C5 配对闭环 | start（服务端算截止，`seconds_left=60`）→ 空 `open_id` **400 且配对仍有效** → consume 写白名单并**自动关闭** → 二次 consume **400** → cancel |
+| C6 写入规整化 | PUT 去空白 / 去重 / 丢空串（`export_allow_dirs` 里 `D:\index` 重复两次 + 一个空串 → 一条） |
+| C3 热重载 | 手改 `config.json` → 日志 `[CONFIG-WATCH] 检测到 config.json 外部改动 → 已重载（飞书策略有变化 → 重启 bot）`，bot 换 PID |
+| C3 自写抑制 | 自写后 PID 稳定，**无重启风暴**（否则每次保存都会自触发一轮重载） |
+| 鉴权 | 无 token → 401 |
+
+**验收发现的两个缺陷（已修）** —— 都属"桌面看不出来、只在特定路径上错"的那类：
+
+```text
+缺陷①  config-changed 没进 BRIDGED_EVENTS
+  → 桌面照收（Tauri IPC），浏览器模式**永远收不到** → Web 端设置页永远不刷新。
+  证据：端点 `/api/events` 挂着 SSE，手改 config.json，后端日志显示已重载（emit 确实发了），
+        但 SSE 只收到 `: ping` 保活，没有任何 `event:` 帧。
+
+缺陷②  本进程的写被自写抑制挡掉，而 emit 只在外部路径
+  → 「bot 配对消费」「远程/CLI 改策略」**两种模式都不发事件** → 面板停在旧值
+    （配对还显示"配对中"、白名单缺新配的用户）。
+  证据：`write_config_file` → `note_known()`（抑制）；`emit` 唯一发射点在 `config_watch::handle_change`。
+  这一条与本节早先写的"bot 配对消费成功都会改这份配置、面板据此刷新"**自相矛盾**：
+  订阅了也收不到 —— 文档的乐观恰好被真机验收推翻。
+```
+
+**修法**：① 把 `config-changed` 加进 `BRIDGED_EVENTS`，并由新测试
+`bridged_events_cover_frontend_subscriptions`（`webapi/mod.rs`）守住"**前端订阅的事件必须被桥接**"
+（确实桌面专属的要登记进该测试的 `TAURI_ONLY_EVENTS` 并写明理由）；② `set_lark_integration`
+改为返回**是否真的变了**，`commands/lark.rs` 在每个写入口成功后 `announce_config_changed`
+（`source = "local"`，与外部改动同事件名、同形状）；前端另加"倒计时归零再问一次服务端"兜底
+（SSE 断线时也能自愈）。
+
+**修完的实测**（同一条 SSE 流，两帧都到了浏览器侧）：
+
+```text
+event: config-changed / data: {"source":"external"}   ← 手改 config.json
+event: config-changed / data: {"source":"local"}      ← PUT /api/integrations/lark
+```
+
+**没能验的部分（如实记录）**：
+
+- **面板渲染本身**：本机浏览器（含 Agent 的浏览器工具）不接受应用的自签证书
+  （证书在 `<data_dir>/tls/cert.pem`，需手动导入信任）；本次只验到"后端事件与接口正确"，
+  DOM 渲染由人眼确认。
+- **C2 跨进程写锁**：只有**句柄级**单测（`cross_process_lock_is_exclusive_across_handles`，
+  忠实于 `fs4` 的 `LockFileEx`/`flock` 语义）；产品里**没有第二个写 `config.json` 的进程**
+  （CLI 无集成子命令、bot 只经 HTTP），因此无法真机复现"两个写者"。这不算"验过"。
+
 
 ---
 

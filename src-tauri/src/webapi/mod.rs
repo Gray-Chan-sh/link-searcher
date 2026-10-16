@@ -43,6 +43,11 @@ const BRIDGED_EVENTS: &[&str] = &[
     "restore-completed",
     "dep-progress",
     "dep-install-done",
+    // 设置页「集成」面板靠它刷新（`config_watch.rs` 的热重载事件）。
+    // ⚠️ 漏了它 → **Web 模式**下面板永远不刷新（桌面走 Tauri IPC，所以只在浏览器里坏）。
+    // 2026-10-16 真机验收就是这样发现的；契约由本文件的
+    // `bridged_events_cover_frontend_subscriptions` 测试守住。
+    "config-changed",
 ];
 
 pub fn spawn_server(app_handle: tauri::AppHandle) {
@@ -246,4 +251,180 @@ fn load_dev_mode(app_state: &AppState) -> bool {
         return val == "true";
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::BRIDGED_EVENTS;
+
+    /// **桌面专属**的订阅：只经 `@tauri-apps/api/event` 拿事件，不需要（也不会）桥接。
+    ///
+    /// 加进来的每个事件都必须在注释里写明"为什么浏览器模式不需要它" ——
+    /// 否则这张表会变成"忘了桥接"的垃圾桶。
+    const TAURI_ONLY_EVENTS: &[&str] = &[
+        // 目录移除进度：`DirManager.tsx` 用 Tauri 的 `listen()` 直接订阅（不在 `client.listen`
+        // 的 Web 分支里），桥接了也收不到，属于既有历史；真要修得先改成 `client.listen`。
+        "remove-dir-progress",
+    ];
+
+    /// 契约：**前端订阅的每个事件都必须在 [`BRIDGED_EVENTS`] 里**（除非明确是桌面专属）。
+    ///
+    /// 为什么值得一个测试：桌面模式走 Tauri IPC，`emit` 一发就到；Web 模式却要过这张白名单。
+    /// 于是"忘了加"的后果**只在浏览器里**出现（页面不报错、只是永远显示旧值）——
+    /// 2026-10-16 真机验收发现的 `config-changed` 缺陷正是如此：事件照发，
+    /// 浏览器里的设置页却一直不刷新。
+    #[test]
+    fn bridged_events_cover_frontend_subscriptions() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri 的父目录就是仓库根")
+            .join("src");
+
+        let mut files = Vec::new();
+        collect_source_files(&src, &mut files);
+        assert!(!files.is_empty(), "没扫到前端源码，扫描逻辑失效了");
+
+        let mut subscribed: Vec<String> = Vec::new();
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else {
+                continue;
+            };
+            for name in listen_event_names(&text) {
+                if !subscribed.contains(&name) {
+                    subscribed.push(name);
+                }
+            }
+        }
+        assert!(
+            !subscribed.is_empty(),
+            "没扫到任何 listen('…') 订阅，扫描逻辑失效了"
+        );
+
+        for name in &subscribed {
+            if TAURI_ONLY_EVENTS.contains(&name.as_str()) {
+                continue;
+            }
+            assert!(
+                BRIDGED_EVENTS.contains(&name.as_str()),
+                "前端订阅了 '{name}'，但它不在 BRIDGED_EVENTS 里 —— \
+                 Web 模式下这个订阅永远不会触发（桌面模式不受影响，所以最容易漏）。\
+                 真要桥接就加进 BRIDGED_EVENTS；确实桌面专属就加进 TAURI_ONLY_EVENTS 并写明理由。"
+            );
+        }
+    }
+
+    /// 递归收集 `src/**/*.{ts,tsx}`。
+    fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_source_files(&path, out);
+                continue;
+            }
+            let is_source = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e == "ts" || e == "tsx");
+            if is_source {
+                out.push(path);
+            }
+        }
+    }
+
+    /// 从一份前端源码里抽出 `listen('name'` / `listen<Type>('name'` / `client.listen<…>('name'` 的
+    /// 事件名。
+    ///
+    /// 刻意不引入正则：判据只有"调用者位置 + 紧邻的引号"，同时**要求名字形如
+    /// `[a-z][a-z0-9-]*`**，这样 `listeners` / `unlisten.then` / `subscribeToasts(l: Listener)`
+    /// 这类同形词都不会被误判（它们要么前一个字符是字母数字，要么后面不是 `(` / `<`）。
+    fn listen_event_names(text: &str) -> Vec<String> {
+        let bytes = text.as_bytes();
+        let mut found = Vec::new();
+        let mut i = 0;
+        while let Some(pos) = text[i..].find("listen") {
+            let start = i + pos;
+            i = start + "listen".len();
+
+            // 前一个字符必须是边界：挡住 `unlisten` / `listeners` 等。
+            let prev_is_word = start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_');
+            if prev_is_word {
+                continue;
+            }
+
+            // 可选泛型参数 `<…>`（含嵌套），随后必须是 `(`。
+            let mut j = i;
+            if bytes.get(j).is_some_and(|b| *b == b'<') {
+                let mut depth = 0usize;
+                while let Some(b) = bytes.get(j) {
+                    match b {
+                        b'<' => depth += 1,
+                        b'>' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                j += 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            if bytes.get(j) != Some(&b'(') {
+                continue;
+            }
+            // 跳过 `(` 与空白，取第一个引号串。
+            j += 1;
+            while bytes.get(j).is_some_and(|b| b.is_ascii_whitespace()) {
+                j += 1;
+            }
+            let Some(quote) = bytes.get(j).copied().filter(|b| *b == b'\'' || *b == b'"') else {
+                continue;
+            };
+            let name_start = j + 1;
+            let Some(rel_end) = bytes[name_start..].iter().position(|b| *b == quote) else {
+                continue;
+            };
+            let name = &text[name_start..name_start + rel_end];
+            let looks_like_event = !name.is_empty()
+                && name.as_bytes()[0].is_ascii_lowercase()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+            if looks_like_event {
+                found.push(name.to_string());
+            }
+            i = name_start + rel_end;
+        }
+        found
+    }
+
+    /// 扫描器自身的守卫：同形词（`unlisten` / `listeners` / `listenScanProgress`）不得被误判。
+    #[test]
+    fn listen_event_names_ignores_lookalikes() {
+        let sample = r#"
+            const listeners = new Map()
+            void unlisten.then(f => f())
+            subscribeToasts(l: Listener)
+            await client.listen<ScanProgress>('scan-progress', h)
+            listen('scan-completed', () => {})
+            const { listen } = await import('@tauri-apps/api/event')
+            listen<{ current: number }>('remove-dir-progress', h)
+            listenScanProgress(setScanProgress)
+        "#;
+        assert_eq!(
+            listen_event_names(sample),
+            vec![
+                "scan-progress".to_string(),
+                "scan-completed".to_string(),
+                "remove-dir-progress".to_string(),
+            ]
+        );
+    }
 }

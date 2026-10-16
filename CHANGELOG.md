@@ -1,3 +1,47 @@
+## 2026-10-16（第二十一轮）：飞书接入 —— 真机验收（31/31）修掉两个「面板不刷新」缺陷
+
+> 上一轮的"未做"就是这条：**真机验收**。本轮起真实应用 + 真实 `lark-bot` 连真实飞书，
+> 用 `curl -sk` 打本机 Web API 跑了 31 条断言（**31/31 通过**），并因此抓到两个
+> **"桌面看不出来、只在特定路径上错"** 的缺陷 —— 都属于"订阅了事件却收不到"这一类。
+
+- **缺陷①：`config-changed` 没进 `BRIDGED_EVENTS`**（`src-tauri/src/webapi/mod.rs`）：
+  该事件在 `config_watch::handle_change` 里 `emit`，桌面模式走 Tauri IPC 照收，
+  **浏览器模式经 `/api/events`(SSE) 却被白名单挡掉** → Web 端设置页永远不刷新。
+  实测证据：挂着 SSE 手改 `config.json`，后端日志显示已重载（emit 确实发了），
+  但 SSE 只收到 `: ping` 保活、**没有任何 `event:` 帧**。修：加进白名单。
+- **新增契约测试 `bridged_events_cover_frontend_subscriptions`**（同文件）：
+  扫 `src/**/*.{ts,tsx}` 里所有 `listen('…')` / `listen<…>('…')` / `client.listen<…>('…')`，
+  **断言每个事件都在 `BRIDGED_EVENTS` 里**；确实桌面专属的（`remove-dir-progress`，
+  它用 `@tauri-apps/api/event` 直接订阅、不在 `client.listen` 的 Web 分支里）
+  必须登记进测试内的 `TAURI_ONLY_EVENTS` **并写明理由**。
+  另配 `listen_event_names_ignores_lookalikes` 守住扫描器本身（`unlisten` / `listeners` /
+  `subscribeToasts(l: Listener)` / `listenScanProgress(` 不得被误判）
+- **缺陷②：本进程的写被自写抑制挡掉，`emit` 只在外部路径**
+  （`config.rs::write_config_file` → `note_known`；唯一发射点在 `config_watch::handle_change`）：
+  于是「bot 配对消费」「远程 / CLI 改策略」**两种模式都不发事件** → 面板停在旧值
+  （配对还显示"配对中"、白名单缺新配的用户）。这与 C6 写在 `useSettingsLark.ts` / 文档里的
+  "配对消费成功会改这份配置、面板据此刷新"**自相矛盾** —— 被真机验收推翻。
+  修：`set_lark_integration` 改为返回**是否真的变了**（`Ok(true)`＝落了盘），
+  `commands/lark.rs` 新增 `announce_config_changed(app)`，在每个写入口成功后广播
+  （`source = "local"`，与外部改动**同事件名、同形状**）；`consume` 路径也因此
+  **收口成共享函数 `pairing_consume`**（此前 Web 端点自己拼装"校验→写→重启"三步，
+  现在 Tauri / Web 共用一份，命令与端点都只是薄包装）
+- **前端兜底**（`src/hooks/useSettingsLark.ts`）：倒计时归零时**再问一次服务端** ——
+  事件仍可能丢（SSE 断线、页面长时间后台被挂起）；用 `useRef` 保证只在"确实倒数过"之后触发，
+  且不会自旋（服务端剩余秒数随时间单调递减）。同时修正该文件里那句与实现不符的注释
+- **真机验收结论**（据实记录）：迁移（真实旧数据）、bot 连接飞书、C7 `lark-cli` 解析、
+  C4 结构化接口、C5 配对闭环（含空 `open_id` 400、二次 consume 400、cancel）、
+  C6 写入规整化（去空白/去重/丢空串）、C3 热重载、C3 自写抑制无重启风暴、鉴权 401 —— 全部通过。
+  **没能验的**：① 面板 **DOM 渲染**（浏览器与本机均不接受应用的自签证书
+  `<data_dir>/tls/cert.pem`，需手动导入信任）→ 由人眼确认；② **C2 跨进程写锁**只有句柄级单测
+  （产品里没有第二个写 `config.json` 的进程）—— 不算"验过"
+- **文档**：`docs/LARK_BOT.md` §4.4 事件桥补 `config-changed` + "白名单漏一条只在浏览器里坏"的警告；
+  §5.9 新增「真机验收（2026-10-16）」小节（验过什么、两个缺陷的证据与修法、没能验的部分）；
+  **补 C6 遗漏的用户手册**：`docs/06-settings.md` 新增「集成标签页」（步骤 12.2–12.4：
+  启用 / 两个方向相反的名单 / 配对流程）+ 验证清单一行 + 章节导语补「集成」
+- **测试**：`link_searcher_lib` **570** 个用例（+2）；`cargo test --workspace`、
+  `npx tsc --noEmit`、`npx vitest run`（9 文件/73 用例）、`semgrep --severity ERROR`（0 发现）全绿
+
 ## 2026-10-16（第二十轮）：飞书接入 —— C7 `lark-cli` 发现不再只认 Windows
 
 > **问题**：`lark_cli_path()`（依赖中心的前置探测）只硬编码了本机的

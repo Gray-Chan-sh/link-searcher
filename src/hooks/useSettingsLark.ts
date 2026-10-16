@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '../api/client'
 import { useI18n } from '../i18n'
 import {
@@ -33,8 +33,14 @@ export function joinList(list: string[]): string {
  * 两处**不是**随手写的地方：
  * 1. **配对倒计时只是显示**：真正的到期判定在服务端（`pairing_active`）—— UI 一关，
  *    计时就没了，所以绝不能靠前端计时来决定"还在不在配对"。
- * 2. **订阅 `config-changed`**（C3 的热重载事件）：手改 `config.json`、或 bot 配对消费
- *    成功，都会改这份配置；不订阅的话面板会一直显示旧值。
+ * 2. **订阅 `config-changed`**（`config_watch.rs` 的热重载事件）：手改 `config.json`、
+ *    以及**经服务端**的写（bot 配对消费 / 远程改策略 / 本页保存）都会广播它。
+ *    不订阅的话面板会一直显示旧值。
+ *    ⚠️ 这条链曾经断过两处（2026-10-16 真机验收发现）：① 本进程的写被「自写抑制」
+ *    挡掉、根本不发事件；② 该事件没进 `webapi::BRIDGED_EVENTS`，浏览器模式收不到。
+ *    现已修复，并由 `src-tauri/src/webapi/mod.rs` 的
+ *    `bridged_events_cover_frontend_subscriptions` 测试守住 ②。
+ * 3. 事件仍可能丢（SSE 断线、页面长时间后台被挂起）→ 倒计时归零时**再问一次服务端**兜底。
  */
 export function useSettingsLark() {
   const { t } = useI18n()
@@ -85,6 +91,21 @@ export function useSettingsLark() {
     const id = window.setTimeout(() => setSecondsLeft(s => (s > 0 ? s - 1 : 0)), 1000)
     return () => window.clearTimeout(id)
   }, [secondsLeft])
+
+  // 本地倒计时归零 → 向服务端确认一次（事件可能丢：SSE 断线、他处消费）。
+  // 只在"确实倒数过"之后触发，避免首次加载时多打一次请求。
+  // 不会自旋：服务端的剩余秒数随时间单调递减，最终必然回到 0 / inactive。
+  const countedDown = useRef(false)
+  useEffect(() => {
+    if (secondsLeft > 0) {
+      countedDown.current = true
+      return
+    }
+    if (countedDown.current) {
+      countedDown.current = false
+      void reload()
+    }
+  }, [secondsLeft, reload])
 
   /** 面板上此刻"将要保存"的值（bool 来自 draft，两个列表来自文本框）。 */
   const current: LarkIntegration | null =

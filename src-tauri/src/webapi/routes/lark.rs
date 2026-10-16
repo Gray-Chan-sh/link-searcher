@@ -88,10 +88,12 @@ async fn get_lark_config() -> Result<Json<serde_json::Value>, ApiError> {
 /// `integrations.lark` 这一块**（不是"整份重建"，不会顺带抹掉别人的字段）。
 /// 写后**重启 bot** —— 策略是 bot 启动时读一次，不重启就等于没改。
 async fn put_lark_config(
+    State(state): State<ApiState>,
     Json(body): Json<LarkIntegration>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::config::set_lark_integration(&body).map_err(|e| ApiError { error: e })?;
-    crate::lark_bot::restart();
+    // 与 Tauri 命令 `set_lark_config` **同一条实现**（含"写后广播 config-changed"与"重启 bot"）。
+    crate::commands::lark::save_config(&state.app_handle, &body)
+        .map_err(|e| ApiError { error: e })?;
     let saved = crate::config::lark_integration();
     serde_json::to_value(saved)
         .map(Json)
@@ -133,44 +135,37 @@ async fn restart_bot() -> Result<Json<serde_json::Value>, ApiError> {
 
 /// 进入配对模式（截止时刻由**服务端**算，不靠 UI 计时）。
 async fn start_pairing(
+    State(state): State<ApiState>,
     Json(body): Json<PairingStartBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    crate::commands::lark::pairing_start(body.minutes).map_err(|e| ApiError { error: e })?;
+    crate::commands::lark::pairing_start(&state.app_handle, body.minutes)
+        .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 退出配对模式。
-async fn cancel_pairing() -> Result<Json<serde_json::Value>, ApiError> {
-    crate::commands::lark::pairing_cancel().map_err(|e| ApiError { error: e })?;
+async fn cancel_pairing(State(state): State<ApiState>) -> Result<Json<serde_json::Value>, ApiError> {
+    crate::commands::lark::pairing_cancel(&state.app_handle).map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// 配对消费：把发送者写入白名单，并**自动关闭**配对（§7.1 ⑥）。
 ///
-/// ⚠️ **这是白名单写入口** —— 必须先校验配对**确实开着且未过期**，否则它就成了
-/// "凭一个 token 往白名单里塞任意 `open_id`"的口子（等于绕过 L1 准入）。
-/// 校验规则与桌面路径共用 [`crate::commands::lark::consume_pairing_into`]（纯函数，有单测）。
+/// ⚠️ **这是白名单写入口** —— 校验（配对确实开着且未过期）只有一份实现，在
+/// [`crate::commands::lark::pairing_consume`] → [`crate::commands::lark::consume_pairing_into`]
+/// （纯函数，有单测）。本端点**只做薄包装**，绝不自己判一遍：
+/// 漏判就是"凭一个 token 往白名单里塞任意 `open_id`"的口子（等于绕过 L1 准入）。
 ///
 /// 是否私聊由**闸门**判定（bot 只在 p2p 配对时才调这里）—— 服务端看不到 `chat_type`，
 /// 因此不重复判定，但正因如此才更要把"配对是否有效"守死。
 async fn consume_pairing(
+    State(state): State<ApiState>,
     Json(body): Json<PairingConsumeBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let now = chrono::Utc::now().timestamp();
-    let mut lark = crate::config::lark_integration();
-    crate::commands::lark::consume_pairing_into(&mut lark, &body.open_id, now)
+    let allowed_users = crate::commands::lark::pairing_consume(&state.app_handle, &body.open_id)
         .map_err(|e| ApiError { error: e })?;
-    crate::config::set_lark_integration(&lark).map_err(|e| ApiError { error: e })?;
-    // 白名单变了 → 让 bot 重读，否则新配的用户仍会被拒。
-    crate::lark_bot::restart();
-
-    let saved = crate::config::lark_integration();
-    log::info!(
-        "[LARK] 配对成功：{} 已加入白名单，配对模式自动关闭",
-        body.open_id.trim()
-    );
     Ok(Json(
-        serde_json::json!({ "ok": true, "allowed_users": saved.allowed_users }),
+        serde_json::json!({ "ok": true, "allowed_users": allowed_users }),
     ))
 }
 

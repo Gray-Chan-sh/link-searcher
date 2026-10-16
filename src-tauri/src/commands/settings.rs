@@ -174,7 +174,8 @@ pub fn migrate_legacy_lark_settings(conn: &rusqlite::Connection) {
 
     if let Some(lark) = legacy_lark_into(crate::config::lark_integration(), &read) {
         match crate::config::set_lark_integration(&lark) {
-            Ok(()) => log::info!("[CONFIG] 已把遗留飞书策略迁移进 config.json 的 integrations.lark"),
+            // 迁移发生在窗口出现之前，不需要广播（返回值＝是否落盘，这里不关心）。
+            Ok(_) => log::info!("[CONFIG] 已把遗留飞书策略迁移进 config.json 的 integrations.lark"),
             Err(e) => {
                 // 保留 DB 行，下次启动重试；绝不置标记。
                 log::error!("[CONFIG] 迁移飞书策略失败（保留 DB 行下次重试）: {e}");

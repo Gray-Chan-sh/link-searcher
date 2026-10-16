@@ -14,9 +14,12 @@
 //! 为什么不是清一色 `#[tauri::command]`：同一套动作**桌面与 Web 两种传输都要用**
 //! （`webapi/routes/lark.rs` 直接调这里的 `pub fn`）。实现写成普通函数、命令只做薄包装，
 //! 逻辑只写一份 —— 也不会出现"桌面能用、Web 端行为不同"这种最难查的分叉。
+//!
+//! ⚠️ **写成功后必须广播 `config-changed`**：`config_watch` 只对**外部**改动发事件，
+//! 本进程的写会被自写抑制挡掉（见 [`announce_config_changed`]）。
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::sessions::lark as lark_store;
 use crate::config::LarkIntegration;
@@ -79,6 +82,24 @@ pub fn consume_pairing_into(
 
 // ───────────────────────── 共享实现（命令与端点都调它） ─────────────────────────
 
+/// 本进程写成功且**内容真的变了**之后广播 `config-changed`（`source = "local"`）。
+///
+/// 为什么必须补这一发（2026-10-16 真机验收发现）：
+/// `config_watch` 的 `config-changed` **只在外部改动时**发出，而本进程的写会被
+/// "自写抑制"挡掉（`config.rs::write_config_file` → `note_known`）。于是
+/// 「bot 配对消费」「远程/CLI 改策略」这些**经本进程**的改动谁都不通知界面 ——
+/// 设置页会一直显示旧值（配对还显示"配对中"、白名单缺新配的用户）。
+///
+/// 事件名与 payload 形状与 [`crate::config_watch`] 保持一致，只有 `source` 不同。
+fn announce_config_changed(app: &AppHandle) {
+    if let Err(e) = app.emit(
+        crate::config_watch::CONFIG_CHANGED_EVENT,
+        serde_json::json!({ "source": "local" }),
+    ) {
+        log::debug!("[LARK] 广播 {} 失败: {e}", crate::config_watch::CONFIG_CHANGED_EVENT);
+    }
+}
+
 /// 读策略 + 运行态快照。
 pub fn status_of(state: &AppState) -> Result<LarkStatus, String> {
     let config = crate::config::lark_integration();
@@ -107,10 +128,31 @@ pub fn bindings_of(state: &AppState) -> Result<Vec<lark_store::LarkBinding>, Str
 }
 
 /// 写策略并**重启 bot**（不重启＝改了不生效）。
-pub fn save_config(lark: &LarkIntegration) -> Result<(), String> {
-    crate::config::set_lark_integration(lark)?;
+pub fn save_config(app: &AppHandle, lark: &LarkIntegration) -> Result<(), String> {
+    if crate::config::set_lark_integration(lark)? {
+        announce_config_changed(app);
+    }
     crate::lark_bot::restart();
     Ok(())
+}
+
+/// **配对消费**：把发送者写入白名单、自动关闭配对、重启 bot 并广播。
+///
+/// 校验只有一份实现（[`consume_pairing_into`]）：调用方**不得**自己判一遍
+/// （漏判＝白名单后门，重复判＝两套规则漂移）。返回写入后的白名单，供端点回显。
+pub fn pairing_consume(app: &AppHandle, open_id: &str) -> Result<Vec<String>, String> {
+    let now = now_secs();
+    let mut lark = crate::config::lark_integration();
+    consume_pairing_into(&mut lark, open_id, now)?;
+    crate::config::set_lark_integration(&lark)?;
+    // 白名单变了 → 让 bot 重读，否则新配的用户仍会被拒。
+    crate::lark_bot::restart();
+    announce_config_changed(app);
+    log::info!(
+        "[LARK] 配对成功：{} 已加入白名单，配对模式自动关闭",
+        open_id.trim()
+    );
+    Ok(crate::config::lark_integration().allowed_users)
 }
 
 /// 手动重启 bot（手改 `config.json` 后由 [`crate::config_watch`] 自动触发；这里是兜底入口）。
@@ -122,7 +164,7 @@ pub fn restart() {
 ///
 /// 必须**先启用**机器人：没启用就没有 bot 去收那条私聊消息，配对永远不会完成。
 /// 这里直接拒绝并给出可操作提示 —— 比"开了配对却等不到人"好排查得多。
-pub fn pairing_start(minutes: Option<i64>) -> Result<(), String> {
+pub fn pairing_start(app: &AppHandle, minutes: Option<i64>) -> Result<(), String> {
     let mut lark = crate::config::lark_integration();
     if !lark.enabled {
         return Err("请先启用飞书机器人（enabled = true）再开始配对".into());
@@ -130,7 +172,9 @@ pub fn pairing_start(minutes: Option<i64>) -> Result<(), String> {
     let mins = pairing_minutes(minutes);
     lark.pairing = true;
     lark.pairing_expires_at = now_secs() + mins * 60;
-    crate::config::set_lark_integration(&lark)?;
+    if crate::config::set_lark_integration(&lark)? {
+        announce_config_changed(app);
+    }
     // 必须重启：闸门配置是 bot **启动时**读的，不重启就不会放行那条配对消息。
     crate::lark_bot::restart();
     log::info!("[LARK] 已进入配对模式（{mins} 分钟）：请用飞书私聊机器人一次");
@@ -138,11 +182,13 @@ pub fn pairing_start(minutes: Option<i64>) -> Result<(), String> {
 }
 
 /// 取消配对模式（用户点"取消"，或超时后手动收尾）。
-pub fn pairing_cancel() -> Result<(), String> {
+pub fn pairing_cancel(app: &AppHandle) -> Result<(), String> {
     let mut lark = crate::config::lark_integration();
     lark.pairing = false;
     lark.pairing_expires_at = 0;
-    crate::config::set_lark_integration(&lark)?;
+    if crate::config::set_lark_integration(&lark)? {
+        announce_config_changed(app);
+    }
     crate::lark_bot::restart();
     Ok(())
 }
@@ -157,9 +203,10 @@ pub fn get_lark_config() -> Result<LarkIntegration, String> {
 /// 写策略并**重启 bot**（不重启＝改了不生效）。
 ///
 /// `async`：重启要 spawn/kill 子进程，别占住主线程（AGENTS「async fn 避免阻塞事件循环」）。
+/// `app` 由 Tauri 注入 —— 写成功后要靠它广播 `config-changed`（见 [`announce_config_changed`]）。
 #[tauri::command]
-pub async fn set_lark_config(lark: LarkIntegration) -> Result<(), String> {
-    save_config(&lark)
+pub async fn set_lark_config(app: AppHandle, lark: LarkIntegration) -> Result<(), String> {
+    save_config(&app, &lark)
 }
 
 #[tauri::command]
@@ -174,13 +221,13 @@ pub async fn lark_restart() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn lark_pairing_start(minutes: Option<i64>) -> Result<(), String> {
-    pairing_start(minutes)
+pub async fn lark_pairing_start(app: AppHandle, minutes: Option<i64>) -> Result<(), String> {
+    pairing_start(&app, minutes)
 }
 
 #[tauri::command]
-pub async fn lark_pairing_cancel() -> Result<(), String> {
-    pairing_cancel()
+pub async fn lark_pairing_cancel(app: AppHandle) -> Result<(), String> {
+    pairing_cancel(&app)
 }
 
 #[tauri::command]

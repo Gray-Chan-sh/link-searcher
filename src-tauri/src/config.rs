@@ -490,16 +490,22 @@ pub fn lark_integration() -> LarkIntegration {
 /// `docs/LARK_BOT.md` §5.6 故障②（"我手改了 config.json 却被应用整份覆盖"）的
 /// 收口点 —— 所以飞书配置**绝不**走 [`save_config`] 那种"整份重建"的路径。
 /// 值未变化时不落盘。
-pub fn set_lark_integration(lark: &LarkIntegration) -> Result<(), String> {
+///
+/// 返回**是否真的变了**（＝是否落了盘）。调用方据此决定要不要广播
+/// `config-changed`：没变就别惊动界面，也别让"空写"看起来像一次改动。
+/// ⚠️ 但**不要**用它来决定要不要重启 bot —— 重启与否是调用方的语义
+/// （`commands/lark.rs` 保持原样：写完就重启）。
+pub fn set_lark_integration(lark: &LarkIntegration) -> Result<bool, String> {
     let _g = lock_config();
     let mut cfg = read_config_file();
     // 规整化**在这里统一做**：所有写入口都汇到本函数，调用方不必各自记得清理。
     let next = lark.clone().sanitized();
     if cfg.integrations.lark == next {
-        return Ok(());
+        return Ok(false);
     }
     cfg.integrations.lark = next;
-    write_config_file(&cfg)
+    write_config_file(&cfg)?;
+    Ok(true)
 }
 
 /// 持锁读取配置文件；文件缺失/损坏时返回默认配置。
