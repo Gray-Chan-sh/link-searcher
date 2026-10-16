@@ -5,6 +5,9 @@
 //!
 //! - `GET/PUT/DELETE /api/lark/binding` —— p2p `chat_id` ↔ 本库聊天会话
 //! - `GET /api/lark/bindings`           —— 全量（诊断 / 将来的统一管理视图）
+//! - `GET/POST /api/lark/chat-sessions` —— 某私聊的**多会话**列表 / 新建（§11）
+//! - `PUT /api/lark/chat-sessions/active` —— 切换活动会话（§11）
+//! - `POST /api/lark/chat-sessions/delete` —— 删除一条会话映射（§11）
 //! - `POST /api/lark/seen`              —— 按 `message_id` 去重，返回是否首次
 //! - `GET /api/integrations/lark`       —— **结构化**读飞书策略（`config.json`）
 //! - `PUT /api/integrations/lark`       —— 结构化写策略（写后**重启 bot**）
@@ -27,7 +30,7 @@
 
 use axum::{
     extract::{Query, State},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -42,12 +45,18 @@ use super::ApiError;
 
 pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
-        .route(
-            "/api/lark/binding",
-            get(get_binding).put(upsert_binding).delete(delete_binding),
-        )
+        .route("/api/lark/binding", get(get_binding).put(upsert_binding).delete(delete_binding))
         .route("/api/lark/bindings", get(list_bindings))
         .route("/api/lark/seen", post(mark_seen))
+        .route(
+            "/api/lark/chat-sessions",
+            get(list_chat_sessions).post(create_chat_session),
+        )
+        .route("/api/lark/chat-sessions/active", put(set_active_session))
+        .route(
+            "/api/lark/chat-sessions/delete",
+            post(delete_chat_session),
+        )
         .route(
             "/api/integrations/lark",
             get(get_lark_config).put(put_lark_config),
@@ -284,6 +293,7 @@ async fn upsert_binding(
         chat_id: body.chat_id,
         session_id: body.session_id,
         user_open_id: body.user_open_id,
+        is_active: true,
         created_at: now,
         updated_at: now,
     };
@@ -334,4 +344,135 @@ async fn mark_seen(
     let first_time = lark::mark_seen(&conn, &body.message_id, now, cap)
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "first_time": first_time })))
+}
+
+// ───────────────── 多会话（§11：/sessions · /switch · /new · /delete）─────────────────
+//
+// 语义（数据层见 `commands::sessions::lark`）：
+// - 一个私聊**多行**，`is_active = 1` 的那条是当前会话（bot 的问答都落它）；
+// - 列表 join `chat_history.json` 的 `origin = "lark"` 会话元数据（给标题），
+//   排序以**绑定表的最近使用**为准（会话元数据里没有"被切换过"这个信号）；
+// - `create` 顺带把新会话置为活动（bot 的 `/new` 一个请求完成）。
+
+#[derive(Deserialize)]
+struct ChatIdOnly {
+    chat_id: String,
+}
+
+#[derive(Deserialize)]
+struct CreateSessionBody {
+    chat_id: String,
+    #[serde(default)]
+    user_open_id: String,
+}
+
+#[derive(Deserialize)]
+struct SetActiveBody {
+    chat_id: String,
+    session_id: String,
+}
+
+#[derive(Deserialize)]
+struct DeleteSessionBody {
+    chat_id: String,
+    session_id: String,
+}
+
+/// 会话列表：绑定行 + 标题（来自会话存储；取不到标题时退化为"新会话"）。
+async fn list_chat_sessions(
+    State(state): State<ApiState>,
+    Query(q): Query<ChatIdOnly>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    let rows = lark::list_chat_sessions(&conn, &q.chat_id).map_err(|e| ApiError { error: e })?;
+    drop(conn);
+
+    let metas = crate::commands::ai::list_chat_sessions_filtered(
+        &app_state.data_dir,
+        Some(crate::commands::ai::ORIGIN_LARK),
+    );
+    let title_of = |id: &str| {
+        metas
+            .iter()
+            .find(|m| m.id == id)
+            .map(|m| m.title.clone())
+            .unwrap_or_else(|| "(找不到对应会话内容)".to_string())
+    };
+    let sessions: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|b| {
+            serde_json::json!({
+                "session_id": b.session_id,
+                "title": title_of(&b.session_id),
+                "is_active": b.is_active,
+                "updated_at": b.updated_at,
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "sessions": sessions })))
+}
+
+/// 新建一条 lark 会话并**置为活动**（bot `/new` 的一句话实现）。
+async fn create_chat_session(
+    State(state): State<ApiState>,
+    Json(body): Json<CreateSessionBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if body.chat_id.trim().is_empty() {
+        return Err(ApiError { error: "chat_id is required".into() });
+    }
+    let app_state = state.app_handle.state::<AppState>();
+    let session_id = crate::commands::ai::create_chat_session_impl(
+        &app_state.data_dir,
+        crate::commands::ai::ORIGIN_LARK,
+    )
+    .map_err(|e| ApiError { error: e })?;
+    let now = chrono::Utc::now().timestamp();
+    let conn = app_state.db.get().map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    lark::upsert_binding(
+        &conn,
+        &crate::commands::sessions::lark::LarkBinding {
+            chat_id: body.chat_id,
+            session_id: session_id.clone(),
+            user_open_id: body.user_open_id,
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        },
+    )
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": true, "session_id": session_id })))
+}
+
+/// 切换活动会话。目标不属于该私聊 → 404 语义（`ok: false`，不改动任何状态）。
+async fn set_active_session(
+    State(state): State<ApiState>,
+    Json(body): Json<SetActiveBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    let now = chrono::Utc::now().timestamp();
+    let ok = lark::set_active(&conn, &body.chat_id, &body.session_id, now)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": ok })))
+}
+
+/// 删除一条会话**映射**（内容保留在会话存储里）。
+async fn delete_chat_session(
+    State(state): State<ApiState>,
+    Json(body): Json<DeleteSessionBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError {
+        error: e.to_string(),
+    })?;
+    let deleted = lark::delete_session(&conn, &body.chat_id, &body.session_id)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": deleted })))
 }

@@ -547,3 +547,115 @@ fn test_concurrent_safety() -> Result<()> {
     assert_eq!(r2.indexed, 1);
     Ok(())
 }
+
+/// 9 → 10 迁移（`docs/LARK_BOT.md` §11）：v9 的单会话绑定表升级成多会话表。
+///
+/// 这是**老用户升级路径**的唯一证据来源：先手工造出 v9 的表结构与数据
+/// （`lark_sessions`，`chat_id` 主键），再跑 `init_db`，断言：
+/// - 每个旧绑定不丢，且成为该私聊的**活动**会话（行为与升级前完全一致）；
+/// - 旧表被删（否则下一次启动会重复迁移）；
+/// - 再跑一次 `init_db` 幂等。
+#[test]
+fn test_lark_sessions_v9_to_v10_migration() -> Result<()> {
+    // 这些 lark 帮助函数的错误类型是 `String`（不实现 `std::error::Error`，anyhow 的 `?`
+    // 转不了）——在测试里包一层把它们转成 panic，保持测试主体干净。
+    fn lark<T>(r: Result<T, String>, what: &str) -> T {
+        r.unwrap_or_else(|e| panic!("{what}: {e}"))
+    }
+
+    let tmp = TempDir::new("lark_migrate");
+    let db_path = tmp.path().join("legacy.db");
+    let db_str = db_path.to_str().unwrap();
+
+    // ── 造一个 v9 库：老表结构 + 两行数据 ──
+    {
+        let conn = rusqlite::Connection::open(db_str)?;
+        conn.execute_batch(
+            "CREATE TABLE lark_sessions (
+                 chat_id      TEXT PRIMARY KEY,
+                 session_id   TEXT NOT NULL,
+                 user_open_id TEXT NOT NULL DEFAULT '',
+                 created_at   INTEGER NOT NULL,
+                 updated_at   INTEGER NOT NULL
+             );
+             INSERT INTO lark_sessions VALUES ('oc_a', 'sess-a', 'ou_a', 100, 110);
+             INSERT INTO lark_sessions VALUES ('oc_b', 'sess-b', 'ou_b', 200, 210);",
+        )?;
+    }
+
+    // ── 升级（真实迁移链）──
+    {
+        let conn = rusqlite::Connection::open(db_str)?;
+        db::init_db(&conn)?;
+    }
+    let pool = db::get_pool(db_str)?;
+    let conn = pool.get().unwrap();
+
+    // 旧表必须已被移除
+    let old_exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='lark_sessions'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(old_exists, 0, "迁移后旧表 `lark_sessions` 必须被删掉");
+
+    // 绑定语义不变：两个私聊各有一条**活动**会话，指向原会话
+    let a = lark(
+        link_searcher_lib::commands::sessions::lark::get_binding(&conn, "oc_a"),
+        "读 oc_a",
+    )
+    .expect("oc_a 的绑定必须还在");
+    assert_eq!(a.session_id, "sess-a");
+    assert_eq!(a.created_at, 100, "created_at 必须原样保留");
+    assert!(a.is_active, "迁移出来的唯一会话必须是活动会话");
+    let b = lark(
+        link_searcher_lib::commands::sessions::lark::get_binding(&conn, "oc_b"),
+        "读 oc_b",
+    )
+    .expect("oc_b 的绑定必须还在");
+    assert_eq!(b.session_id, "sess-b");
+    assert_eq!(b.user_open_id, "ou_b");
+    assert!(b.is_active);
+
+    // 迁移后立刻能用多会话能力：新增一条并切回旧的
+    let now = 999i64;
+    lark(
+        link_searcher_lib::commands::sessions::lark::upsert_binding(
+            &conn,
+            &link_searcher_lib::commands::sessions::lark::LarkBinding {
+                chat_id: "oc_a".into(),
+                session_id: "sess-a2".into(),
+                user_open_id: "ou_a".into(),
+                is_active: true,
+                created_at: now,
+                updated_at: now,
+            },
+        ),
+        "upsert",
+    );
+    let a2 = lark(
+        link_searcher_lib::commands::sessions::lark::get_binding(&conn, "oc_a"),
+        "读 oc_a",
+    )
+    .unwrap();
+    assert_eq!(a2.session_id, "sess-a2");
+    let list = lark(
+        link_searcher_lib::commands::sessions::lark::list_chat_sessions(&conn, "oc_a"),
+        "列 oc_a",
+    );
+    assert_eq!(list.len(), 2, "旧的 sess-a 应仍可切换回去");
+    drop(conn);
+
+    // ── 再跑一次 init_db：幂等（不重迁移、不报错）──
+    {
+        let conn = rusqlite::Connection::open(db_str)?;
+        db::init_db(&conn)?;
+        let still = lark(
+            link_searcher_lib::commands::sessions::lark::get_binding(&conn, "oc_a"),
+            "第二次 init 后读 oc_a",
+        )
+        .expect("第二次 init 不得动数据");
+        assert_eq!(still.session_id, "sess-a2");
+    }
+    Ok(())
+}

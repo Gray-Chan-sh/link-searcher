@@ -302,6 +302,135 @@ fn main() {
     let (status, _) = request(addr, "POST", "/api/setup/cancel", Some(good));
     assert_eq!(status, 400, "cancel with no install in flight must be 400");
 
+    // ── 8b. 飞书多会话（§11）：建 → 列 → 切 → 删 的完整链路 ──
+    // 这条链路 bot 侧全靠 webapi，所以端点形状错了 bot 必然坏 —— 在真实 router 上跑一遍。
+    let chat = "oc_webapi_test";
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/lark/chat-sessions",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}"}}"#)),
+    );
+    assert_eq!(status, 200, "create session must succeed: {body}");
+    let s1 = json(&body)["session_id"]
+        .as_str()
+        .expect("create must return session_id")
+        .to_string();
+
+    // 空白 chat_id 必须被拒（不能建出孤儿会话）
+    let (status, _) = request_with_body(
+        addr,
+        "POST",
+        "/api/lark/chat-sessions",
+        Some(good),
+        Some(r#"{"chat_id":"  "}"#),
+    );
+    assert_eq!(status, 400, "blank chat_id must be 400");
+
+    // 再建一条 → 活动指针应移到新的那条
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/lark/chat-sessions",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}","user_open_id":"ou_me"}}"#)),
+    );
+    assert_eq!(status, 200);
+    let s2 = json(&body)["session_id"].as_str().unwrap().to_string();
+    assert_ne!(s1, s2, "两次新建必须是两条不同的会话");
+
+    let (status, body) = request(
+        addr,
+        "GET",
+        &format!("/api/lark/chat-sessions?chat_id={chat}"),
+        Some(good),
+    );
+    assert_eq!(status, 200, "list must succeed: {body}");
+    let v = json(&body);
+    let sessions = v["sessions"].as_array().expect("sessions array");
+    assert_eq!(sessions.len(), 2, "两条会话都应在列表里：{body}");
+    assert_eq!(
+        sessions[0]["session_id"], Value::String(s2.clone()),
+        "活动会话必须排最前"
+    );
+    assert_eq!(sessions[0]["is_active"], Value::Bool(true));
+    assert_eq!(sessions[1]["is_active"], Value::Bool(false));
+    assert!(
+        sessions[0]["title"].is_string(),
+        "列表必须带标题（join 会话存储）：{body}"
+    );
+
+    // 切回第一条
+    let (status, body) = request_with_body(
+        addr,
+        "PUT",
+        "/api/lark/chat-sessions/active",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}","session_id":"{s1}"}}"#)),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["ok"], Value::Bool(true), "切换必须成功：{body}");
+
+    // 不属于该私聊的会话 → ok:false（不改动任何状态）
+    let (status, body) = request_with_body(
+        addr,
+        "PUT",
+        "/api/lark/chat-sessions/active",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}","session_id":"not-mine"}}"#)),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["ok"], Value::Bool(false), "外来会话必须被拒：{body}");
+
+    // 活动指针确实回到了 s1（用绑定接口验证）
+    let (status, body) = request(
+        addr,
+        "GET",
+        &format!("/api/lark/binding?chat_id={chat}"),
+        Some(good),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        json(&body)["binding"]["session_id"],
+        Value::String(s1.clone()),
+        "绑定接口应返回切换后的活动会话：{body}"
+    );
+
+    // 删除 s2 → deleted:true；重复删 → deleted:false
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/lark/chat-sessions/delete",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}","session_id":"{s2}"}}"#)),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["deleted"], Value::Bool(true), "删除必须生效：{body}");
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/lark/chat-sessions/delete",
+        Some(good),
+        Some(&format!(r#"{{"chat_id":"{chat}","session_id":"{s2}"}}"#)),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(json(&body)["deleted"], Value::Bool(false), "重复删除返回 false：{body}");
+
+    // 列表只剩一条，且仍是活动
+    let (status, body) = request(
+        addr,
+        "GET",
+        &format!("/api/lark/chat-sessions?chat_id={chat}"),
+        Some(good),
+    );
+    assert_eq!(status, 200);
+    let v = json(&body);
+    let sessions = v["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session_id"], Value::String(s1.clone()));
+    assert_eq!(sessions[0]["is_active"], Value::Bool(true));
+
     // ── 9. 飞书集成：结构化接口可达、形状正确（**只读**，不碰真实 config.json） ──
     let (status, body) = request(addr, "GET", "/api/integrations/lark", Some(good));
     assert_eq!(status, 200, "lark config must be reachable: {body}");

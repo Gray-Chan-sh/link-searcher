@@ -337,6 +337,131 @@ pub fn split_for_cards(text: &str, max_bytes: usize, max_cards: usize) -> Vec<St
     chunks
 }
 
+/// 会话列表卡片：每行一个「**切换 N**」按钮（序号与文本列表一致）。
+pub fn render_session_list_card(
+    title: &str,
+    items: &[ListItem],
+    session_ids: &[String],
+    footer: Option<&str>,
+) -> serde_json::Value {
+    render_list_card(title, items, footer, Some(("切换", "switch")), session_ids)
+}
+
+/// 删除确认卡片：每行一个「**删除 N**」按钮（二次确认，防误删）。
+pub fn render_delete_list_card(
+    title: &str,
+    items: &[ListItem],
+    session_ids: &[String],
+    footer: Option<&str>,
+) -> serde_json::Value {
+    render_list_card(title, items, footer, Some(("删除", "remove_confirm")), session_ids)
+}
+
+/// 飞书**单条纯文本**的安全长度（按字符计）：超长会被拒/截断，宁可我们自己裁。
+const MAX_MENU_LINE_CHARS: usize = 200;
+/// 菜单列表的**纯文本**行数上限（渲染与动作序号共用同一常量）。
+pub const MAX_MENU_LINES: usize = 5;
+
+/// 一条列表项：飞书侧**同时**通过卡片与纯文本展示。
+///
+/// 为什么两套都要：卡片上按钮的 `card.action.trigger` 回调依赖长连接与后台菜单订阅，
+/// 而"回复数字"走的是普通消息（现有链路，零配置）。两者共用同一份序号。
+#[derive(Debug, Clone)]
+pub struct ListItem {
+    /// 展示标题（会话标题 / 文件名）。
+    pub title: String,
+    /// 次要说明（更新时间 / 路径等），可为空。
+    pub detail: String,
+}
+
+/// 单行列表文本（**纯文本路径**用的格式；卡片侧用同一序号）。
+fn menu_line(i: usize, item: &ListItem) -> String {
+    let mut line = format!("{}. {}", i + 1, item.title.trim());
+    let detail = item.detail.trim();
+    if !detail.is_empty() {
+        line.push_str("（");
+        line.push_str(detail);
+        line.push('）');
+    }
+    clip_bytes(&line, MAX_MENU_LINE_CHARS)
+}
+
+/// 列表的**纯文本**形态（发给飞书，供"回复数字"使用）。
+pub fn menu_text(items: &[ListItem]) -> String {
+    items
+        .iter()
+        .take(MAX_MENU_LINES)
+        .enumerate()
+        .map(|(i, item)| menu_line(i, item))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 会话/搜索列表卡片：`1.` 开头的 markdown 列表 + 可选说明 + 可选按钮。
+///
+/// `actions` 与 `items` 一一对应（第 i 个按钮作用于第 i 项）。**没有 items 时不渲染**
+/// 调用方据此走别的分支。
+pub fn render_list_card(
+    title: &str,
+    items: &[ListItem],
+    footer: Option<&str>,
+    button: Option<(&str, &str)>, // (label, action) —— 每项同一种动作（序号随 payload 传递）
+    session_ids: &[String],
+) -> serde_json::Value {
+    let body = menu_text(items);
+    let mut card = render_card(title, &body, footer);
+    let Some((label, action)) = button else {
+        return card;
+    };
+    let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) else {
+        return card;
+    };
+    let buttons: Vec<serde_json::Value> = items
+        .iter()
+        .take(MAX_MENU_LINES)
+        .enumerate()
+        .filter_map(|(i, _)| {
+            let sid = session_ids.get(i)?;
+            if sid.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": format!("{label} {}", i + 1) },
+                "type": "default",
+                "value": action_payload_indexed(action, sid, i + 1),
+            }))
+        })
+        .collect();
+    if buttons.is_empty() {
+        return card;
+    }
+    elements.push(serde_json::json!({ "tag": "action", "actions": buttons }));
+    card
+}
+
+/// 搜索结果卡片：每条 = 文件名（粗体）+ 路径 + 命中片段。
+///
+/// 结果**不打按钮**：点按钮打开 WebUI 预览要带 LAN 地址（`path` 深链），而设备与网络
+/// 拿不准时贸然给链接反而误导 —— 先在飞书里看到"命中在哪"，要细看走 `/sessions` 与
+/// 「打开详情」那种明确入口（都是已知可达的场景）。
+pub fn render_search_card(
+    query: &str,
+    items: &[ListItem],
+    footer: Option<&str>,
+) -> serde_json::Value {
+    let mut lines: Vec<String> = Vec::new();
+    for (i, item) in items.iter().enumerate() {
+        lines.push(format!("**{}. {}**", i + 1, item.title.trim()));
+        if !item.detail.trim().is_empty() {
+            lines.push(format!("   {}", item.detail.trim()));
+        }
+        lines.push(String::new());
+    }
+    let body = lines.join("\n");
+    render_card(&format!("搜索「{}」", query.trim()), &body, footer)
+}
+
 /// 失败卡片（**在"卡已发出"之后**出错时用）：不再另发文本，避免答案重复出现两次。
 pub fn render_error(detail: &str) -> serde_json::Value {
     render_card("出错了", &format!("未能完成这次回答：\n\n```\n{detail}\n```"), None)
@@ -408,6 +533,11 @@ pub struct CardActionEvent {
     #[serde(default)]
     pub chat_id: String,
     /// 点击者的 `open_id`（仍需过白名单 —— 回调是**另一条入口**，不能只靠消息入口把关）。
+    ///
+    /// ⚠️ 准入判定实际走 [`operator_open_id`]（直接读**原始 JSON**，兼容多种形状）——
+    /// 这个字段只作反序列化的文档化：真实样本的字段形状尚未确认，宁可多留一条读原始
+    /// 事件的路径，也不把安全性押在一种形状上。
+    #[allow(dead_code)]
     #[serde(default)]
     pub operator_id: String,
 }
@@ -419,6 +549,14 @@ pub enum CardAction {
     OpenDetail { session_id: String },
     /// 「换一批证据」：用同一个问题重跑一轮。
     Retry { session_id: String },
+    /// 「新建会话」（帮助卡 / 会话列表卡）：**不需要** session_id。
+    NewSession,
+    /// 「切换会话」：把按钮对应的会话置为活动。
+    Switch { session_id: String },
+    /// 「删除会话」：先回一本确认卡（真正的删除走 [`CardAction::RemoveConfirm`]）。
+    Remove { session_id: String, index: usize },
+    /// 「确认删除」：经由确认卡上的按钮到这里才真删。
+    RemoveConfirm { session_id: String, index: usize },
 }
 
 /// 从 `action_value` 解析出动作。返回 `None` = **不认识/不完整 → 直接忽略**。
@@ -429,19 +567,31 @@ pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
     // 二次 parse：飞书给的是 JSON **字符串**（§2 实测发现 ①）
     let v: serde_json::Value = serde_json::from_str(ev.action_value.trim()).ok()?;
     let action = v.get("action")?.as_str()?.trim();
+    // 唯一**不需要** session_id 的动作：新建会话（没有"对哪个会话做事"的问题）
+    if action == "new_session" {
+        return Some(CardAction::NewSession);
+    }
     let session_id = v
         .get("session_id")
         .and_then(|s| s.as_str())
         .unwrap_or("")
         .trim()
         .to_string();
-    // 没有 session_id 的动作无法安全执行（不知道对哪个会话做事）→ 忽略
+    // 其余动作都需要 session_id（不知道对哪个会话做事）→ 忽略
     if session_id.is_empty() {
         return None;
     }
+    let index = v
+        .get("index")
+        .and_then(|i| i.as_u64())
+        .map(|i| i as usize)
+        .unwrap_or(0);
     match action {
         "open_detail" => Some(CardAction::OpenDetail { session_id }),
         "retry" => Some(CardAction::Retry { session_id }),
+        "switch" => Some(CardAction::Switch { session_id }),
+        "remove" if index >= 1 => Some(CardAction::Remove { session_id, index }),
+        "remove_confirm" if index >= 1 => Some(CardAction::RemoveConfirm { session_id, index }),
         _ => None,
     }
 }
@@ -460,6 +610,11 @@ pub fn action_value(action: &str, session_id: &str) -> String {
 /// 走"二次 parse"那条路 —— 两边靠 `action_payload` 单点定义 + 往返测试保持一致。
 pub fn action_payload(action: &str, session_id: &str) -> serde_json::Value {
     serde_json::json!({ "action": action, "session_id": session_id })
+}
+
+/// 带**序号**的按钮 payload（会话列表卡用）：`index` 是 1-based 的展示序号。
+pub fn action_payload_indexed(action: &str, session_id: &str, index: usize) -> serde_json::Value {
+    serde_json::json!({ "action": action, "session_id": session_id, "index": index })
 }
 
 /// WebUI 的**深链**（给「打开详情」按钮用）：直达某条会话，用户可以在浏览器里继续追问。
@@ -1003,6 +1158,111 @@ mod tests {
             card["elements"].as_array().unwrap().len(),
             before,
             "没有 session_id 就不该加按钮（点了也动不了，只会是噪音）"
+        );
+    }
+
+    // ── 多会话/搜索：动作往返（§11）──
+
+    /// 新动作的**发送侧 ↔ 解析侧**往返：按钮 value 被字符串化后必须能被认回来。
+    #[test]
+    fn session_actions_round_trip_with_their_builders() {
+        let cases = [
+            (action_payload("switch", "s-1"), CardAction::Switch { session_id: "s-1".into() }),
+            (
+                action_payload_indexed("remove", "s-2", 2),
+                CardAction::Remove { session_id: "s-2".into(), index: 2 },
+            ),
+            (
+                action_payload_indexed("remove_confirm", "s-3", 3),
+                CardAction::RemoveConfirm { session_id: "s-3".into(), index: 3 },
+            ),
+            (action_payload("new_session", ""), CardAction::NewSession),
+        ];
+        for (payload, expect) in cases {
+            let ev = CardActionEvent {
+                event_type: "card.action.trigger".into(),
+                // 飞书会把 value 对象**字符串化**后放进 action_value（§2 实测样本）
+                action_value: payload.to_string(),
+                ..Default::default()
+            };
+            assert_eq!(parse_card_action(&ev), Some(expect), "往返失败：{payload}");
+        }
+    }
+
+    /// 不完整/未知动作必须**忽略**（fail-closed）：缺 session_id、缺 index、未知 action。
+    #[test]
+    fn partial_or_unknown_card_actions_are_ignored() {
+        for bad in [
+            r#"{"action":"switch"}"#,
+            r#"{"action":"switch","session_id":"  "}"#,
+            r#"{"action":"remove","session_id":"s"}"#,        // 缺 index
+            r#"{"action":"remove","session_id":"s","index":0}"#, // index 必须 ≥1
+            r#"{"action":"remove_confirm","session_id":"s"}"#,
+            r#"{"action":"cancel"}"#,
+            r#"{"action":"__unknown__","session_id":"s"}"#,
+        ] {
+            let ev = CardActionEvent { action_value: bad.to_string(), ..Default::default() };
+            assert_eq!(parse_card_action(&ev), None, "必须忽略：{bad}");
+        }
+    }
+
+    /// 列表卡：正文序号与按钮序号**一致**；没有 session_id 的位置不出现按钮。
+    #[test]
+    fn list_card_numbers_text_and_buttons_consistently() {
+        let items = vec![
+            ListItem { title: "合同审查".into(), detail: "10-16 14:02".into() },
+            ListItem { title: "汪均益案".into(), detail: String::new() },
+            ListItem { title: "缺 id 的会话".into(), detail: String::new() },
+        ];
+        let ids = vec!["s-1".to_string(), "s-2".to_string(), String::new()];
+        let card = render_session_list_card("你的会话", &items, &ids, Some("回复数字可点选"));
+        let body = card["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(body.contains("1. 合同审查（10-16 14:02）"), "正文：{body}");
+        assert!(body.contains("2. 汪均益案"), "正文：{body}");
+        let last = card["elements"].as_array().unwrap().last().unwrap();
+        let buttons = last["actions"].as_array().unwrap();
+        assert_eq!(buttons.len(), 2, "只应为有 session_id 的前两条加按钮");
+        assert_eq!(buttons[0]["text"]["content"], "切换 1");
+        assert_eq!(buttons[1]["text"]["content"], "切换 2");
+        // 按钮 1 往返：switch s-1 index 1
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: buttons[0]["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::Switch { session_id: "s-1".into() })
+        );
+        // footer 走 note 元素
+        let tags: Vec<&str> = card["elements"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["tag"].as_str().unwrap_or(""))
+            .collect();
+        assert_eq!(tags, vec!["markdown", "hr", "note", "action"]);
+    }
+
+    /// 搜索卡：序号、路径与片段都在正文里；不打按钮。
+    #[test]
+    fn search_card_renders_numbered_hits_without_buttons() {
+        let items = vec![
+            ListItem { title: "一审判决书.pdf".into(), detail: "合同纠纷/2024\n   …汪均益…".into() },
+            ListItem { title: "48号裁定.docx".into(), detail: "上诉材料".into() },
+        ];
+        let card = render_search_card("汪均益", &items, Some("共 2 条"));
+        let body = card["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(body.contains("**1. 一审判决书.pdf**"), "正文：{body}");
+        assert!(body.contains("合同纠纷/2024"), "正文：{body}");
+        assert!(body.contains("汪均益"), "正文：{body}");
+        assert!(
+            !card["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tag"] == "action"),
+            "搜索结果不打按钮"
         );
     }
 }

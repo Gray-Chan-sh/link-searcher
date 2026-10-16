@@ -1623,3 +1623,104 @@ lark-cli event consume card.action.trigger --as bot --max-events 1 --timeout 25s
 
 > ✅ **已确认（2026-10-15）**：`lark-cli` 的取得方式就是**依赖中心**（`deps/catalog.rs` 那套），
 > 不随包分发、在杀软/安全中心加信任。此前的"待澄清"已作废。
+
+---
+
+## 十一、多会话 + 搜索命令 + 机器人菜单（2026-10-16 实施）
+
+> 需求原文："如何在飞书中集成搜索、ai聊天功能，并且可以和 ui 一样，ai 聊天可以分成多组，
+> 每组可以多轮"；经确认：命令**用英文**，并追问"输入 `/` 能否弹出命令列表"。
+> 本节记录**平台事实**与**落地实现**，供回归与后续增量参考。
+
+### 11.1 平台事实（2026-10-16 查证，官方文档）
+
+| 问题 | 结论 | 出处 |
+|---|---|---|
+| 飞书机器人支持"输入 `/` 弹命令列表"吗？ | **不支持**。FAQ 原文："机器人是否支持 /help 这类斜线命令（slash command）？—— **机器人本身不支持**" | [消息常见问题](https://open.feishu.cn/document/server-docs/im-v1/faq) |
+| 有没有替代的"命令栏"？ | **有**：**机器人自定义菜单**（可切换式 / 悬浮式），**仅单聊**；容量 3×5（可切换）/ 5×10（悬浮）；动作可选跳转链接 / **发文本消息**（≥7.22）/ **推送事件** | [Bot customized menu](https://open.feishu.cn/document/uAjLw4CM/ukTMukTMukTM/bot-v3/bot-customized-menu) |
+| 菜单怎么配？ | **开发者后台**（机器人能力页 → 自定义菜单 → 建版本 → 发布，约 5 分钟生效）。当前**没有**找到稳定、完整的"程序化配置菜单"公开 API 文档（应用能力配置 v7 `ability.patch` 存在，但字段未证实覆盖菜单）→ **按"手工配置一次"设计** | 同上 + openlark API 清单 |
+| 菜单事件怎么收？ | `lark-cli event consume application.bot.menu_v6`（官方 changelog 确认支持；走既有长连接） | [Lark changelog](https://open.larksuite.com/changelog?lang=en-US) |
+
+→ 因此本功能的形态是**三条并行路径**（能力递进、前两条**零配置**）：
+
+1. **斜杠命令**（文本消息，`/help` `/new` `/sessions` `/switch` `/delete` `/find`）；
+2. **列表点选**：列表卡片同时给出**按钮**（`card.action.trigger`，§8.4 已通的回调链路）
+   与**数字回复**（普通消息链路，不依赖任何后台订阅）；
+3. **机器人菜单**（需后台配置一次）：bot 侧把菜单事件解析成**同一条命令路径**执行。
+
+### 11.2 数据模型：一私聊多会话 + 活动指针（SCHEMA_VERSION 9 → 10）
+
+`lark_sessions`（`chat_id` 主键 ⇒ 一私聊只能一条）替换为 `lark_chat_sessions`：
+
+```sql
+CREATE TABLE lark_chat_sessions (
+    chat_id      TEXT NOT NULL,
+    session_id   TEXT NOT NULL,
+    user_open_id TEXT NOT NULL DEFAULT '',
+    is_active    INTEGER NOT NULL DEFAULT 0,   -- 当前活动会话（bot 的问答落它）
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (chat_id, session_id)
+);
+CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_active = 1;
+```
+
+- **部分唯一索引**把"每私聊至多一个活动会话"钉在 schema 层（不变量不靠调用方自觉）。
+- **迁移**（`db::migrate_lark_sessions_to_multi`，幂等）：旧表每行搬成"该私聊唯一会话、`is_active=1`"
+  → **老用户升级后行为与从前完全一致**（仍接着原会话聊），只是从此多了切换/新建能力；随后 DROP 旧表。
+- **容量**：每私聊上限 `MAX_SESSIONS_PER_CHAT = 50`（`upsert_binding` 内同事务修剪），
+  **只淘汰最旧的非活动行；活动行永不被自动删**。
+- **删除语义**：`delete_session` 只删**映射行**；`chat_history.json` 里的内容保留
+  （"删映射丢了对话内容"才是意外；删除卡片上明说这一点）。
+- **删掉活动会话** → 该私聊**暂时没有活动行**；bot 下次取绑定会自动新建并注明（见 11.4 防呆）。
+
+### 11.3 接口与实现落点
+
+| 层 | 落点 |
+|---|---|
+| 数据层 | `commands/sessions/lark.rs`：`get_binding` / `list_chat_sessions` / `upsert_binding`（事务：清旧活动 → upsert → 修剪）/ `set_active`（**不属于该私聊 → false**，不改任何状态）/ `delete_session` / `delete_binding` / `list_bindings`（只列活动行） |
+| WebAPI（bot 消费） | `webapi/routes/lark.rs`：`GET/POST /api/lark/chat-sessions`、`PUT /api/lark/chat-sessions/active`、`POST /api/lark/chat-sessions/delete`。列表接口 **join** `chat_history.json` 的 `origin=lark` 会话元数据拿标题（排序以**绑定表的 `updated_at`** 为准 —— 切换会话也是"使用"） |
+| bot | 命令解析 `lark-bot/src/commands.rs`；点选状态 `lark-bot/src/menu.rs`（TTL 10 分钟、进程内存）；卡片渲染与动作 `lark-bot/src/card.rs`；路由 `lark-bot/src/main.rs` |
+| 事件入口 | 消息（完整闸门）＋ 卡片回调（只判白名单）＋ **菜单事件**（只判白名单，`chat_type` 不存在）—— 三条流的白名单判定**都在各自入口**，fail-closed |
+
+**命令表**（全英文；未命中/未知 `/xxx` 一律按普通提问走 AI —— 命令解析不能吃掉正常问题）：
+
+| 命令 | 行为 | 备注 |
+|---|---|---|
+| `/help`（或单独 `/`） | 命令卡片（附「新建会话」按钮） | 零配置的"弹出列表"替代 |
+| `/new` | 新建 lark 会话并置活动，回会话列表卡 | |
+| `/sessions` | 会话列表卡（活动置顶，带时间与标题） | 记点选映射 |
+| `/switch <序号或标题前缀>` | 切换并回"锚点"（上一个问题）；前缀多命中时列表让选 | 序号优先按**上次列表快照**解析 |
+| `/delete <序号>` | **先确认卡**（按钮二次确认才真删） | 防误删 |
+| `/find <关键词> [页码]` | 调 `GET /api/search`（每页 5 条）→ 结果卡（文件名/路径/片段） | 页码规则：末位数字 **≤99** 才算页码（`判决书 2024` 这类"数字关键词"不被误判） |
+
+**`/switch` 的序号来源**：菜单记忆保存的 `序号 → 动作` **从渲染出的列表正文解析**
+（`card::menu_text` + `menu::resolve_text_menu`），而不是另写一套下标 —— 按钮、数字回复
+与卡片上的序号因此**必然一致**。
+
+### 11.4 边界与防呆
+
+- **活动会话被别的端删除**（桌面/WebUI）：bot 取会话收到 404 → 自动新建并回
+  "原会话已不存在（可能在其他端被删），已自动开一条新会话"→ 整轮问答**继续**，不把错误抛给用户。
+- **数字回复误伤**：仅当 ①该私聊 10 分钟内发过列表、②数字命中已记录序号、③列表 ≥2 项时才拦截；
+  否则数字照常走 AI 问答。
+- **菜单项配错**（`event_key` 不是命令）：回一条可选项提示，不猜。
+- **卡片按钮一律"回复式"动作**：不消费 `card.action.trigger` 的回调 token（"最多 2 次更新"
+  的限制因此与我们无关，§8.1）。
+- **bot 进程内存里的菜单记忆**：丢失（重启）只损失"回复数字"，重发 `/sessions` 即可 ——
+  与 §5.6 的配置/状态划分一致（真正的状态在 SQLite）。
+
+### 11.5 验收记录（2026-10-16）
+
+| 项 | 证据 |
+|---|---|
+| 数据层 | `commands/sessions/lark.rs` 单测：多会话往返、created_at 保留、切换/删除/跨私聊隔离、容量淘汰边界（**淘汰最旧的 3 条、第 4 旧保留**）、`set_active` 对外来会话返回 false 且不扰动状态 |
+| 迁移 | `tests/integration.rs::test_lark_sessions_v9_to_v10_migration`：真造 v9 表 → `init_db` → 绑定不丢且为活动、旧表已删、二次 `init_db` 幂等 |
+| WebAPI | `tests/webapi_http.rs`：真实 router 上建→列（活动置顶+标题）→切→外来会话被拒→绑定接口反映切换→删→重复删 false→列表 |
+| bot | 60 项单测（命令解析/数字点选/卡片渲染与动作往返/时间格式化等） |
+| 门禁 | `cargo test --workspace` 全绿（lib 600 + lark-bot 60 + lark-gate 13 + 集成/HTTP/……）；`tsc` 0 错；`vitest` 81/81；semgrep ERROR **0 发现** |
+| 真机 | ⏳ 待用户验收（命令、列表点选、`/find`；菜单为可选，需按 11.1 在开发者后台配置一次） |
+
+> ⚠️ **教训（本轮排查）**：容量测试首版把"最后插入的 s-52"误写成"s-0"（时间戳递减时
+> **编号越大越旧**），断言失败一度被怀疑成"活动指针漂移"的产品 bug。**先怀疑断言、再怀疑实现**
+> —— 尤其当"每步断言都过、最终状态却不对"时，先核对**期望值本身**（详见 `CHANGELOG.md` 本轮条目）。

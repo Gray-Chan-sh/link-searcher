@@ -1,20 +1,24 @@
-//! 飞书 bot sidecar —— `docs/LARK_BOT.md` P1 的 bot 本体（**先做纯文本回复**）。
+//! 飞书 bot sidecar —— `docs/LARK_BOT.md` P1 的 bot 本体。
 //!
-//! 它是**独立进程**，只经 webapi 访问本库（§4.1 的数据流），因此：
+//! ## 它做的事（§11 起为多会话 + 搜索）
 //!
 //! ```text
-//! 消费 lark-cli 的 NDJSON 事件
-//!   → §7.1 准入判定（`lark-gate` crate：L0 来源 / L2 类型 / L1 白名单 / L1′ 配对）
-//!   → /api/lark/seen 去重（按 message_id）
-//!   → /api/lark/binding 取/建 chat_id ↔ session_id 绑定
-//!   → /api/chat/sessions/{id}?origin=lark 取会话、带上历史
-//!   → **回复一张"检索中"卡片** → 消费 `POST /api/ai/conversation/ask/stream`（SSE）
-//!     → **节流**更新卡片（§8.1：约束是频率而非次数） → 收尾成最终卡片
-//!     →（卡片发不出去就**退回纯文本**：`/api/ai/conversation/ask` + `im +messages-reply --text`）
-//!   → 把这一轮落回会话（origin=lark）
+//! 消费 lark-cli 的 NDJSON 事件（三条流汇进同一个处理循环）：
+//!   ├─ im.message.receive_v1  消息  → §7.1 准入判定（`lark-gate`）→ /api/lark/seen 去重
+//!   │     ├─ 命中斜杠命令（commands::parse_command）→ 命令实现（/help /new /sessions
+//!   │     │   /switch /delete /find）→ 回卡片/文本，结束
+//!   │     └─ 否则 → 取/建**活动会话**（chat_id ↔ 多会话表的 is_active 行）
+//!   │           → 回"检索中"卡片 → 消费 `POST /api/ai/conversation/ask/stream`（SSE）
+//!   │           → **节流**更新卡片（§8.1）→ 收尾成最终卡片 → 这一轮落回会话（origin=lark）
+//!   ├─ card.action.trigger    卡片按钮（打开详情 / 换一批证据 / 切换 / 删除 / 新建 / 取消）
+//!   └─ application.bot.menu_v6 机器人菜单点击（§11；菜单在开发者后台配置，仅单聊）
 //! ```
 //!
-//! 卡片的渲染/节流/SSE 分帧在 [`card`] 模块（纯逻辑，可单测）。
+//! 三条入口各自过白名单：消息走完整闸门（L0/L2/L1/L1′），回调与菜单事件没有
+//! `chat_type`，只做身份判定（fail-closed）。
+//!
+//! 卡片的渲染/节流/SSE 分帧在 [`card`] 模块；命令解析在 [`commands`]；
+//! "回复数字点选"的状态在 [`menu`]（都是纯逻辑，可单测）。
 //!
 //! ## 为什么是**独立 crate**（而不是主程序包里的一个 bin）
 //!
@@ -42,36 +46,66 @@
 //! - **stderr 先就绪、stdout 再解析**：lark-cli 的契约是"stderr 出现 `[event] ready event_key=`
 //!   之后才开始读 stdout"（§2 实测）。两个流必须分开读，不能合并。
 //! - **自签名 TLS**：webapi 用自签证书，本进程必须显式接受（见 [`insecure_agent`]）。
+//! - **`lark-cli` 的可执行文件发现归应用侧的依赖中心**：应用解析出的路径经 `LS_LARK_CLI`
+//!   注入给本进程；本进程自带的 [`lark_cli_program`] 只是"被手工拉起"时的兜底
+//!   （Unix 上直接交回裸名 `lark-cli`，由 PATH 解析 —— 见该函数注释）。
 //!
 //! ## 尚未做（后续增量）
 //!
-//! - 卡片**按钮/交互**（P3；`card.action.trigger` 回调已实测可走长连接，但需要
-//!   `custom_action_id` 路由，且那条路的更新有"最多 2 次"限制，见 §8.1）
-//! - `lark-cli` 的可执行文件发现**已交给依赖中心**：应用解析出的路径经 `LS_LARK_CLI`
-//!   注入给本进程；本进程自带的 [`lark_cli_program`] 只是"被手工拉起"时的兜底
-//!   （Unix 上直接交回裸名 `lark-cli`，由 PATH 解析 —— 见该函数注释）
+//! - 文件 / 语音 / 图片入站（P2；见 `docs/LARK_BOT.md` 九、分阶段实施建议）
+//! - 定时摘要与"写飞书文档/表格"出口（P3）
+//! - 卡片按钮的**回调 token 更新**（当前按钮只做"回复式"动作，刻意绕开
+//!   `card.action.trigger` token 的"最多 2 次更新"限制，见 §8.1）
 
 mod card;
+mod commands;
+mod menu;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use card::{render_answer_card, render_error, render_working, split_for_cards, CardActionEvent, SseAccum, Throttle, MAX_BODY_BYTES, MAX_CARDS};
+use card::{
+    render_answer_card, render_delete_list_card, render_error, render_search_card,
+    render_session_list_card, render_working, split_for_cards, CardActionEvent, ListItem, SseAccum,
+    Throttle, MAX_BODY_BYTES, MAX_CARDS, MAX_MENU_LINES,
+};
+use commands::{parse_command, parse_selection, Command as Cmd};
 use lark_gate::{
     gate, strip_leading_mention, GateVerdict, LarkGateConfig, LarkMessageEvent, NON_P2P_NOTICE,
 };
+use menu::{MenuAction, MenuMemory};
 use serde_json::{json, Value};
 
 /// webapi 基址（自签名 TLS）。可用 `LS_WEB_API_URL` 覆盖。
 const DEFAULT_BASE: &str = "https://127.0.0.1:8443";
+/// 飞书**机器人菜单点击**事件（§11：开发者后台配置的自定义菜单）。
+const MENU_EVENT_TYPE: &str = "application.bot.menu_v6";
 /// 等长连接就绪的上限。
 const READY_TIMEOUT: Duration = Duration::from_secs(90);
+/// 菜单消费者的就绪等待上限：菜单是**可选**能力（后台没配就没有就绪标记），
+/// 所以短等即走、绝不占用后台线程（详见 [`poll_consumer_into`]）。
+const MENU_READY_TIMEOUT: Duration = Duration::from_secs(15);
 /// 纯文本回复的截断长度（飞书消息有长度上限，且 Windows 命令行也有；§8 的卡片分页是后续增量）。
 const MAX_REPLY_CHARS: usize = 3000;
+/// `/find` 每页条数（飞书侧 5 条既有信息量又不刷屏）。
+const FIND_PAGE_SIZE: usize = 5;
+
+/// 上次列表菜单记忆（§11：零配置的"回复数字点选"）。
+///
+/// 进程内存即可：它是**一次性 UI 状态**（bot 重启后翻篇的列表不再有意义），
+/// 真正的会话状态在 `lark_chat_sessions` 表里。用 `Mutex` 而非线程局部：
+/// 卡片回调消费者（后台线程）也要读它。
+static MENUS: Mutex<Option<MenuMemory>> = Mutex::new(None);
+
+/// 在菜单记忆上执行一次操作（拿到全局单例，惰性初始化）。
+fn with_menu<R>(f: impl FnOnce(&mut MenuMemory) -> R) -> R {
+    let mut guard = MENUS.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.get_or_insert_with(MenuMemory::new))
+}
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -136,7 +170,14 @@ fn main() {
     // 回调是**另一条入口**，必须自己再过一次白名单（消息入口那套不会自动保护它）。
     spawn_card_consumer(Arc::clone(&http), cfg.gate.allowed_users.clone());
 
-    // ── 4. 逐行消费标准输出 ────────────────────────────────────────────────
+    // ── 3c. 机器人菜单（§11）：**第三个消费者**，后台起（失败只降级）─────────────
+    // 菜单事件是"推送事件"类菜单项的落点；菜单本身在开发者后台配置（仅单聊）。
+    // 起不来（旧版 lark-cli / 未订阅）只损失"点菜单"这一条路，消息与卡片两条主路不受影响。
+    spawn_menu_consumer(Arc::clone(&http), cfg.gate.allowed_users.clone());
+
+    // ── 4. 逐行消费事件（stdout 线程 + 菜单消费者，统一进同一个通道）────────────
+    // 为什么不是直接 `for line in BufReader::new(stdout).lines()`：菜单消费者是**第二个
+    // 事件源**，两条流要汇成一条串行处理（处理逻辑是同步的，天然不需要并发）。
     let stdout = match child.stdout.take() {
         Some(s) => s,
         None => {
@@ -144,36 +185,48 @@ fn main() {
             std::process::exit(6);
         }
     };
-    for line in BufReader::new(stdout).lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                log::warn!("读 stdout 失败：{e}");
-                break;
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let stdout_tx = line_tx.clone();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let line = line.trim().to_string();
+            if !line.is_empty() && stdout_tx.send(line).is_err() {
+                break; // 主线程已退出
             }
-        };
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
         }
-        if let Err(e) = handle_line(line, &http, &cfg.gate) {
+    });
+    drop(line_tx); // 只留 stdout 那条发送端：它结束时接收端才能自然退出
+    for line in line_rx {
+        if let Err(e) = handle_line(&line, &http, &cfg.gate) {
             // 单条失败不影响后续事件：飞书会重投，而我们有 message_id 去重兜底。
             log::warn!("[bot] 处理事件失败：{e}");
         }
     }
-    log::warn!("[bot] stdout 结束（lark-cli 已退出）");
+    log::warn!("[bot] 事件流结束（lark-cli 已退出）");
     let _ = child.wait();
 }
 
 // ───────────────────────────── 事件处理 ─────────────────────────────
 
 fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(), String> {
-    let ev: LarkMessageEvent = serde_json::from_str(line)
+    // 事件类型先看一眼（在**反序列化成具体结构之前**）：
+    // 菜单事件（`application.bot.menu_v6`）与消息事件字段完全不同，走各自的分支。
+    let peek: Value = serde_json::from_str(line)
         .map_err(|e| format!("事件 JSON 解析失败：{e}（原文前 200 字符：{}）", &line[..line.len().min(200)]))?;
-    if ev.event_type != "im.message.receive_v1" {
-        return Ok(()); // 只关心新消息
+    let ev_type = peek
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if ev_type == MENU_EVENT_TYPE {
+        return handle_menu_line(&peek, http, &gate_cfg.allowed_users);
+    }
+    if ev_type != "im.message.receive_v1" {
+        return Ok(()); // 只关心新消息与菜单点击
     }
 
+    let ev: LarkMessageEvent = serde_json::from_value(peek)
+        .map_err(|e| format!("消息事件解析失败：{e}"))?;
     match gate(&ev, gate_cfg) {
         GateVerdict::DenyNonUser => {
             log::info!("[bot] 忽略非用户来源（sender_type={}）", ev.sender_type);
@@ -223,6 +276,32 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     }
 
     let question = strip_leading_mention(&ev.content);
+
+    // ── 命令路由（§11）：命中命令 → 执行并结束；未命中 → 一律走 AI 问答 ──────────
+    // 数字点选优先于命令：用户在列表后直接回 `3` 是最顺手的操作。
+    if let Some(sel) = parse_selection(&question) {
+        let action = with_menu(|m| m.resolve(&ev.chat_id, now_secs(), sel));
+        if let Some(action) = action {
+            log::info!("[bot] 数字点选 {sel} → {action:?}（chat={}）", ev.chat_id);
+            return run_menu_action(http, &ev.chat_id, &ev.message_id, &action);
+        }
+        // 没命中菜单 → 把"3"当普通提问（稀有，但语义一致）
+    }
+    match parse_command(&question) {
+        Cmd::Help => {
+            reply_card(&ev.message_id, &commands::help_card())?;
+            log::info!("[bot] 已回命令帮助（chat={}）", ev.chat_id);
+            return Ok(());
+        }
+        Cmd::New => return reply_new_session(http, &ev),
+        Cmd::List => return reply_session_list(http, &ev),
+        Cmd::Switch(arg) => return reply_switch(http, &ev, &arg),
+        Cmd::Delete(arg) => return reply_delete_confirm(http, &ev, &arg),
+        Cmd::Find { query, page } => return reply_find(http, &ev, &query, page),
+        // 不是命令 / 是空正文：走 AI 问答
+        Cmd::Ai => {}
+    }
+
     if question.is_empty() {
         reply(&ev.message_id, "请直接说出你的问题。");
         return Ok(());
@@ -230,6 +309,36 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
 
     // 取/建会话绑定（阶段三）
     let session_id = http.session_for_chat(&ev.chat_id, &ev.sender_id)?;
+    match ask_with_session(http, &ev, &question, &session_id, None) {
+        Ok(()) => Ok(()),
+        // 兜底：绑定指向的会话可能已被**别的端**（桌面/WebUI）删除 —— 随机换一条新的，
+        // 并提醒用户（而不是把 404 原样抛给用户或静默失败）。
+        Err(e) if e.contains("404") || e.contains("session not found") => {
+            log::warn!(
+                "[bot] 会话 {session_id} 已不存在（可能在桌面/WebUI 被删）—— 自动新建并继续"
+            );
+            let fresh = http.session_for_chat_fresh(&ev.chat_id, &ev.sender_id)?;
+            reply(
+                &ev.message_id,
+                "原会话已不存在（可能在其他端被删），已自动开一条新会话。",
+            );
+            ask_with_session(http, &ev, &question, &fresh, None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 用已有会话发起一次问答（带上历史与这一轮问题）。
+///
+/// 从原 `handle_line` 尾部抽出：`/switch` 之后的"首次追问"也想复用同一条路径，
+/// 但那条路径的会话**已经明确**，不该再走一遍"取/建绑定"。
+fn ask_with_session(
+    http: &Http,
+    ev: &LarkMessageEvent,
+    question: &str,
+    session_id: &str,
+    retry_prior_answer: Option<&str>,
+) -> Result<(), String> {
     let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
     // 历史**原样透传**（见文件头注释：结构化解析一旦与服务端不一致就会静默丢空历史）
     let mut messages: Vec<Value> = session
@@ -245,12 +354,12 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     // 但**卡片还没发出去之前**的任何失败 → 完全退回纯文本，用户不会看到两套答案。
     // `LS_LARK_CARDS=off` 是逃生阀（排查卡片问题时强制走纯文本）。
     if cards_enabled() {
-        match answer_with_card(http, &ev, &question, &session_id, session.clone(), messages.clone(), None) {
+        match answer_with_card(http, ev, question, session_id, session.clone(), messages.clone(), retry_prior_answer) {
             Ok(()) => return Ok(()),
             Err(e) => log::warn!("[bot] 卡片流程未能启动（{e}）→ 退回纯文本"),
         }
     }
-    answer_with_text(http, &ev, &question, &session_id, session, messages, None)
+    answer_with_text(http, ev, question, session_id, session, messages, retry_prior_answer)
 }
 
 /// 截断过长回答，并说明原因。
@@ -262,6 +371,633 @@ fn truncate_reply(answer: &str) -> String {
     }
     let head: String = answer.chars().take(MAX_REPLY_CHARS).collect();
     format!("{head}\n\n…（回答过长已截断；完整内容请到 WebUI / 桌面端查看）")
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 把 Unix 秒格式化成 `MM-DD HH:MM`（**UTC**）。
+///
+/// 为什么手搓而不引 chrono：bot 是刻意轻量的 sidecar（见文件头"不 import 应用 lib"），
+/// 为一个"列表里的相对时间"引入完整时区库不划算；而本地时区在 Windows 上要
+/// `GetTimeZoneInformation` 才准（std 拿不到）—— 这个字段只是**参考信息**
+/// （"哪个会话最近在用"），按 UTC 显示即可，猜时区反而会给出误导性的"准确时间"。
+fn fmt_utc_short(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let secs_of_day = secs.rem_euclid(86_400);
+    let (_, mm, dd) = civil_from_days(days);
+    let hh = secs_of_day / 3600;
+    let mi = (secs_of_day % 3600) / 60;
+    format!("{mm:02}-{dd:02} {hh:02}:{mi:02} UTC")
+}
+
+/// 从 Unix 天数得到 `(年, 月, 日)`（Howard Hinnant 的 civil_from_days 算法）。
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ───────────────── 命令实现（§11：/help /new /sessions /switch /delete /find） ─────────────────
+
+/// 一条会话（供列表展示与切换）。
+struct SessionBrief {
+    id: String,
+    title: String,
+    updated_at: i64,
+    is_active: bool,
+}
+
+/// 从 `GET /api/lark/chat-sessions` 的响应里解析会话列表（纯函数，便于单测）。
+fn parse_session_briefs(v: &Value) -> Vec<SessionBrief> {
+    v.get("sessions")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| {
+                    Some(SessionBrief {
+                        id: s.get("session_id")?.as_str()?.to_string(),
+                        title: s
+                            .get("title")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("(无标题)")
+                            .to_string(),
+                        updated_at: s.get("updated_at").and_then(|t| t.as_i64()).unwrap_or(0),
+                        is_active: s.get("is_active").and_then(|a| a.as_bool()).unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 会话相对时间的短说明（列表卡片右侧那点空间只够这个）。
+fn brief_detail(b: &SessionBrief) -> String {
+    let when = if b.updated_at > 0 {
+        fmt_utc_short(b.updated_at)
+    } else {
+        String::new()
+    };
+    if b.is_active {
+        if when.is_empty() {
+            "当前会话".to_string()
+        } else {
+            format!("当前会话 · {when}")
+        }
+    } else {
+        when
+    }
+}
+
+/// 列表项与对应 id（前 [`MAX_MENU_LINES`] 条）。
+fn brief_items(briefs: &[SessionBrief]) -> (Vec<ListItem>, Vec<String>) {
+    let items: Vec<ListItem> = briefs
+        .iter()
+        .take(MAX_MENU_LINES)
+        .map(|b| ListItem { title: b.title.clone(), detail: brief_detail(b) })
+        .collect();
+    let ids: Vec<String> = briefs.iter().take(MAX_MENU_LINES).map(|b| b.id.clone()).collect();
+    (items, ids)
+}
+
+/// 记下"序号 → 动作"（供后续数字点选）。
+///
+/// 映射**从即将渲染的列表正文**解析出来（`card::menu_text` + `menu::resolve_text_menu`），
+/// 而不是另写一套下标逻辑：两条路径（卡片按钮 / 回复数字）与列表上的序号因此**必然一致**，
+/// 一旦渲染格式变了（比如不再用 `1.` 前缀），这里会立刻失配而不是悄悄给错会话。
+fn remember_current_menu(chat_id: &str, briefs: &[SessionBrief]) {
+    let actions: Vec<MenuAction> = briefs
+        .iter()
+        .take(MAX_MENU_LINES)
+        .map(|b| MenuAction::Switch(b.id.clone()))
+        .collect();
+    let (items, _) = brief_items(briefs);
+    let items = menu::resolve_text_menu(&card::menu_text(&items), &actions);
+    with_menu(|m| m.remember(chat_id, now_secs(), items));
+}
+
+/// 回一张"会话列表"卡片（**同时**记下数字点选，两条路都可用）。
+fn reply_session_list(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
+    let briefs = http.chat_sessions(&ev.chat_id)?;
+    let (items, ids) = brief_items(&briefs);
+    remember_current_menu(&ev.chat_id, &briefs);
+    if items.is_empty() {
+        // 空列表：给"新建"按钮，别让用户对着空卡片不知所措
+        reply_card(&ev.message_id, &list_empty_card())?;
+        return Ok(());
+    }
+    let footer = format!("共 {} 个会话 · 回复数字可直接切换", briefs.len());
+    reply_card(
+        &ev.message_id,
+        &render_session_list_card("你的会话", &items, &ids, Some(&footer)),
+    )?;
+    log::info!("[bot] 已回会话列表（{} 个，chat={}）", briefs.len(), ev.chat_id);
+    Ok(())
+}
+
+/// 空会话列表卡片（带「新建会话」按钮）。
+fn list_empty_card() -> Value {
+    let mut card = card::render_card("你的会话", "还没有会话。发送 `/new` 或点下面的按钮新建一个。", None);
+    if let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) {
+        elements.push(json!({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": "新建会话" },
+                "type": "primary",
+                "value": card::action_payload("new_session", ""),
+            }],
+        }));
+    }
+    card
+}
+
+/// `/new`：新建会话并切换过去，回列表卡（用户立刻看到"现在在这儿"）。
+fn reply_new_session(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
+    let created = http.post(
+        "/api/lark/chat-sessions",
+        &json!({ "chat_id": ev.chat_id, "user_open_id": ev.sender_id }),
+    )?;
+    let sid = created
+        .get("session_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    log::info!("[bot] 新建会话 {sid}（chat={}）", ev.chat_id);
+    reply(&ev.message_id, "已新建会话，直接提问即可。");
+    reply_session_list(http, ev)
+}
+
+/// 切换后的"锚点"说明：让用户知道接上了哪条对话（最后一条提问）。
+fn switch_anchor(http: &Http, session_id: &str) -> Result<String, String> {
+    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+    Ok(anchor_text(&session))
+}
+
+/// 从会话里取"最后一条用户提问"（纯函数，便于单测）。
+fn anchor_text(session: &Value) -> String {
+    let last_q = session
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .rev()
+                .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+        })
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if last_q.is_empty() {
+        "这是一条新会话，直接提问即可。".to_string()
+    } else {
+        let short: String = last_q.chars().take(60).collect();
+        if last_q.chars().count() > 60 {
+            format!("已接上这条会话，上一个问题是：{short}…")
+        } else {
+            format!("已接上这条会话，上一个问题是：{short}")
+        }
+    }
+}
+
+/// 切换会话并回执（切完**不发**整张列表：避免刷屏，用户想再看看列表可以发 `/sessions`）。
+fn do_switch(http: &Http, chat_id: &str, session_id: &str, reply_to: &str) -> Result<(), String> {
+    let v = http.put(
+        "/api/lark/chat-sessions/active",
+        &json!({ "chat_id": chat_id, "session_id": session_id }),
+    )?;
+    if v.get("ok").and_then(|o| o.as_bool()) != Some(true) {
+        reply(reply_to, "这个会话不属于当前私聊，切换未生效（发 /sessions 看看列表？）");
+        return Ok(());
+    }
+    let briefs = http.chat_sessions(chat_id)?;
+    remember_current_menu(chat_id, &briefs);
+    let text = switch_anchor(http, session_id).unwrap_or_else(|_| "已切换会话。".to_string());
+    reply(reply_to, &format!("{text}\n（发 /sessions 查看全部会话）"));
+    log::info!("[bot] 已切换会话 {session_id}（chat={chat_id}）");
+    Ok(())
+}
+
+/// `/switch <序号或标题前缀>`。
+///
+/// 序号优先按**上次列表**解析（与用户看到的一致）；标题前缀按当前列表匹配，
+/// 命中多条时列出候选而不猜。
+fn reply_switch(http: &Http, ev: &LarkMessageEvent, arg: &str) -> Result<(), String> {
+    let briefs = http.chat_sessions(&ev.chat_id)?;
+    if briefs.is_empty() {
+        reply_card(&ev.message_id, &list_empty_card())?;
+        return Ok(());
+    }
+    // ① 纯数字 → 序号（先查上次菜单快照，再退到当前列表）
+    if let Some(n) = parse_selection(arg) {
+        let MenuAction::Switch(snapshot) = with_menu(|m| m.resolve(&ev.chat_id, now_secs(), n))
+            .unwrap_or(MenuAction::Switch(String::new()));
+        let id = if !snapshot.is_empty() {
+            Some(snapshot)
+        } else {
+            // 快照里没有 → 用当前列表的第 n 条
+            briefs.get(n - 1).map(|b| b.id.clone())
+        };
+        let Some(id) = id else {
+            reply(&ev.message_id, &format!("没有第 {n} 个会话（发 /sessions 看看列表）。"));
+            return Ok(());
+        };
+        return do_switch(http, &ev.chat_id, &id, &ev.message_id);
+    }
+    // ② 标题前缀
+    let needle = arg.trim();
+    let matches: Vec<&SessionBrief> = briefs
+        .iter()
+        .filter(|b| b.title.contains(needle))
+        .collect();
+    match matches.len() {
+        0 => {
+            reply(&ev.message_id, &format!("没有标题包含「{needle}」的会话（发 /sessions 看看列表）。"));
+            Ok(())
+        }
+        1 => do_switch(http, &ev.chat_id, &matches[0].id, &ev.message_id),
+        _ => {
+            let (items, ids) = brief_items(&briefs);
+            remember_current_menu(&ev.chat_id, &briefs);
+            let footer = format!("「{needle}」匹配到 {} 个会话 —— 回复数字选择", matches.len());
+            reply_card(
+                &ev.message_id,
+                &render_session_list_card("你要切换哪一个？", &items, &ids, Some(&footer)),
+            )?;
+            Ok(())
+        }
+    }
+}
+
+/// `/delete <序号>`：**先回确认卡**，真正的删除走卡片按钮（二次确认，防误删）。
+fn reply_delete_confirm(http: &Http, ev: &LarkMessageEvent, arg: &str) -> Result<(), String> {
+    let briefs = http.chat_sessions(&ev.chat_id)?;
+    let Some(n) = parse_selection(arg) else {
+        reply(&ev.message_id, "用法：`/delete 3`（先发 `/sessions` 看序号）");
+        return Ok(());
+    };
+    let Some(target) = briefs.get(n - 1) else {
+        reply(&ev.message_id, &format!("没有第 {n} 个会话（发 /sessions 看看列表）。"));
+        return Ok(());
+    };
+    let (items, ids) = brief_items(&briefs);
+    let footer = format!(
+        "确认要删除「{}」吗？对话内容仍保留在本地，可在 WebUI/桌面端查看。",
+        target.title
+    );
+    reply_card(
+        &ev.message_id,
+        &render_delete_list_card("删除哪个会话？", &items, &ids, Some(&footer)),
+    )?;
+    log::info!("[bot] 删除确认卡已发（chat={}，目标 {n}）", ev.chat_id);
+    Ok(())
+}
+
+/// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
+fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        reply(&ev.message_id, "用法：`/find 关键词`（短词更容易命中；可加页码如 `/find 合同 2`）");
+        return Ok(());
+    }
+    let page = page.max(1);
+    let body = http.get(&format!(
+        "/api/search?q={}&page={}&page_size={FIND_PAGE_SIZE}",
+        url_encode(query),
+        page
+    ))?;
+    let total = body.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+    let hits: Vec<HitBrief> = parse_hits(&body);
+    if hits.is_empty() {
+        let text = if total == 0 {
+            format!("没有找到与「{query}」相关的内容。")
+        } else {
+            format!("「{query}」共 {total} 条结果，但第 {page} 页是空的（试试前面的页码）。")
+        };
+        reply(&ev.message_id, &text);
+        return Ok(());
+    }
+    let items: Vec<ListItem> = hits
+        .iter()
+        .map(|h| ListItem {
+            title: h.file_name.clone(),
+            detail: search_hit_detail(h),
+        })
+        .collect();
+    let pages = (total as usize).div_ceil(FIND_PAGE_SIZE).max(1);
+    let mut footer = format!("第 {page}/{pages} 页 · 共 {total} 条");
+    if (page as usize) < pages {
+        footer.push_str(&format!(" · 下一页：/find {query} {}", page + 1));
+    }
+    reply_card(&ev.message_id, &render_search_card(query, &items, Some(&footer)))?;
+    log::info!(
+        "[bot] 搜索「{query}」第 {page}/{pages} 页，回 {}/{} 条（chat={}）",
+        hits.len(),
+        total,
+        ev.chat_id
+    );
+    Ok(())
+}
+
+/// 一条搜索命中的精简信息（只取渲染需要的字段）。
+struct HitBrief {
+    file_name: String,
+    path: String,
+    snippet: String,
+}
+
+/// 从 `/api/search` 响应解析命中（纯函数，便于单测）。
+fn parse_hits(v: &Value) -> Vec<HitBrief> {
+    v.get("hits")
+        .and_then(|h| h.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|h| {
+                    Some(HitBrief {
+                        file_name: h.get("file_name")?.as_str()?.to_string(),
+                        path: h.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
+                        snippet: h.get("snippet").and_then(|s| s.as_str()).unwrap_or("").to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 搜索命中的两行说明：路径 + 片段（均按单行裁剪 —— 卡片 markdown 里换行会打乱编号）。
+fn search_hit_detail(h: &HitBrief) -> String {
+    let one_line = |s: &str, max: usize| -> String {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(max)
+            .collect()
+    };
+    let path = one_line(&h.path, 90);
+    let snippet = one_line(&h.snippet, 120);
+    match (path.is_empty(), snippet.is_empty()) {
+        (false, false) => format!("{path}\n   {snippet}"),
+        (false, true) => path,
+        (true, false) => snippet,
+        _ => String::new(),
+    }
+}
+
+/// 最小 URL 编码（query 值）：非 unreserved 一律百分号编码。
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 执行一条"菜单点选"动作（数字回复或按钮回调共用的收口）。
+fn run_menu_action(http: &Http, chat_id: &str, reply_to: &str, action: &MenuAction) -> Result<(), String> {
+    match action {
+        MenuAction::Switch(session_id) => do_switch(http, chat_id, session_id, reply_to),
+    }
+}
+
+/// 处理一条**机器人菜单事件**（`application.bot.menu_v6`）。
+///
+/// 两条前置事实（见 `docs/LARK_BOT.md` §11）：
+/// - 菜单是**开发者后台配置**的（仅单聊），事件走长连接（`lark-cli event consume`）；
+/// - 事件里**没有 `chat_type`**（它不是消息事件）——所以这里只能做**白名单**判定
+///   （fail-closed），"仅私聊"由"菜单本就只存在于单聊"这个平台事实保证。
+///
+/// 菜单项建议配置成**推送事件**并把 `event_key` 直接写成对应的斜杠命令（如 `/new`）——
+/// 这里就按命令解析执行，和用户手打完全同一条路径。
+fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Result<(), String> {
+    let operator = card::operator_open_id(raw);
+    if !card::card_action_allowed(operator.as_deref(), allowed_users) {
+        log::info!("[bot] 拒绝菜单点击：operator={operator:?} 不在白名单（fail-closed）");
+        return Ok(());
+    }
+    let event_key = raw
+        .get("event_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let message_id = raw.get("message_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let chat_id = raw.get("chat_id").and_then(|v| v.as_str()).unwrap_or("").trim();
+    log::info!("[bot] 菜单点击 event_key={event_key:?}（chat={chat_id}）");
+    if message_id.is_empty() && chat_id.is_empty() {
+        log::warn!("[bot] 菜单事件既没有 message_id 也没有 chat_id，无法回复");
+        return Ok(());
+    }
+    // event_key 就是命令（推荐配置）；空则回帮助（用户点了"帮助"但没配 key）
+    let cmd_text = if event_key.is_empty() || !event_key.starts_with('/') {
+        "/help".to_string()
+    } else {
+        event_key.to_string()
+    };
+    let sender = operator.clone().unwrap_or_default();
+    let ev = LarkMessageEvent {
+        event_type: "im.message.receive_v1".to_string(),
+        message_id: message_id.to_string(),
+        chat_id: chat_id.to_string(),
+        chat_type: "p2p".to_string(),
+        message_type: "text".to_string(),
+        sender_id: sender,
+        sender_type: "user".to_string(),
+        content: cmd_text.clone(),
+    };
+    match parse_command(&cmd_text) {
+        Cmd::Help => {
+            reply_card(&ev.message_id, &commands::help_card())?;
+            Ok(())
+        }
+        Cmd::New => reply_new_session(http, &ev),
+        Cmd::List => reply_session_list(http, &ev),
+        Cmd::Switch(arg) => reply_switch(http, &ev, &arg),
+        Cmd::Delete(arg) => reply_delete_confirm(http, &ev, &arg),
+        Cmd::Find { query, page } => reply_find(http, &ev, &query, page),
+        // 菜单项配成了别的文案（不是命令）：回帮助，别猜
+        Cmd::Ai => {
+            reply(
+                &ev.message_id,
+                "菜单项未配置为命令。可选：/new、/sessions、/switch <序号或标题>、/delete <序号>、/find <关键词>、/help",
+            );
+            Ok(())
+        }
+    }
+}
+
+/// 处理一条卡片回调：**先过身份闸门，再路由动作**。
+///
+/// ⚠️ 回调是**另一条入口** —— 消息入口的 L0/L1/L2 闸门**不会**自动保护它，所以这里必须再判一次
+/// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
+fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result<(), String> {
+    let raw: Value = serde_json::from_str(line).map_err(|e| {
+        format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
+    })?;
+    let ev: CardActionEvent =
+        serde_json::from_value(raw.clone()).map_err(|e| format!("回调字段解析失败：{e}"))?;
+    if ev.event_type != "card.action.trigger" {
+        return Ok(()); // 该消费者只接这一类
+    }
+
+    let operator = crate::card::operator_open_id(&raw);
+    if !crate::card::card_action_allowed(operator.as_deref(), allowed_users) {
+        log::info!(
+            "[bot] 拒绝卡片操作：operator={operator:?} 不在白名单（fail-closed）"
+        );
+        return Ok(());
+    }
+
+    match crate::card::parse_card_action(&ev) {
+        None => {
+            log::info!("[bot] 忽略无法识别的卡片动作（action_value={:?}）", ev.action_value);
+            Ok(())
+        }
+        Some(action) => {
+            log::info!(
+                "[bot] 收到卡片动作 {action:?}（chat={} operator={operator:?}）",
+                ev.chat_id
+            );
+            match action {
+                crate::card::CardAction::OpenDetail { session_id } => {
+                    // 动作本身**不需要回调 token**：直接 reply 一条提示即可
+                    // （§8.1：回调 token 那条路有"最多 2 次更新"限制，能不用就不用）。
+                    let text = match webui_hint(http, &session_id) {
+                        Ok(t) => t,
+                        Err(e) => format!("暂时拿不到 WebUI 地址：{e}\n（会话 id：{session_id}）"),
+                    };
+                    reply(&ev.message_id, &text);
+                    Ok(())
+                }
+                crate::card::CardAction::Retry { session_id } => {
+                    // D-4b：**复用主链路** —— 把重跑当成"用户又问了一遍"。
+                    // 事件用回调里的 id 合成（白名单已在回调入口判过，故这里不会再被拒）。
+                    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+                    let messages: Vec<Value> = session
+                        .get("messages")
+                        .and_then(|v| v.as_array().cloned())
+                        .unwrap_or_default();
+                    // 问题 = 该会话里**最后一条 user 消息**
+                    let question = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if question.is_empty() {
+                        reply(&ev.message_id, "找不到可重跑的问题（这会话里没有用户消息）。");
+                        return Ok(());
+                    }
+                    // 上一轮回答：作为 `retry_prior_answer` 交给服务端，让它**换一批检索词**
+                    // 重搜（原词再搜一遍等于白点一次）。注意服务端的"问题"口径也是
+                    // **最后一条 user 消息**（`commands/ai/rewrite.rs::question_from_messages`）——
+                    // 两边一致，重跑才是"对原问题换词重搜"，而不是"对上一条回答再问一遍"（那是 P1 的旧行为）。
+                    let prior_answer = messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    let synth = LarkMessageEvent {
+                        event_type: "im.message.receive_v1".to_string(),
+                        message_id: ev.message_id.clone(),
+                        chat_id: ev.chat_id.clone(),
+                        chat_type: "p2p".to_string(),
+                        message_type: "text".to_string(),
+                        sender_id: operator.clone().unwrap_or_default(),
+                        sender_type: "user".to_string(),
+                        content: question.clone(),
+                    };
+                    log::info!(
+                        "[bot] 重跑会话 {session_id} 的最后一问（{} 字；带上轮回答 {} 字用于换词扩查）",
+                        question.chars().count(),
+                        prior_answer.chars().count()
+                    );
+                    let retry = (!prior_answer.is_empty()).then(|| prior_answer.as_str());
+                    answer_with_card(http, &synth, &question, &session_id, session, messages, retry)
+                        .map_err(|e| format!("重跑失败：{e}"))
+                }
+                crate::card::CardAction::NewSession => {
+                    // 合成一条"用户发了 /new"的事件：与手打 /new 完全同一条路径
+                    let synth = LarkMessageEvent {
+                        event_type: "im.message.receive_v1".to_string(),
+                        message_id: ev.message_id.clone(),
+                        chat_id: ev.chat_id.clone(),
+                        chat_type: "p2p".to_string(),
+                        message_type: "text".to_string(),
+                        sender_id: operator.clone().unwrap_or_default(),
+                        sender_type: "user".to_string(),
+                        content: "/new".to_string(),
+                    };
+                    reply_new_session(http, &synth)
+                }
+                crate::card::CardAction::Switch { session_id } => {
+                    run_menu_action(http, &ev.chat_id, &ev.message_id, &MenuAction::Switch(session_id))
+                }
+                crate::card::CardAction::Remove { session_id, index } => {
+                    // 「删除」按钮 → **确认卡**（真正的删除走 remove_confirm）
+                    let briefs = http.chat_sessions(&ev.chat_id)?;
+                    let (items, ids) = brief_items(&briefs);
+                    let title = briefs
+                        .iter()
+                        .find(|b| b.id == session_id)
+                        .map(|b| b.title.clone())
+                        .unwrap_or_else(|| format!("第 {index} 个会话"));
+                    let footer = format!(
+                        "确认要删除「{title}」吗？对话内容仍保留在本地，可在 WebUI/桌面端查看。"
+                    );
+                    reply_card(
+                        &ev.message_id,
+                        &render_delete_list_card("删除哪个会话？", &items, &ids, Some(&footer)),
+                    )?;
+                    log::info!("[bot] 删除确认卡已发（chat={}，目标 {index}）", ev.chat_id);
+                    Ok(())
+                }
+                crate::card::CardAction::RemoveConfirm { session_id, index } => {
+                    let v = http.post(
+                        "/api/lark/chat-sessions/delete",
+                        &json!({ "chat_id": ev.chat_id, "session_id": session_id }),
+                    )?;
+                    let deleted = v.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false);
+                    if !deleted {
+                        reply(&ev.message_id, "这条会话已经不在了（可能刚被删过）。");
+                        return Ok(());
+                    }
+                    log::info!("[bot] 已删除会话 {session_id}（chat={}）", ev.chat_id);
+                    // 回执 + 最新列表（合成一条事件：列表渲染不需要真实的 sender/内容）
+                    let synth = LarkMessageEvent {
+                        event_type: "im.message.receive_v1".to_string(),
+                        message_id: ev.message_id.clone(),
+                        chat_id: ev.chat_id.clone(),
+                        chat_type: "p2p".to_string(),
+                        message_type: "text".to_string(),
+                        sender_id: operator.clone().unwrap_or_default(),
+                        sender_type: "user".to_string(),
+                        content: String::new(),
+                    };
+                    reply(&ev.message_id, &format!("已删除第 {index} 个会话映射。"));
+                    reply_session_list(http, &synth)
+                }
+            }
+        }
+    }
 }
 
 // ───────────────────────────── 会话问答：两条路径 ─────────────────────────────
@@ -761,104 +1497,107 @@ fn spawn_card_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
     });
 }
 
-/// 处理一条卡片回调：**先过身份闸门，再路由动作**。
+// ───────────────────────── 机器人菜单消费者（§11）─────────────────────────
+
+/// 起**机器人菜单**（`application.bot.menu_v6`）消费者并在后台线程里逐行处理。
 ///
-/// ⚠️ 回调是**另一条入口** —— 消息入口的 L0/L1/L2 闸门**不会**自动保护它，所以这里必须再判一次
-/// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
-fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result<(), String> {
-    let raw: Value = serde_json::from_str(line).map_err(|e| {
-        format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
-    })?;
-    let ev: CardActionEvent =
-        serde_json::from_value(raw.clone()).map_err(|e| format!("回调字段解析失败：{e}"))?;
-    if ev.event_type != "card.action.trigger" {
-        return Ok(()); // 该消费者只接这一类
-    }
-
-    let operator = crate::card::operator_open_id(&raw);
-    if !crate::card::card_action_allowed(operator.as_deref(), allowed_users) {
-        log::info!(
-            "[bot] 拒绝卡片操作：operator={operator:?} 不在白名单（fail-closed）"
-        );
-        return Ok(());
-    }
-
-    match crate::card::parse_card_action(&ev) {
-        None => {
-            log::info!("[bot] 忽略无法识别的卡片动作（action_value={:?}）", ev.action_value);
-            Ok(())
-        }
-        Some(action) => {
-            log::info!(
-                "[bot] 收到卡片动作 {action:?}（chat={} operator={operator:?}）",
-                ev.chat_id
-            );
-            match action {
-                crate::card::CardAction::OpenDetail { session_id } => {
-                    // 动作本身**不需要回调 token**：直接 reply 一条提示即可
-                    // （§8.1：回调 token 那条路有"最多 2 次更新"限制，能不用就不用）。
-                    let text = match webui_hint(http, &session_id) {
-                        Ok(t) => t,
-                        Err(e) => format!("暂时拿不到 WebUI 地址：{e}\n（会话 id：{session_id}）"),
-                    };
-                    reply(&ev.message_id, &text);
-                    Ok(())
+/// 与卡片回调（[`spawn_card_consumer`]）的两处不同，都是刻意的：
+/// - **轮询式**（[`poll_consumer_into`]）而不是"就绪后阻塞读"：菜单订阅在开发者后台
+///   没配好时，长连接**永远不出现就绪标记** —— 若像卡片回调那样在初始化线程里等，
+///   一个后台线程会被永久占住（不致命但不干净）。这里短等即放弃，几秒后再试。
+/// - 线程**每次尝试重建**（含 `Child`）：拿不到 stdout 时子进程要能被正确回收。
+///
+/// 失败只记日志（降级即"点菜单没反应"）—— 消息与卡片两条主路不受影响。
+fn spawn_menu_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
+    std::thread::spawn(move || loop {
+        match spawn_consumer(MENU_EVENT_TYPE) {
+            Ok(mut child) => match poll_consumer_into(&mut child, "菜单".to_string(), |line| {
+                // 菜单事件没有 chat_type —— 按"仅私聊"的既定事实，构造一份与主链路
+                // 一致的策略（`require_p2p = true` 对消息有效；菜单事件走白名单判定）
+                let gate_cfg = LarkGateConfig {
+                    require_p2p: true,
+                    allowed_users: allowed_users.clone(),
+                    pairing: false,
+                };
+                if let Err(e) = handle_line(line, &http, &gate_cfg) {
+                    log::warn!("[bot] 处理菜单事件失败：{e}");
                 }
-                crate::card::CardAction::Retry { session_id } => {
-                    // D-4b：**复用主链路** —— 把重跑当成"用户又问了一遍"。
-                    // 事件用回调里的 id 合成（白名单已在回调入口判过，故这里不会再被拒）。
-                    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
-                    let messages: Vec<Value> = session
-                        .get("messages")
-                        .and_then(|v| v.as_array().cloned())
-                        .unwrap_or_default();
-                    // 问题 = 该会话里**最后一条 user 消息**
-                    let question = messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    if question.is_empty() {
-                        reply(&ev.message_id, "找不到可重跑的问题（这会话里没有用户消息）。");
-                        return Ok(());
+            }) {
+                Ok(read) => {
+                    if read > 0 {
+                        log::info!("[bot] 菜单长连接断开，5 秒后重试");
+                    } else {
+                        log::warn!(
+                            "[bot] 菜单长连接未就绪（开发者后台未配置自定义菜单？）—— 5 分钟后重试"
+                        );
+                        std::thread::sleep(Duration::from_secs(300));
+                        continue;
                     }
-                    // 上一轮回答：作为 `retry_prior_answer` 交给服务端，让它**换一批检索词**
-                    // 重搜（原词再搜一遍等于白点一次）。注意服务端的"问题"口径也是
-                    // **最后一条 user 消息**（`commands/ai/rewrite.rs::question_from_messages`）——
-                    // 两边一致，重跑才是"对原问题换词重搜"，而不是"对上一条回答再问一遍"（那是 P1 的旧行为）。
-                    let prior_answer = messages
-                        .iter()
-                        .rev()
-                        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
-                        .and_then(|m| m.get("content").and_then(|c| c.as_str()))
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    let synth = LarkMessageEvent {
-                        event_type: "im.message.receive_v1".to_string(),
-                        message_id: ev.message_id.clone(),
-                        chat_id: ev.chat_id.clone(),
-                        chat_type: "p2p".to_string(),
-                        message_type: "text".to_string(),
-                        sender_id: operator.clone().unwrap_or_default(),
-                        sender_type: "user".to_string(),
-                        content: question.clone(),
-                    };
-                    log::info!(
-                        "[bot] 重跑会话 {session_id} 的最后一问（{} 字；带上轮回答 {} 字用于换词扩查）",
-                        question.chars().count(),
-                        prior_answer.chars().count()
-                    );
-                    let retry = (!prior_answer.is_empty()).then(|| prior_answer.as_str());
-                    answer_with_card(http, &synth, &question, &session_id, session, messages, retry)
-                        .map_err(|e| format!("重跑失败：{e}"))
+                }
+                Err(e) => log::warn!("[bot] 读取菜单事件失败：{e}"),
+            },
+            Err(e) => log::warn!("[bot] 菜单消费者启动失败（点菜单将不可用）：{e}"),
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    });
+}
+
+/// 短等就绪后轮询式读取一路子进程的输出，逐行交给 `on_line`。
+///
+/// 为什么不是 [`wait_ready`] + 阻塞读：那个组合要求"就绪标记一定会出现"，否则读线程
+/// 会一直挂着。菜单订阅则是**可选**的（后台没配就没有标记），所以这里：
+/// - 最多等 [`MENU_READY_TIMEOUT`]；
+/// - 之后**非阻塞**轮询（`try_wait` + 已就绪后阻塞读的组合在这里不适用，
+///   因为 lark-cli 的输出是行缓冲的管道 —— 用 `read_until(b'\n')` 配超时太绕，
+///   改为"就绪即转入阻塞读"：一旦拿到 ready，说明订阅有效，之后的读是安全的）。
+///
+/// 返回读到的行数：`0` ＝ 等不到就绪（大概率订阅没配）。
+fn poll_consumer_into(
+    child: &mut Child,
+    tag: String,
+    mut on_line: impl FnMut(&str),
+) -> Result<usize, String> {
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready_reader = Arc::clone(&ready);
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                log::info!("[lark-cli/{tag}] {line}");
+                if line.contains("[event] ready event_key=") {
+                    ready_reader.store(true, Ordering::Release);
                 }
             }
-        }
+        });
     }
+    let deadline = Instant::now() + MENU_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if ready.load(Ordering::Acquire) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    if !ready.load(Ordering::Acquire) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(0);
+    }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("拿不到菜单消费者的 stdout".to_string());
+    };
+    let mut read = 0usize;
+    for line in BufReader::new(stdout).lines() {
+        let Ok(line) = line else { break };
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        read += 1;
+        on_line(line);
+    }
+    let _ = child.wait(); // 回收子进程
+    Ok(read)
 }
 
 /// 生成"在 WebUI 里打开"的提示（含 **LAN 地址**）。
@@ -1109,6 +1848,28 @@ impl Http {
         log::info!("[bot] 为 {chat_id} 新建会话 {sid} 并绑定");
         Ok(sid)
     }
+
+    /// 取该私聊的多会话列表（§11）。活动会话排第一。
+    fn chat_sessions(&self, chat_id: &str) -> Result<Vec<SessionBrief>, String> {
+        let v = self.get(&format!("/api/lark/chat-sessions?chat_id={chat_id}"))?;
+        Ok(parse_session_briefs(&v))
+    }
+
+    /// **强制**新建一条会话并绑定（跳过"已存在就复用"的检查）。
+    ///
+    /// 用途：绑定指向的会话已被别的端删除时的兜底（见 `handle_line` 的 404 分支）——
+    /// 此时旧绑定**必须**被替换，走 [`Self::session_for_chat`] 只会拿回同一条死会话。
+    fn session_for_chat_fresh(&self, chat_id: &str, user_open_id: &str) -> Result<String, String> {
+        let created = self.post("/api/lark/chat-sessions", &json!({
+            "chat_id": chat_id,
+            "user_open_id": user_open_id,
+        }))?;
+        created
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| "新建会话未返回 session_id".to_string())
+    }
 }
 
 /// 接受自签名证书的 HTTP agent。
@@ -1224,5 +1985,93 @@ mod tests {
             webui_hint_text("192.168.1.54", 70000, "s").is_err(),
             "超范围端口会被 `as u16` 静默截断成错误端口，必须拒绝"
         );
+    }
+
+    // ── §11 多会话 / 搜索的纯函数 ──
+
+    /// `/api/lark/chat-sessions` 响应解析：字段缺失、元素残缺都不能 panic。
+    #[test]
+    fn parse_session_briefs_tolerates_partial_rows() {
+        let v = serde_json::json!({
+            "sessions": [
+                { "session_id": "s-1", "title": "合同审查", "is_active": true, "updated_at": 1000 },
+                { "session_id": "s-2", "title": "汪均益案", "is_active": false, "updated_at": 900 },
+                { "session_id": "s-3" },              // 无 title / is_active / updated_at
+                { "title": "没有 id" },               // 缺 session_id → 丢弃
+                "垃圾元素"
+            ]
+        });
+        let briefs = parse_session_briefs(&v);
+        assert_eq!(briefs.len(), 3);
+        assert_eq!(briefs[0].id, "s-1");
+        assert!(briefs[0].is_active);
+        assert!(!briefs[1].is_active);
+        assert_eq!(briefs[2].title, "(无标题)");
+        assert_eq!(briefs[2].updated_at, 0);
+        // 没有 sessions 键 → 空表（不是 Err）
+        assert!(parse_session_briefs(&serde_json::json!({})).is_empty());
+    }
+
+    /// 切换后的"锚点"：有上一问就给出来，没有就明说"这是新会话"。
+    #[test]
+    fn anchor_text_shows_last_question_and_marks_empty_sessions() {
+        let session = serde_json::json!({
+            "messages": [
+                { "role": "user", "content": "第一问" },
+                { "role": "assistant", "content": "第一答" },
+                { "role": "user", "content": "最后一问" },
+            ]
+        });
+        let text = anchor_text(&session);
+        assert!(text.contains("最后一问"), "必须给最后一条 user 消息：{text}");
+        assert!(!text.contains("第一问"), "不能给更早的问题：{text}");
+
+        assert!(anchor_text(&serde_json::json!({ "messages": [] })).contains("新会话"));
+        assert!(anchor_text(&serde_json::json!({})).contains("新会话"));
+        // 超长问题被截到 60 字以内 + 省略号
+        let long = "字".repeat(100);
+        let text = anchor_text(&serde_json::json!({
+            "messages": [{ "role": "user", "content": long }]
+        }));
+        assert!(text.contains('…'), "超长要截断：{text}");
+    }
+
+    /// 搜索响应解析 + 命中说明（路径与片段各一行，空白压成单个空格）。
+    #[test]
+    fn parse_hits_and_detail_flatten_whitespace() {
+        let v = serde_json::json!({
+            "total": 2,
+            "hits": [
+                { "file_name": "判决书.pdf", "path": "合同纠纷/2024/判决书.pdf",
+                  "snippet": "……汪均益\n  案的最终结果……" },
+                { "file_name": "没有片段的.docx", "path": "目录B/没有片段的.docx" },
+                { "path": "缺文件名" }        // 缺 file_name → 丢弃
+            ]
+        });
+        let hits = parse_hits(&v);
+        assert_eq!(hits.len(), 2);
+        let detail = search_hit_detail(&hits[0]);
+        assert!(detail.contains("合同纠纷/2024/判决书.pdf"), "{detail}");
+        assert!(detail.contains("汪均益 案的最终结果"), "换行要压成空格：{detail}");
+        assert!(!detail.contains('\n') || detail.contains("\n   "), "只允许片段前的固定缩进");
+        assert_eq!(search_hit_detail(&hits[1]), "目录B/没有片段的.docx");
+        assert!(parse_hits(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn url_encode_percent_encodes_non_unreserved() {
+        assert_eq!(url_encode("abc-_.~123"), "abc-_.~123");
+        assert_eq!(url_encode("汪均益 A&B"), "%E6%B1%AA%E5%9D%87%E7%9B%8A%20A%26B");
+    }
+
+    /// `MM-DD HH:MM UTC` 的格式化（纯算术，不依赖 chrono）。
+    #[test]
+    fn fmt_utc_short_formats_known_timestamps() {
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        assert_eq!(fmt_utc_short(1_704_067_200), "01-01 00:00 UTC");
+        // 1970-01-01 00:00:00 UTC
+        assert_eq!(fmt_utc_short(0), "01-01 00:00 UTC");
+        // 2026-10-16 12:34 UTC 附近（会话列表时间字段的实际量级）
+        assert_eq!(fmt_utc_short(1_792_154_040), "10-16 12:34 UTC");
     }
 }

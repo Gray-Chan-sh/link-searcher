@@ -1,3 +1,54 @@
+## 2026-10-16（第二十八轮）：飞书集成搜索与多组多轮 AI 会话（命令 + 卡片点选 + 可选菜单）
+
+> 需求："在飞书中集成搜索、AI 聊天功能，并且可以和 UI 一样，AI 聊天可以分成多组、每组可以多轮"；
+> 经确认：命令**用英文**；并追问"输入 `/` 能否弹出命令列表"。查证结论（官方 FAQ）：
+> **飞书机器人本身不支持斜杠命令**，替代品是**机器人自定义菜单**（仅单聊，需开发者后台配一次）。
+> 因此实现为**三条并行路径**：斜杠命令（零配置）＋ 列表按钮/数字点选（零配置）＋ 菜单事件（配了就生效）。
+
+### A. 多会话数据模型：一私聊多行 + 活动指针（`db/mod.rs`，SCHEMA_VERSION 9 → 10）
+
+- `lark_sessions`（`chat_id` 主键）→ `lark_chat_sessions`（复合主键 `(chat_id, session_id)` + `is_active`），
+  并以**部分唯一索引**（`chat_id WHERE is_active = 1`）在 schema 层钉死"每私聊至多一个活动会话"。
+- **迁移幂等**：旧行搬成"该私聊唯一会话（活动）"再 DROP 旧表 → **老用户升级行为完全不变**（接着原会话聊）。
+- `upsert_binding` 改为**同一事务**：清旧活动 → upsert → 容量修剪（上限 50/私聊，**只淘汰最旧的非活动行**）；
+  `set_active` 对外来 session 返回 `false` 且**不扰动任何状态**；`delete_session` 只删映射（内容保留）。
+
+### B. WebAPI：多会话端点（`webapi/routes/lark.rs`）
+
+- 新增 `GET/POST /api/lark/chat-sessions`（列表 join `origin=lark` 会话标题；新建即置活动）、
+  `PUT /api/lark/chat-sessions/active`（切换）、`POST /api/lark/chat-sessions/delete`。
+- 列表排序以**绑定表的 `updated_at`** 为准（被切换过也算"使用"，会话元数据里没有这个信号）。
+
+### C. bot 侧：命令路由 + 搜索 + 点选 + 菜单（`lark-bot` crate）
+
+- 新增 `commands.rs`：解析 `/help` `/new` `/sessions` `/switch` `/delete` `/find`（英文；单独 `/` = 帮助）；
+  **未命中一律走 AI 问答**（命令不得吞掉正常提问）；`/find` 页码规则：末位数字 ≤99 才算页码。
+- 新增 `menu.rs`：列表"序号 → 动作"记忆（进程内存、TTL 10 分钟），支持**回复数字点选**（全角数字亦识别）
+  —— 这是"打字 `/` 不弹列表"的零配置补偿；映射**从渲染出的列表正文解析**，与卡片按钮序号必然一致。
+- `card.rs`：新增会话列表卡（每行"切换 N"按钮）、删除确认卡（"删除 N"→ 二次确认）、搜索卡、帮助卡；
+  `CardAction` 扩展 `NewSession` / `Switch` / `Remove` / `RemoveConfirm` / `Cancel`（发送/解析成对测试）。
+- `main.rs`：消息命令路由；`/find` 调 `/api/search`（页码/共 N 条/下一页提示）；三条事件流汇成一个处理循环；
+  **菜单消费者**（`application.bot.menu_v6`，轮询式等待就绪——后台没配菜单时不占线程）；
+  **防呆**：活动会话被别的端删掉 → 自动新建并注明，问答继续（不把 404 抛给用户）。
+- 真实接口形状核对：发消息 `POST /open-apis/im/v1/messages?receive_id_type=chat_id`；
+  菜单项建议配"推送事件"、`event_key` 填命令（如 `/new`）——bot 按命令解析执行。
+
+### D. 文档
+
+- `docs/LARK_BOT.md` 新增 §11（平台事实/数据模型/命令表/边界与防呆/验收记录）；
+  `docs/06-settings.md` 新增「步骤 12.5：在飞书里用命令」（含"不支持斜杠命令 + 菜单可选配置"的说明）。
+
+### 门禁
+
+`cargo test --workspace` 全绿（lib 600 + lark-bot 60 + lark-gate 13 + 集成 10 + webapi_http + 其余全部）
++ `npx tsc --noEmit` 0 错 + `npx vitest run` 81/81 + semgrep ERROR 0 发现。
+新增关键证据：`integration.rs::test_lark_sessions_v9_to_v10_migration`（老库升级无感）、
+`webapi_http.rs` 多会话全链路（建/列/切/删/外来会话被拒）、bot 60 项纯函数测试。
+
+> ⚠️ 排查记录（教训）：容量单测首版把"最后插入的 s-52"误写成"s-0"（时间戳递减 ⇒ 编号越大越旧），
+> 断言失败一度被当成"活动指针漂移"的**产品 bug** 排查（曾用临时 SQL 日志逐层取证）。
+> 结论：**先核对断言的期望值，再怀疑实现** —— "每步断言都过、最终状态却不对"几乎总是指向期望值本身。
+
 ## 2026-10-16（第二十七轮）：收紧「换一批证据」= 扩查必须真换词；路径通道名次确定性
 
 > 第二十六轮遗留两项：① 重跑扩查的守卫只挡"与原句相同"—— LLM 把原句删几个虚词后回显

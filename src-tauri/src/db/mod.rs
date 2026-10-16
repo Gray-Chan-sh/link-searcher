@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "9";
+const SCHEMA_VERSION: &str = "10";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -142,6 +142,12 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // Settings key rename: `auto_backup_enabled`/`auto_backup_interval_days`
     // were seeded but never read (UI + whitelist use `auto_backup`/`backup_interval`).
     migrate_legacy_backup_settings(&tx)?;
+
+    // Schema v10: one Feishu private chat may now own many local chat sessions
+    // (with an `is_active` pointer) — the old table was keyed by `chat_id` alone,
+    // so it could only ever hold one. Must run AFTER CREATE_TABLES_SQL above
+    // (that is where the new table is created).
+    migrate_lark_sessions_to_multi(&tx)?;
 
     tx.execute(
         "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('schema_version', ?1)",
@@ -415,13 +421,21 @@ const CREATE_TABLES_SQL: &str = "
 
     -- 飞书机器人：p2p 会话 ↔ 本库聊天会话 的映射（docs/LARK_BOT.md §5.5 阶段三）。
     -- 存 DB 而非独立文件：事务性 + 跨进程安全，不必再造一套锁与临时文件。
-    CREATE TABLE IF NOT EXISTS lark_sessions (
-        chat_id      TEXT PRIMARY KEY,
+    -- ⚠️ 9 → 10 迁移（docs/LARK_BOT.md §11）：v9 的 `lark_sessions` 是
+    -- `chat_id` 主键 ⇒ 一个私聊只能绑一个会话；新版一私聊多行 + `is_active` 指针，
+    -- 支撑「/sessions 切换会话」的多组多轮。`IF NOT EXISTS` 对全新库直接建新表。
+    CREATE TABLE IF NOT EXISTS lark_chat_sessions (
+        chat_id      TEXT NOT NULL,
         session_id   TEXT NOT NULL,
         user_open_id TEXT NOT NULL DEFAULT '',
+        is_active    INTEGER NOT NULL DEFAULT 0,
         created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL
+        updated_at   INTEGER NOT NULL,
+        PRIMARY KEY (chat_id, session_id)
     );
+    -- 每个私聊最多一个活动会话（部分唯一索引把这条不变量钉在 schema 层）。
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_lcs_active
+        ON lark_chat_sessions(chat_id) WHERE is_active = 1;
 
     -- 飞书事件去重环：按 message_id 记住已处理的消息（§8 幂等）。
     -- 官方明言 event_id **不可**用于去重（重投会变），必须用 message_id。
@@ -542,6 +556,45 @@ fn migrate_legacy_backup_settings(tx: &Connection) -> Result<()> {
         tx.execute("DELETE FROM app_settings WHERE key = ?1", [legacy])
             .context(format!("failed to drop legacy setting '{legacy}'"))?;
     }
+    Ok(())
+}
+
+/// 9 → 10：把 v9 的单会话绑定表（`chat_id` 主键）迁成 v10 的多会话表。
+///
+/// 每个旧行搬成"该私聊的唯一会话"，并置 `is_active = 1` —— **老用户升级后行为与从前
+/// 完全一致**（仍是原来那条会话接着聊），只是从此多了"切换/新建"的能力。
+///
+/// `IF NOT EXISTS` + 表存在性探测 ⇒ 幂等，可安全地在每次启动时调用。旧表保留到迁移
+/// 末尾才删除（INSERT 以它为数据源；`query_map` 失败即视为不存在）。
+fn migrate_lark_sessions_to_multi(tx: &Connection) -> Result<()> {
+    let old: Vec<(String, String, String, i64, i64)> = {
+        let mut stmt = match tx.prepare(
+            "SELECT chat_id, session_id, user_open_id, created_at, updated_at FROM lark_sessions",
+        ) {
+            Ok(s) => s,
+            Err(_) => return Ok(()), // 旧表不存在（全新库 / 已迁移过）→ 无事可做
+        };
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .context("failed to read legacy lark_sessions")?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect legacy lark_sessions")?
+    };
+
+    for (chat_id, session_id, user_open_id, created_at, updated_at) in old {
+        tx.execute(
+            "INSERT OR IGNORE INTO lark_chat_sessions
+                 (chat_id, session_id, user_open_id, is_active, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+            rusqlite::params![chat_id, session_id, user_open_id, created_at, updated_at],
+        )
+        .context("failed to migrate lark_sessions row")?;
+    }
+
+    tx.execute_batch("DROP TABLE IF EXISTS lark_sessions;")
+        .context("failed to drop legacy lark_sessions")?;
     Ok(())
 }
 
@@ -814,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_9() {
+    fn test_schema_version_is_10() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -823,7 +876,7 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "9");
+        assert_eq!(version, "10");
     }
 
     #[test]
