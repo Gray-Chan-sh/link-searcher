@@ -43,6 +43,10 @@ tauri-build = { version = "2", features = [] }
 # （`parse_allowed_users`）：把 DB 里的遗留策略迁移进 `config.json` 时必须与
 # 闸门**同一套** fail-closed 规则，否则"迁移"本身就是一次静默放宽。
 lark-gate = { path = "lark-gate" }
+# 跨进程配置文件锁（§5.6 "多写者"那条）。已在依赖树里（版本 0.8.4，无需新增下载）；
+# 只用同步 API：Windows→LockFileEx、Unix→flock，且由 OS 在进程退出时自动释放 ——
+# 因此没有"崩溃留下僵尸锁"的问题（那是"create_new 锁文件"类做法的通病）。
+fs4 = "0.8"
 base64 = "0.22"
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-dialog = "2"

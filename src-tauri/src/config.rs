@@ -1,14 +1,127 @@
+use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+use fs4::FileExt;
 use serde::{Serialize, Deserialize};
 
 const CONFIG_DIR: &str = ".link-searcher";
 const CONFIG_FILE: &str = "config.json";
+/// 跨进程写锁的锁文件（与 `config.json` 同目录）。
+const CONFIG_LOCK_FILE: &str = "config.lock";
+/// 等跨进程锁的上限；超时后**降级**而不是无限等（见 [`lock_config`]）。
+const CONFIG_LOCK_WAIT: Duration = Duration::from_secs(2);
+/// 等锁时的轮询间隔。
+const CONFIG_LOCK_POLL: Duration = Duration::from_millis(20);
 
-/// Serializes full-file config read-modify-write cycles. Multiple Tauri
-/// commands (provider CRUD) can run on different threads; without this,
-/// concurrent `load_config`→`save_config` pairs lose updates (last-write-wins).
+/// **进程内**串行化配置的整文件读-改-写。多个 Tauri 命令（provider CRUD）可能落在
+/// 不同线程上；没有它，并发的 `load_config`→`save_config` 会丢更新（last-write-wins）。
+///
+/// 它同时是**外层**锁：同一时刻只允许一个线程去碰跨进程锁句柄。这不是形式主义 ——
+/// `fs4` 的锁绑在**句柄**上，同进程多线程共用一个句柄时 `try_lock_exclusive` 会直接
+/// 成功，**并不构成互斥**。真正的进程内互斥由这层 Mutex 提供。
 static CONFIG_LOCK: Mutex<()> = Mutex::new(());
+
+/// 跨进程锁文件句柄。**全进程共用一个**（理由见 [`lock_handle`]）。
+static CONFIG_LOCK_HANDLE: OnceLock<File> = OnceLock::new();
+
+/// 配置写锁的守卫：Drop 时释放跨进程锁。
+struct ConfigGuard {
+    /// 进程内互斥（外层）。只为持有，不读其值。
+    _process: std::sync::MutexGuard<'static, ()>,
+    /// 本次是否真的拿到了跨进程锁。`false` ＝ **降级**（只保证进程内串行化）。
+    cross_process: bool,
+}
+
+impl Drop for ConfigGuard {
+    fn drop(&mut self) {
+        if !self.cross_process {
+            return;
+        }
+        if let Some(file) = CONFIG_LOCK_HANDLE.get()
+            && let Err(e) = file.unlock()
+        {
+            log::warn!("[CONFIG] 释放跨进程配置锁失败: {e}");
+        }
+    }
+}
+
+/// 锁文件句柄（`OnceLock` ⇒ 全进程**共用同一个**）。
+///
+/// ⚠️ **必须共用同一个句柄**：`fs4` 在 Windows 走 `LockFileEx`、在 Unix 走 `flock`，
+/// 两者的锁都**绑在句柄 / 打开文件描述上**。若每次加锁都新开一个 fd，同进程的第二次
+/// 加锁会**把自己挡住**（`flock` 对不同 fd 互斥、`LockFileEx` 也不同句柄互斥）——
+/// 而 `load_config` 的迁移分支正是"持锁时再写文件"这条会嵌套的路径。
+fn lock_handle() -> Option<&'static File> {
+    if let Some(f) = CONFIG_LOCK_HANDLE.get() {
+        return Some(f);
+    }
+    let dir = config_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("[CONFIG] 创建配置目录失败，跨进程锁降级: {e}");
+        return None;
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(CONFIG_LOCK_FILE))
+    {
+        Ok(f) => f,
+        Err(e) => {
+            log::warn!("[CONFIG] 打开配置锁文件失败，跨进程锁降级: {e}");
+            return None;
+        }
+    };
+    // 并发首次：谁先 set 谁赢；输的那个丢掉自己的句柄（指向同一文件，语义等价）。
+    let _ = CONFIG_LOCK_HANDLE.set(file);
+    CONFIG_LOCK_HANDLE.get()
+}
+
+/// 在给定句柄上尝试取得**跨进程**排他锁（有界重试）。抽出句柄/时长参数是为了可单测。
+///
+/// 返回 `false` 表示**降级**（拿不到句柄，或对方持锁超过 `wait`）——调用方继续，
+/// 只保证进程内串行化。见 [`lock_config`] 为何不无限等。
+fn try_lock_with(file: Option<&File>, wait: Duration, poll: Duration) -> bool {
+    let Some(file) = file else {
+        return false;
+    };
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return true,
+            Err(e) => {
+                if Instant::now() >= deadline {
+                    log::warn!(
+                        "[CONFIG] 等跨进程配置锁超时（{wait:?}）：本次降级为进程内串行化，继续写。原因: {e}"
+                    );
+                    return false;
+                }
+                std::thread::sleep(poll);
+            }
+        }
+    }
+}
+
+/// 取得配置写锁：**进程内 Mutex（外层）+ 跨进程 advisory 锁（内层）**。
+///
+/// 所有"整文件读-改-写"的入口都要在**整个 RMW 期间**持有它 —— 只锁"写"是不够的：
+/// A 读 / B 读 / A 写 / B 写，B 仍会覆盖 A 的改动（**原子的写照样能吞掉另一个原子的写**）。
+///
+/// 为什么用 `try_lock_exclusive` + **有界**重试，而不是阻塞式 `lock_exclusive`：
+/// 若另一个进程（CLI / headless）卡住不放，无限等会把**界面线程**冻住。宁可在超时后
+/// 记一条 WARN 并降级继续写，也不让界面无响应 —— 跨进程锁是"防两进程互相覆盖"的
+/// **加固**，不是正确性的唯一来源（正确性由原子写 + RMW 保证）。
+fn lock_config() -> ConfigGuard {
+    let process = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cross_process = try_lock_with(lock_handle(), CONFIG_LOCK_WAIT, CONFIG_LOCK_POLL);
+    ConfigGuard {
+        _process: process,
+        cross_process,
+    }
+}
 
 /// 索引子目录名（Tantivy 数据）。用点开头避免与用户 data_dir 名为 "index" 时撞车。
 pub const INDEX_DIR_NAME: &str = ".ls-index";
@@ -275,10 +388,10 @@ pub fn load_embed_plan(key: &str) -> Option<EmbedPlan> {
 }
 
 /// Persist (or refresh) the learned plan for `key`. Full read-modify-write
-/// under [`CONFIG_LOCK`] so plan updates and provider CRUD serialize instead of
-/// clobbering each other. Best-effort — a failure only logs.
+/// under [`lock_config`]（进程内 + 跨进程）so plan updates and provider CRUD
+/// serialize instead of clobbering each other. Best-effort — a failure only logs.
 pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     let path = config_dir().join(CONFIG_FILE);
     let mut cfg: AppConfig = std::fs::read_to_string(&path)
         .ok()
@@ -292,7 +405,7 @@ pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
 
 /// Read the Web API token from `config.json`（不做迁移/默认填充，直接读文件）。
 pub fn web_api_token() -> String {
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     read_config_file().web_api_token
 }
 
@@ -303,7 +416,7 @@ pub fn set_web_api_token(token: &str) {
     if token.is_empty() {
         return;
     }
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     let mut cfg = read_config_file();
     if cfg.web_api_token == token {
         return;
@@ -329,7 +442,7 @@ pub fn lark_integration() -> LarkIntegration {
 /// 收口点 —— 所以飞书配置**绝不**走 [`save_config`] 那种"整份重建"的路径。
 /// 值未变化时不落盘。
 pub fn set_lark_integration(lark: &LarkIntegration) -> Result<(), String> {
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     let mut cfg = read_config_file();
     if cfg.integrations.lark == *lark {
         return Ok(());
@@ -373,7 +486,8 @@ fn default_data_dir() -> PathBuf {
         .join("link-searcher")
 }
 
-/// Write config without taking the lock — callers must hold [`CONFIG_LOCK`].
+/// Write config without taking the lock — callers must hold the config write
+/// lock ([`lock_config`]，含跨进程那一层)。
 fn write_config_file(config: &AppConfig) -> Result<(), String> {
     let dir = config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("{e}"))?;
@@ -393,8 +507,9 @@ fn write_config_file(config: &AppConfig) -> Result<(), String> {
 ///
 /// 1. **临时文件必须与目标同目录**：跨文件系统的 `rename` 会失败或退化成
 ///    "复制 + 删除"，原子性随之消失（所以不能用系统临时目录）。
-/// 2. **临时文件名带 pid**：进程内的 [`CONFIG_LOCK`] 挡不住第二个进程
-///    （CLI / headless / bot sidecar），固定名会让两个进程写同一个临时文件而互相撕碎。
+/// 2. **临时文件名带 pid**：主防线是跨进程锁（[`lock_config`]），但锁**可能降级**
+///    （见其"有界等待"），所以带 pid 的临时名是**第二道保险** —— 锁一旦被绕过/降级，
+///    两个进程也不会写同一个临时文件而互相撕碎。进程内 Mutex 单独挡不住第二个进程。
 /// 3. **unix 权限必须在创建临时文件时就设 0600**：否则 `rename` 之后
 ///    `config.json` 会从 0600 变成默认的 0644 —— 而它装着 AI `api_key` 与
 ///    `web_api_token`。这是"修一个洞、开一个洞"的典型，务必守住。
@@ -573,7 +688,7 @@ fn read_config_checked(path: &Path) -> ConfigRead {
 }
 
 pub fn load_config() -> AppConfig {
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     let path = config_dir().join(CONFIG_FILE);
 
     let mut config = match read_config_checked(&path) {
@@ -715,7 +830,7 @@ fn migrate_legacy_gateways(config: &mut AppConfig) -> bool {
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
-    let _g = CONFIG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = lock_config();
     write_config_file(config)
 }
 
@@ -984,5 +1099,70 @@ mod tests {
         };
         assert!(provider.find_model("m1").is_some());
         assert!(provider.find_model("ghost").is_none());
+    }
+
+    /// 老 `config.json`（没有 `integrations`）必须**原样可加载**，且飞书策略取
+    /// **安全默认**：关 + 要求私聊 + 空名单（＝谁都不许）—— §7.1 ⑤ 的 fail-closed。
+    #[test]
+    fn integrations_default_to_fail_closed_and_legacy_json_still_loads() {
+        let legacy = r#"{"data_dir":"/tmp/x"}"#;
+        let cfg: AppConfig = serde_json::from_str(legacy).unwrap();
+        let lark = cfg.integrations.lark;
+        assert!(!lark.enabled, "默认必须是关（与 web_api_enabled 的默认开刻意相反）");
+        assert!(lark.require_p2p, "默认必须要求私聊");
+        assert!(lark.allowed_users.is_empty(), "默认空名单＝拒绝全部");
+        assert!(lark.allowed_chats.is_empty());
+        assert!(!lark.pairing);
+        assert_eq!(lark.pairing_expires_at, 0);
+
+        // 只给部分字段也要能补齐（容器级 `serde(default)`）。
+        let partial = r#"{"integrations":{"lark":{"enabled":true}}}"#;
+        let cfg: AppConfig = serde_json::from_str(partial).unwrap();
+        assert!(cfg.integrations.lark.enabled);
+        assert!(cfg.integrations.lark.require_p2p, "未给的字段必须退回安全默认");
+
+        // 往返保住。
+        let json = serde_json::to_string(&AppConfig::default()).unwrap();
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.integrations.lark, LarkIntegration::default());
+    }
+
+    /// 跨进程锁**真的**互斥：另一个句柄持锁时本句柄必须拿不到（而不是"假装拿到"）。
+    /// 用同一路径的**两个句柄**模拟两个进程 —— `fs4` 的锁绑在句柄上，正是这个语义。
+    #[test]
+    fn cross_process_lock_is_exclusive_across_handles() {
+        use fs4::FileExt as _;
+
+        let dir = std::env::temp_dir().join(format!("ls_cfg_lock_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.lock");
+        let open = || {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .unwrap()
+        };
+        let a = open();
+        let b = open();
+
+        assert!(a.try_lock_exclusive().is_ok(), "第一个句柄应拿到锁");
+        assert!(
+            !try_lock_with(Some(&b), Duration::from_millis(60), Duration::from_millis(10)),
+            "对方持锁期间必须有界等待后返回 false（降级），而不是无限等"
+        );
+        a.unlock().unwrap();
+        assert!(
+            try_lock_with(Some(&b), Duration::from_millis(300), Duration::from_millis(10)),
+            "对方释放后应能拿到"
+        );
+        let _ = b.unlock();
+
+        // 拿不到句柄（例如目录不可建）＝ 降级，绝不能死锁。
+        assert!(!try_lock_with(None, Duration::ZERO, Duration::from_millis(5)));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

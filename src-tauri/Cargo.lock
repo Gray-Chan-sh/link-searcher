@@ -4091,6 +4091,7 @@ dependencies = [
  "encoding_rs",
  "env_logger",
  "flate2",
+ "fs4",
  "glob",
  "hound",
  "image",
