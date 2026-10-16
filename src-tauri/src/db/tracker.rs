@@ -718,6 +718,12 @@ pub fn get_files_by_md5(conn: &Connection, md5: &str) -> Result<Vec<String>> {
 
 /// Match active files whose relative path contains ANY of the given
 /// keywords (OR). An empty keyword list matches nothing.
+///
+/// 排序（2026-10-16 起确定性）：返回名次直接决定路径通道在 RRF 里的权重，
+/// 而此前依赖 SQLite 行序 —— 无 ORDER BY 时行序随 VACUUM/重建漂移，同一查询的
+/// 注入结果不稳定。规则：① 文件名（basename）命中的检索词数多者在前（"文件名
+/// 本身就是答案线索"时信号最强，如 `一审判决书.pdf`）；② 路径任意位置命中的
+/// 检索词数；③ 路径字典序兜底（路径唯一，保证全序）。
 pub fn path_match_files(conn: &Connection, keywords: &[String]) -> Result<Vec<(String, String)>> {
     if keywords.is_empty() {
         return Ok(Vec::new());
@@ -742,6 +748,22 @@ pub fn path_match_files(conn: &Connection, keywords: &[String]) -> Result<Vec<(S
     for row in rows {
         result.push(row?);
     }
+    let hit_counts = |path: &str| -> (usize, usize) {
+        let file_name = path
+            .rsplit(|c| c == '/' || c == '\\')
+            .next()
+            .unwrap_or(path);
+        let base = keywords.iter().filter(|k| file_name.contains(k.as_str())).count();
+        let total = keywords.iter().filter(|k| path.contains(k.as_str())).count();
+        (base, total)
+    };
+    result.sort_by(|a, b| {
+        let (ba, ta) = hit_counts(&a.1);
+        let (bb, tb) = hit_counts(&b.1);
+        bb.cmp(&ba)
+            .then_with(|| tb.cmp(&ta))
+            .then_with(|| a.1.cmp(&b.1))
+    });
     Ok(result)
 }
 
@@ -1405,5 +1427,26 @@ mod tests {
             get_files_needing_index(&conn, 100).unwrap().iter().any(|r| r.id == id),
             "success must reset the retry counter"
         );
+    }
+
+    #[test]
+    fn path_match_files_prefers_filename_hits_and_is_deterministic() {
+        let conn = db();
+        insert_raw_file(&conn, "案件/WJY 汪均益/身份证明/身份证/汪均益.jpg", "d1");
+        insert_raw_file(&conn, "案件/WJY 汪均益/行政诉讼/一审/一审判决书.pdf", "d1");
+        insert_raw_file(&conn, "案件/ZZZ 结案/匹配结果.txt", "d1");
+        insert_raw_file(&conn, "无关/普通文件.txt", "d1");
+
+        let kws = vec!["汪均益".to_string(), "结果".to_string()];
+        let paths: Vec<String> = path_match_files(&conn, &kws).unwrap().into_iter().map(|(_, p)| p).collect();
+        // 不命中任何关键词的文件被排除
+        assert!(!paths.iter().any(|p| p.contains("普通文件")), "got: {paths:?}");
+        // 文件名命中（汪均益.jpg）优先于仅目录命中（一审判决书.pdf 只在目录里命中"汪均益"）
+        let jpg = paths.iter().position(|p| p.ends_with("汪均益.jpg")).expect("jpg hit");
+        let judge = paths.iter().position(|p| p.ends_with("一审判决书.pdf")).expect("judgment hit");
+        assert!(jpg < judge, "文件名命中应排在仅目录命中之前: {paths:?}");
+        // 同一库多次调用顺序一致（此前依赖 SQLite 行序，随重建/VACUUM 漂移）
+        let again: Vec<String> = path_match_files(&conn, &kws).unwrap().into_iter().map(|(_, p)| p).collect();
+        assert_eq!(paths, again, "路径通道名次必须确定性");
     }
 }

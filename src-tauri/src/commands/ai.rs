@@ -476,7 +476,7 @@ pub async fn smart_search_stream(
 
 mod rewrite;
 pub use rewrite::{RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
-use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords, question_from_messages, retry_expansion_keeps_question_entity, rewrite_adds_foreign_entity};
+use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity, rewrite_adds_foreign_entity};
 #[cfg(test)]
 use rewrite::{rewrite_history, valid_rewrite_output, may_inherit_parent_entities};
 
@@ -2296,6 +2296,21 @@ mod chunk_budget_tests {
         // 问句本身没有锚点实体 ⇒ 无从判定，放行（空/泛输出由 valid_rewrite_output 挡）；
         // 用退化问句构造"检索词为空"这一分支（`<2` 字即空）。
         assert!(retry_expansion_keeps_question_entity("任何东西", "？"));
+    }
+
+    /// 「真换词」守卫：扩查必须新增检索词；把原句删几个虚词后回显（词集与首轮相同）
+    /// 视为无效 —— 否则"换一批"会给出同一批材料（2026-10-16 实测踩到）。
+    #[test]
+    fn retry_expansion_requires_new_terms() {
+        let q = "汪均益案的最终结果是什么？";
+        // 补结论性词/新锚点是扩查的目的 → 通过
+        assert!(retry_expansion_adds_new_terms("汪均益案 判决 裁定 结案 调解 处理结果 结论", q));
+        assert!(retry_expansion_adds_new_terms("汪均益 歙县 自然资源 判决", q));
+        // 删虚词回显 / 同词集重组 → 弃用
+        assert!(!retry_expansion_adds_new_terms("汪均益案 最终结果", q), "删虚词回显不算换词");
+        assert!(!retry_expansion_adds_new_terms("汪均益案的结果", q), "同词集重组不算换词");
+        // 问句本身没有检索词可对比 → 放行（空/泛输出由 valid_rewrite_output 挡）
+        assert!(retry_expansion_adds_new_terms("把时间列出来", "？"));
     }
 
     /// P1：本轮问题 = **最后一条 user 消息**。重跑时会话最后一条是上一轮回答，

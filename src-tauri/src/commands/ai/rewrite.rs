@@ -223,6 +223,31 @@ pub(super) fn retry_expansion_keeps_question_entity(expanded: &str, question: &s
         .any(|t| t.chars().count() >= 2 && lower_anchors.iter().any(|a| a.contains(&t.to_lowercase())))
 }
 
+/// 重跑扩查的「真换词」守卫：扩查结果必须引入**本轮问句之外的新检索词**。
+///
+/// 与 [`retry_expansion_keeps_question_entity`] 互补：那条保"不丢锚点"，这条防"没换词"。
+/// 只挡"与原句相同"不够 —— LLM 常把原句删几个虚词后回显，词集与首轮完全相同，
+/// 用户点了「换一批」却还是同一批材料（2026-10-16 实测：
+/// `汪均益案的最终结果是什么？` → `汪均益案 最终结果`，两轮的 `final_kws` 一模一样）。
+///
+/// 判据：扩查结果里存在至少一个检索词，与问句的每个检索词**都无包含关系**
+/// （"汪均益案" 与 "汪均益" 互为包含 → 视为同词，不算新词）。词集无新增即弃用
+/// （调用方回退常规链）。
+pub(super) fn retry_expansion_adds_new_terms(expanded: &str, question: &str) -> bool {
+    let q_kws = extract_retrieval_keywords(question);
+    if q_kws.is_empty() {
+        // 问句本身没有检索词可对比 → 无从判定；空输出/泛词由 `valid_rewrite_output` 挡住。
+        return true;
+    }
+    let q_lower: Vec<String> = q_kws.iter().map(|k| k.to_lowercase()).collect();
+    extract_retrieval_keywords(expanded).iter().any(|k| {
+        let kl = k.to_lowercase();
+        !q_lower
+            .iter()
+            .any(|q| q == &kl || q.contains(kl.as_str()) || kl.contains(q.as_str()))
+    })
+}
+
 fn is_rewrite_stopword(w: &str) -> bool {
     matches!(w,
         "它" | "这个" | "那个" | "上述" | "上文" | "该" | "那" | "此"

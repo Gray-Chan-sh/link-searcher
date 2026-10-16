@@ -298,11 +298,17 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         let prior = retry_prior_answer.unwrap_or("").trim().to_string();
         match llm_expand_retry_query(&last_q, &prior).await {
             // 扩查守卫与"新话题守卫"相反：这里只要求**锚点实体还在**（补词是目的，见函数注释）
-            Some(q) if retry_expansion_keeps_question_entity(&q, &last_q) => Some(q),
-            Some(q) => {
+            Some(q) if !retry_expansion_keeps_question_entity(&q, &last_q) => {
                 log::warn!("[AI]   retry 扩查丢了本轮问句的锚点实体，弃用：{:?}", truncate_text(&q, 40));
                 None
             }
+            // 且必须**真换词**：词集与首轮完全相同 = 原词再搜一遍，用户点了等于白发
+            // （2026-10-16 实测：LLM 把原句删几个虚词后回显，"换一批"给出同一批材料）。
+            Some(q) if !retry_expansion_adds_new_terms(&q, &last_q) => {
+                log::warn!("[AI]   retry 扩查没有新增检索词（= 原词再搜），弃用：{:?}", truncate_text(&q, 40));
+                None
+            }
+            Some(q) => Some(q),
             None => None,
         }
     } else {
