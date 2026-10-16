@@ -223,7 +223,15 @@ fn is_table_row(line: &str) -> bool {
 /// 不支持的写法要降级，否则用户会看到裸标记（`### 一、…`）。
 ///
 /// `footer` 走 `note` 元素（灰色小字），用于"耗时 / 引用条数"这类元信息。
-pub fn render_card(title: &str, body_md: &str, footer: Option<&str>) -> serde_json::Value {
+///
+/// `template`：页眉配色（`blue` / `red` / …）。会话类卡片用 `blue` 让**会话名一眼可辨**
+/// （2026-10-17 用户反馈"标题不明显"）；工具类卡片（帮助/列表/搜索）保持无配色的克制样式。
+pub fn render_card(
+    title: &str,
+    body_md: &str,
+    footer: Option<&str>,
+    template: Option<&str>,
+) -> serde_json::Value {
     let mut elements = vec![json!({
         "tag": "markdown",
         "content": clip_bytes(&normalize_for_card(body_md), MAX_BODY_BYTES),
@@ -235,42 +243,83 @@ pub fn render_card(title: &str, body_md: &str, footer: Option<&str>) -> serde_js
             "elements": [{ "tag": "plain_text", "content": f }],
         }));
     }
+    let mut header = json!({ "title": { "tag": "plain_text", "content": title } });
+    if let Some(t) = template.map(str::trim).filter(|t| !t.is_empty()) {
+        header["template"] = json!(t);
+    }
     json!({
         "config": { "wide_screen_mode": true },
-        "header": { "title": { "tag": "plain_text", "content": title } },
+        "header": header,
         "elements": elements,
     })
 }
 
-/// "检索中"卡片：进度阶段 + 已经生成的部分内容。
+/// 会话类卡片的页眉配色（回答/流式/当前会话都用它，形成"蓝色 = 会话"的一致视觉）。
+pub const TEMPLATE_SESSION: &str = "blue";
+/// 出错卡片的页眉配色（红色 = 失败，与正常回答一眼区分）。
+pub const TEMPLATE_ERROR: &str = "red";
+
+/// "检索中"卡片：进度阶段 + 已经生成的部分内容 + **「停止」按钮**。
 ///
 /// `title`：当前会话名（`/rename` 或首问自动生成）—— 回答卡与流式卡都带上它，
-/// 用户始终能看到"现在在哪个会话里问答"。空/占位（见 [`crate::card::display_title`]）
-/// 时退回无标题。
-pub fn render_working(progress: &str, partial: &str, title: Option<&str>) -> serde_json::Value {
+/// 用户始终能看到"现在在哪个会话里问答"。空/占位时退回无标题（见 [`headline`]）。
+///
+/// `session_id`：非空时挂「停止」按钮（`stop` 动作，见 [`parse_card_action`]）——
+/// 与 `/stop` 命令同一条实现：按会话取消在途生成。流式过程中卡片会被反复 patch，
+/// 按钮随每次渲染重建（patch 是整体替换，不会丢）。
+pub fn render_working(
+    progress: &str,
+    partial: &str,
+    title: Option<&str>,
+    session_id: &str,
+) -> serde_json::Value {
     let body = if partial.trim().is_empty() {
         format!("⏳ {progress}")
     } else {
         format!("{partial}\n\n---\n⏳ {progress}")
     };
-    render_card(&headline("正在检索…", title), &body, None)
+    let mut card = render_card(
+        &headline("正在检索…", title),
+        &body,
+        None,
+        Some(TEMPLATE_SESSION),
+    );
+    let sid = session_id.trim();
+    if !sid.is_empty()
+        && let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut())
+    {
+        elements.push(json!({
+            "tag": "action",
+            "actions": [{
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": "停止" },
+                "type": "danger",
+                "value": action_payload("stop", sid),
+            }],
+        }));
+    }
+    card
 }
 
-/// 卡片标题的组合规则：有会话名 → `基础 · 会话名`；否则就用基础标题。
+/// 卡片标题的组合规则：有会话名 → **`会话名 · 基础`**（名字在前，最醒目）；
+/// 否则就用基础标题。
 ///
 /// "新会话"是**占位标题**（首轮回答保存时才自动命名）→ 不显示它，
 /// 免得每张卡都挂一个没信息量的"新会话"。
 fn headline(base: &str, title: Option<&str>) -> String {
     match title.map(str::trim).filter(|t| !t.is_empty() && *t != "新会话") {
-        Some(t) => format!("{base} · {t}"),
+        Some(t) => format!("{t} · {base}"),
         None => base.to_string(),
     }
 }
 
 /// 渲染**分页**的最终卡片（`page` 从 1 开始）。
 ///
-/// `title` = 会话名（首问后自动生成，或 `/rename` 指定）→ 页眉显示 `回答 · <标题>`，
-/// 让用户一眼知道这条回答属于哪个会话（多会话切换时的关键信息）。
+/// `title` = 会话名（首问后自动生成，或 `/rename` 指定）→ 页眉显示 `会话名 · 回答`，
+/// 让用户一眼知道这条回答属于哪个会话（多会话切换时的关键信息）；配色见 [`TEMPLATE_SESSION`]。
+///
+/// `cancelled` = 这轮曾被**停止**（`/stop` 或卡片按钮）→ 页眉换成"已停止"，
+/// 明确告诉用户"看到的是被打断的部分内容"，而不是一个看起来完整却莫名的短回答。
 ///
 /// 证据条数与耗时**只标在最后一张**：否则一张长回答会连着刷三遍同样的脚注，
 /// 反而把"读到第几段"这个真正有用的信息淹掉。
@@ -281,6 +330,7 @@ pub fn render_answer_card(
     pages: usize,
     evidence_count: usize,
     took_ms: u64,
+    cancelled: bool,
 ) -> serde_json::Value {
     let mut meta: Vec<String> = Vec::new();
     if pages > 1 {
@@ -294,9 +344,15 @@ pub fn render_answer_card(
             meta.push(format!("{}s", took_ms / 1000));
         }
     }
-    let base = if pages > 1 { format!("回答（{page} / {pages}）") } else { "回答".to_string() };
+    let base = if cancelled {
+        "已停止".to_string()
+    } else if pages > 1 {
+        format!("回答（{page} / {pages}）")
+    } else {
+        "回答".to_string()
+    };
     let footer = if meta.is_empty() { None } else { Some(meta.join(" · ")) };
-    render_card(&headline(&base, title), body, footer.as_deref())
+    render_card(&headline(&base, title), body, footer.as_deref(), Some(TEMPLATE_SESSION))
 }
 
 /// 把长回答切成**多张卡片**（每张 ≤ `max_bytes`），最多 `max_cards` 张。
@@ -428,7 +484,7 @@ pub fn render_list_card(
     session_ids: &[String],
 ) -> serde_json::Value {
     let body = menu_text(items);
-    let mut card = render_card(title, &body, footer);
+    let mut card = render_card(title, &body, footer, None);
     let Some((label, action)) = button else {
         return card;
     };
@@ -478,12 +534,17 @@ pub fn render_search_card(
         lines.push(String::new());
     }
     let body = lines.join("\n");
-    render_card(&format!("搜索「{}」", query.trim()), &body, footer)
+    render_card(&format!("搜索「{}」", query.trim()), &body, footer, None)
 }
 
 /// 失败卡片（**在"卡已发出"之后**出错时用）：不再另发文本，避免答案重复出现两次。
 pub fn render_error(detail: &str) -> serde_json::Value {
-    render_card("出错了", &format!("未能完成这次回答：\n\n```\n{detail}\n```"), None)
+    render_card(
+        "出错了",
+        &format!("未能完成这次回答：\n\n```\n{detail}\n```"),
+        None,
+        Some(TEMPLATE_ERROR),
+    )
 }
 
 // ───────────────────────────── SSE 分帧 ─────────────────────────────
@@ -576,6 +637,8 @@ pub enum CardAction {
     Remove { session_id: String, index: usize },
     /// 「确认删除」：经由确认卡上的按钮到这里才真删。
     RemoveConfirm { session_id: String, index: usize },
+    /// 「停止」：取消该会话**正在生成**的回答（与 `/stop` 同一实现）。
+    Stop { session_id: String },
 }
 
 /// 从 `action_value` 解析出动作。返回 `None` = **不认识/不完整 → 直接忽略**。
@@ -611,6 +674,7 @@ pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
         "switch" => Some(CardAction::Switch { session_id }),
         "remove" if index >= 1 => Some(CardAction::Remove { session_id, index }),
         "remove_confirm" if index >= 1 => Some(CardAction::RemoveConfirm { session_id, index }),
+        "stop" => Some(CardAction::Stop { session_id }),
         _ => None,
     }
 }
@@ -806,7 +870,7 @@ mod tests {
     #[test]
     fn whole_card_json_stays_under_feishu_30kb_limit() {
         let long = "字".repeat(20_000); // 60KB，必被截断
-        let card = render_answer_card(&long, None, 1, 1, 3, 1000);
+        let card = render_answer_card(&long, None, 1, 1, 3, 1000, false);
         let json = serde_json::to_string(&card).unwrap();
         assert!(json.len() < 30_000, "整张卡片 JSON 必须 < 30KB，实际 {} 字节", json.len());
         assert!(json.contains("已截断"));
@@ -851,20 +915,19 @@ mod tests {
         assert_eq!(a.push_line(""), Some(("x".to_string(), "line1\nline2".to_string())));
     }
 
-    // ── 卡片渲染 ──
-
-    /// 会话名出现在卡片页眉；占位标题（"新会话"）与空值不显示。
+    /// 会话名出现在卡片页眉（**名字在前**，且带会话配色）；占位标题与空值不显示。
     #[test]
-    fn card_headline_carries_session_title_but_hides_placeholder() {
-        let with = render_answer_card("答案", Some("合同审查"), 1, 1, 2, 3400);
-        assert_eq!(with["header"]["title"]["content"], "回答 · 合同审查");
-        let working = render_working("正在检索…", "", Some("合同审查"));
-        assert_eq!(working["header"]["title"]["content"], "正在检索… · 合同审查");
-        let paged = render_answer_card("第一段", Some("合同审查"), 1, 3, 0, 0);
-        assert_eq!(paged["header"]["title"]["content"], "回答（1 / 3） · 合同审查");
+    fn card_headline_leads_with_session_title_and_hides_placeholder() {
+        let with = render_answer_card("答案", Some("合同审查"), 1, 1, 2, 3400, false);
+        assert_eq!(with["header"]["title"]["content"], "合同审查 · 回答");
+        assert_eq!(with["header"]["template"], "blue", "会话卡片要配色（标题醒目）");
+        let working = render_working("正在检索…", "", Some("合同审查"), "sess-1");
+        assert_eq!(working["header"]["title"]["content"], "合同审查 · 正在检索…");
+        let paged = render_answer_card("第一段", Some("合同审查"), 1, 3, 0, 0, false);
+        assert_eq!(paged["header"]["title"]["content"], "合同审查 · 回答（1 / 3）");
 
         for placeholder in [None, Some(""), Some("   "), Some("新会话")] {
-            let c = render_answer_card("答案", placeholder, 1, 1, 0, 0);
+            let c = render_answer_card("答案", placeholder, 1, 1, 0, 0, false);
             assert_eq!(
                 c["header"]["title"]["content"], "回答",
                 "占位标题不该显示：{placeholder:?}"
@@ -872,9 +935,44 @@ mod tests {
         }
     }
 
+    /// 被停止的回答：页眉明确写"已停止"（不是看起来完整却莫名的短回答）。
+    #[test]
+    fn cancelled_answer_card_marks_itself_as_stopped() {
+        let c = render_answer_card("部分内容", Some("合同审查"), 1, 1, 2, 3400, true);
+        assert_eq!(c["header"]["title"]["content"], "合同审查 · 已停止");
+        let c2 = render_answer_card("部分内容", None, 1, 1, 0, 0, true);
+        assert_eq!(c2["header"]["title"]["content"], "已停止");
+    }
+
+    /// 工作卡带「停止」按钮（有 session_id 时），并往返成 `CardAction::Stop`。
+    #[test]
+    fn working_card_carries_stop_button() {
+        let c = render_working("正在检索…", "", None, "sess-1");
+        let last = c["elements"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["tag"], "action");
+        let btn = &last["actions"][0];
+        assert_eq!(btn["text"]["content"], "停止");
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: btn["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::Stop { session_id: "sess-1".into() }),
+            "停止按钮往返失败"
+        );
+        // 没有 session_id（理论上不会发生）→ 不加按钮
+        let c2 = render_working("正在检索…", "", None, "  ");
+        assert!(
+            c2["elements"].as_array().unwrap().iter().all(|e| e["tag"] != "action"),
+            "无会话 id 不该挂按钮"
+        );
+    }
+
     #[test]
     fn card_shape_is_valid_1_0() {
-        let c = render_answer_card("答案 [1]", None, 1, 1, 2, 3400);
+        let c = render_answer_card("答案 [1]", None, 1, 1, 2, 3400, false);
         assert!(c.get("config").is_some());
         assert_eq!(c["header"]["title"]["content"], "回答");
         assert_eq!(c["elements"][0]["tag"], "markdown");
@@ -887,9 +985,9 @@ mod tests {
 
     #[test]
     fn working_card_shows_progress_and_marks_partial() {
-        let c = render_working("正在检索文档…", "", None);
+        let c = render_working("正在检索文档…", "", None, "");
         assert!(c["elements"][0]["content"].as_str().unwrap_or("").contains("⏳"));
-        let c2 = render_working("生成回答中…", "已经写了一半", None);
+        let c2 = render_working("生成回答中…", "已经写了一半", None, "");
         let body = c2["elements"][0]["content"].as_str().unwrap_or("");
         assert!(body.contains("已经写了一半") && body.contains("生成回答中"));
         assert_eq!(c2["elements"].as_array().unwrap().len(), 1, "没有 footer 时不该多出元素");
@@ -959,18 +1057,18 @@ mod tests {
 
     #[test]
     fn paged_card_marks_pages_and_only_last_shows_evidence() {
-        let c1 = render_answer_card("第一段", None, 1, 3, 19, 67000);
+        let c1 = render_answer_card("第一段", None, 1, 3, 19, 67000, false);
         assert_eq!(c1["header"]["title"]["content"], "回答（1 / 3）");
         let f1 = &c1["elements"][2]["elements"][0]["content"];
         assert_eq!(f1, "第 1 / 3 段", "非最后一张不该标证据/耗时");
-        let c3 = render_answer_card("末段", None, 3, 3, 19, 67000);
+        let c3 = render_answer_card("末段", None, 3, 3, 19, 67000, false);
         let f3 = c3["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
         assert!(f3.contains("第 3 / 3 段") && f3.contains("19 条证据") && f3.contains("67s"), "实际：{f3}");
     }
 
     #[test]
     fn single_page_card_has_no_page_marker() {
-        let c = render_answer_card("就一段", None, 1, 1, 2, 3400);
+        let c = render_answer_card("就一段", None, 1, 1, 2, 3400, false);
         assert_eq!(c["header"]["title"]["content"], "回答");
         let f = c["elements"][2]["elements"][0]["content"].as_str().unwrap_or("");
         assert!(!f.contains("段"), "只有一段时不该出现分页标记：{f}");
@@ -1126,7 +1224,7 @@ mod tests {
     /// 它们一旦漂移，症状是"按钮点了没反应"—— 最难查的那种。
     #[test]
     fn action_buttons_round_trip_into_parseable_actions() {
-        let mut card = render_answer_card("答", None, 1, 1, 1, 1000);
+        let mut card = render_answer_card("答", None, 1, 1, 1, 1000, false);
         append_actions(&mut card, "sess-9");
         let elems = card["elements"].as_array().unwrap();
         let action = elems.last().expect("应追加 action 元素");
@@ -1189,7 +1287,7 @@ mod tests {
 
     #[test]
     fn actions_are_skipped_without_a_session_id() {
-        let mut card = render_answer_card("答", None, 1, 1, 1, 1000);
+        let mut card = render_answer_card("答", None, 1, 1, 1, 1000, false);
         let before = card["elements"].as_array().unwrap().len();
         append_actions(&mut card, "   ");
         assert_eq!(
@@ -1215,6 +1313,7 @@ mod tests {
                 CardAction::RemoveConfirm { session_id: "s-3".into(), index: 3 },
             ),
             (action_payload("new_session", ""), CardAction::NewSession),
+            (action_payload("stop", "s-5"), CardAction::Stop { session_id: "s-5".into() }),
         ];
         for (payload, expect) in cases {
             let ev = CardActionEvent {

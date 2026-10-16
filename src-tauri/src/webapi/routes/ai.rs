@@ -444,9 +444,13 @@ async fn smart_search_stream_handler(
     tauri::async_runtime::spawn(async move {
         let app_state = handle.state::<AppState>();
         if let Err(e) =
-            crate::commands::ai::smart_search_stream(app_state, handle.clone(), query, sid).await
+            crate::commands::ai::smart_search_stream(app_state, handle.clone(), query, sid.clone())
+                .await
         {
             log::warn!("[WEBAPI] smart-search stream failed: {e}");
+            // 与 conversation ask 同款收尾（原因见 [`emit_terminal_done`]）：
+            // 否则订阅方会一直等一个不会来的 `ai-done`。
+            emit_terminal_done(&handle, &sid, e.contains("取消"), &e);
         }
     });
 
@@ -482,7 +486,7 @@ async fn conversation_ask_stream_handler(
             handle.clone(),
             body.messages,
             body.source_ids,
-            sid,
+            sid.clone(),
             body.scope,
             body.session_retrieval_scope,
             body.strict_docs,
@@ -493,10 +497,71 @@ async fn conversation_ask_stream_handler(
         .await
         {
             log::warn!("[WEBAPI] conversation ask stream failed: {e}");
+            // ⚠️ SSE **不会**因为生成任务结束而自行收尾（广播通道还活着，keep-alive 还在发），
+            // 任务失败若只打日志，订阅方（飞书 bot / 浏览器）会永远等一个不会来的 `ai-done`。
+            // → 失败也必须**显式收尾**：补一发空内容的 `ai-done`，用 `cancelled`/`error`
+            //   告诉订阅方"结束的原因"。
+            // `cancelled` 的判定：错误文案含"取消" —— 停止请求在**检索阶段**生效时走的
+            // 就是这条路（生成阶段的取消由 `chat_stream_cancellable` 自行收尾，不走这里）。
+            emit_terminal_done(
+                &handle,
+                &sid,
+                e.contains("取消"),
+                &e,
+            );
         }
     });
 
     Ok(sse_for_session(rx, session_id))
+}
+
+/// 生成任务失败时的**收尾事件**（与 `AiDone` 同形 + 一个 `error` 字段）。
+///
+/// 为什么需要它：SSE 没有"任务结束即关闭"的语义（`sse_for_session` 挂的是广播通道），
+/// 订阅方只能靠 `ai-done` 判定终态。缺了它，失败会表现为"永远在转圈"。
+///
+/// 前端**已经**按这个形状设计过（`applyDone` 里 `if (p.cancelled) return`、
+/// `streamStore` 里 `!e.cancelled` 才代为落库）—— 补上这发事件即可对齐，
+/// 不需要动前端。
+fn emit_terminal_done(app: &tauri::AppHandle, session_id: &str, cancelled: bool, error: &str) {
+    use tauri::Emitter;
+    let _ = app.emit("ai-done", terminal_done_payload(session_id, cancelled, error));
+}
+
+/// [`emit_terminal_done`] 的事件载荷（纯函数，便于单测 —— 它是订阅方判定终态的契约）。
+fn terminal_done_payload(session_id: &str, cancelled: bool, error: &str) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "full_text": "",
+        "took_ms": 0,
+        "cancelled": cancelled,
+        "source_ids": [],
+        "source_files": [],
+        "evidence": [],
+        "trace_id": "",
+        // 额外字段：机器人端据此显示具体原因（前端不认识它，按普通字段忽略）。
+        "error": error,
+    })
+}
+
+#[cfg(test)]
+mod terminal_done_tests {
+    use super::terminal_done_payload;
+
+    /// 收尾事件的**契约**：订阅方（飞书 bot）靠 `session_id` 过滤、靠 `cancelled`/`error`
+    /// 判定终态 —— 字段名或类型漂了，症状是"停止后卡片永远停在检索中"。
+    #[test]
+    fn terminal_done_payload_matches_subscriber_contract() {
+        let v = terminal_done_payload("sess-1", true, "请求已取消");
+        assert_eq!(v["session_id"], "sess-1");
+        assert_eq!(v["full_text"], "");
+        assert_eq!(v["cancelled"], true);
+        assert_eq!(v["error"], "请求已取消");
+        // 与真实 AiDone 同形：这些键必须存在（bot 的解析按可选字段读）
+        for key in ["session_id", "full_text", "took_ms", "cancelled", "source_ids", "source_files", "evidence", "trace_id"] {
+            assert!(!v[key].is_null(), "缺字段 {key}：{v}");
+        }
+    }
 }
 
 async fn save_chat_session_handler(

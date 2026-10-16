@@ -1688,10 +1688,12 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 | 命令 | 行为 | 备注 |
 |---|---|---|
 | `/help`（或单独 `/`） | 命令卡片（附「新建会话」按钮） | 零配置的"弹出列表"替代 |
+| `/current` | 查看**当前会话**：名字（页眉）、消息数、会话总数 | 别名 `/session` |
 | `/new` | 新建 lark 会话并置活动，回会话列表卡 | |
 | `/sessions` | 会话列表卡（活动置顶，带时间与标题） | 记点选映射 |
 | `/switch <序号或标题前缀>` | 切换并回"锚点"（会话名 + 上一个问题）；前缀多命中时列表让选 | 序号优先按**上次列表快照**解析 |
 | `/rename <新名字>` | 给**当前活动会话**改标题（§11.6） | 新名字取剩余整段（含空格）；上限 30 字 |
+| `/stop` | 停止**当前正在生成**的回答（检索阶段同样中断） | 别名 `/cancel`；工作卡上也有「停止」按钮 |
 | `/delete <序号>` | **先确认卡**（按钮二次确认才真删） | 防误删 |
 | `/find <关键词> [页码]` | 调 `GET /api/search`（每页 5 条）→ 结果卡（文件名/路径/片段） | 页码规则：末位数字 **≤99** 才算页码（`判决书 2024` 这类"数字关键词"不被误判） |
 
@@ -1760,3 +1762,49 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 | WebAPI | `webapi_http.rs`：改后列表立刻反映新名 / 空标题 400 / 跨端 400 / 不存在 400 |
 | 门禁 | `cargo test --workspace` 全绿（lib 602 + lark-bot 63 + lark-gate 13 + 集成/HTTP/……）+ `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
 | 真机 | ⏳ 待用户验收（`/rename`、回答卡页眉的会话名） |
+
+### 11.8 停止命令 + 标题醒目化 + 并发消费（第三十轮，2026-10-17）
+
+**背景**：用户反馈"标题不明显""需要一个命令看出当前会话""加一个停止命令，
+可以直接停止当前的 ai 回答或搜索过程"。
+
+#### ① 标题醒目化（`card.rs`）
+
+- 页眉顺序改为 **`会话名 · 基础`**（名字在前）；会话类卡片统一**蓝色页眉**
+  （`TEMPLATE_SESSION`），错误卡红色（`TEMPLATE_ERROR`）。
+- `/current` 卡片：页眉 `当前会话：<名字>`，正文"最近使用 / 消息数 / 总数"。
+
+#### ② `/stop`：**必须能打断生成**，这决定了整个消息消费模型
+
+- **此前**：消息消费是**单线程顺序**的 —— `/stop` 只会排在正在生成的回答后面执行，
+  等于没有。要让它有效，消息必须**并发消费**。
+- **现在**（`main.rs`）：
+  - 每条消息一个线程；
+  - **`GeneratingGuard`**（RAII，静态表 `GENERATING: chat_id → 正在生成的 session_id`）
+    保证**每私聊串行**：生成中收到新提问/重跑 → 被拒并提示 `/stop`；
+  - `/stop` 的准星 = `GENERATING` 里记的会话（**不猜**"当前绑定"——用户可能中途 `/switch` 过）；
+  - 工作卡挂**「停止」按钮**（`stop` 动作，走卡片回调线程）——与 `/stop` 同一条实现。
+- **取消的覆盖面**：`in_flight::cancel(session_id)` 的令牌在**检索阶段**（`prompt.rs` 的
+  `check_cancel!`）与**生成阶段**（`chat_stream_cancellable`）都会检查 —— 因此
+  "停止搜索过程"与"停止回答"是同一个动作。
+
+#### ③ 配套修复：**SSE 任务失败会"永远转圈"**（`webapi/routes/ai.rs`，既存缺陷）
+
+- **根因**：两条流式端点的生成任务失败时**只打日志**；SSE 挂的是广播通道，
+  任务结束不会关闭流 —— 订阅方（bot/浏览器）等一个永远不来的 `ai-done`。
+  "检索阶段被 /stop"恰好走这条路（生成阶段的取消会正常收尾），此前罕见、本轮成为常态。
+- **修法**：失败也**显式收尾** —— 补一发 `ai-done`（空内容 + `cancelled` + `error` 原因）。
+  - 前端**无需改动**：`ChatPanel.applyDone` 对 `cancelled` 直接 return、
+    `streamStore` 对 `cancelled` 不代为落库（stage 1 就是这么设计的）。
+  - bot：空内容 + `cancelled` → 卡片渲染"已停止"且**不写历史**；空内容 + `!cancelled` →
+    "出错了"卡片带 `error` 原因。
+- 单测 `terminal_done_payload_matches_subscriber_contract` 守住字段契约。
+
+#### ④ 验收（第三十轮）
+
+| 项 | 证据 |
+|---|---|
+| bot | lark-bot 合计 **67** 项：`card_headline_leads_with_session_title_and_hides_placeholder`、`cancelled_answer_card_marks_itself_as_stopped`、`working_card_carries_stop_button`（往返 `CardAction::Stop`）、`generating_guard_serialises_per_chat_and_releases_on_drop`、`current_card_shows_name_or_explains_placeholder`、命令解析（`/stop` `/cancel` `/current` `/session`） |
+| app | `terminal_done_tests::terminal_done_payload_matches_subscriber_contract` |
+| 门禁 | `cargo test --workspace` 全绿 + `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
+| 真机 | ⏳ 待用户验收（长回答中点「停止」/发 `/stop`；`/current`；页眉蓝色会话名） |

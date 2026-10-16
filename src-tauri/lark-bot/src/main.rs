@@ -68,6 +68,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use card::{
     render_answer_card, render_delete_list_card, render_error, render_search_card,
     render_session_list_card, render_working, split_for_cards, CardActionEvent, ListItem, SseAccum,
@@ -105,6 +107,47 @@ static MENUS: Mutex<Option<MenuMemory>> = Mutex::new(None);
 fn with_menu<R>(f: impl FnOnce(&mut MenuMemory) -> R) -> R {
     let mut guard = MENUS.lock().unwrap_or_else(|e| e.into_inner());
     f(guard.get_or_insert_with(MenuMemory::new))
+}
+
+/// 每个私聊**当前正在生成**的会话（`chat_id → session_id`）。
+///
+/// 两个用途（§11.8）：
+/// 1. **每私聊串行**：消息改并发消费后（`/stop` 必须能在生成途中被处理），
+///    同一私聊的第二条提问会被这里拦下，避免两会话并发写同一份会话历史；
+/// 2. **`/stop` 的准星**：停止时精确知道该取消**哪条会话**的生成
+///    （用户可能在中途切换过会话，不能拿"当前绑定"去猜）。
+static GENERATING: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// 在生成登记表上执行一次操作（拿到全局单例，惰性初始化）。
+fn with_generating<R>(f: impl FnOnce(&mut HashMap<String, String>) -> R) -> R {
+    let mut guard = GENERATING.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.get_or_insert_with(HashMap::new))
+}
+
+/// RAII 生成登记：进入生成即登记，结束（含失败/提前返回）自动摘除。
+struct GeneratingGuard {
+    chat_id: String,
+}
+
+impl GeneratingGuard {
+    /// 登记该私聊开始生成。**同私聊已有生成 → `None`**（调用方据此拒绝并提示 `/stop`）。
+    fn begin(chat_id: &str, session_id: &str) -> Option<Self> {
+        with_generating(|g| {
+            if g.contains_key(chat_id) {
+                return None;
+            }
+            g.insert(chat_id.to_string(), session_id.to_string());
+            Some(Self { chat_id: chat_id.to_string() })
+        })
+    }
+}
+
+impl Drop for GeneratingGuard {
+    fn drop(&mut self) {
+        with_generating(|g| {
+            g.remove(&self.chat_id);
+        });
+    }
 }
 
 fn main() {
@@ -197,10 +240,18 @@ fn main() {
     });
     drop(line_tx); // 只留 stdout 那条发送端：它结束时接收端才能自然退出
     for line in line_rx {
-        if let Err(e) = handle_line(&line, &http, &cfg.gate) {
-            // 单条失败不影响后续事件：飞书会重投，而我们有 message_id 去重兜底。
-            log::warn!("[bot] 处理事件失败：{e}");
-        }
+        // 每条消息**独立线程**处理：生成（RAG 可能几十秒）不能再堵住后续消息 ——
+        // `/stop` 之所以有用，前提就是它能在**生成进行中**被处理（此前是单线程顺序
+        // 消费，停止消息只能排到回答跑完，等于没有）。
+        // 同一私聊的并发生成由 `GeneratingGuard` 拦下（保持"每私聊串行"）。
+        let http = Arc::clone(&http);
+        let gate = cfg.gate.clone();
+        std::thread::spawn(move || {
+            if let Err(e) = handle_line(&line, &http, &gate) {
+                // 单条失败不影响后续事件：飞书会重投，而我们有 message_id 去重兜底。
+                log::warn!("[bot] 处理事件失败：{e}");
+            }
+        });
     }
     log::warn!("[bot] 事件流结束（lark-cli 已退出）");
     let _ = child.wait();
@@ -295,8 +346,10 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
         }
         Cmd::New => return reply_new_session(http, &ev),
         Cmd::List => return reply_session_list(http, &ev),
+        Cmd::Current => return reply_current(http, &ev),
         Cmd::Switch(arg) => return reply_switch(http, &ev, &arg),
         Cmd::Rename(name) => return reply_rename(http, &ev, &name),
+        Cmd::Stop => return reply_stop(http, &ev),
         Cmd::Delete(arg) => return reply_delete_confirm(http, &ev, &arg),
         Cmd::Find { query, page } => return reply_find(http, &ev, &query, page),
         // 不是命令 / 是空正文：走 AI 问答
@@ -310,6 +363,11 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
 
     // 取/建会话绑定（阶段三）
     let session_id = http.session_for_chat(&ev.chat_id, &ev.sender_id)?;
+    // 同一私聊已有生成 → 拒绝（消息并发消费后，这里是"每私聊串行"的守门人）。
+    let Some(_guard) = GeneratingGuard::begin(&ev.chat_id, &session_id) else {
+        reply(&ev.message_id, "正在回答上一条问题，请稍候（发 /stop 可中止）。");
+        return Ok(());
+    };
     match ask_with_session(http, &ev, &question, &session_id, None) {
         Ok(()) => Ok(()),
         // 兜底：绑定指向的会话可能已被**别的端**（桌面/WebUI）删除 —— 随机换一条新的，
@@ -521,7 +579,12 @@ fn reply_session_list(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> 
 
 /// 空会话列表卡片（带「新建会话」按钮）。
 fn list_empty_card() -> Value {
-    let mut card = card::render_card("你的会话", "还没有会话。发送 `/new` 或点下面的按钮新建一个。", None);
+    let mut card = card::render_card(
+        "你的会话",
+        "还没有会话。发送 `/new` 或点下面的按钮新建一个。",
+        None,
+        None,
+    );
     if let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) {
         elements.push(json!({
             "tag": "action",
@@ -733,6 +796,76 @@ fn reply_rename(http: &Http, ev: &LarkMessageEvent, name: &str) -> Result<(), St
     reply_session_list(http, ev)
 }
 
+/// `/current`（别名 `/session`）：把**当前会话**显示出来 —— 名字放页眉（最显眼），
+/// 正文给"最近使用 / 消息数 / 会话总数"，并指路切换与改名。
+fn reply_current(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
+    let briefs = http.chat_sessions(&ev.chat_id)?;
+    let Some(active) = briefs.iter().find(|b| b.is_active) else {
+        reply(
+            &ev.message_id,
+            "当前还没有会话 —— 直接提问会自动创建一条（发 /new 也可以）。",
+        );
+        return Ok(());
+    };
+    let session = http.get(&format!("/api/chat/sessions/{}?origin=lark", active.id))?;
+    let title = session_title_of(&session).filter(|t| t != "新会话");
+    let msg_count = session
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    reply_card(
+        &ev.message_id,
+        &current_card(title.as_deref(), active.updated_at, msg_count, briefs.len()),
+    )?;
+    log::info!(
+        "[bot] 已回当前会话（chat={} session={} 消息 {msg_count} 条）",
+        ev.chat_id,
+        active.id
+    );
+    Ok(())
+}
+
+/// `/current` 的卡片（纯函数，便于单测）：名字进页眉（醒目、与会话配色一致）。
+fn current_card(title: Option<&str>, updated_at: i64, msg_count: usize, total: usize) -> Value {
+    let head = match title {
+        Some(t) => format!("当前会话：{t}"),
+        None => "当前会话".to_string(),
+    };
+    let mut lines: Vec<String> = Vec::new();
+    if title.is_none() {
+        lines.push("（这条还没起名 —— 提第一个问题后自动命名，或发 `/rename 新名字`）".to_string());
+    }
+    let when = if updated_at > 0 {
+        fmt_utc_short(updated_at)
+    } else {
+        "未知".to_string()
+    };
+    lines.push(format!("最近使用：{when} · 消息 {msg_count} 条 · 共 {total} 个会话"));
+    card::render_card(
+        &head,
+        &lines.join("\n"),
+        Some("/sessions 查看全部 · /switch 切换 · /rename 改名"),
+        Some(card::TEMPLATE_SESSION),
+    )
+}
+
+/// `/stop`（别名 `/cancel`）：取消**当前正在生成**的回答（检索阶段同样会被中断）。
+///
+/// 准星来自 [`GENERATING`]（按私聊记着正在生成哪条会话）——**不猜**"当前绑定"：
+/// 用户可能在中途 `/switch` 过，拿绑定去取消会打错目标。
+fn reply_stop(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
+    let session_id = with_generating(|g| g.get(&ev.chat_id).cloned());
+    let Some(session_id) = session_id else {
+        reply(
+            &ev.message_id,
+            "当前没有正在生成的回答（可能已经完成）。",
+        );
+        return Ok(());
+    };
+    stop_generation(http, ev, &session_id)
+}
+
 /// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
 fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> Result<(), String> {
     let query = query.trim();
@@ -892,17 +1025,19 @@ fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Resul
             reply_card(&ev.message_id, &commands::help_card())?;
             Ok(())
         }
+        Cmd::Current => reply_current(http, &ev),
         Cmd::New => reply_new_session(http, &ev),
         Cmd::List => reply_session_list(http, &ev),
         Cmd::Switch(arg) => reply_switch(http, &ev, &arg),
         Cmd::Rename(name) => reply_rename(http, &ev, &name),
+        Cmd::Stop => reply_stop(http, &ev),
         Cmd::Delete(arg) => reply_delete_confirm(http, &ev, &arg),
         Cmd::Find { query, page } => reply_find(http, &ev, &query, page),
         // 菜单项配成了别的文案（不是命令）：回帮助，别猜
         Cmd::Ai => {
             reply(
                 &ev.message_id,
-                "菜单项未配置为命令。可选：/new、/sessions、/switch <序号或标题>、/rename <新名字>、/delete <序号>、/find <关键词>、/help",
+                "菜单项未配置为命令。可选：/current、/new、/sessions、/switch <序号或标题>、/rename <新名字>、/stop、/delete <序号>、/find <关键词>、/help",
             );
             Ok(())
         }
@@ -1001,8 +1136,17 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                         prior_answer.chars().count()
                     );
                     let retry = (!prior_answer.is_empty()).then(|| prior_answer.as_str());
+                    // 重跑也是一次生成：走同一道"每私聊串行"守门（与消息入口共用）。
+                    let Some(_guard) = GeneratingGuard::begin(&ev.chat_id, &session_id) else {
+                        reply(
+                            &ev.message_id,
+                            "这个私聊正在生成回答，请稍候（发 /stop 可中止）。",
+                        );
+                        return Ok(());
+                    };
                     answer_with_card(http, &synth, &question, &session_id, session, messages, retry)
-                        .map_err(|e| format!("重跑失败：{e}"))                }
+                        .map_err(|e| format!("重跑失败：{e}"))
+                }
                 crate::card::CardAction::NewSession => {
                     // 合成一条"用户发了 /new"的事件：与手打 /new 完全同一条路径
                     let synth = LarkMessageEvent {
@@ -1064,9 +1208,48 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                     reply(&ev.message_id, &format!("已删除第 {index} 个会话映射。"));
                     reply_session_list(http, &synth)
                 }
+                crate::card::CardAction::Stop { session_id } => {
+                    // 与 `/stop` 同一条实现：按会话取消在途生成。
+                    // 这条路径走**卡片回调线程**，与正在流式生成的线程并行 —— 因此按钮真能"打断"。
+                    let synth = LarkMessageEvent {
+                        event_type: "im.message.receive_v1".to_string(),
+                        message_id: ev.message_id.clone(),
+                        chat_id: ev.chat_id.clone(),
+                        chat_type: "p2p".to_string(),
+                        message_type: "text".to_string(),
+                        sender_id: operator.clone().unwrap_or_default(),
+                        sender_type: "user".to_string(),
+                        content: String::new(),
+                    };
+                    stop_generation(http, &synth, &session_id)
+                }
             }
         }
     }
+}
+
+/// 按会话请求取消在途生成（`/stop` 与卡片「停止」按钮共用）。
+///
+/// `session_id` 从**发起方**拿：命令走 [`GENERATING`] 的准星，按钮用卡片 payload 里的 id ——
+/// 两条路都**不看**"当前绑定"（用户可能中途切走）。
+fn stop_generation(http: &Http, ev: &LarkMessageEvent, session_id: &str) -> Result<(), String> {
+    match http.post("/api/ai/cancel", &json!({ "session_id": session_id })) {
+        Ok(_) => {
+            reply(
+                &ev.message_id,
+                "已请求停止 —— 已经生成的部分会保留在回答卡片里。",
+            );
+            log::info!(
+                "[bot] 已请求停止会话 {session_id} 的生成（chat={}，入口={}）",
+                ev.chat_id,
+                if ev.content.is_empty() { "按钮" } else { "命令" }
+            );
+        }
+        Err(e) => {
+            reply(&ev.message_id, &format!("停止请求失败：{e}"));
+        }
+    }
+    Ok(())
 }
 
 // ───────────────────────────── 会话问答：两条路径 ─────────────────────────────
@@ -1173,12 +1356,30 @@ fn answer_with_card(
     let title = session_title_of(&session);
     let card_id = reply_card(
         &ev.message_id,
-        &render_working("正在检索…", "", title.as_deref()),
+        &render_working("正在检索…", "", title.as_deref(), session_id),
     )?;
     log::info!("[bot] 已回卡片 {card_id}（chat={}）", ev.chat_id);
 
     match stream_turn(http, session_id, &messages, &card_id, retry_prior_answer, title.as_deref()) {
         Ok(turn) => {
+            // 停止发生在"还没生成任何内容"时（如检索阶段被 `/stop`）：**合法收尾**，
+            // 把卡片换成"已停止"，且**不写历史**（没有内容可写）。
+            if turn.full_text.trim().is_empty() {
+                log::info!("[bot] 已在生成内容前停止（session={session_id}）");
+                let card = render_answer_card(
+                    "（已停止：还没有生成任何内容）",
+                    title.as_deref(),
+                    1,
+                    1,
+                    0,
+                    0,
+                    true,
+                );
+                if let Err(e) = patch_card(&card_id, &card) {
+                    log::warn!("[bot] 收尾卡片更新失败：{e}");
+                }
+                return Ok(());
+            }
             let mut done = messages;
             done.push(json!({ "role": "assistant", "content": turn.full_text }));
             save_turn(http, session_id, &mut session, &done);
@@ -1189,7 +1390,15 @@ fn answer_with_card(
             let chunks = split_for_cards(&turn.full_text, MAX_BODY_BYTES, MAX_CARDS);
             let pages = chunks.len();
             let mut sent_pages = 0usize;
-            let mut first = render_answer_card(&chunks[0], title.as_deref(), 1, pages, turn.evidence_count, turn.took_ms);
+            let mut first = render_answer_card(
+                &chunks[0],
+                title.as_deref(),
+                1,
+                pages,
+                turn.evidence_count,
+                turn.took_ms,
+                turn.cancelled,
+            );
             if pages == 1 {
                 // 只有一张 → 按钮挂它；多张 → 挂最后一张（见下）
                 card::append_actions(&mut first, session_id);
@@ -1201,7 +1410,15 @@ fn answer_with_card(
             } else {
                 sent_pages = 1;
                 for (i, chunk) in chunks.iter().enumerate().skip(1) {
-                    let mut card = render_answer_card(chunk, title.as_deref(), i + 1, pages, turn.evidence_count, turn.took_ms);
+                    let mut card = render_answer_card(
+                        chunk,
+                        title.as_deref(),
+                        i + 1,
+                        pages,
+                        turn.evidence_count,
+                        turn.took_ms,
+                        turn.cancelled,
+                    );
                     if i + 1 == pages {
                         card::append_actions(&mut card, session_id);
                     }
@@ -1290,7 +1507,7 @@ fn stream_turn(
         }
         // 中间更新：节流决定"这次要不要真发"（把高频 chunk 合并掉）
         if throttle.should_send(Instant::now(), false)
-            && let Err(e) = patch_card(card_id, &render_working(&progress, &partial, title))
+            && let Err(e) = patch_card(card_id, &render_working(&progress, &partial, title, session_id))
         {
             // 中间更新失败**不**中断回答：抖动不值得让用户拿不到答案
             log::warn!("[bot] 中间卡片更新失败（继续）：{e}");
@@ -1322,10 +1539,30 @@ fn stream_turn(
         .to_string();
     let full_text = if authoritative.is_empty() { partial.trim().to_string() } else { authoritative };
     if full_text.is_empty() {
-        return Err(if cancelled {
-            "本次回答已取消".to_string()
-        } else {
+        if cancelled {
+            // 停止发生在"还没生成任何内容"时（检索阶段被 `/stop`/按钮打断）：
+            // **合法收尾**，不是错误 —— 上层据此把卡片标成"已停止"且不写历史。
+            log::info!("[bot] 本轮在生成任何内容前被停止");
+            return Ok(Turn {
+                full_text: String::new(),
+                evidence_count: 0,
+                took_ms: 0,
+                cancelled: true,
+                updates: throttle.sent(),
+            });
+        }
+        // 失败收尾：webapi 在生成任务出错时会补一发**空内容** `ai-done`（携带 `error` 原因），
+        // 没有原因字段时退回兜底文案。
+        let detail = done
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        return Err(if detail.is_empty() {
             "回答为空（主程序日志里应有原因）".to_string()
+        } else {
+            detail
         });
     }
     let evidence_count = done
@@ -2140,6 +2377,60 @@ mod tests {
         assert_eq!(s(r#"{"title":"   "}"#), None);
         assert_eq!(s(r#"{"title":""}"#), None);
         assert_eq!(s("{}"), None);
+    }
+
+    /// 生成守卫：同私聊串行（第二条被拦）、跨私聊互不影响、drop 即释放、/stop 能查到准星。
+    #[test]
+    fn generating_guard_serialises_per_chat_and_releases_on_drop() {
+        // 用独有的 chat id，避免与其他并行测试互相干扰（静态表是全局的）
+        let chat = "oc_guard_test_a";
+        let other = "oc_guard_test_b";
+        assert!(with_generating(|g| g.get(chat).cloned()).is_none(), "初始应当为空");
+
+        let g1 = GeneratingGuard::begin(chat, "s-1").expect("首次登记应成功");
+        assert!(
+            GeneratingGuard::begin(chat, "s-2").is_none(),
+            "同一私聊的第二条生成必须被拦下（保持每私聊串行）"
+        );
+        assert!(
+            GeneratingGuard::begin(other, "s-9").is_some(),
+            "别的私聊不受影响"
+        );
+        // `/stop` 的准星：按 chat 能查到正在生成的**会话**
+        assert_eq!(
+            with_generating(|g| g.get(chat).cloned()).as_deref(),
+            Some("s-1")
+        );
+
+        drop(g1);
+        assert!(
+            with_generating(|g| g.get(chat).cloned()).is_none(),
+            "guard drop 必须摘除登记（否则该私聊会永久被拒）"
+        );
+        assert!(
+            GeneratingGuard::begin(chat, "s-3").is_some(),
+            "释放后应能再次开始生成"
+        );
+    }
+
+    /// `/current` 卡片：名字进页眉；无名时有解释；时间/计数都在正文里。
+    #[test]
+    fn current_card_shows_name_or_explains_placeholder() {
+        let named = current_card(Some("合同审查"), 1_792_154_040, 12, 3);
+        assert_eq!(
+            named["header"]["title"]["content"], "当前会话：合同审查",
+            "名字必须在页眉（最显眼处）"
+        );
+        assert_eq!(named["header"]["template"], "blue");
+        let body = named["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(body.contains("消息 12 条"), "{body}");
+        assert!(body.contains("共 3 个会话"), "{body}");
+        assert!(body.contains("10-16 12:34 UTC"), "时间要展示：{body}");
+
+        let unnamed = current_card(None, 0, 0, 1);
+        assert_eq!(unnamed["header"]["title"]["content"], "当前会话");
+        let body = unnamed["elements"][0]["content"].as_str().unwrap_or("");
+        assert!(body.contains("还没起名"), "未命名要解释清楚：{body}");
     }
 
     /// 搜索响应解析 + 命中说明（路径与片段各一行，空白压成单个空格）。

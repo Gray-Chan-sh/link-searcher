@@ -18,10 +18,12 @@ use serde_json::json;
 /// 命令帮助正文（`/help` 的回复，也是菜单项「帮助」的内容）。
 pub const HELP_TEXT: &str = "**可用命令**\n\
 - `/help` — 显示本帮助\n\
+- `/current` — 查看当前会话（名字 / 消息数）\n\
 - `/new` — 新建会话并切换过去\n\
 - `/sessions` — 查看会话列表\n\
 - `/switch 3` — 切换到第 3 个会话（也可用标题前缀，如 `/switch 合同`）\n\
-- `/rename 新名字` — 给当前会话改个名字（侧栏与列表显示的就是它）\n\
+- `/rename 新名字` — 给当前会话改个名字（侧栏/列表显示的就是它）\n\
+- `/stop` — 停止正在生成的回答\n\
 - `/delete 3` — 删除第 3 个会话（会先让你确认）\n\
 - `/find 关键词` — 搜索本地库（`/find 关键词 2` 翻到第 2 页）\n\
 \n\
@@ -34,11 +36,15 @@ pub const MAX_FIND_PAGE: usize = 99;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help,
+    /// 查看当前会话（名字/消息数）。
+    Current,
     New,
     List,
     Switch(String),
     /// 给**当前活动会话**改标题（新名字含空格时整体保留）。
     Rename(String),
+    /// 停止当前正在生成的回答。
+    Stop,
     Delete(String),
     Find { query: String, page: usize },
     /// 不是命令（空正文 / 未命中前缀）或未识别的命令 → 走 AI 问答。
@@ -63,8 +69,10 @@ pub fn parse_command(text: &str) -> Command {
     let args: Vec<&str> = parts.collect();
     match head.as_str() {
         "help" => Command::Help,
+        "current" | "session" => Command::Current,
         "new" => Command::New,
         "sessions" | "list" => Command::List,
+        "stop" | "cancel" => Command::Stop,
         "switch" => match args.first() {
             Some(a) if !a.is_empty() => Command::Switch((*a).to_string()),
             // 缺参数：当作列出会话（用户多半想看"能切到哪几个"）
@@ -139,7 +147,7 @@ pub fn parse_selection(text: &str) -> Option<usize> {
 
 /// 渲染 `/help` 回复的卡片（正文同 [`HELP_TEXT`]）。
 pub fn help_card() -> serde_json::Value {
-    let mut card = crate::card::render_card("命令帮助", HELP_TEXT, None);
+    let mut card = crate::card::render_card("命令帮助", HELP_TEXT, None, None);
     // 帮助卡上挂一个「新建会话」按钮：零配置下最常用的动作，一步可达
     if let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) {
         elements.push(json!({
@@ -171,6 +179,10 @@ mod tests {
         assert_eq!(parse_command("/new"), Command::New);
         assert_eq!(parse_command("/sessions"), Command::List);
         assert_eq!(parse_command("/list"), Command::List, "list 是 sessions 的别名");
+        assert_eq!(parse_command("/current"), Command::Current);
+        assert_eq!(parse_command("/session"), Command::Current, "单数别名校验");
+        assert_eq!(parse_command("/stop"), Command::Stop);
+        assert_eq!(parse_command("/cancel"), Command::Stop, "cancel 是 stop 的别名");
         assert_eq!(parse_command("/switch 3"), Command::Switch("3".into()));
         assert_eq!(parse_command("/switch 合同"), Command::Switch("合同".into()));
         // 缺参数的 switch/delete → 列出来让用户看着选，而不是报错
