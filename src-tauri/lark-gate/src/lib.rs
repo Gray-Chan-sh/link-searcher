@@ -50,24 +50,31 @@ pub struct LarkMessageEvent {
     pub content: String,
 }
 
-/// 准入判定所需的配置（来自 `app_settings`，见 §7.1 ⑤）。
+/// 准入判定所需的配置（来自 `config.json` 的 `integrations.lark`，见 §7.1 ⑤）。
 #[derive(Debug, Clone)]
 pub struct LarkGateConfig {
     /// L2：是否要求私聊。默认 `true`。
     pub require_p2p: bool,
     /// L1：允许的 `open_id`。**空 ⇒ 拒绝全部**（fail-closed，§7.1 ②）。
     pub allowed_users: Vec<String>,
+    /// L1′：冷启动**配对模式**（§7.1 ⑥）。为真时 L1 **暂放行**（仅私聊），
+    /// 且**不回答**该消息 —— 由消费方把发送者写进白名单后自动关闭。
+    ///
+    /// ⚠️ 传进来的应当是**裁决后**的结果（是否仍在有效期内由**服务端**按
+    /// `pairing_expires_at` 判定，见 `LarkIntegration::pairing_active`）——
+    /// 本 crate 不碰时钟，规则只有一份。
+    pub pairing: bool,
 }
 
 impl Default for LarkGateConfig {
     fn default() -> Self {
-        // 安全默认：要求私聊 + 空名单（＝谁都不许）。
-        Self { require_p2p: true, allowed_users: Vec::new() }
+        // 安全默认：要求私聊 + 空名单（＝谁都不许）+ 不配对。
+        Self { require_p2p: true, allowed_users: Vec::new(), pairing: false }
     }
 }
 
 /// 判定结果。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateVerdict {
     /// 放行，可进入问答流程。
     Pass,
@@ -77,6 +84,9 @@ pub enum GateVerdict {
     DenyNonP2p,
     /// 不在白名单（含名单为空）—— 拒绝，**静默**（不向未知用户确认机器人存在）。
     DenyNotAllowed,
+    /// 配对模式（§7.1 ⑥）：**暂放行，但绝不回答**。附带发送者 `open_id`，
+    /// 由消费方写入白名单（`POST /api/integrations/lark/pairing/consume`）。
+    Pair(String),
 }
 
 /// 非私聊时的固定提示（§7.1 ③）。
@@ -104,7 +114,8 @@ pub fn parse_allowed_users(raw: &str) -> Vec<String> {
     }
 }
 
-/// 按 §7.1 ① 的顺序判定。**输入顺序即优先级**，不要重排。
+/// 按 §7.1 ① 的顺序判定：**L0 来源 → L2 类型 → L1 白名单 → L1′ 配对**。
+/// **输入顺序即优先级**，不要重排。
 pub fn gate(ev: &LarkMessageEvent, cfg: &LarkGateConfig) -> GateVerdict {
     // L0：来源必须是真人。机器人/应用自己发的消息会被忽略，防止自问自答死循环
     //    （群样本里 `mentions[0].id` 就是机器人自己的 open_id，见 §7.1 ⑩）。
@@ -118,10 +129,16 @@ pub fn gate(ev: &LarkMessageEvent, cfg: &LarkGateConfig) -> GateVerdict {
     }
     // L1：白名单（空 ⇒ 拒绝全部）。
     let sender = ev.sender_id.trim();
-    if sender.is_empty() || !cfg.allowed_users.iter().any(|u| u == sender) {
-        return GateVerdict::DenyNotAllowed;
+    if !sender.is_empty() && cfg.allowed_users.iter().any(|u| u == sender) {
+        return GateVerdict::Pass;
     }
-    GateVerdict::Pass
+    // L1′：冷启动配对（§7.1 ⑥）—— **暂放行但不回答**，由消费方把发送者写进白名单。
+    //   它刻意排在 L2 **之后**：配对也只放行私聊（群消息一律 DenyNonP2p），
+    //   否则"配对"就成了绕过 L2 的后门。
+    if cfg.pairing && !sender.is_empty() {
+        return GateVerdict::Pair(sender.to_string());
+    }
+    GateVerdict::DenyNotAllowed
 }
 
 /// 剥掉正文里的 `@机器人名` 前缀（§7.1 ⑩ 实测：预渲染把 `@_user_1` 换成了机器人名，
@@ -162,6 +179,15 @@ mod tests {
         LarkGateConfig {
             require_p2p,
             allowed_users: users.iter().map(|s| (*s).to_string()).collect(),
+            pairing: false,
+        }
+    }
+
+    fn cfg_pairing(users: &[&str]) -> LarkGateConfig {
+        LarkGateConfig {
+            require_p2p: true,
+            allowed_users: users.iter().map(|s| (*s).to_string()).collect(),
+            pairing: true,
         }
     }
 
@@ -250,6 +276,56 @@ mod tests {
             parse_allowed_users(r#"["ou_a", " ou_b ", ""]"#),
             vec!["ou_a".to_string(), "ou_b".to_string()],
             "应去空白并丢掉空元素"
+        );
+    }
+
+    /// §7.1 ⑦ #6（配对）：配对模式 + p2p + 不在名单 → **暂放行但带上发送者**，
+    /// 由消费方写白名单（**不是 Pass** —— 绝不能回答）。
+    #[test]
+    fn pairing_lets_stranger_through_but_only_to_consume() {
+        assert_eq!(
+            gate(&ev("p2p", "user", "ou_me"), &cfg_pairing(&[])),
+            GateVerdict::Pair("ou_me".to_string())
+        );
+        // 已在名单里的人走正常放行，不受配对影响。
+        assert_eq!(
+            gate(&ev("p2p", "user", "ou_me"), &cfg_pairing(&["ou_me"])),
+            GateVerdict::Pass
+        );
+    }
+
+    /// **配对不得绕过 L2**：群消息一律 DenyNonP2p（否则配对就是进群的后门）。
+    /// 同样不得绕过 L0：机器人自己发的消息不能被"配对"成白名单成员。
+    #[test]
+    fn pairing_does_not_bypass_type_or_source_gates() {
+        assert_eq!(
+            gate(&ev("group", "user", "ou_me"), &cfg_pairing(&[])),
+            GateVerdict::DenyNonP2p,
+            "配对只在私聊里生效"
+        );
+        assert_eq!(
+            gate(&ev("p2p", "bot", "ou_bot"), &cfg_pairing(&[])),
+            GateVerdict::DenyNonUser,
+            "非真人来源不得被配对"
+        );
+    }
+
+    /// 没开配对时行为与从前完全一致（回归）。
+    #[test]
+    fn without_pairing_stranger_is_still_denied() {
+        assert_eq!(
+            gate(&ev("p2p", "user", "ou_stranger"), &cfg(true, &["ou_me"])),
+            GateVerdict::DenyNotAllowed
+        );
+    }
+
+    /// 发送者为空（脏事件）时不得配对 —— 空 `open_id` 写进白名单毫无意义，
+    /// 且会让下一次判定更难排查。
+    #[test]
+    fn pairing_ignores_empty_sender() {
+        assert_eq!(
+            gate(&ev("p2p", "user", ""), &cfg_pairing(&[])),
+            GateVerdict::DenyNotAllowed
         );
     }
 

@@ -54,9 +54,16 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
 /// bot 只消费（这也是将来接入第二个平台时能复用的接缝）。
 async fn get_lark_config() -> Result<Json<serde_json::Value>, ApiError> {
     let lark = crate::config::lark_integration();
-    serde_json::to_value(lark)
-        .map(Json)
-        .map_err(|e| ApiError { error: e.to_string() })
+    let mut value = serde_json::to_value(&lark).map_err(|e| ApiError { error: e.to_string() })?;
+    // 由**服务端**把"配对是否此刻有效"裁决后再下发：bot 不碰时钟，那条 fail-closed
+    // 规则（`0` / 已过去都算失效）只存在一份实现（`LarkIntegration::pairing_active`）。
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "pairing_active".to_string(),
+            serde_json::json!(lark.pairing_active(chrono::Utc::now().timestamp())),
+        );
+    }
+    Ok(Json(value))
 }
 
 /// 结构化**写**飞书集成配置（CLI / 远程客户端用；桌面设置页走 Tauri 命令）。

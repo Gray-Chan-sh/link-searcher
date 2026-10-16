@@ -1,3 +1,28 @@
+## 2026-10-16（第十八轮）：飞书接入 —— C5 配对模式闭环（闸门 + bot 消费）
+
+> C4 给了配对的**消费端点**，本轮把**判定**与**消费**接通：冷启动时白名单为空 =
+> 把自己也锁在外面，配对模式就是那扇"只开一次"的门。
+
+- **`lark-gate`（准入策略，唯一防线）**：
+  - `LarkGateConfig` 新增 `pairing`；`GateVerdict` 新增 **`Pair(String)`**（附带发送者
+    `open_id`）；为容纳 `String` 去掉 `Copy`（保留 `Clone`/`PartialEq`）
+  - `gate()` 判定顺序明确为 **L0 来源 → L2 类型 → L1 白名单 → L1′ 配对**：
+    - L1′ 排在 L2 **之后** —— 配对**不得绕过**"仅私聊"（否则配对就是进群后门）
+    - L0 也仍然优先 —— 机器人自己发的消息**不得**被配对成白名单成员
+    - 发送者为空则不配对（脏事件；空 `open_id` 写白名单毫无意义）
+- **服务端裁决、bot 不自算**：`GET /api/integrations/lark` 增加**派生字段**
+  `pairing_active`（按 `pairing_expires_at` 裁决）—— bot 不碰时钟，那条 fail-closed
+  规则（`0`/已过去都算失效）**只有一份实现**
+- **bot（`lark-bot/src/main.rs`）**：收到 `GateVerdict::Pair(sender)` → **不回答**，
+  只调 `POST /api/integrations/lark/pairing/consume`。消费成功后服务端会重启 bot
+  （策略是启动时读一次），因此那次请求可能被自己的退出打断 → 只记 WARN，不当错误
+- **测试**：`lark-gate` 从 9 → **13**（配对放行但不回答 / 不绕过 L2 / 不绕过 L0 /
+  空发送者不配对 / 未开配对行为回归）；`cargo test --workspace` / `tsc` / `vitest` /
+  `semgrep(ERROR)` 全绿；另跑 `npm run sidecar` 做 bot 二进制真实链接冒烟
+- **文档**：`docs/LARK_BOT.md` §5.9 补"配对链路完整闭环"图与"为什么消费要重启 bot"；
+  §7.1 ⑦ 补第 9–12 条用例（已落地）
+- **未做**：C6（设置页「集成」面板）、C7（mac/Linux npm 前缀）
+
 ## 2026-10-16（第十七轮）：飞书接入 —— C4 结构化接口 + 命令层 + bot 生命周期
 
 > 目的：把飞书策略的**读写口**从"平铺字符串"改成**结构化**接口，并补齐设置页要用的

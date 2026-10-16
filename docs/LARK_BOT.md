@@ -705,7 +705,7 @@ src-tauri/
 
 | 层 | 入口 | 说明 |
 |---|---|---|
-| Web API | `GET /api/integrations/lark` | 结构化读策略（bot 启动时读它） |
+| Web API | `GET /api/integrations/lark` | 结构化读策略（bot 启动时读它）；**额外带派生字段 `pairing_active`** |
 | Web API | `PUT /api/integrations/lark` | 结构化写策略；**写后重启 bot**；只碰 `integrations.lark` 这一块 |
 | Web API | `POST /api/integrations/lark/pairing/consume` | **配对消费（白名单写入口）** |
 | Tauri 命令 | `get_lark_config` / `set_lark_config` | 设置页读写策略 |
@@ -732,6 +732,25 @@ src-tauri/
 > **规范化的单一收口点**：`set_lark_integration` 内部统一做 `sanitized()`（去空白、去重、
 > "没在配对就不留截止时刻"）。所有写入口（设置页 / Web API / 一次性迁移 / 手改热重载）都汇到
 > 那里，因此调用方**不必各自记得**清理。
+
+**配对链路的完整闭环（C4 端点 + C5 判定）**：
+
+```text
+设置页「开始配对」 ──► pairing=true, expires=now+5min ──► 重启 bot
+   │
+   ▼（用户用飞书私聊机器人一次）
+bot 闸门 L2 通过（必须 p2p）──► L1 未命中 ──► L1′ pairing_active ⇒ GateVerdict::Pair(sender)
+   │                                              │
+   │  **不回答这条消息**                          ▼
+   └────────────────────────► POST …/pairing/consume { open_id }
+                                   │  校验 pairing_active（失败即拒）
+                                   ▼
+                              allowed_users += sender; pairing=false ──► 重启 bot ⇒ 白名单生效
+```
+
+> 为什么"消费"要重启 bot：策略是 bot **启动时读一次**的 —— 不重启，新配的白名单与
+> 已关闭的配对都不会生效。重启会让**正在处理这条消息的** bot 进程退出，因此那次 HTTP
+> 响应可能收不到（`Err` 只记 WARN）—— 反正这条消息**本来就不回答**，无影响。
 
 ---
 
@@ -902,6 +921,15 @@ src-tauri/
 | 6 | `lark_export_allow_dirs = []` | **不限制**（fail-open 回归） |
 | 7 | `sender_type = "app"`（机器人自己发的消息） | **忽略**（L0，防自问自答死循环） |
 | 8 | 真实群夹具 `oc_5ed092dfb438fc24cd8c2378c15046e2` + `chat_type = "group"` | 拒绝 + 回固定提示 |
+| 9 | 配对中 + p2p + 不在名单 | **`Pair`（暂放行但绝不回答）**，把发送者写白名单（= `pairing_lets_stranger_through_but_only_to_consume`） |
+| 10 | 配对中 + **群**消息 | 仍然 `DenyNonP2p` —— 配对**不得绕过 L2**（= `pairing_does_not_bypass_type_or_source_gates`） |
+| 11 | 配对中 + `sender_type = "bot"` | 仍然 `DenyNonUser` —— 配对**不得绕过 L0**（同上） |
+| 12 | 配对中 + **发送者为空**（脏事件） | `DenyNotAllowed`（空 `open_id` 写白名单毫无意义）（= `pairing_ignores_empty_sender`） |
+
+> **第 9–12 条已落地**（2026-10-16，C5）：`lark-gate::gate` 的 `L1′` 分支 + `GateVerdict::Pair(String)`；
+> bot 收到 `Pair` 只调 `POST /api/integrations/lark/pairing/consume`，**不回答**。
+> "配对是否仍有效"由服务端按 `pairing_expires_at` 裁决后以派生字段 `pairing_active` 下发 ——
+> bot 不碰时钟，fail-closed 规则只有一份实现。
 
 > **#3 与 #6 是一对**：它们共同锁死"两个空数组方向相反"这条约定；任一个被改错，测试立刻红。
 > **#8 用真实群 id 作夹具**（2026-10-15 实测机器人确实被拉进了该群），比构造的假 id 更有说服力。

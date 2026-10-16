@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! 消费 lark-cli 的 NDJSON 事件
-//!   → §7.1 准入判定（`lark-gate` crate：L0 来源 / L2 类型 / L1 白名单）
+//!   → §7.1 准入判定（`lark-gate` crate：L0 来源 / L2 类型 / L1 白名单 / L1′ 配对）
 //!   → /api/lark/seen 去重（按 message_id）
 //!   → /api/lark/binding 取/建 chat_id ↔ session_id 绑定
 //!   → /api/chat/sessions/{id}?origin=lark 取会话、带上历史
@@ -190,6 +190,24 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
             // 回提示：群里多半是本人误用，需要反馈（§7.1 ③）
             log::info!("[bot] 拒绝：非私聊（chat_type={}）", ev.chat_type);
             reply(&ev.message_id, NON_P2P_NOTICE);
+            return Ok(());
+        }
+        GateVerdict::Pair(sender) => {
+            // 配对模式（§7.1 ⑥）：**只登记、绝不回答**。
+            // 服务端消费时会校验"配对仍有效"，所以这条路径不能被滥用成加白名单的口子。
+            // 消费成功后服务端会重启 bot（策略是启动时读一次的）—— 本进程可能就此退出，
+            // 因此这里的日志失败也属正常，不当作错误处理。
+            log::info!("[bot] 配对模式：登记 {sender}（本条不回答）");
+            match http.post(
+                "/api/integrations/lark/pairing/consume",
+                &json!({ "open_id": sender }),
+            ) {
+                Ok(v) => log::info!(
+                    "[bot] 配对已消费，白名单={}",
+                    v.get("allowed_users").cloned().unwrap_or(Value::Null)
+                ),
+                Err(e) => log::warn!("[bot] 配对消费未完成（服务端可能已在重启 bot）：{e}"),
+            }
             return Ok(());
         }
         GateVerdict::Pass => {}
@@ -998,6 +1016,9 @@ impl Http {
                 // 缺省即 true：没配置时也必须要求私聊。
                 require_p2p: bool_of("require_p2p").unwrap_or(true),
                 allowed_users: users,
+                // **裁决后的**配对状态（服务端按 `pairing_expires_at` 算好再下发）——
+                // bot 不碰时钟、也不复制那条 fail-closed 规则。缺省 false。
+                pairing: bool_of("pairing_active").unwrap_or(false),
             },
         })
     }
