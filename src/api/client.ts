@@ -247,6 +247,22 @@ const MAPPINGS: Record<string, Mapping> = {
   check_bge_installed: { method: 'GET', path: '/api/ai/install/bge/status' },
   install_bge: (a) => ({ method: 'POST', path: '/api/ai/install/bge', body: a }),
   install_funasr: { method: 'POST', path: '/api/ai/install/funasr' },
+
+  // ── Lark (飞书集成) ──
+  get_lark_config: { method: 'GET', path: '/api/integrations/lark' },
+  set_lark_config: (a) => ({ method: 'PUT', path: '/api/integrations/lark', body: a.lark }),
+  get_lark_status: { method: 'GET', path: '/api/integrations/lark/status' },
+  lark_restart: { method: 'POST', path: '/api/integrations/lark/restart' },
+  lark_pairing_start: (a) => ({
+    method: 'POST', path: '/api/integrations/lark/pairing/start',
+    body: { minutes: a.minutes ?? null },
+  }),
+  lark_pairing_cancel: { method: 'POST', path: '/api/integrations/lark/pairing/cancel' },
+  // 服务端返回 `{ bindings: [...] }`；Tauri 命令直接返回数组。
+  get_lark_bindings: {
+    method: 'GET', path: '/api/lark/bindings',
+    transform: (data) => (data as Record<string, unknown>)?.bindings ?? [],
+  },
 };
 
 /** 会话被他人占用时的 403 响应体（session_guard 返回）。 */

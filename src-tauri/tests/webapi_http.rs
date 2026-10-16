@@ -302,6 +302,39 @@ fn main() {
     let (status, _) = request(addr, "POST", "/api/setup/cancel", Some(good));
     assert_eq!(status, 400, "cancel with no install in flight must be 400");
 
+    // ── 9. 飞书集成：结构化接口可达、形状正确（**只读**，不碰真实 config.json） ──
+    let (status, body) = request(addr, "GET", "/api/integrations/lark", Some(good));
+    assert_eq!(status, 200, "lark config must be reachable: {body}");
+    let v = json(&body);
+    assert!(v["enabled"].is_boolean(), "lark config must carry enabled");
+    assert!(v["allowed_users"].is_array(), "lark config must carry allowed_users");
+    assert!(
+        v["pairing_active"].is_boolean(),
+        "server must derive pairing_active (bot must not own the clock)"
+    );
+
+    let (status, body) = request(addr, "GET", "/api/integrations/lark/status", Some(good));
+    assert_eq!(status, 200, "lark status must be reachable: {body}");
+    let v = json(&body);
+    assert!(v["running"].is_boolean(), "status must carry running");
+    assert!(v["pairing_active"].is_boolean(), "status must carry pairing_active");
+    assert!(v["pairing_seconds_left"].is_number(), "status must carry seconds left");
+    assert!(v["bindings"].is_number(), "status must carry a bindings count");
+    assert!(v["config"]["enabled"].is_boolean(), "status must embed the config");
+
+    // 配对消费：空 open_id 必须被拒。
+    // （"配对未开启/已过期必须拒绝"这条**安全边界**由 `commands/lark.rs`
+    //   `consume_pairing_into` 的单测覆盖 —— 这里刻意用空 open_id，保证测试
+    //   **绝不写盘**，不会污染跑门禁这台机器的真实 config.json。）
+    let (status, body) = request_with_body(
+        addr,
+        "POST",
+        "/api/integrations/lark/pairing/consume",
+        Some(good),
+        Some(r#"{"open_id":""}"#),
+    );
+    assert_eq!(status, 400, "empty open_id must be 400: {body}");
+
     // 收尾：清会话 + 关停服务器
     link_searcher_lib::webapi::session::clear(None);
     let _ = shutdown.send(());
@@ -310,6 +343,7 @@ fn main() {
     println!(
         "✓ Web API HTTP smoke test passed: 401(no token) / 401(bad token, no session) / \
          200 + session granted (ConnectInfo) / session JSON shape / ping / logout / re-login / \
-         setup status + install-status reachable / install validation / cancel guard"
+         setup status + install-status reachable / install validation / cancel guard / \
+         lark structured config + status shape / pairing-consume validation"
     );
 }

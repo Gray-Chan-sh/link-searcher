@@ -1,3 +1,37 @@
+## 2026-10-16（第十九轮）：飞书接入 —— C6 设置页「集成」面板 + 传输对称
+
+> 前五轮把策略搬进 `config.json`、加了热重载/锁/结构化接口/配对闭环，但**用户还没有入口**。
+> 本轮补上设置页面板，并顺手把"桌面命令"与"Web 端点"整理成**同一实现**（否则面板在浏览器里
+> 会直接抛"缺少映射"，或行为与桌面不同）。
+
+- **设置页新增「集成」页签**（`src/components/settings/LarkTab.tsx` + `hooks/useSettingsLark.ts`）：
+  开关 / 仅私聊 / 白名单 / 外发目录 / **运行态**（进程是否在跑、已绑定会话数）/ 配对按钮
+  （开始、取消、剩余时间倒计时）
+- **传输对称（后端重整）**：把 C4 的 Tauri 命令实现抽成 `commands/lark.rs` 的 `pub fn`
+  （`status_of` / `save_config` / `restart` / `pairing_start` / `pairing_cancel` /
+  `bindings_of` / `consume_pairing_into`），**命令与 Web API 只是薄包装** → 桌面与 Web 行为一致；
+  新增端点 `GET /api/integrations/lark/status`、`POST /api/integrations/lark/restart`、
+  `POST /api/integrations/lark/pairing/start|cancel`；前端 `api/client.ts` MAPPINGS 逐条镜像
+  （`get_lark_bindings` 复用既有 `GET /api/lark/bindings`，补 `bindings` 剥壳）
+- **面板的两个取舍**：① 两个名单**方向相反**（`allowed_users` 空＝拒绝全部、
+  `export_allow_dirs` 空＝不限制），hint 各自写明；② **订阅 `config-changed`**（C3 事件）——
+  手改 `config.json` 或 bot 配对成功后刷新，否则面板一直显示旧值
+- **倒计时只是显示**：到期与否由服务端 `pairing_active` 裁决（UI 一关计时就没了，
+  绝不能靠前端计时决定"还在不在配对"）
+- **配对消费规则收敛为纯函数** `consume_pairing_into`（白名单写入口的唯一实现，
+  **配对无效时绝不写盘**），Tauri 侧与 Web 侧共用
+- **i18n**：`zh/en/ja/ko` 各补 26 个键（含 `tab_integrations`）
+- **测试**：`commands/lark.rs` 单测 3 条（时长夹取 `1..=60`；**配对未开/已过期/`0`/空
+  open_id 一律拒绝且不改动配置**；有效配对＝写白名单 + 去重 + 自动关闭）；
+  `tests/webapi_http.rs` 补只读断言（结构化配置与 status 的形状、`pairing_active` 为服务端
+  派生、消费空 open_id → 400）—— **刻意不写盘**，不污染跑门禁这台机器的真实 `config.json`；
+  `link_searcher_lib` 567 个用例；`cargo test --workspace` / `tsc`(含 `tsc -b`) / `vitest` /
+  `vite build` / `oxlint` / `semgrep(ERROR)` 全绿
+- **文档**：`docs/LARK_BOT.md` §5.9 扩写为"结构化接口、命令层与设置页面板"（端点表 + 传输对称
+  + 面板取舍）
+- **未做**：C7（mac/Linux 的 npm 前缀 / `lark_cli_program`）；面板**真机点击验收**待人工确认
+  （门禁只覆盖类型、单测与打包）
+
 ## 2026-10-16（第十八轮）：飞书接入 —— C5 配对模式闭环（闸门 + bot 消费）
 
 > C4 给了配对的**消费端点**，本轮把**判定**与**消费**接通：冷启动时白名单为空 =

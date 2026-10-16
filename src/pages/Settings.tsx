@@ -11,7 +11,7 @@ import { checkBgeInstalled, checkRerankInstalled, getVersion, updateSettings } f
 import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
 import { useSettingsOcr } from '../hooks/useSettingsOcr'
-import { GeneralTab, DocsTab, IndexTab, AiTab, DepsTab, BackupTab, SystemTab, PerformanceTab } from '../components/settings'
+import { GeneralTab, DocsTab, IndexTab, AiTab, DepsTab, BackupTab, SystemTab, PerformanceTab, LarkTab } from '../components/settings'
 
 export default function Settings() {
   const { t, lang, setLang } = useI18n()
@@ -168,6 +168,7 @@ export default function Settings() {
           { id: 'ai', key: t('tab_ai') },
           { id: 'backup', key: t('tab_backup') },
           { id: 'perf', key: t('tab_perf') },
+          { id: 'integrations', key: t('tab_integrations') },
           { id: 'system', key: t('tab_system') },
         ].map(tab => (
           <button
@@ -291,6 +292,8 @@ export default function Settings() {
             onChangeEmbedAdaptive={v => handleFieldChange('embed_adaptive', v)}
           />
         )}
+
+        {activeTab === 'integrations' && <LarkTab />}
 
         {activeTab === 'system' && (
           <SystemTab

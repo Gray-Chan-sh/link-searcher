@@ -697,7 +697,7 @@ src-tauri/
 > 所以正确做法是 **先关一次、再开一次**（而不是"点一次"），否则会像我这次一样把它点成 OFF。
 > 已用 `Get-ItemProperty …Run` 复核：现在指向安装路径 ✅。
 
-### 5.9 结构化接口与命令层（C4，2026-10-16）
+### 5.9 结构化接口、命令层与设置页面板（C4/C6，2026-10-16）
 
 **为什么要有"结构化接口"**：飞书策略原先经 `/api/settings` 以**平铺字符串**下发（bool 存成
 `"true"`、数组存成 JSON 字符串），每个消费者各自剥壳、各自容错。改成结构化后**形状由服务端
@@ -707,12 +707,21 @@ src-tauri/
 |---|---|---|
 | Web API | `GET /api/integrations/lark` | 结构化读策略（bot 启动时读它）；**额外带派生字段 `pairing_active`** |
 | Web API | `PUT /api/integrations/lark` | 结构化写策略；**写后重启 bot**；只碰 `integrations.lark` 这一块 |
+| Web API | `GET /api/integrations/lark/status` | 策略 + **运行态**（与 Tauri `get_lark_status` 同一实现） |
+| Web API | `POST /api/integrations/lark/restart` | 手动重启 bot |
+| Web API | `POST /api/integrations/lark/pairing/start` \| `…/cancel` | 进入 / 退出配对模式（**截止时刻由服务端算**，不靠 UI 计时） |
 | Web API | `POST /api/integrations/lark/pairing/consume` | **配对消费（白名单写入口）** |
 | Tauri 命令 | `get_lark_config` / `set_lark_config` | 设置页读写策略 |
 | Tauri 命令 | `get_lark_status` | 策略 + **运行态**（`running` / `pairing_active` / 剩余秒数 / 绑定数） |
 | Tauri 命令 | `lark_restart` | 手动重启 bot（手改文件由 §5.6 C3 的热重载自动触发，这里是兜底） |
 | Tauri 命令 | `lark_pairing_start` / `lark_pairing_cancel` | 进入 / 退出配对模式 |
 | Tauri 命令 | `get_lark_bindings` | 已绑定的 p2p 会话 |
+| 设置页 | 设置 → **集成**（`LarkTab.tsx`） | 开关 / 白名单 / 外发目录 / 运行态 / 配对按钮 |
+
+> **传输对称**：Web API 那几行与 Tauri 命令**共用** `commands/lark.rs` 的 `pub fn`
+> （`status_of` / `save_config` / `pairing_start` / `pairing_cancel` / `consume_pairing_into`），
+> 命令与端点只做薄包装。因此桌面端与 Web 端**行为一致**，不会出现"桌面能用、浏览器不同"的分叉；
+> 前端 `api/client.ts` 的 MAPPINGS 也逐条镜像了这些端点。
 
 **三条收在代码里的纪律**：
 
@@ -721,10 +730,17 @@ src-tauri/
 2. **配对消费必须先校验配对有效**：`POST …/pairing/consume` 是**白名单写入口**，若不校验就
    等于"凭一个 token 往白名单塞任意 `open_id`"（绕过 L1）。校验口径是 `pairing_active(now)`，
    即 `pairing && pairing_expires_at > now` —— **`0` 也算已过期**（fail-closed：漏设截止时刻
-   ＝没开配对，而不是永久敞开）。
+   ＝没开配对，而不是永久敞开）。规则只有一份：`commands::lark::consume_pairing_into`（纯函数，有单测）。
 3. **`running` 要问进程，不是问配置**：`lark_bot::is_running()` 用 `try_wait` 顺手回收已退出的
    子进程 —— bot 可能**自己退出**（读到 `enabled = false`、缺 lark-cli、崩溃），只看
    `Option<Child>` 会一直显示"运行中"。
+
+**设置页面板（C6）的两个取舍**：
+
+- **两个名单的文本方向相反**：`allowed_users` 空＝**拒绝全部**；`export_allow_dirs` 空＝**不限制**。
+  两个 hint 各自写明，避免"顺手统一"。
+- **订阅 `config-changed`**：手改 `config.json`（C3 热重载）或 bot 配对消费成功都会改这份配置，
+  面板据此刷新 —— 否则会一直显示旧值。
 
 **顺带修掉的 W5**：`lark-bot` 是 console 子系统程序，而 GUI 进程没有控制台 → Windows 会为它
 **新建控制台窗口**（黑框一闪）。已加 `CREATE_NO_WINDOW`（`lark_bot.rs`）。
