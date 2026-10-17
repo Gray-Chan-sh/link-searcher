@@ -145,8 +145,8 @@
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
-| **飞书机器人** | **私聊**机器人问答本地私有库：**多组多轮会话**（`/sessions` 切换 / `/new` 新建 / `/rename` 命名）、`/find` 关键词搜索（结果卡自带「上一页/下一页」翻页与「✦ 语义」开关）、`/history` 召回会话全文、`/stop` 停止生成、提问新话题自动另起会话；**出站文件**（`/find` 命中卡点「发送 N」→ 图片/语音/文件发到飞书）；可选**机器人自定义菜单**；仅私聊 + 白名单（fail-closed）。接入步骤见 [`docs/06-settings.md`](docs/06-settings.md) 步骤 12，设计与实现记录见 [`docs/LARK_BOT.md`](docs/LARK_BOT.md) |
-| **远程 WebUI / API** | **默认开启**的 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），启动即监听 `0.0.0.0:8443`，其它机器浏览器直连；**单用户 IP 会话**（同一时刻仅一个会话，超时/主动退出/桌面端强制踢出）；Token 存 `config.json`（`web_api_token`，可用 `LS_WEB_API_TOKEN` 注入），设置页与 Web 端均可修改；**依赖中心在 Web 端同样可用**（查看依赖状态 + 安装/取消，进度经 SSE 事件桥） |
+| **飞书机器人** | **私聊**机器人问答本地私有库：**多组多轮会话**（`/sessions` 切换 / `/new` 新建 / `/rename` 命名）、`/find` 关键词搜索（结果卡自带「上一页/下一页」翻页与「✦ 语义」开关）、`/history` 召回会话全文、`/stop` 停止生成、提问新话题自动另起会话；**出站文件**（`/find` 命中卡点「发送 N」→ 图片/语音/文件发到飞书）；可选**机器人自定义菜单**；仅私聊 + 白名单（fail-closed）。**完整使用手册见 [`docs/13-lark.md`](docs/13-lark.md)**；接入步骤见 [`docs/06-settings.md`](docs/06-settings.md) 步骤 12，设计与实现记录见 [`docs/LARK_BOT.md`](docs/LARK_BOT.md) |
+| **远程 WebUI / API** | **默认开启**的 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），启动即监听 `0.0.0.0:8443`，其它机器浏览器直连；**多端可同时使用**（原"单用户 IP 排他"已废弃，现只记录在线状态；Token 是唯一门槛，请勿暴露公网）；Token 存 `config.json`（`web_api_token`，可用 `LS_WEB_API_TOKEN` 注入），设置页与 Web 端均可修改；**依赖中心在 Web 端同样可用**（查看依赖状态 + 安装/取消，进度经 SSE 事件桥） |
 
 ---
 
@@ -271,7 +271,8 @@ npm run tauri build
 | 图片处理 | image-rs + imageproc |
 
 > 📚 **文档导航**
-> - [用户手册](docs/USER_MANUAL.md) — 面向使用者的 12 章手册
+> - [用户手册](docs/USER_MANUAL.md) — 面向使用者的 13 章手册
+> - [飞书机器人手册](docs/13-lark.md) — 私聊问答 / 命令 / 搜索翻页 / 发文件 / 注意事项
 > - [设计手册](docs/ARCHITECTURE.md) — 面向开发者，分模块讲解设计思想、架构与复现要点
 > - [检索问答流程](docs/RAG_PIPELINE.md) — 提问后系统做了什么（纯行为描述，含已知薄弱场景与排查线索）
 > - [检索评测基线](docs/rag-eval-baseline.md) — 检索质量度量与变更门禁

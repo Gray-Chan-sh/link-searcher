@@ -46,7 +46,7 @@ npx tsc --noEmit && npx vitest run
 
 ### Web API HTTP 冒烟测试（`webapi_http.rs`）
 
-真实起 axum（`into_make_service_with_connect_info::<SocketAddr>()`，与生产一致）+ `ureq` 打真请求，覆盖鉴权与单用户会话全链路：401(无/错 token，且**不创建会话**) → 200 + 首次授予会话（证明来源 IP 抽取成功）→ `/api/session` JSON 形状 → `ping` 续租 → `logout` → 重新登入。
+真实起 axum（`into_make_service_with_connect_info::<SocketAddr>()`，与生产一致）+ `ureq` 打真请求，覆盖鉴权与在线状态链路：401(无/错 token，且**不创建会话**) → 200 + 首次授予会话（证明来源 IP 抽取成功）→ `/api/session` JSON 形状（含 `tailscale_ip` / `webui_base_url`）→ `/api/search` 形状（含 `semantic_applied`）→ `ping` 刷新在线记录 → `logout` → 重新登入。
 
 两个实现要点（改动前请先读）：
 1. `ApiState.app_handle` 是**具体类型** `AppHandle<Wry>`，`MockRuntime` 的 handle 不匹配 → 用 `tauri::Builder::default().manage(state).build(tauri::test::mock_context(tauri::test::noop_assets()))` 构造真实 Wry app（无窗口，headless 可行）。
