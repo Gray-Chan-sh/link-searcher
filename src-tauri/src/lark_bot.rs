@@ -130,6 +130,13 @@ pub fn spawn_if_enabled() {
         ),
     }
 
+    // ── ffmpeg 的发现权同样归应用侧 ─────────────────────────────────────────
+    // bot 出站发语音时要把 mp3/wav 转成飞书要求的 Opus；它不依赖应用 lib，
+    // 所以由应用解析好路径、经 `LS_FFMPEG` 注入（找不到就不注入，bot 会退回"按文件发"）。
+    if let Some(ff) = crate::extractor::audio::ffmpeg_binary() {
+        cmd.env("LS_FFMPEG", &ff);
+    }
+
     match cmd.spawn() {
         Ok(mut child) => {
             if let Some(out) = child.stdout.take() {

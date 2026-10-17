@@ -52,17 +52,20 @@
 //!
 //! ## 尚未做（后续增量）
 //!
-//! - 文件 / 语音 / 图片入站（P2；见 `docs/LARK_BOT.md` 九、分阶段实施建议）
+//! - **入站**文件 / 语音 / 图片（P2；见 `docs/LARK_BOT.md` 九、分阶段实施建议）。
+//!   **出站**（把本地库里的文件发到飞书）已实现：`/find` 结果卡上的「发送 N」按钮
+//!   → `media` 上传 → 回复图片/语音/文件消息（见 §5.13）。
 //! - 定时摘要与"写飞书文档/表格"出口（P3）
 //! - 卡片按钮的**回调 token 更新**（当前按钮只做"回复式"动作，刻意绕开
 //!   `card.action.trigger` token 的"最多 2 次更新"限制，见 §8.1）
 
 mod card;
 mod commands;
+mod media;
 mod menu;
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1034,12 +1037,16 @@ fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> R
             detail: search_hit_detail(h),
         })
         .collect();
+    let file_ids: Vec<String> = hits.iter().map(|h| h.file_id.clone()).collect();
     let pages = (total as usize).div_ceil(FIND_PAGE_SIZE).max(1);
     let mut footer = format!("第 {page}/{pages} 页 · 共 {total} 条");
     if (page as usize) < pages {
         footer.push_str(&format!(" · 下一页：/find {query} {}", page + 1));
     }
-    reply_card(&ev.message_id, &render_search_card(query, &items, Some(&footer)))?;
+    if file_ids.iter().any(|id| !id.is_empty()) {
+        footer.push_str(" · 点「发送 N」把原文件发到飞书");
+    }
+    reply_card(&ev.message_id, &render_search_card(query, &items, Some(&footer), &file_ids))?;
     log::info!(
         "[bot] 搜索「{query}」第 {page}/{pages} 页，回 {}/{} 条（chat={}）",
         hits.len(),
@@ -1049,8 +1056,10 @@ fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> R
     Ok(())
 }
 
-/// 一条搜索命中的精简信息（只取渲染需要的字段）。
+/// 一条搜索命中的精简信息（只取渲染与"发送文件"需要的字段）。
 struct HitBrief {
+    /// 用于「发送 N」按钮：没有它就只能看、不能发（按钮按空 id 省略）。
+    file_id: String,
     file_name: String,
     path: String,
     snippet: String,
@@ -1064,6 +1073,11 @@ fn parse_hits(v: &Value) -> Vec<HitBrief> {
             arr.iter()
                 .filter_map(|h| {
                     Some(HitBrief {
+                        file_id: h
+                            .get("file_id")
+                            .and_then(|f| f.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                         file_name: h.get("file_name")?.as_str()?.to_string(),
                         path: h.get("path").and_then(|p| p.as_str()).unwrap_or("").to_string(),
                         snippet: h.get("snippet").and_then(|s| s.as_str()).unwrap_or("").to_string(),
@@ -1186,7 +1200,7 @@ fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Resul
 ///
 /// ⚠️ 回调是**另一条入口** —— 消息入口的 L0/L1/L2 闸门**不会**自动保护它，所以这里必须再判一次
 /// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
-fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result<(), String> {
+fn handle_card_line(http: &Arc<Http>, line: &str, allowed_users: &[String]) -> Result<(), String> {
     let raw: Value = serde_json::from_str(line).map_err(|e| {
         format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
     })?;
@@ -1360,6 +1374,23 @@ fn handle_card_line(http: &Http, line: &str, allowed_users: &[String]) -> Result
                         content: String::new(),
                     };
                     stop_generation(http, &synth, &session_id)
+                }
+                crate::card::CardAction::SendFile { file_id } => {
+                    // 上传可能是几十 MB（秒级）→ **不能阻塞回调消费者**（它还要处理其它按钮）。
+                    // 单独线程里跑，失败回一条文本（线程里没有返回值可传）。
+                    let http = Arc::clone(http);
+                    let message_id = ev.message_id.clone();
+                    log::info!(
+                        "[bot] 发送文件 {file_id}（chat={} operator={operator:?}）",
+                        ev.chat_id
+                    );
+                    std::thread::spawn(move || {
+                        if let Err(e) = send_tracked_file(&http, &message_id, &file_id) {
+                            log::warn!("[bot] 发送文件 {file_id} 失败：{e}");
+                            reply(&message_id, &format!("发送文件失败：{e}"));
+                        }
+                    });
+                    Ok(())
                 }
             }
         }
@@ -1785,6 +1816,191 @@ fn patch_card(card_message_id: &str, card: &Value) -> Result<(), String> {
     lark_api("PATCH", &format!("/open-apis/im/v1/messages/{card_message_id}"), &body).map(|_| ())
 }
 
+// ───────────────────────────── 出站媒体（项目 → 飞书）─────────────────────────────
+
+/// 回复一条**媒体消息**（图片 / 文件 / 语音）。
+///
+/// 与 [`reply_card`] 同一约定：`content` 是飞书要求的 **JSON 字符串**（先序列化再塞进
+/// `content` 字段），走 `messages/{id}/reply`。上传已在 `media` 模块完成（先拿 key）。
+fn reply_media(message_id: &str, msg_type: &str, content: &Value) -> Result<(), String> {
+    if message_id.is_empty() {
+        return Err("没有 message_id，无法回复".to_string());
+    }
+    let body = json!({
+        "msg_type": msg_type,
+        "content": serde_json::to_string(content)
+            .map_err(|e| format!("序列化媒体内容失败：{e}"))?,
+    });
+    lark_api("POST", &format!("/open-apis/im/v1/messages/{message_id}/reply"), &body).map(|_| ())
+}
+
+/// 把一个**索引里的文件**发到飞书（`/find` 结果卡上的「发送 N」按钮落到这里）。
+///
+/// 数据流：`file_id` → `GET /api/files/{id}/abs-path`（服务端校验路径仍在索引目录内）
+/// → 按扩展名/大小选形态 → `media` 上传 → 回复媒体消息。
+///
+/// 三条边界：
+/// - **只认 file_id**：不接受任意路径（模型/用户都不能指定"发哪个本地文件"）；
+/// - 空文件 / >30MB 不硬发，回一条说明（>30MB 时尽量附 WebUI 地址）；
+/// - 失败**回文本**而不是静默 —— 用户点了按钮必须有反馈。
+fn send_tracked_file(http: &Http, message_id: &str, file_id: &str) -> Result<(), String> {
+    let meta = http.get(&format!("/api/files/{file_id}/abs-path"))?;
+    let abs = meta.get("abs_path").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let name = meta
+        .get("file_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("file")
+        .trim()
+        .to_string();
+    let ext = meta.get("file_ext").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if abs.is_empty() {
+        reply(message_id, "服务端没返回文件路径，无法发送。");
+        return Ok(());
+    }
+    let path = PathBuf::from(&abs);
+    // 以磁盘上的**实际大小**为准（DB 里的 size 可能已过期）
+    let size = match std::fs::metadata(&path) {
+        Ok(m) if m.is_file() => m.len(),
+        _ => {
+            reply(message_id, &format!("文件「{name}」不在磁盘上（可能已被移动或删除）。"));
+            return Ok(());
+        }
+    };
+    if size == 0 {
+        reply(message_id, &format!("文件「{name}」是空文件，飞书不允许上传 0 字节。"));
+        return Ok(());
+    }
+    if size > media::FILE_MAX_BYTES {
+        let mb = size as f64 / 1_048_576.0;
+        let mut text = format!(
+            "「{name}」{mb:.1} MB，超过飞书单文件 30 MB 上限，无法直接发送。"
+        );
+        if let Ok(origin) = webui_origin(http) {
+            text.push_str(&format!("\n可在 WebUI 里查看：{origin}"));
+        }
+        reply(message_id, &text);
+        return Ok(());
+    }
+
+    let program = lark_cli_program();
+    let audio = media::audio_plan(&ext, ffmpeg_program().is_some());
+    let mut converted: Option<PathBuf> = None;
+    let result = (|| -> Result<(), String> {
+        match audio {
+            media::AudioPlan::Direct => {
+                let key = media::upload_file(&program, &path, "opus", &name)?;
+                reply_media(message_id, "audio", &json!({ "file_key": key }))
+            }
+            media::AudioPlan::Convert => {
+                match convert_to_opus(&path) {
+                    Some(opus) => {
+                        converted = Some(opus.clone());
+                        let opus_name = format!("{}.opus", file_stem(&name));
+                        let key = media::upload_file(&program, &opus, "opus", &opus_name)?;
+                        reply_media(message_id, "audio", &json!({ "file_key": key }))
+                    }
+                    // 转码失败（没有 ffmpeg / 源文件损坏）→ 退回普通文件，别让用户拿不到东西
+                    None => {
+                        let key =
+                            media::upload_file(&program, &path, media::file_type_for(&ext), &name)?;
+                        reply_media(message_id, "file", &json!({ "file_key": key }))
+                    }
+                }
+            }
+            media::AudioPlan::AsFile => match media::classify(&ext, size) {
+                Some(media::MediaPlan::Image) => {
+                    let key = media::upload_image(&program, &path)?;
+                    reply_media(message_id, "image", &json!({ "image_key": key }))
+                }
+                Some(media::MediaPlan::File) => {
+                    let key =
+                        media::upload_file(&program, &path, media::file_type_for(&ext), &name)?;
+                    reply_media(message_id, "file", &json!({ "file_key": key }))
+                }
+                // 大小已在上面挡过；这里只是把"决策返回 None"也收口成可读错误
+                None => Err(format!("文件「{name}」不满足飞书的发送限制")),
+            },
+        }
+    })();
+    if let Some(tmp) = converted {
+        let _ = std::fs::remove_file(tmp); // 转码产物是临时的，无论成败都清掉
+    }
+    match result {
+        Ok(()) => {
+            log::info!(
+                "[bot] 已发送文件「{name}」（{size} 字节，形态={audio:?}，file_id={file_id}）"
+            );
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// 文件名主干（转码后的 opus 用它命名；空名退回 `voice`）。
+fn file_stem(name: &str) -> String {
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    if stem.is_empty() { "voice".to_string() } else { stem.to_string() }
+}
+
+/// 解析 ffmpeg：应用经 `LS_FFMPEG` 注入（依赖中心解析的路径），否则退回 PATH 上的 `ffmpeg`。
+///
+/// **每次都探**（不缓存"没找到"）：与 `extractor::audio` 的策略一致 —— 装好 ffmpeg
+/// 之后不必重启 bot 就能发语音。
+fn ffmpeg_program() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("LS_FFMPEG") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let ok = Command::new("ffmpeg")
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok.then(|| PathBuf::from("ffmpeg"))
+}
+
+/// mp3/wav/… → Opus（飞书语音消息的唯一可用编码），写到临时目录；失败返回 `None`。
+///
+/// 参数按飞书文档给的建议：`-acodec libopus -ac 1 -ar 16000`（单声道 16kHz）。
+fn convert_to_opus(src: &Path) -> Option<PathBuf> {
+    let ffmpeg = ffmpeg_program()?;
+    let out = std::env::temp_dir().join(format!(
+        "link-searcher-lark-{}-{}.opus",
+        std::process::id(),
+        now_millis()
+    ));
+    let status = Command::new(&ffmpeg)
+        .args(["-y", "-i"])
+        .arg(src)
+        .args(["-acodec", "libopus", "-ac", "1", "-ar", "16000"])
+        .arg(&out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    if !status.success() || !out.is_file() {
+        let _ = std::fs::remove_file(&out);
+        return None;
+    }
+    Some(out)
+}
+
+/// Unix 毫秒时间戳（临时文件名用；失败回 0，不影响唯一性 —— pid 也在名字里）。
+fn now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
 // ───────────────────────────── 凭据读取 ─────────────────────────────
 
 /// 读 webapi token：`LS_WEB_API_TOKEN` 优先，否则读 `config.json`。
@@ -2056,15 +2272,59 @@ fn poll_consumer_into(
     Ok(read)
 }
 
-/// 生成"在 WebUI 里打开"的提示（含 **LAN 地址**）。
+/// 从 `GET /api/session` 的状态里选 WebUI 的**外部可达基址**。
 ///
-/// 地址取自 `GET /api/session` 的 `lan_ip` + `port` —— bot 自己只知道 `127.0.0.1`，
-/// 而用户多半在**手机/别的机器**上点按钮，给回环地址等于点不开。
+/// 优先级（多网卡机器的取舍，见 `docs/LARK_BOT.md` §5.13）：
+/// 1. `webui_base_url`（用户手配，例如固定域名 / 反向代理）—— 显式配置永远最优先；
+/// 2. `tailscale_ip`（100.64/10）—— **同时适用于同一 Wi-Fi 与异地**，是"不做网络判断"
+///    也能点开的最佳答案；
+/// 3. `lan_ip`（默认路由的局域网地址）—— 只在同 Wi-Fi 时可用。
+///
+/// 返回 `(主地址, 备选地址)`；备选会附在文案里（"打不开就换这个"）。纯函数，便于单测。
+fn webui_address(state: &Value) -> Result<(String, Option<String>), String> {
+    let port = state.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+    let lan = state.get("lan_ip").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let ts = state.get("tailscale_ip").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let custom = state
+        .get("webui_base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+
+    let from_ip = |ip: &str| -> Option<String> {
+        if ip.is_empty() || ip == "127.0.0.1" || port == 0 || port > u16::MAX as u64 {
+            return None;
+        }
+        Some(format!("https://{ip}:{port}"))
+    };
+    let custom_origin =
+        (!custom.is_empty()).then(|| custom.trim_end_matches('/').to_string());
+    let ts_origin = from_ip(ts);
+    let lan_origin = from_ip(lan);
+
+    let primary = custom_origin
+        .clone()
+        .or_else(|| ts_origin.clone())
+        .or_else(|| lan_origin.clone())
+        .ok_or_else(|| "webapi 未运行，或没取到可用地址".to_string())?;
+    let alternate = [custom_origin, ts_origin, lan_origin]
+        .into_iter()
+        .flatten()
+        .find(|o| *o != primary);
+    Ok((primary, alternate))
+}
+
+/// 生成"在 WebUI 里打开"的提示（含**外部可达地址** + 备选）。
 fn webui_hint(http: &Http, session_id: &str) -> Result<String, String> {
     let st = http.get("/api/session")?;
-    let ip = st.get("lan_ip").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-    let port = st.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
-    webui_hint_text(&ip, port, session_id)
+    let (origin, alternate) = webui_address(&st)?;
+    webui_hint_text(&origin, alternate.as_deref(), session_id)
+}
+
+/// 只取 WebUI 基址（没有会话可指时用，例如"文件太大，去 WebUI 看"）。
+fn webui_origin(http: &Http) -> Result<String, String> {
+    let st = http.get("/api/session")?;
+    webui_address(&st).map(|(origin, _)| origin)
 }
 
 /// 提示文案（纯函数，便于单测）。
@@ -2073,16 +2333,33 @@ fn webui_hint(http: &Http, session_id: &str) -> Result<String, String> {
 /// 只会以为链接坏了（当时还叠加了 release 下静态资源 404，见 docs/LARK_BOT.md §5.11）。
 /// 链接本身换成**直达该条会话的深链**（同一实测日期）：以前给的是站点根地址，
 /// 点开只到首页，"打开详情"名不副实。
-fn webui_hint_text(ip: &str, port: u64, session_id: &str) -> Result<String, String> {
-    let ip = ip.trim();
-    // 0 或超出端口范围都说明没取到可用地址（`as u16` 会静默截断成错误端口，故先判）。
-    if ip.is_empty() || port == 0 || port > u16::MAX as u64 {
-        return Err("webapi 未运行，或没取到 LAN 地址".to_string());
+///
+/// 多网卡机器**不做"是否同一网络"的判断**（飞书不给客户端 IP，判断不了）：
+/// 主地址按 [`webui_address`] 的优先级选，另一个可用地址作为"打不开就换这个"附在后面。
+fn webui_hint_text(
+    origin: &str,
+    alternate: Option<&str>,
+    session_id: &str,
+) -> Result<String, String> {
+    let origin = origin.trim().trim_end_matches('/');
+    if origin.is_empty() {
+        return Err("webapi 未运行，或没取到可用地址".to_string());
     }
-    Ok(format!(
-        "在浏览器打开（需与电脑同一局域网；自签名证书会先提示「不安全」，点「继续访问」信任一次即可）：\n{}\n\n这个链接直达该条会话，可以直接在浏览器里继续追问。",
-        crate::card::webui_deep_link(ip, port as u16, session_id)
-    ))
+    let mut text = format!(
+        "在浏览器打开（自签名证书会先提示「不安全」，点「继续访问」信任一次即可）：\n{}\n",
+        crate::card::webui_deep_link(origin, session_id)
+    );
+    if let Some(alt) = alternate.map(str::trim).filter(|a| !a.is_empty()) {
+        let alt = alt.trim_end_matches('/');
+        if alt != origin {
+            text.push_str(&format!(
+                "\n如果上面这个打不开，换这个地址试试：\n{}\n",
+                crate::card::webui_deep_link(alt, session_id)
+            ));
+        }
+    }
+    text.push_str("\n这个链接直达该条会话，可以直接在浏览器里继续追问。");
+    Ok(text)
 }
 
 /// 阻塞读 stderr，直到出现就绪标记 `[event] ready event_key=`。
@@ -2422,25 +2699,75 @@ mod tests {
         assert_eq!(arg_value("--parent-pid"), None);
     }
 
-    /// 「打开详情」的提示：必须给 **LAN 地址**（回环在手机/别的机器上点不开）、
-    /// **直达会话的深链**（而不是站点根地址，否则点开只到首页），
-    /// 且必须提醒自签名证书（否则用户看到"不安全"就以为链接坏了）。
+    /// 「打开详情」的提示：必须给**外部可达地址** + **直达会话的深链**，
+    /// 备选地址要出现，且必须提醒自签名证书（否则用户看到"不安全"就以为链接坏了）。
     #[test]
-    fn webui_hint_text_gives_lan_deep_link_and_cert_warning() {
-        let text = webui_hint_text("192.168.1.54", 8443, "sess-1").unwrap();
+    fn webui_hint_text_gives_deep_link_alternate_and_cert_warning() {
+        let text = webui_hint_text(
+            "https://100.101.102.101:8443",
+            Some("https://192.168.1.54:8443"),
+            "sess-1",
+        )
+        .unwrap();
+        assert!(
+            text.contains("https://100.101.102.101:8443/#/chat?origin=lark&session=sess-1"),
+            "主地址 + 直达会话的深链：{text}"
+        );
         assert!(
             text.contains("https://192.168.1.54:8443/#/chat?origin=lark&session=sess-1"),
-            "必须是 LAN 地址 + 直达会话的深链：{text}"
+            "备选地址不能少（打不开时换它）：{text}"
         );
         assert!(text.contains("证书"), "自签名证书的提醒不能少：{text}");
 
-        assert!(webui_hint_text("", 8443, "s").is_err(), "没 IP = 没地址");
-        assert!(webui_hint_text("   ", 8443, "s").is_err(), "空白 IP 同理");
-        assert!(webui_hint_text("192.168.1.54", 0, "s").is_err(), "没端口 = 没地址");
-        assert!(
-            webui_hint_text("192.168.1.54", 70000, "s").is_err(),
-            "超范围端口会被 `as u16` 静默截断成错误端口，必须拒绝"
-        );
+        assert!(webui_hint_text("", None, "s").is_err(), "没地址 = 报错");
+        assert!(webui_hint_text("   ", None, "s").is_err(), "空白地址同理");
+        let same = webui_hint_text("https://a:1", Some("https://a:1"), "s").unwrap();
+        assert!(!same.contains("换这个地址"), "备选与主地址相同就不必再给：{same}");
+        let none = webui_hint_text("https://a:1", None, "s").unwrap();
+        assert!(!none.contains("换这个地址"), "{none}");
+    }
+
+    /// 地址优先级：自定义基址 > Tailscale > 局域网；端口/回环无效时整体不可用。
+    #[test]
+    fn webui_address_prefers_custom_then_tailscale_then_lan() {
+        let full = serde_json::json!({
+            "port": 8443,
+            "lan_ip": "192.168.1.54",
+            "tailscale_ip": "100.101.102.101",
+            "webui_base_url": "",
+        });
+        let (origin, alt) = webui_address(&full).unwrap();
+        assert_eq!(origin, "https://100.101.102.101:8443", "Tailscale 优先于局域网");
+        assert_eq!(alt.as_deref(), Some("https://192.168.1.54:8443"), "局域网作为备选");
+
+        let custom = serde_json::json!({
+            "port": 8443,
+            "lan_ip": "192.168.1.54",
+            "tailscale_ip": "100.101.102.101",
+            "webui_base_url": "https://link.example.com/",
+        });
+        let (origin, alt) = webui_address(&custom).unwrap();
+        assert_eq!(origin, "https://link.example.com", "手配基址最优先（去掉尾斜杠）");
+        assert_eq!(alt.as_deref(), Some("https://100.101.102.101:8443"));
+
+        let lan_only = serde_json::json!({
+            "port": 8443,
+            "lan_ip": "192.168.1.54",
+            "tailscale_ip": null,
+            "webui_base_url": "",
+        });
+        let (origin, alt) = webui_address(&lan_only).unwrap();
+        assert_eq!(origin, "https://192.168.1.54:8443");
+        assert!(alt.is_none(), "只有局域网时没有备选");
+
+        for bad in [
+            serde_json::json!({"port": 0, "lan_ip": "192.168.1.54"}),
+            serde_json::json!({"port": 70000, "lan_ip": "192.168.1.54"}),
+            serde_json::json!({"port": 8443, "lan_ip": "127.0.0.1"}),
+            serde_json::json!({"port": 8443}),
+        ] {
+            assert!(webui_address(&bad).is_err(), "不可用状态必须报错：{bad}");
+        }
     }
 
     // ── §11 多会话 / 搜索的纯函数 ──
@@ -2597,7 +2924,7 @@ mod tests {
         let v = serde_json::json!({
             "total": 2,
             "hits": [
-                { "file_name": "判决书.pdf", "path": "合同纠纷/2024/判决书.pdf",
+                { "file_id": "f-1", "file_name": "判决书.pdf", "path": "合同纠纷/2024/判决书.pdf",
                   "snippet": "……汪均益\n  案的最终结果……" },
                 { "file_name": "没有片段的.docx", "path": "目录B/没有片段的.docx" },
                 { "path": "缺文件名" }        // 缺 file_name → 丢弃
@@ -2605,6 +2932,8 @@ mod tests {
         });
         let hits = parse_hits(&v);
         assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].file_id, "f-1");
+        assert_eq!(hits[1].file_id, "", "缺 file_id 的命中照样可看，只是没有「发送」按钮");
         let detail = search_hit_detail(&hits[0]);
         assert!(detail.contains("合同纠纷/2024/判决书.pdf"), "{detail}");
         assert!(detail.contains("汪均益 案的最终结果"), "换行要压成空格：{detail}");

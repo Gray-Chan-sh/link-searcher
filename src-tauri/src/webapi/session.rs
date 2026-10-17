@@ -184,6 +184,8 @@ pub fn status_json(
         "active": false,
         "timeout_secs": timeout,
         "lan_ip": crate::webapi::lan_ip(),
+        "tailscale_ip": crate::webapi::tailscale_ip(),
+        "webui_base_url": crate::config::webui_base_url(),
         "port": crate::webapi::settings_port(app_state),
         "bind": crate::webapi::settings_bind(app_state),
     });

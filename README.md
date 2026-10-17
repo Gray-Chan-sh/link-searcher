@@ -145,7 +145,7 @@
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
-| **飞书机器人** | **私聊**机器人问答本地私有库：**多组多轮会话**（`/sessions` 切换 / `/new` 新建 / `/rename` 命名）、`/find` 关键词搜索、`/history` 召回会话全文、`/stop` 停止生成、提问新话题自动另起会话；可选**机器人自定义菜单**；仅私聊 + 白名单（fail-closed）。接入步骤见 [`docs/06-settings.md`](docs/06-settings.md) 步骤 12，设计与实现记录见 [`docs/LARK_BOT.md`](docs/LARK_BOT.md) |
+| **飞书机器人** | **私聊**机器人问答本地私有库：**多组多轮会话**（`/sessions` 切换 / `/new` 新建 / `/rename` 命名）、`/find` 关键词搜索、`/history` 召回会话全文、`/stop` 停止生成、提问新话题自动另起会话；**出站文件**（`/find` 命中卡点「发送 N」→ 图片/语音/文件发到飞书）；可选**机器人自定义菜单**；仅私聊 + 白名单（fail-closed）。接入步骤见 [`docs/06-settings.md`](docs/06-settings.md) 步骤 12，设计与实现记录见 [`docs/LARK_BOT.md`](docs/LARK_BOT.md) |
 | **远程 WebUI / API** | **默认开启**的 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），启动即监听 `0.0.0.0:8443`，其它机器浏览器直连；**单用户 IP 会话**（同一时刻仅一个会话，超时/主动退出/桌面端强制踢出）；Token 存 `config.json`（`web_api_token`，可用 `LS_WEB_API_TOKEN` 注入），设置页与 Web 端均可修改；**依赖中心在 Web 端同样可用**（查看依赖状态 + 安装/取消，进度经 SSE 事件桥） |
 
 ---

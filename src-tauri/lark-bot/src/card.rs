@@ -534,15 +534,18 @@ pub fn render_list_card(
     card
 }
 
-/// 搜索结果卡片：每条 = 文件名（粗体）+ 路径 + 命中片段。
+/// 搜索结果卡片：每条 = 文件名（粗体）+ 路径 + 命中片段（+ 可选「发送 N」按钮）。
 ///
-/// 结果**不打按钮**：点按钮打开 WebUI 预览要带 LAN 地址（`path` 深链），而设备与网络
-/// 拿不准时贸然给链接反而误导 —— 先在飞书里看到"命中在哪"，要细看走 `/sessions` 与
-/// 「打开详情」那种明确入口（都是已知可达的场景）。
+/// 之前**不打按钮**是因为"打开 WebUI 预览"要带 LAN 地址、设备与网络拿不准；
+/// 现在的按钮是**发送原文件到飞书** —— 字节由 bot 上传到飞书云，不需要客户端
+/// 能访问本机，所以这个顾虑不成立（见 `docs/LARK_BOT.md` §5.13）。
+/// `file_ids` 与 `items` 一一对应；空 id 的位置不出现按钮（取不到就少一个按钮，
+/// 而不是发错文件）。
 pub fn render_search_card(
     query: &str,
     items: &[ListItem],
     footer: Option<&str>,
+    file_ids: &[String],
 ) -> serde_json::Value {
     let mut lines: Vec<String> = Vec::new();
     for (i, item) in items.iter().enumerate() {
@@ -553,7 +556,30 @@ pub fn render_search_card(
         lines.push(String::new());
     }
     let body = lines.join("\n");
-    render_card(&format!("搜索「{}」", query.trim()), &body, footer, None)
+    let mut card = render_card(&format!("搜索「{}」", query.trim()), &body, footer, None);
+    let buttons: Vec<serde_json::Value> = items
+        .iter()
+        .take(MAX_MENU_LINES)
+        .enumerate()
+        .filter_map(|(i, _)| {
+            let fid = file_ids.get(i)?.trim();
+            if fid.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "tag": "button",
+                "text": { "tag": "plain_text", "content": format!("发送 {}", i + 1) },
+                "type": "default",
+                "value": action_payload_file("send_file", fid),
+            }))
+        })
+        .collect();
+    if !buttons.is_empty()
+        && let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut())
+    {
+        elements.push(serde_json::json!({ "tag": "action", "actions": buttons }));
+    }
+    card
 }
 
 /// 失败卡片（**在"卡已发出"之后**出错时用）：不再另发文本，避免答案重复出现两次。
@@ -658,6 +684,11 @@ pub enum CardAction {
     RemoveConfirm { session_id: String, index: usize },
     /// 「停止」：取消该会话**正在生成**的回答（与 `/stop` 同一实现）。
     Stop { session_id: String },
+    /// 「发送文件」：把搜索结果里的第 N 个文件（`file_id`）作为媒体消息发到飞书。
+    ///
+    /// 与其它动作不同：它**不需要** session_id（与"对哪个会话做事"无关），
+    /// 所以解析时走单独一条分支（缺 `file_id` 才忽略）。
+    SendFile { file_id: String },
 }
 
 /// 从 `action_value` 解析出动作。返回 `None` = **不认识/不完整 → 直接忽略**。
@@ -671,6 +702,19 @@ pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
     // 唯一**不需要** session_id 的动作：新建会话（没有"对哪个会话做事"的问题）
     if action == "new_session" {
         return Some(CardAction::NewSession);
+    }
+    // 「发送文件」也不需要 session_id —— 它作用于搜索结果里的 `file_id`。
+    if action == "send_file" {
+        let file_id = v
+            .get("file_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if file_id.is_empty() {
+            return None;
+        }
+        return Some(CardAction::SendFile { file_id });
     }
     let session_id = v
         .get("session_id")
@@ -719,20 +763,25 @@ pub fn action_payload_indexed(action: &str, session_id: &str, index: usize) -> s
     serde_json::json!({ "action": action, "session_id": session_id, "index": index })
 }
 
+/// 「发送文件」按钮的 payload：只带 `file_id`（它不作用于任何会话）。
+pub fn action_payload_file(action: &str, file_id: &str) -> serde_json::Value {
+    serde_json::json!({ "action": action, "file_id": file_id })
+}
+
 /// WebUI 的**深链**（给「打开详情」按钮用）：直达某条会话，用户可以在浏览器里继续追问。
 ///
 /// 两个要点：
-/// - 必须用 **LAN 地址**、不能用 `127.0.0.1` —— 用户多半是在**手机/别的机器**上点这个按钮，
-///   给回环地址等于点不开；
+/// - `origin` 必须是**外部设备能访问的基址**（`https://host:port`），不能是 `127.0.0.1`
+///   —— 用户多半是在手机 / 别的机器上点这个按钮（地址选择见 `main::webui_address`：
+///   自定义基址 > Tailscale > 局域网 IP）；
 /// - 必须带上 `origin=lark&session=<id>` —— 应用是 `HashRouter`（故 query 在 `#/chat?` 之后），
 ///   而会话按端隔离：不带 `origin=lark` 去读飞书会话只会得到 `session not found`。
 ///
 /// 纯函数：这是"点开到底能不能打开到那一条"的唯一决定因素，也是唯一值得单测的部分。
-pub fn webui_deep_link(lan_ip: &str, port: u16, session_id: &str) -> String {
+pub fn webui_deep_link(origin: &str, session_id: &str) -> String {
     format!(
-        "https://{}:{}/#/chat?origin=lark&session={}",
-        lan_ip.trim(),
-        port,
+        "{}/#/chat?origin=lark&session={}",
+        origin.trim().trim_end_matches('/'),
         encode_query_value(session_id.trim())
     )
 }
@@ -1282,19 +1331,22 @@ mod tests {
     }
 
     #[test]
-    fn webui_deep_link_uses_the_lan_address_not_loopback() {
+    fn webui_deep_link_uses_the_given_origin_not_loopback() {
         assert_eq!(
-            webui_deep_link("192.168.1.5", 8443, "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"),
+            webui_deep_link(
+                "https://192.168.1.5:8443",
+                "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"
+            ),
             "https://192.168.1.5:8443/#/chat?origin=lark&session=3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"
         );
         assert_eq!(
-            webui_deep_link("  10.0.0.7  ", 9000, "s"),
+            webui_deep_link("  https://10.0.0.7:9000/  ", "s"),
             "https://10.0.0.7:9000/#/chat?origin=lark&session=s",
-            "首尾空白要清掉"
+            "首尾空白与结尾斜杠都要清掉（避免拼出 //#/chat）"
         );
         assert!(
-            !webui_deep_link("192.168.1.5", 8443, "s").contains("127.0.0.1"),
-            "必须给 LAN 地址 —— 用户在手机上点，回环地址点不开"
+            !webui_deep_link("https://192.168.1.5:8443", "s").contains("127.0.0.1"),
+            "必须给外部可达地址 —— 用户在手机上点，回环地址点不开"
         );
     }
 
@@ -1303,7 +1355,7 @@ mod tests {
     /// 得到 `session not found`（2026-10-16 实测：带 origin 18050 字节，不带就是那个错误）。
     #[test]
     fn webui_deep_link_targets_one_session_and_declares_its_origin() {
-        let url = webui_deep_link("192.168.1.5", 8443, "  sess-1  ");
+        let url = webui_deep_link("https://192.168.1.5:8443", "  sess-1  ");
         assert!(url.contains("/#/chat?"), "HashRouter：query 必须在 hash 之后：{url}");
         assert!(url.contains("origin=lark"), "缺 origin 读不到飞书会话：{url}");
         assert!(url.contains("session=sess-1"), "必须指名会话（且去掉空白）：{url}");
@@ -1311,10 +1363,10 @@ mod tests {
 
     #[test]
     fn deep_link_encodes_session_id_defensively() {
-        let url = webui_deep_link("10.0.0.7", 9000, "a b&c=1");
+        let url = webui_deep_link("https://10.0.0.7:9000", "a b&c=1");
         assert!(url.contains("session=a%20b%26c%3D1"), "特殊字符必须编码，否则会截断 query：{url}");
         // UUID 这类正常取值不应被改动（真实会话 id 就是这种形状）
-        let normal = webui_deep_link("10.0.0.7", 9000, "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb");
+        let normal = webui_deep_link("https://10.0.0.7:9000", "3d3a9b1e-8c03-4fe3-a448-142ff70dceeb");
         assert!(normal.contains("session=3d3a9b1e-8c03-4fe3-a448-142ff70dceeb"), "{normal}");
     }
 
@@ -1347,6 +1399,10 @@ mod tests {
             ),
             (action_payload("new_session", ""), CardAction::NewSession),
             (action_payload("stop", "s-5"), CardAction::Stop { session_id: "s-5".into() }),
+            (
+                action_payload_file("send_file", "f-9"),
+                CardAction::SendFile { file_id: "f-9".into() },
+            ),
         ];
         for (payload, expect) in cases {
             let ev = CardActionEvent {
@@ -1368,6 +1424,8 @@ mod tests {
             r#"{"action":"remove","session_id":"s"}"#,        // 缺 index
             r#"{"action":"remove","session_id":"s","index":0}"#, // index 必须 ≥1
             r#"{"action":"remove_confirm","session_id":"s"}"#,
+            r#"{"action":"send_file"}"#,                    // 缺 file_id
+            r#"{"action":"send_file","file_id":"  "}"#,     // 空白 file_id
             r#"{"action":"cancel"}"#,
             r#"{"action":"__unknown__","session_id":"s"}"#,
         ] {
@@ -1414,25 +1472,47 @@ mod tests {
         assert_eq!(tags, vec!["markdown", "hr", "note", "action"]);
     }
 
-    /// 搜索卡：序号、路径与片段都在正文里；不打按钮。
+    /// 搜索卡：序号、路径与片段都在正文里；有 `file_id` 的条目带「发送 N」按钮。
     #[test]
-    fn search_card_renders_numbered_hits_without_buttons() {
+    fn search_card_renders_hits_and_send_buttons_when_ids_exist() {
         let items = vec![
             ListItem { title: "一审判决书.pdf".into(), detail: "合同纠纷/2024\n   …汪均益…".into() },
             ListItem { title: "48号裁定.docx".into(), detail: "上诉材料".into() },
+            ListItem { title: "缺 id 的命中.txt".into(), detail: String::new() },
         ];
-        let card = render_search_card("汪均益", &items, Some("共 2 条"));
+        let ids = vec!["f-1".to_string(), String::new(), "f-3".to_string()];
+        let card = render_search_card("汪均益", &items, Some("共 2 条"), &ids);
         let body = card["elements"][0]["content"].as_str().unwrap_or("");
         assert!(body.contains("**1. 一审判决书.pdf**"), "正文：{body}");
         assert!(body.contains("合同纠纷/2024"), "正文：{body}");
         assert!(body.contains("汪均益"), "正文：{body}");
+
+        // 只给有 file_id 的条目加按钮（空 id 少一个按钮，而不是发错文件）
+        let last = card["elements"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["tag"], "action");
+        let buttons = last["actions"].as_array().unwrap();
+        assert_eq!(buttons.len(), 2, "第 2 条没有 file_id，不应有按钮");
+        assert_eq!(buttons[0]["text"]["content"], "发送 1");
+        assert_eq!(buttons[1]["text"]["content"], "发送 3");
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: buttons[0]["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::SendFile { file_id: "f-1".into() })
+        );
+
+        // 完全没有 file_id 时保持原来的"纯文本结果卡"
+        let plain = render_search_card("汪均益", &items, Some("共 2 条"), &[]);
         assert!(
-            !card["elements"]
+            !plain["elements"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|e| e["tag"] == "action"),
-            "搜索结果不打按钮"
+            "没有 file_id 就不该出现空按钮行"
         );
     }
 }

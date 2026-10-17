@@ -14,7 +14,6 @@ pub fn ensure_cert(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf), Str
     let mut san_names = vec![
         "localhost".to_string(),
         "127.0.0.1".to_string(),
-        "100.101.102.100".to_string(),
     ];
 
     if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
@@ -38,13 +37,12 @@ pub fn ensure_cert(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf), Str
             if !san_names.contains(&ip) { san_names.push(ip); }
         }
     }
-    // Tailscale CGNAT range
-    if let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        let _ = sock.connect("100.64.0.1:80");
-        if let Ok(addr) = sock.local_addr() {
-            let ip = addr.ip().to_string();
-            if !san_names.contains(&ip) { san_names.push(ip); }
-        }
+    // Tailscale / CGNAT 覆盖网地址：**动态取**，不再硬编码某台机器的 100.x 地址
+    // （硬编码会随换机/换 Tailnet 失效；`tailscale_ip()` 只在确有 100.64/10 路由时给值）。
+    if let Some(ts) = super::tailscale_ip()
+        && !san_names.contains(&ts)
+    {
+        san_names.push(ts);
     }
 
     log::info!("[WEBAPI] generating TLS cert with SANs: {:?}", san_names);

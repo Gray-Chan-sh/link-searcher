@@ -41,6 +41,13 @@ pub fn ffmpeg_available() -> bool {
     ffmpeg_path().is_some()
 }
 
+/// Resolved ffmpeg binary, if any. Used to inject `LS_FFMPEG` into the bot
+/// sidecar (it deliberately does not link this crate, so it cannot reuse the
+/// discovery logic itself).
+pub fn ffmpeg_binary() -> Option<PathBuf> {
+    ffmpeg_path().map(|p| p.to_path_buf())
+}
+
 /// FunASR-Nano ONNX model files that must be present in the model dir.
 /// Layout matches `sherpa-onnx-funasr-nano-int8-2025-12-30` archive.
 const MODEL_SUBDIR: &str = "models/funasr";

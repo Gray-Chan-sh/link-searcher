@@ -387,6 +387,14 @@ pub struct AppConfig {
     /// 用户可查看/分发。运行期由设置页 / Web 端修改（`set_web_api_token` 同步回写）。
     #[serde(default)]
     pub web_api_token: String,
+    /// WebUI 对**外部设备**（手机 / 其它电脑）的基址，例如
+    /// `https://100.101.102.101:8443`（Tailscale）或 `https://link.example.com`。
+    /// 空 = 自动：飞书 bot 优先用 Tailscale 地址，其次本机默认路由的局域网 IP，
+    /// 并会在文案里附上另一个可用地址（见 `docs/LARK_BOT.md` §5.13）。
+    /// 只在 `config.json` 里手改即可（B 档：配置文件为中心）；改动热加载生效
+    /// （每次现读，无需重启）。
+    #[serde(default)]
+    pub webui_base_url: String,
     /// 对外集成（飞书机器人等）。见 [`Integrations`]。
     #[serde(default)]
     pub integrations: Integrations,
@@ -417,6 +425,7 @@ impl Default for AppConfig {
             pending_cleanup_dir: None,
             embed_plans: std::collections::HashMap::new(),
             web_api_token: String::new(),
+            webui_base_url: String::new(),
             integrations: Integrations::default(),
         }
     }
@@ -456,6 +465,13 @@ pub fn save_embed_plan(key: &str, plan: EmbedPlan) {
 pub fn web_api_token() -> String {
     let _g = lock_config();
     read_config_file().web_api_token
+}
+
+/// 只要 `webui_base_url` 的值：**不跑迁移、不加锁** —— 供 `/api/session` 这类
+/// "每次请求读一下"的只读路径使用（`load_config` 会走迁移分支并持跨进程锁，
+/// 对高频只读不划算）。解析失败 → 回退空串（= 自动选地址），与"读不懂就当没配"一致。
+pub fn webui_base_url() -> String {
+    read_config_file().webui_base_url
 }
 
 /// 把 Web API token 写回 `config.json`（加锁的整文件读-改-写，避免与
@@ -736,6 +752,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "pending_cleanup_dir",
     "embed_plans",
     "web_api_token",
+    "webui_base_url",
     "integrations",
 ];
 

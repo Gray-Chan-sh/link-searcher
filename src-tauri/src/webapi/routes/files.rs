@@ -31,6 +31,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/files", get(files_handler))
         .route("/api/files/preview-by-path", get(preview_by_path_handler))
         .route("/api/files/{id}", get(get_file_handler))
+        .route("/api/files/{id}/abs-path", get(abs_path_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
         .route("/api/files/browse", get(files_browse_handler))
         .route("/api/dir-entries", get(dir_entries_handler))
@@ -287,6 +288,75 @@ async fn get_file_handler(
     })))
 }
 
+/// 解析一个受控文件的**绝对路径**（供同机 bot 发送到飞书）。
+///
+/// 这是 bot 与主程序之间"文件字节从哪来"的唯一接缝：bot 是独立进程，不能直接查 DB；
+/// 它拿 `file_id` 换绝对路径，再由自己调用 lark-cli 上传（见 `lark-bot/src/media.rs`）。
+///
+/// 安全边界：只接受**索引记录里的相对路径**，且 canonicalize 后必须仍在该目录根之内
+/// —— `..` 穿越、绝对路径注入、指向外部的符号链接一律拒绝。
+async fn abs_path_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+    let rec = tracker::get_file_by_id(&conn, &id)
+        .map_err(|e| ApiError { error: e.to_string() })?
+        .ok_or_else(|| ApiError { error: "file not found".into() })?;
+    let dir = crate::db::dir_config::get_dir(&conn, &rec.dir_id)
+        .map_err(|e| ApiError { error: e.to_string() })?
+        .ok_or_else(|| ApiError { error: "dir not found".into() })?;
+    drop(conn);
+
+    let abs = resolve_tracked_file(&dir.path, &rec.path).map_err(|e| ApiError { error: e })?;
+    let size = std::fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+    let name = abs
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(rec.path.as_str())
+        .to_string();
+    Ok(Json(serde_json::json!({
+        "file_id": rec.id,
+        "abs_path": abs.to_string_lossy(),
+        "file_name": name,
+        "file_ext": path_to_ext(&rec.path),
+        "file_size": size,
+    })))
+}
+
+/// 把「目录根 + 相对路径」解析成受控的绝对路径。
+///
+/// 先做**纯词法**校验（[`rel_within_root`] 挡 `..` / 绝对路径），再 `canonicalize`
+/// 校验真实路径仍在目录根内（挡符号链接逃逸）；不存在、不是普通文件都报错。
+pub(crate) fn resolve_tracked_file(dir_root: &str, rel: &str) -> Result<std::path::PathBuf, String> {
+    if !rel_within_root(rel) {
+        return Err("file path escapes the indexed directory".into());
+    }
+    let root = std::fs::canonicalize(dir_root)
+        .map_err(|e| format!("indexed directory is unavailable: {e}"))?;
+    let abs = std::fs::canonicalize(std::path::Path::new(dir_root).join(rel))
+        .map_err(|e| format!("file is unavailable: {e}"))?;
+    if !abs.starts_with(&root) {
+        return Err("file path escapes the indexed directory".into());
+    }
+    if !abs.is_file() {
+        return Err("not a regular file".into());
+    }
+    Ok(abs)
+}
+
+/// 相对路径的词法校验：非空、非绝对、不含 `..`。纯函数，便于单测（不碰磁盘）。
+pub(crate) fn rel_within_root(rel: &str) -> bool {
+    use std::path::Component;
+    let rel = rel.trim();
+    !rel.is_empty()
+        && !std::path::Path::new(rel).is_absolute()
+        && std::path::Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 async fn file_preview_handler(
     State(state): State<ApiState>,
     Path(id): Path<String>,
@@ -324,4 +394,60 @@ async fn file_preview_handler(
         "char_count": content.chars().count(),
         "ocr_used": false,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rel_within_root, resolve_tracked_file};
+
+    /// 词法防线：拒绝 `..` 与绝对路径；正常相对路径放行。
+    /// 真实逃逸（符号链接）由 `resolve_tracked_file` 的 canonicalize 兜住。
+    #[test]
+    fn tracked_path_must_stay_relative_and_parent_free() {
+        for ok in ["a.pdf", "sub/a.pdf", "./a.pdf", "a/./b.pdf", "带空格 的文件.docx"] {
+            assert!(rel_within_root(ok), "{ok:?} 应被接受");
+        }
+        for bad in [
+            "",
+            "   ",
+            "..",
+            "../a.pdf",
+            "sub/../../a.pdf",
+            "/etc/passwd",
+            "/tmp/a.pdf",
+        ] {
+            assert!(!rel_within_root(bad), "{bad:?} 应被拒绝");
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                !rel_within_root("C:\\Windows\\win.ini"),
+                "Windows 盘符绝对路径必须拒绝"
+            );
+            assert!(
+                !rel_within_root("sub\\..\\a.pdf"),
+                "Windows 反斜杠 .. 必须拒绝"
+            );
+        }
+    }
+
+    /// 真实路径解析：目录内的文件可解析；不存在、`..` 越界都报错。
+    /// 用 uuid 独占临时目录（避免与并行测试互相看见，见 AGENTS.md 测试门禁 ④′）。
+    #[test]
+    fn resolve_tracked_file_stays_inside_the_root() {
+        let root = std::env::temp_dir().join(format!("ls_abs_path_{}", uuid::Uuid::new_v4()));
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).expect("建临时目录");
+        let file = sub.join("a.txt");
+        std::fs::write(&file, b"hi").expect("写临时文件");
+
+        let root_s = root.to_str().expect("临时路径应为 UTF-8");
+        let got = resolve_tracked_file(root_s, "sub/a.txt").expect("目录内文件应可解析");
+        assert!(got.ends_with("a.txt"), "解析结果：{got:?}");
+
+        assert!(resolve_tracked_file(root_s, "sub/missing.txt").is_err(), "不存在要报错");
+        assert!(resolve_tracked_file(root_s, "../a.txt").is_err(), "越界要报错");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

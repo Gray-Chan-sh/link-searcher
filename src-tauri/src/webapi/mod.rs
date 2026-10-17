@@ -245,6 +245,35 @@ pub fn lan_ip() -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
+/// Tailscale（或其它 CGNAT 100.64/10 覆盖网）地址；没有则 `None`。
+///
+/// 多网卡机器上 [`lan_ip`] 只会给出**默认路由**那一个地址（可能是 Wi-Fi / VPN，
+/// 而手机在外网时根本够不着它）。Tailscale 地址则同时适用于"同一 Wi-Fi"与"异地"，
+/// 因此它是 WebUI 深链的**首选**地址（见 `docs/LARK_BOT.md` §5.13）。
+///
+/// 探测方式与 [`lan_ip`] 相同：UDP connect 只做路由选择，不发包；只有结果确实落在
+/// CGNAT 段（100.64.0.0/10）才认账 —— 否则说明本机没有 Tailscale，不能拿默认路由地址冒充。
+pub fn tailscale_ip() -> Option<String> {
+    let ip = std::net::UdpSocket::bind("0.0.0.0:0")
+        .ok()
+        .and_then(|s| {
+            s.connect("100.64.0.1:80").ok()?;
+            s.local_addr().ok()
+        })?
+        .ip()
+        .to_string();
+    is_cgnat_ip(&ip).then_some(ip)
+}
+
+/// `100.64.0.0/10`（RFC 6598，Tailscale 用的段）判定。纯函数，便于单测。
+fn is_cgnat_ip(ip: &str) -> bool {
+    let Ok(v4) = ip.trim().parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let o = v4.octets();
+    o[0] == 100 && (64..=127).contains(&o[1])
+}
+
 pub fn settings_port(app_state: &AppState) -> u16 {
     if let Ok(conn) = app_state.db.get()
         && let Ok(port_str) = conn.query_row::<String, _, _>(
@@ -289,6 +318,17 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::BRIDGED_EVENTS;
+
+    /// CGNAT 段判定：只有 100.64/10 才算 Tailscale/覆盖网地址。
+    #[test]
+    fn cgnat_range_is_exactly_100_64_over_10() {
+        for ok in ["100.64.0.1", "100.101.102.101", "100.127.255.254"] {
+            assert!(super::is_cgnat_ip(ok), "{ok} 应属于 100.64/10");
+        }
+        for bad in ["100.63.255.255", "100.128.0.0", "192.168.1.54", "127.0.0.1", "", "not-an-ip"] {
+            assert!(!super::is_cgnat_ip(bad), "{bad} 不应属于 100.64/10");
+        }
+    }
 
     /// **桌面专属**的订阅：只经 `@tauri-apps/api/event` 拿事件，不需要（也不会）桥接。
     ///

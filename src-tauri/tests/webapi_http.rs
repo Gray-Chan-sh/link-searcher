@@ -237,6 +237,14 @@ fn main() {
     assert!(v["port"].is_number(), "port must be present");
     assert!(v["bind"].is_string(), "bind must be present");
     assert!(v["lan_ip"].is_string(), "lan_ip must be present");
+    assert!(
+        v["tailscale_ip"].is_null() || v["tailscale_ip"].is_string(),
+        "tailscale_ip must be null or a string (bot 用它选 WebUI 地址)"
+    );
+    assert!(
+        v["webui_base_url"].is_string(),
+        "webui_base_url must be present (空串 = 自动选地址)"
+    );
     assert!(v["timeout_secs"].is_number(), "timeout_secs must be present");
 
     // ── 5. 心跳 ping：续租成功、会话仍在 ──
