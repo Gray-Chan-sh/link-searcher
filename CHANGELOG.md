@@ -17,6 +17,26 @@
   门禁扩为全测试目标（15 目标清单）。
 - 其余修复与踩坑记录见下方各轮条目。
 
+### 补记（同日）：CI 发布链路修复（v1.3.0 首次触发即暴露）
+
+首次 tag 推送触发的 Release 在 **1–4 秒内四平台全挂**，根因与修复：
+
+- **根因 ①（发布失败的真正原因）**：`scripts/build-sidecar.mjs`（`predev`/`prebuild` 依赖）
+  **被 `.gitignore` 的 `scripts/*` 静默挡在仓库外** —— 本地一切正常（文件在磁盘上），
+  CI 全新检出没有它 → `prebuild` 秒崩 `MODULE_NOT_FOUND` → `tauri build` 立即退出。
+  这是"只在本机跑过"的典型盲区，且**任何本地门禁都覆盖不到**（发布链路是唯一走
+  "全新检出 + `npm run build`"的路径）。
+- **根因 ②（修完 ① 后必然浮现的次生问题）**：sidecar 产物按 **`rustc` host** 三元组命名，
+  而 macOS 的 `x86_64-apple-darwin` 是**交叉编译**（runner 是 arm64）→ 与
+  `tauri build --target` 要找的 `lark-bot-x86_64-apple-darwin` 对不上。
+- **修复**：`.gitignore` 增加 `!scripts/build-sidecar.mjs` 例外（并写下"新增构建必需脚本
+  要同步开例外"的注释）；sidecar 脚本支持 `--target` / `SIDECAR_TARGET`（优先级：
+  参数 > 环境变量 > host；交叉时产物在 `target/<triple>/<profile>/`）；workflow 增加
+  `SIDECAR_TARGET: ${{ matrix.target }}`，让 `prebuild` 直接产出**构建目标**命名的文件。
+- **验证**：在"只含已跟踪文件"的 git worktree 里完整复现了原失败（1 秒级、
+  `Cannot find module ... build-sidecar.mjs`）；修复后同一环境越过该失败点进入正常编译。
+  tag `v1.3.0` 重指到本修复提交（原 tag 未产生任何 Release），推送后重新触发。
+
 ## 2026-10-17（第三十一轮）：飞书 `/history` 召回会话全文 + LLM 自动新话题切换
 
 > 用户两条需求：①"在飞书中召回当次的会话完整内容"；②"让 llm 根据提问内容自动判断

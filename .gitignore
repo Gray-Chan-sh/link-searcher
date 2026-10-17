@@ -58,6 +58,9 @@ third_party/
 
 # Dev tooling scripts: keep only the portable setup helpers, ignore the rest
 # (eval corpora, private fixtures).
+# ⚠️ `build-sidecar.mjs` **必须入库**（`predev`/`prebuild` 依赖它）——2026-10-17 v1.3.0
+#    发布失败的根因就是它被 `scripts/*` 静默挡在仓库外：本地能跑、CI 全新检出
+#    `MODULE_NOT_FOUND`。**今后 scripts/ 下新增"构建链路必需"脚本时，记得同步开例外。**
 scripts/*
 !scripts/setup-dev.sh
 !scripts/setup-dev.ps1
@@ -65,6 +68,7 @@ scripts/*
 !scripts/clean-dev.sh
 !scripts/clean-dev.ps1
 !scripts/clean-dev.bat
+!scripts/build-sidecar.mjs
 
 # GUI 测试运行时产物 (脚本本身入库)
 test-visual/current/

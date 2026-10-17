@@ -33,6 +33,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
     env:
       APPLE_API_KEY_PATH: /tmp/apple-api-key.p8
+      # sidecar（飞书 bot）产物必须按 **matrix 目标**命名 —— macOS 的 x86_64 是交叉编译，
+      # 按 host（arm64）命名会与 `tauri build --target` 要找的名字对不上。
+      # `prebuild` → `scripts/build-sidecar.mjs` 读取它（未设置时才退回 rustc host）。
+      SIDECAR_TARGET: ${{ matrix.target }}
 
     steps:
       # dispatch 手动触发时 checkout 指定 tag；tag push 时 checkout 该 tag。
