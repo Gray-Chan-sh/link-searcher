@@ -111,6 +111,13 @@ pub struct SearchResponse {
     pub page_size: usize,
     pub took_ms: u64,
     pub hits: Vec<SearchHit>,
+    /// 本次结果**是否真的做了语义融合**（`semantic=true` + Embedding 可用 + 有向量）。
+    ///
+    /// 不是"请求里带了 semantic" —— 带了但没生效时为 `false`，调用方（飞书卡片 /
+    /// WebUI）据此提示"语义未生效"，而不是让用户对着一个没反应的开关猜。
+    /// `#[serde(default)]`：老客户端/老响应形状不受影响。
+    #[serde(default)]
+    pub semantic_applied: bool,
 }
 
 /// High-level search operations against a tantivy index.
@@ -164,6 +171,7 @@ impl SearcherWrap {
                 page_size: params.page_size,
                 took_ms: 0,
                 hits: Vec::new(),
+                semantic_applied: false,
             });
         }
 
@@ -404,6 +412,7 @@ impl SearcherWrap {
                 page_size: params.page_size,
                 took_ms,
                 hits: deduped_hits,
+                semantic_applied: false,
             });
         }
 
@@ -415,6 +424,7 @@ impl SearcherWrap {
             page_size: params.page_size,
             took_ms,
             hits,
+            semantic_applied: false,
         })
     }
 

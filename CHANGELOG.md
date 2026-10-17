@@ -1,3 +1,35 @@
+## 2026-10-17（第三十四轮）：飞书搜索卡翻页 + 语义开关；修 WebUI 语义搜索静默失效
+
+> 用户需求：①"翻页写在卡片里"；②"在 ui 中，有语义搜索，这里（飞书 `/find`）做了么？"；
+> 确认后一起排进一轮。
+
+**先查出两个"参数有人发、没人读"的静默失效**（详见 `docs/LARK_BOT.md` §5.14）：
+
+| 入口 | 症状 | 根因 |
+|---|---|---|
+| WebUI 搜索页「✦ 语义」 | 开关点了没变化（桌面端正常） | `/api/search` 接收 `semantic` 并塞进 `SearchParams`，但 `SearcherWrap::search` **从不读它** —— 融合只写在 Tauri 命令里 |
+| WebUI 排序（字段/方向） | 排序不生效 | 前端 `sortOrder` 没映射成 `sort_order`；且 webapi 路由**写死** `Score`/`desc`（`SearchQuery` 根本没有这两个字段） |
+
+**修法（收口到同一实现）**：新增 `commands::search::search_with_semantic(state, params)`，
+**桌面命令与 webapi `/api/search` 共用**（融合前释放索引管理锁，最长 5s 的 embedding 调用
+不挡索引写入）；`SearchResponse` 新增 `semantic_applied`（"本次是否真的融合"，
+`#[serde(default)]`）；webapi `SearchQuery` 补 `sort`/`sort_order`，`client.ts` 的 `search`
+映射补 `sortOrder → sort_order`；`search_file_ids_only_impl` 同样改走共用函数。
+
+**飞书搜索卡（`/find`）**：按钮两行 —— `发送 1..5` / `上一页 | 下一页 | ✦ 语义：开·关`；
+翻页与语义共用一个 `search` 动作（payload 带 `query/page/semantic`，只改一个字段），点击后
+**原地更新同一张卡**（app 身份 PATCH，失败退回"回一张新卡"）；第 1 页无「上一页」、末页无
+「下一页」、单页不出现导航行；「✦ 语义」只在 `/api/ai/capabilities.embedding = true` 时显示；
+语义开着但 `semantic_applied=false` 时页脚注明原因；query 超 200 字不挂导航按钮（卡片 JSON
+30KB 上限），退回"下一页：/find …"文字提示；搜索/融合放**独立线程**（语义可能等 5s），
+不阻塞卡片回调消费者。
+
+**验证**：`cargo test --workspace` 全绿（lib 611 + lark-bot 79 + lark-gate 13 + 集成/HTTP/…）、
+`npx tsc --noEmit` 0 错、`npx vitest run` 81/81、`semgrep --severity ERROR` 零发现。
+
+> ⚠️ **真机验收边界**：卡片按钮的实际点击（翻页/语义/发送）需要在飞书里点一次；自动化覆盖到
+> payload 往返与渲染边界为止。WebUI 的语义开关可直接在浏览器里对比验证。
+
 ## 2026-10-17（第三十三轮）：飞书出站文件发送（图片/语音/文件）+ WebUI 地址选择
 
 > 用户需求：① 飞书侧此前只能文字交流，希望把本地库里的文件（图片、语音、其它文件）发到飞书；

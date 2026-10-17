@@ -53,7 +53,10 @@ const MAPPINGS: Record<string, Mapping> = {
   // ── Search ──
   search: {
     method: 'GET', path: '/api/search',
-    paramMap: { query: 'q', pageSize: 'page_size', dirIds: 'dir_ids', dirPaths: 'dir_paths', extFilter: 'ext_filter' },
+    // ⚠️ 每个参数都要能到服务端：`semantic`（语义开关）与 `sortOrder` 曾因
+    // 未映射/服务端未实现而**静默失效**（浏览器模式开关点了没变化）。
+    // `sortOrder` → `sort_order` 是这里的映射；`semantic` 原样透传即可。
+    paramMap: { query: 'q', pageSize: 'page_size', dirIds: 'dir_ids', dirPaths: 'dir_paths', extFilter: 'ext_filter', sortOrder: 'sort_order' },
   },
   suggest: { method: 'GET', path: '/api/suggest' },
   search_file_paths: { method: 'GET', path: '/api/search/paths' },

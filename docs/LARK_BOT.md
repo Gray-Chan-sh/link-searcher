@@ -1217,6 +1217,50 @@ cwd 相对化、`webui_address` 优先级与无效状态、`parse_card_action` �
 
 ---
 
+### 5.14 搜索卡的翻页/语义开关 + WebUI 语义修复（2026-10-17）
+
+**需求原文**：①"翻页写在卡片里"；②"在 ui 中，有语义搜索，这里做了么？"（"这里" = 飞书 `/find`）。
+
+**先查出两个"静默失效"**（同一类：参数有人发、没人读）：
+
+| 入口 | 症状 | 根因 |
+|---|---|---|
+| WebUI 搜索页「✦ 语义」开关 | 点了没变化（桌面端正常） | `/api/search` 接收 `semantic` 并塞进 `SearchParams`，但 `SearcherWrap::search` **从不读这个字段** —— 融合只写在 Tauri 命令 `commands/search.rs::search` 里 |
+| WebUI 排序控件（字段/方向） | 排序不生效 | 前端 `sortOrder` 没映射成 `sort_order`；且 webapi 路由**写死** `SortField::Score`/`desc`（`SearchQuery` 里根本没有这两个字段） |
+
+**修法（把"两个入口两套行为"收口）**：
+
+1. 新增 `commands::search::search_with_semantic(state, params)`：拿索引 → BM25 → （满足
+   [`should_semantic_rerank`] 时）全库 top-N + 向量余弦 RRF 融合。**桌面命令与 webapi
+   `/api/search` 共用这一份**；融合前释放索引管理锁（`SearcherWrap` 自带 reader/index 克隆），
+   不让最长 5s 的 embedding 调用挡住索引写入。
+2. `SearchResponse` 新增 `semantic_applied`（`#[serde(default)]`）：**"本次是否真的融合了"**，
+   而不是"请求里带了 semantic"。飞书卡片据此在页脚提示"语义未生效"。
+3. webapi `SearchQuery` 补 `sort` / `sort_order`（`SortField` 已是 lowercase 反序列化），
+   `client.ts` 的 `search` 映射补 `sortOrder → sort_order`。
+4. `search_file_ids_only_impl` 也改走共用函数（此前 `semantic` 传了但没融合）。
+
+**飞书搜索卡（`/find` 与按钮共用 `find_outcome`）**：
+
+- 按钮两行：`发送 1..5` / `上一页 | 下一页 | ✦ 语义：开·关`；
+- 翻页与语义是**同一个动作** `search`（payload 带 `query/page/semantic`，只改一个字段）→
+  点击后**原地更新同一张卡**（app 身份 PATCH；失败退回"回一张新卡"）；
+- 第 1 页无「上一页」、末页无「下一页」、单页不出现导航行；
+- 「✦ 语义」只在 `/api/ai/capabilities.embedding = true` 时显示（不可用不显示 —— 点了没变化
+  等于误导）；语义开着但 `semantic_applied=false` 时页脚注明原因；
+- query 超过 `MAX_QUERY_BUTTON_CHARS = 200` 不挂导航按钮（卡片 JSON 30KB 上限），退回
+  "下一页：/find …"文字提示；
+- 搜索/语义融合可能等 5s → 与「发送文件」一样放**独立线程**，不阻塞卡片回调消费者。
+
+**自动化覆盖**：`should_semantic_rerank`（三条件准入）、搜索卡翻页/语义按钮的边界与 payload
+往返、超长 query 不挂按钮、`search` 动作的 fail-closed（缺 query / 页码 0 或 100）、
+`webapi_http` 冒烟断言 `/api/search` 返回 `semantic_applied`。
+
+**真机验收边界**：卡片按钮的实际点击（翻页/语义/发送）需要在飞书里点一次；自动化只覆盖到
+payload 往返与渲染边界。
+
+---
+
 ## 六、能干什么（功能清单）
 
 按"复用已有能力"排序，⭐ 表示复用程度。
@@ -1773,7 +1817,7 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 | `/rename <新名字>` | 给**当前活动会话**改标题（§11.6） | 新名字取剩余整段（含空格）；上限 30 字 |
 | `/stop` | 停止**当前正在生成**的回答（检索阶段同样中断） | 别名 `/cancel`；工作卡上也有「停止」按钮 |
 | `/delete <序号>` | **先确认卡**（按钮二次确认才真删） | 防误删 |
-| `/find <关键词> [页码]` | 调 `GET /api/search`（每页 5 条）→ 结果卡（文件名/路径/片段） | 页码规则：末位数字 **≤99** 才算页码（`判决书 2024` 这类"数字关键词"不被误判） |
+| `/find <关键词> [页码]` | 调 `GET /api/search`（每页 5 条）→ 结果卡（文件名/路径/片段 + 「发送 N」+「上一页/下一页」+「✦ 语义」） | 页码规则：末位数字 **≤99** 才算页码（`判决书 2024` 这类"数字关键词"不被误判）；卡片上的翻页/语义按钮**原地更新**同一张卡（app 身份 PATCH，§5.14） |
 
 **`/switch` 的序号来源**：菜单记忆保存的 `序号 → 动作` **从渲染出的列表正文解析**
 （`card::menu_text` + `menu::resolve_text_menu`），而不是另写一套下标 —— 按钮、数字回复

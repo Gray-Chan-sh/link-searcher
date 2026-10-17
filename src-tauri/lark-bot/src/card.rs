@@ -534,19 +534,57 @@ pub fn render_list_card(
     card
 }
 
-/// 搜索结果卡片：每条 = 文件名（粗体）+ 路径 + 命中片段（+ 可选「发送 N」按钮）。
+/// 搜索结果卡片：每条 = 文件名（粗体）+ 路径 + 命中片段；按钮两行 ——
+/// 「发送 N」（把原文件发到飞书）与「上一页 / 下一页 / ✦ 语义」。
 ///
 /// 之前**不打按钮**是因为"打开 WebUI 预览"要带 LAN 地址、设备与网络拿不准；
-/// 现在的按钮是**发送原文件到飞书** —— 字节由 bot 上传到飞书云，不需要客户端
-/// 能访问本机，所以这个顾虑不成立（见 `docs/LARK_BOT.md` §5.13）。
-/// `file_ids` 与 `items` 一一对应；空 id 的位置不出现按钮（取不到就少一个按钮，
-/// 而不是发错文件）。
-pub fn render_search_card(
-    query: &str,
-    items: &[ListItem],
-    footer: Option<&str>,
-    file_ids: &[String],
-) -> serde_json::Value {
+/// 现在的按钮要么是**发送原文件到飞书**（字节由 bot 上传到飞书云，不需要客户端
+/// 能访问本机），要么是**重新搜索**（同样由 bot 完成）—— 这个顾虑不成立
+/// （见 `docs/LARK_BOT.md` §5.13）。
+///
+/// `view` 把"按钮要用的状态"收成一个结构体（query/page/pages/semantic…），
+/// 避免 8 个位置参数；`items` 是正文条目。
+pub struct SearchCardView<'a> {
+    /// 原始查询词：翻页/语义按钮要用它重跑同一次搜索。
+    pub query: &'a str,
+    /// 页脚（页数、命中数、提示等）。
+    pub footer: Option<&'a str>,
+    /// 与 `items` 一一对应；空 id 的位置不出现「发送」按钮（取不到就少一个按钮，
+    /// 而不是发错文件）。
+    pub file_ids: &'a [String],
+    /// 当前页 / 总页数（1-based）。`pages <= 1` 时不出现翻页按钮。
+    pub page: usize,
+    pub pages: usize,
+    /// 当前是否语义模式（决定按钮文案与下一次点击的目标状态）。
+    pub semantic: bool,
+    /// Embedding 是否可用；不可用时**不显示**「✦ 语义」按钮 ——
+    /// 点了没变化等于误导（与 WebUI 置灰同一个道理）。
+    pub semantic_available: bool,
+}
+
+/// 翻页/语义按钮里携带的 query 上限（字符）。
+///
+/// 超过就不挂这些按钮、退回页脚文字提示：卡片 JSON 有 30KB 硬上限，
+/// 超长 query 会把按钮 payload 顶爆，宁可少两个按钮也不能让整张卡发不出去。
+pub const MAX_QUERY_BUTTON_CHARS: usize = 200;
+
+/// 搜索卡上的导航按钮（翻页 / 语义）需要重跑搜索 —— query 必须能塞进 payload。
+fn query_fits_in_button(query: &str) -> bool {
+    let q = query.trim();
+    !q.is_empty() && q.chars().count() <= MAX_QUERY_BUTTON_CHARS
+}
+
+/// 一个小按钮（导航行用；`kind` 是飞书按钮类型：default / primary）。
+fn nav_button(label: &str, value: serde_json::Value, kind: &str) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": label },
+        "type": kind,
+        "value": value,
+    })
+}
+
+pub fn render_search_card(view: &SearchCardView<'_>, items: &[ListItem]) -> serde_json::Value {
     let mut lines: Vec<String> = Vec::new();
     for (i, item) in items.iter().enumerate() {
         lines.push(format!("**{}. {}**", i + 1, item.title.trim()));
@@ -556,13 +594,23 @@ pub fn render_search_card(
         lines.push(String::new());
     }
     let body = lines.join("\n");
-    let mut card = render_card(&format!("搜索「{}」", query.trim()), &body, footer, None);
-    let buttons: Vec<serde_json::Value> = items
+    let mut card = render_card(
+        &format!("搜索「{}」", view.query.trim()),
+        &body,
+        view.footer,
+        None,
+    );
+    let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut()) else {
+        return card;
+    };
+
+    // 第一行：发送原文件（有 file_id 的条目才有按钮）
+    let send_buttons: Vec<serde_json::Value> = items
         .iter()
         .take(MAX_MENU_LINES)
         .enumerate()
         .filter_map(|(i, _)| {
-            let fid = file_ids.get(i)?.trim();
+            let fid = view.file_ids.get(i)?.trim();
             if fid.is_empty() {
                 return None;
             }
@@ -574,10 +622,42 @@ pub fn render_search_card(
             }))
         })
         .collect();
-    if !buttons.is_empty()
-        && let Some(elements) = card.get_mut("elements").and_then(|e| e.as_array_mut())
-    {
-        elements.push(serde_json::json!({ "tag": "action", "actions": buttons }));
+    if !send_buttons.is_empty() {
+        elements.push(serde_json::json!({ "tag": "action", "actions": send_buttons }));
+    }
+
+    // 第二行：翻页 + 语义开关。query 超长时整行不出现（退回页脚文字提示）。
+    let mut nav_buttons: Vec<serde_json::Value> = Vec::new();
+    if query_fits_in_button(view.query) {
+        if view.page > 1 {
+            nav_buttons.push(nav_button(
+                "上一页",
+                action_payload_search(view.query, view.page - 1, view.semantic),
+                "default",
+            ));
+        }
+        if view.page < view.pages {
+            nav_buttons.push(nav_button(
+                "下一页",
+                action_payload_search(view.query, view.page + 1, view.semantic),
+                "default",
+            ));
+        }
+        if view.semantic_available {
+            let (label, kind) = if view.semantic {
+                ("✦ 语义：开", "primary")
+            } else {
+                ("✦ 语义：关", "default")
+            };
+            nav_buttons.push(nav_button(
+                label,
+                action_payload_search(view.query, view.page, !view.semantic),
+                kind,
+            ));
+        }
+    }
+    if !nav_buttons.is_empty() {
+        elements.push(serde_json::json!({ "tag": "action", "actions": nav_buttons }));
     }
     card
 }
@@ -689,6 +769,11 @@ pub enum CardAction {
     /// 与其它动作不同：它**不需要** session_id（与"对哪个会话做事"无关），
     /// 所以解析时走单独一条分支（缺 `file_id` 才忽略）。
     SendFile { file_id: String },
+    /// 「重新搜索」：翻页或切换语义模式 —— 用同一 `query` 重跑并**原地更新**卡片。
+    ///
+    /// 一个动作覆盖两种按钮：翻页 = 换 `page`；语义开关 = 换 `semantic`。
+    /// 同样不需要 session_id。
+    SearchAgain { query: String, page: usize, semantic: bool },
 }
 
 /// 从 `action_value` 解析出动作。返回 `None` = **不认识/不完整 → 直接忽略**。
@@ -715,6 +800,22 @@ pub fn parse_card_action(ev: &CardActionEvent) -> Option<CardAction> {
             return None;
         }
         return Some(CardAction::SendFile { file_id });
+    }
+    // 「重新搜索」（翻页 / 语义开关）同样不需要 session_id。
+    if action == "search" {
+        let query = v
+            .get("query")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let page = v.get("page").and_then(|p| p.as_u64()).unwrap_or(0) as usize;
+        let semantic = v.get("semantic").and_then(|s| s.as_bool()).unwrap_or(false);
+        // fail-closed：缺 query / 页码越界一律忽略（页码上限与 `/find` 的解析共用同一常量）。
+        if query.is_empty() || page < 1 || page > crate::commands::MAX_FIND_PAGE {
+            return None;
+        }
+        return Some(CardAction::SearchAgain { query, page, semantic });
     }
     let session_id = v
         .get("session_id")
@@ -766,6 +867,16 @@ pub fn action_payload_indexed(action: &str, session_id: &str, index: usize) -> s
 /// 「发送文件」按钮的 payload：只带 `file_id`（它不作用于任何会话）。
 pub fn action_payload_file(action: &str, file_id: &str) -> serde_json::Value {
     serde_json::json!({ "action": action, "file_id": file_id })
+}
+
+/// 「重新搜索」按钮的 payload：翻页与语义开关共用（只改其中一个字段）。
+pub fn action_payload_search(query: &str, page: usize, semantic: bool) -> serde_json::Value {
+    serde_json::json!({
+        "action": "search",
+        "query": query.trim(),
+        "page": page,
+        "semantic": semantic,
+    })
 }
 
 /// WebUI 的**深链**（给「打开详情」按钮用）：直达某条会话，用户可以在浏览器里继续追问。
@@ -1403,6 +1514,10 @@ mod tests {
                 action_payload_file("send_file", "f-9"),
                 CardAction::SendFile { file_id: "f-9".into() },
             ),
+            (
+                action_payload_search("合同 2024", 2, true),
+                CardAction::SearchAgain { query: "合同 2024".into(), page: 2, semantic: true },
+            ),
         ];
         for (payload, expect) in cases {
             let ev = CardActionEvent {
@@ -1426,6 +1541,10 @@ mod tests {
             r#"{"action":"remove_confirm","session_id":"s"}"#,
             r#"{"action":"send_file"}"#,                    // 缺 file_id
             r#"{"action":"send_file","file_id":"  "}"#,     // 空白 file_id
+            r#"{"action":"search"}"#,                       // 缺 query/page
+            r#"{"action":"search","query":"x","page":0}"#,  // 页码必须 ≥1
+            r#"{"action":"search","query":"x","page":100}"#, // 页码上限 99（与 /find 共用）
+            r#"{"action":"search","query":"  ","page":1}"#, // 空白 query
             r#"{"action":"cancel"}"#,
             r#"{"action":"__unknown__","session_id":"s"}"#,
         ] {
@@ -1472,7 +1591,7 @@ mod tests {
         assert_eq!(tags, vec!["markdown", "hr", "note", "action"]);
     }
 
-    /// 搜索卡：序号、路径与片段都在正文里；有 `file_id` 的条目带「发送 N」按钮。
+    /// 搜索卡：序号/路径/片段在正文；有 `file_id` 的条目带「发送 N」按钮。
     #[test]
     fn search_card_renders_hits_and_send_buttons_when_ids_exist() {
         let items = vec![
@@ -1481,16 +1600,26 @@ mod tests {
             ListItem { title: "缺 id 的命中.txt".into(), detail: String::new() },
         ];
         let ids = vec!["f-1".to_string(), String::new(), "f-3".to_string()];
-        let card = render_search_card("汪均益", &items, Some("共 2 条"), &ids);
+        let view = SearchCardView {
+            query: "汪均益",
+            footer: Some("共 2 条"),
+            file_ids: &ids,
+            page: 1,
+            pages: 1,
+            semantic: false,
+            semantic_available: false,
+        };
+        let card = render_search_card(&view, &items);
         let body = card["elements"][0]["content"].as_str().unwrap_or("");
         assert!(body.contains("**1. 一审判决书.pdf**"), "正文：{body}");
         assert!(body.contains("合同纠纷/2024"), "正文：{body}");
         assert!(body.contains("汪均益"), "正文：{body}");
 
-        // 只给有 file_id 的条目加按钮（空 id 少一个按钮，而不是发错文件）
-        let last = card["elements"].as_array().unwrap().last().unwrap();
-        assert_eq!(last["tag"], "action");
-        let buttons = last["actions"].as_array().unwrap();
+        // 只给有 file_id 的条目加按钮；单页 + 无 Embedding → 没有导航行
+        let elements = card["elements"].as_array().unwrap();
+        let actions: Vec<&serde_json::Value> = elements.iter().filter(|e| e["tag"] == "action").collect();
+        assert_eq!(actions.len(), 1, "只有发送行：{card}");
+        let buttons = actions[0]["actions"].as_array().unwrap();
         assert_eq!(buttons.len(), 2, "第 2 条没有 file_id，不应有按钮");
         assert_eq!(buttons[0]["text"]["content"], "发送 1");
         assert_eq!(buttons[1]["text"]["content"], "发送 3");
@@ -1504,8 +1633,18 @@ mod tests {
             Some(CardAction::SendFile { file_id: "f-1".into() })
         );
 
-        // 完全没有 file_id 时保持原来的"纯文本结果卡"
-        let plain = render_search_card("汪均益", &items, Some("共 2 条"), &[]);
+        // 完全没有 file_id → 连发送行都不出现
+        let no_ids: Vec<String> = vec![];
+        let plain_view = SearchCardView {
+            query: "汪均益",
+            footer: Some("共 2 条"),
+            file_ids: &no_ids,
+            page: 1,
+            pages: 1,
+            semantic: false,
+            semantic_available: false,
+        };
+        let plain = render_search_card(&plain_view, &items);
         assert!(
             !plain["elements"]
                 .as_array()
@@ -1513,6 +1652,151 @@ mod tests {
                 .iter()
                 .any(|e| e["tag"] == "action"),
             "没有 file_id 就不该出现空按钮行"
+        );
+    }
+
+    /// 翻页按钮：第 1 页无「上一页」、末页无「下一页」、单页整行不出现；
+    /// 点击的 payload 必须能原样解析回同一次搜索的下一页。
+    #[test]
+    fn search_card_paginates_only_when_there_are_more_pages() {
+        let items = vec![ListItem { title: "a.pdf".into(), detail: String::new() }];
+        let ids: Vec<String> = vec![];
+        let nav_of = |card: &serde_json::Value| -> Vec<serde_json::Value> {
+            card["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["tag"] == "action")
+                .flat_map(|e| e["actions"].as_array().cloned().unwrap_or_default())
+                .collect()
+        };
+        let view = |page: usize, pages: usize| SearchCardView {
+            query: "合同 2024",
+            footer: None,
+            file_ids: &ids,
+            page,
+            pages,
+            semantic: false,
+            semantic_available: false,
+        };
+
+        let first = nav_of(&render_search_card(&view(1, 3), &items));
+        assert_eq!(first.len(), 1, "第 1 页只有「下一页」：{first:?}");
+        assert_eq!(first[0]["text"]["content"], "下一页");
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: first[0]["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::SearchAgain { query: "合同 2024".into(), page: 2, semantic: false })
+        );
+
+        let last = nav_of(&render_search_card(&view(3, 3), &items));
+        assert_eq!(last.len(), 1, "末页只有「上一页」：{last:?}");
+        assert_eq!(last[0]["text"]["content"], "上一页");
+
+        let single = nav_of(&render_search_card(&view(1, 1), &items));
+        assert!(single.is_empty(), "单页不出现翻页行：{single:?}");
+    }
+
+    /// 语义开关：文案/配色反映当前状态，点击后请求**相反**的状态；
+    /// Embedding 不可用时按钮不出现（点了没变化 = 误导）。
+    #[test]
+    fn search_card_semantic_toggle_reflects_state_and_availability() {
+        let items = vec![ListItem { title: "a.pdf".into(), detail: String::new() }];
+        let ids: Vec<String> = vec![];
+        let semantic_button = |semantic: bool, available: bool| -> Option<serde_json::Value> {
+            let view = SearchCardView {
+                query: "合同",
+                footer: None,
+                file_ids: &ids,
+                page: 1,
+                pages: 1,
+                semantic,
+                semantic_available: available,
+            };
+            let card = render_search_card(&view, &items);
+            card["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["tag"] == "action")
+                .flat_map(|e| e["actions"].as_array().cloned().unwrap_or_default())
+                .find(|b| b["text"]["content"].as_str().unwrap_or("").contains("语义"))
+        };
+
+        let off = semantic_button(false, true).expect("可用时应有语义按钮");
+        assert_eq!(off["text"]["content"], "✦ 语义：关");
+        assert_eq!(off["type"], "default");
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: off["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::SearchAgain { query: "合同".into(), page: 1, semantic: true }),
+            "关闭状态点一下 → 请求开启"
+        );
+
+        let on = semantic_button(true, true).expect("可用时应有语义按钮");
+        assert_eq!(on["text"]["content"], "✦ 语义：开");
+        assert_eq!(on["type"], "primary", "开启时用蓝色表示状态");
+        let ev = CardActionEvent {
+            event_type: "card.action.trigger".into(),
+            action_value: on["value"].to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            parse_card_action(&ev),
+            Some(CardAction::SearchAgain { query: "合同".into(), page: 1, semantic: false }),
+            "开启状态点一下 → 请求关闭"
+        );
+
+        assert!(
+            semantic_button(false, false).is_none(),
+            "Embedding 不可用时不显示语义按钮"
+        );
+    }
+
+    /// query 超过 payload 上限（200 字）：整行导航按钮不出现（不能把卡片顶爆）。
+    #[test]
+    fn search_card_drops_nav_buttons_for_overlong_query() {
+        let items = vec![ListItem { title: "a.pdf".into(), detail: String::new() }];
+        let ids: Vec<String> = vec![];
+        let long_query = "长".repeat(MAX_QUERY_BUTTON_CHARS + 1);
+        let view = SearchCardView {
+            query: &long_query,
+            footer: Some("下一页：/find …（文字提示保留）"),
+            file_ids: &ids,
+            page: 1,
+            pages: 3,
+            semantic: true,
+            semantic_available: true,
+        };
+        let card = render_search_card(&view, &items);
+        assert!(
+            !card["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tag"] == "action"),
+            "超长 query 不挂任何按钮行：{card}"
+        );
+
+        // 刚好等于上限 → 允许
+        let edge_query = "长".repeat(MAX_QUERY_BUTTON_CHARS);
+        let edge = SearchCardView { query: &edge_query, ..view };
+        let card = render_search_card(&edge, &items);
+        assert!(
+            card["elements"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["tag"] == "action"),
+            "等于上限时应正常挂按钮"
         );
     }
 }

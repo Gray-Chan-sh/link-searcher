@@ -247,6 +247,20 @@ fn main() {
     );
     assert!(v["timeout_secs"].is_number(), "timeout_secs must be present");
 
+    // ── 4b. GET /api/search 的形状（含语义融合标记）──
+    // 锁定 webapi 与桌面命令共用同一实现后的响应形状：`semantic_applied` 是
+    // "本次是否真的做了语义融合"，飞书卡片据此提示"语义未生效"。
+    let (status, body) = request(addr, "GET", "/api/search?q=test&page=1&page_size=5", Some(good));
+    assert_eq!(status, 200, "search must be reachable: {body}");
+    let v = json(&body);
+    assert!(v["hits"].is_array(), "hits must be an array");
+    assert!(v["total"].is_number(), "total must be present");
+    assert_eq!(
+        v["semantic_applied"],
+        Value::Bool(false),
+        "未请求语义 → 不应标记为已融合"
+    );
+
     // ── 5. 心跳 ping：续租成功、会话仍在 ──
     let (status, body) = request(addr, "POST", "/api/session/ping", Some(good));
     assert_eq!(status, 200, "ping must succeed for the session owner");

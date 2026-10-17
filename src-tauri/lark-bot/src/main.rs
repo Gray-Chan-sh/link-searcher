@@ -1006,20 +1006,40 @@ fn build_history_text(messages: &[Value]) -> String {
     blocks.join("\n\n")
 }
 
-/// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
-fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> Result<(), String> {
+/// 一次 `/find` 的结果：要么直接回文本（无命中），要么回/更新一张卡。
+enum FindOutcome {
+    Empty(String),
+    Card(Value),
+}
+
+/// 搜索并渲染结果卡（`/find` 命令与卡片上的翻页/语义按钮**共用**）。
+///
+/// `semantic=true` 时带上 `semantic` 参数；服务端在 Embedding 可用且有向量时才真的
+/// 融合，响应里的 `semantic_applied` 告诉我们是否生效（没生效就在页脚说明，
+/// 不让用户对着一个没反应的开关猜）。
+/// `/api/ai/capabilities` 决定要不要显示「✦ 语义」按钮 —— 不可用时显示等于误导。
+fn find_outcome(
+    http: &Http,
+    query: &str,
+    page: usize,
+    semantic: bool,
+) -> Result<FindOutcome, String> {
     let query = query.trim();
-    if query.is_empty() {
-        reply(&ev.message_id, "用法：`/find 关键词`（短词更容易命中；可加页码如 `/find 合同 2`）");
-        return Ok(());
-    }
-    let page = page.max(1);
-    let body = http.get(&format!(
+    let page = page.clamp(1, crate::commands::MAX_FIND_PAGE);
+    let mut url = format!(
         "/api/search?q={}&page={}&page_size={FIND_PAGE_SIZE}",
         url_encode(query),
         page
-    ))?;
+    );
+    if semantic {
+        url.push_str("&semantic=true");
+    }
+    let body = http.get(&url)?;
     let total = body.get("total").and_then(|t| t.as_u64()).unwrap_or(0);
+    let semantic_applied = body
+        .get("semantic_applied")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let hits: Vec<HitBrief> = parse_hits(&body);
     if hits.is_empty() {
         let text = if total == 0 {
@@ -1027,8 +1047,7 @@ fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> R
         } else {
             format!("「{query}」共 {total} 条结果，但第 {page} 页是空的（试试前面的页码）。")
         };
-        reply(&ev.message_id, &text);
-        return Ok(());
+        return Ok(FindOutcome::Empty(text));
     }
     let items: Vec<ListItem> = hits
         .iter()
@@ -1039,20 +1058,56 @@ fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> R
         .collect();
     let file_ids: Vec<String> = hits.iter().map(|h| h.file_id.clone()).collect();
     let pages = (total as usize).div_ceil(FIND_PAGE_SIZE).max(1);
+    let can_nav = query.chars().count() <= card::MAX_QUERY_BUTTON_CHARS;
     let mut footer = format!("第 {page}/{pages} 页 · 共 {total} 条");
-    if (page as usize) < pages {
+    if !can_nav && page < pages {
+        // query 太长、塞不进按钮 payload → 保留原来的"手打页码"提示
         footer.push_str(&format!(" · 下一页：/find {query} {}", page + 1));
     }
     if file_ids.iter().any(|id| !id.is_empty()) {
         footer.push_str(" · 点「发送 N」把原文件发到飞书");
     }
-    reply_card(&ev.message_id, &render_search_card(query, &items, Some(&footer), &file_ids))?;
+    if semantic && !semantic_applied {
+        footer.push_str(" · ✦ 语义未生效（未配置 Embedding 或无向量）");
+    }
+    let semantic_available = http
+        .get("/api/ai/capabilities")
+        .ok()
+        .and_then(|c| c.get("embedding").and_then(|v| v.as_bool()))
+        .unwrap_or(false);
     log::info!(
-        "[bot] 搜索「{query}」第 {page}/{pages} 页，回 {}/{} 条（chat={}）",
+        "[bot] 搜索「{query}」第 {page}/{pages} 页，回 {}/{} 条（semantic={semantic} applied={semantic_applied}）",
         hits.len(),
-        total,
-        ev.chat_id
+        total
     );
+    let view = card::SearchCardView {
+        query,
+        footer: Some(&footer),
+        file_ids: &file_ids,
+        page,
+        pages,
+        semantic,
+        semantic_available,
+    };
+    Ok(FindOutcome::Card(render_search_card(&view, &items)))
+}
+
+/// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
+fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> Result<(), String> {
+    let query = query.trim();
+    if query.is_empty() {
+        reply(
+            &ev.message_id,
+            "用法：`/find 关键词`（短词更容易命中；可加页码如 `/find 合同 2`；结果卡自带「上一页/下一页」与「✦ 语义」）",
+        );
+        return Ok(());
+    }
+    match find_outcome(http, query, page, false)? {
+        FindOutcome::Empty(text) => reply(&ev.message_id, &text),
+        FindOutcome::Card(card) => {
+            reply_card(&ev.message_id, &card)?;
+        }
+    }
     Ok(())
 }
 
@@ -1388,6 +1443,34 @@ fn handle_card_line(http: &Arc<Http>, line: &str, allowed_users: &[String]) -> R
                         if let Err(e) = send_tracked_file(&http, &message_id, &file_id) {
                             log::warn!("[bot] 发送文件 {file_id} 失败：{e}");
                             reply(&message_id, &format!("发送文件失败：{e}"));
+                        }
+                    });
+                    Ok(())
+                }
+                crate::card::CardAction::SearchAgain { query, page, semantic } => {
+                    // 搜索本身很快，但 `semantic=true` 可能等 embedding（最长 5s）
+                    // → 与发送文件一样放独立线程，不阻塞回调消费者。
+                    // 成功后**原地更新这张卡**（app 身份 PATCH，无"最多 2 次"限制）；
+                    // PATCH 失败才退回"回一张新卡"。
+                    let http = Arc::clone(http);
+                    let message_id = ev.message_id.clone();
+                    log::info!(
+                        "[bot] 搜索卡动作 query={query:?} page={page} semantic={semantic}（chat={}）",
+                        ev.chat_id
+                    );
+                    std::thread::spawn(move || match find_outcome(&http, &query, page, semantic) {
+                        Ok(FindOutcome::Empty(text)) => reply(&message_id, &text),
+                        Ok(FindOutcome::Card(new_card)) => {
+                            if let Err(e) = patch_card(&message_id, &new_card) {
+                                log::warn!("[bot] 原地更新搜索卡失败（{e}）→ 回一张新卡");
+                                if let Err(e2) = reply_card(&message_id, &new_card) {
+                                    log::warn!("[bot] 回搜索卡也失败：{e2}");
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("[bot] 重新搜索失败：{e}");
+                            reply(&message_id, &format!("搜索失败：{e}"));
                         }
                     });
                     Ok(())

@@ -151,6 +151,7 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
                 page_size: page_size.unwrap_or(20),
                 took_ms: 0,
                 hits: Vec::new(),
+                semantic_applied: false,
             });
         }
         ids
@@ -188,54 +189,14 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
         dedupe: true,
     };
 
-    let mgr = state
-        .index_manager
-        .read()
-        .map_err(|e| format!("index manager lock error: {e}"))?;
-    let reader = mgr
-        .reader()
-        .map_err(|e| format!("failed to get reader: {e}"))?;
-    let searcher = crate::search::searcher::SearcherWrap::new(
-        reader.clone(),
-        mgr.index().as_ref().clone(),
-    );
-    drop(mgr);
-
-    let response = searcher
-        .search(&params)
-        .map_err(|e| {
-            log::error!("[SEARCH] search failed: query={:?} dedupe={} error={e}", params.query, params.dedupe);
-            format!("search failed: {e}")
-        })?;
-    // configured, fuse BM25 hits with embedding-cosine top-N via RRF so
-    // meaning-matches surface alongside keyword matches. Runs on a
-    // blocking thread with a short timeout so a hung embedding gateway
-    // degrades to BM25-only rather than freezing the search.
-    let mut response = response;
-    if params.semantic && crate::ai::embedding_enabled() && !params.query.is_empty() {
-        // 全库 top-N BM25（同过滤、不分页）作 RRF 的 BM25 侧融合源：
-        // 页内 20 条的 page-local rank 会让第 2+ 页命中完全不参与融合。
-        let mut top_params = params.clone();
-        top_params.page = 1;
-        top_params.page_size = BM25_FUSION_TOP_N;
-        let db = state.db.clone();
-        match searcher
-            .search(&top_params)
-            .map_err(|e| format!("search failed: {e}"))
-            .and_then(|top| {
-                semantic_rerank_worker(
-                    &db,
-                    &params.query,
-                    &response,
-                    &top.hits,
-                    params.page,
-                    params.page_size,
-                )
-            }) {
-            Ok(merged) => response = merged,
-            Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
-        }
-    }
+    let response = search_with_semantic(&state, params.clone()).map_err(|e| {
+        log::error!(
+            "[SEARCH] search failed: query={:?} dedupe={} error={e}",
+            params.query,
+            params.dedupe
+        );
+        e
+    })?;
 
     let conn = state
         .db
@@ -266,6 +227,76 @@ page: page.unwrap_or(1).clamp(1, 10_000), // 上限防 TopDocs::with_limit(page*
     );
 
     Ok(response)
+}
+
+/// 执行一次搜索，并在 `semantic` 打开且 Embedding 可用时做 RRF 融合。
+///
+/// ⚠️ **桌面命令与 webapi `/api/search` 必须共用这一份实现**。此前融合只写在 Tauri
+/// 命令里，`/api/search` 虽然接收 `semantic` 参数、也塞进了 [`SearchParams`]，但
+/// `SearcherWrap::search` **从不读这个字段** —— 后果是"桌面端语义开关有效、
+/// 浏览器端静默无效"（2026-10-17 查出的缺陷）。把两条入口收口到同一个函数后，
+/// 这类"两个入口两套行为"不会再发生。
+///
+/// 融合前会**释放索引管理锁**（`SearcherWrap` 自带 reader/index 克隆），
+/// 否则一次最长 5s 的 embedding 调用会把索引写入挡在门外。
+pub fn search_with_semantic(
+    state: &AppState,
+    params: SearchParams,
+) -> Result<SearchResponse, String> {
+    let searcher = {
+        let mgr = state
+            .index_manager
+            .read()
+            .map_err(|e| format!("index manager lock error: {e}"))?;
+        let reader = mgr
+            .reader()
+            .map_err(|e| format!("failed to get reader: {e}"))?;
+        let wrap = crate::search::searcher::SearcherWrap::new(
+            reader.clone(),
+            mgr.index().as_ref().clone(),
+        );
+        drop(mgr);
+        wrap
+    };
+
+    let mut response = searcher
+        .search(&params)
+        .map_err(|e| format!("search failed: {e}"))?;
+
+    // 语义融合：把 BM25 命中与 embedding-cosine top-N 按 RRF 融合，让"意思相近"
+    // 的结果与关键词命中一起浮现。embedding 调用有 5s 超时，挂掉的网关只会降级为
+    // 纯关键词，不会把搜索冻住。
+    if should_semantic_rerank(&params, crate::ai::embedding_enabled()) {
+        // 全库 top-N BM25（同过滤、不分页）作 RRF 的 BM25 侧融合源：
+        // 页内 20 条的 page-local rank 会让第 2+ 页命中完全不参与融合。
+        let mut top_params = params.clone();
+        top_params.page = 1;
+        top_params.page_size = BM25_FUSION_TOP_N;
+        match searcher
+            .search(&top_params)
+            .map_err(|e| format!("search failed: {e}"))
+            .and_then(|top| {
+                semantic_rerank_worker(
+                    &state.db,
+                    &params.query,
+                    &response,
+                    &top.hits,
+                    params.page,
+                    params.page_size,
+                )
+            }) {
+            Ok(merged) => response = merged,
+            Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
+        }
+    }
+
+    Ok(response)
+}
+
+/// 语义融合的准入（纯函数，便于单测）：三个条件缺一不可 ——
+/// 请求里明确要、Embedding 网关可用、查询非空。
+fn should_semantic_rerank(params: &SearchParams, embedding_enabled: bool) -> bool {
+    params.semantic && embedding_enabled && !params.query.is_empty()
 }
 
 /// How many corpus-wide BM25 hits feed the semantic RRF fusion. Fusing
@@ -424,6 +455,7 @@ fn semantic_rerank_worker(
         page_size,
         took_ms: bm25.took_ms,
         hits: page_hits,
+        semantic_applied: true,
     })
 }
 
@@ -881,12 +913,7 @@ pub async fn search_file_ids_only_impl(
         dedupe: false,
     };
 
-    let mgr = app_state.index_manager.read().map_err(|e| format!("{e}"))?;
-    let reader = mgr.reader().map_err(|e| format!("{e}"))?;
-    let searcher = crate::search::searcher::SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
-    drop(mgr);
-
-    let response = searcher.search(&params).map_err(|e| format!("{e}"))?;
+    let response = search_with_semantic(app_state, params).map_err(|e| format!("{e}"))?;
     Ok(response
         .hits
         .into_iter()
@@ -1046,6 +1073,52 @@ mod snippet_tests {
         };
         let json = serde_json::to_string(&row).unwrap();
         assert_eq!(json, r#"{"file_id":"abc-123","path":"/Users/gray/Docs/合同.pdf"}"#);
+    }
+}
+
+/// 语义融合准入的测试：与 webapi `/api/search` 的修复直接相关 ——
+/// "请求要 + 网关可用 + 查询非空"三条件缺一不可，避免"开关点了没变化"。
+#[cfg(test)]
+mod semantic_gate_tests {
+    use super::{should_semantic_rerank, SearchParams, SortField};
+
+    fn params(query: &str, semantic: bool) -> SearchParams {
+        SearchParams {
+            query: query.to_string(),
+            dir_ids: None,
+            file_ids: None,
+            ext_filter: None,
+            path_prefixes: None,
+            date_from: None,
+            date_to: None,
+            sort: SortField::Score,
+            sort_order: "desc".to_string(),
+            page: 1,
+            page_size: 20,
+            fuzzy: false,
+            semantic,
+            dedupe: true,
+        }
+    }
+
+    #[test]
+    fn semantic_rerank_requires_flag_gateway_and_query() {
+        assert!(
+            should_semantic_rerank(&params("合同", true), true),
+            "三条件齐 → 融合"
+        );
+        assert!(
+            !should_semantic_rerank(&params("合同", false), true),
+            "没请求 → 不融合（默认纯关键词）"
+        );
+        assert!(
+            !should_semantic_rerank(&params("合同", true), false),
+            "Embedding 网关不可用 → 不融合（降级而不是报错）"
+        );
+        assert!(
+            !should_semantic_rerank(&params("", true), true),
+            "空查询 → 不融合（无词可嵌入）"
+        );
     }
 }
 

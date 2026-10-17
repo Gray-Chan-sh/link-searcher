@@ -28,6 +28,12 @@ pub struct SearchQuery {
     pub date_to: Option<i64>,
     pub fuzzy: Option<bool>,
     pub semantic: Option<bool>,
+    /// 排序字段 / 方向（与桌面命令同语义：`sort=score|date|name`，`sort_order=asc|desc`）。
+    ///
+    /// 2026-10-17 补：此前 webapi 路由**写死** `Score`/`desc`，而 WebUI 一直在发
+    /// 这两个参数 → 浏览器模式下排序控件静默无效（与 `semantic` 同一类缺陷）。
+    pub sort: Option<SortField>,
+    pub sort_order: Option<String>,
 }
 
 pub fn router(_state: ApiState) -> Router<ApiState> {
@@ -63,18 +69,6 @@ async fn search_handler(
         None
     };
 
-    let mgr = app_state
-        .index_manager
-        .read()
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
-    let reader = mgr.reader().map_err(|e| ApiError {
-        error: e.to_string(),
-    })?;
-    let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
-    drop(mgr);
-
     let search_params = SearchParams {
         query: crate::search::schema::split_query_terms(&params.q.to_lowercase()),
         dir_ids: params.dir_ids,
@@ -83,8 +77,8 @@ async fn search_handler(
         path_prefixes: None,
         date_from: params.date_from,
         date_to: params.date_to,
-        sort: SortField::Score,
-        sort_order: "desc".to_string(),
+        sort: params.sort.unwrap_or_default(),
+        sort_order: params.sort_order.unwrap_or_else(|| "desc".to_string()),
         page: params.page,
         page_size: params.page_size,
         fuzzy: params.fuzzy.unwrap_or(false),
@@ -92,17 +86,18 @@ async fn search_handler(
         dedupe: true,
     };
 
-    let result = searcher
-        .search(&search_params)
-        .map_err(|e| ApiError {
-            error: e.to_string(),
-        })?;
+    // ⚠️ 与桌面命令**共用同一实现**（含语义 RRF 融合）—— 见
+    // `commands::search::search_with_semantic` 的注释：此前这里只把 `semantic`
+    // 塞进 SearchParams 而没人读，导致 WebUI 的「✦ 语义」开关静默无效。
+    let result = crate::commands::search::search_with_semantic(&app_state, search_params)
+        .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({
         "hits": result.hits,
         "total": result.total,
         "page": result.page,
         "page_size": result.page_size,
         "took_ms": result.took_ms,
+        "semantic_applied": result.semantic_applied,
     })))
 }
 
