@@ -1,3 +1,44 @@
+## 2026-10-17（第三十一轮）：飞书 `/history` 召回会话全文 + LLM 自动新话题切换
+
+> 用户两条需求：①"在飞书中召回当次的会话完整内容"；②"让 llm 根据提问内容自动判断
+> 是不是要切换到新会话"。
+
+### A. `/history`（别名 `/recall`）：召回当前会话的全部内容（bot + card）
+
+- 取**当前活动会话**的完整消息列表，渲染成 `**你：** …` / `**助手：** …` 交替的
+  卡片（`build_history_text` 纯函数：空内容消息跳过、顺序保持）。
+- 长会话按既有 `split_for_cards` 规则**分多页**（每页 ≤20KB，上限 6 页；超限时尾部合并并
+  提示到 WebUI/桌面端看完整版）；页眉 `会话名 · 历史记录（1 / 3）`（会话配色），
+  末页 footer 给"共 N 条消息"。
+- 空会话/无会话给出明确指引（提问即建 / `/new`）。
+
+### B. LLM 自动新话题 → 自动另起会话（§11.9）
+
+- **服务端**新增判定接口 `POST /api/ai/topic-shift`（`commands/ai.rs::detect_topic_shift`）：
+  用小上下文（最近 6 条、单条截 500 字）问当前 LLM"新问题是否延续当前对话主题"，
+  要求只输出 `{"new_topic": true|false}`。
+  - 解析**严格 JSON 优先**、任何格式漂移 → `false`（宁可不切，不可乱切；丢上下文比会话凌乱严重）；
+  - 这是**判定不是动作**：切不切由 bot 决定（绑定关系的主人），服务端不悄悄搬会话。
+- **bot 侧**（`maybe_auto_switch`，仅"新提问"路径；重跑绝不切换）：
+  - 空会话不判定；判定失败/超时只记日志并**留在当前会话**；
+  - 判定为真 → 建新会话并置活动 → 回一句提示（"检测到新话题，已自动为你开一条新会话
+    （旧会话保留，发 /sessions 可切换回去）"）→ 在新会话里回答；
+  - 逃生阀 `LS_LARK_AUTO_SWITCH=off`（与 `LS_LARK_CARDS` 同套约定）。
+- 提示词内置保守规则：追问/细化/澄清/简短补充（只给一个名字或日期）/同一份文档 → 不切。
+
+### C. 验收
+
+| 项 | 证据 |
+|---|---|
+| app | `topic_shift_tests::parse_prefers_strict_json_and_defaults_to_false`（含"缺字段不得凭 true 乱切"）、`prompt_keeps_recent_messages_and_truncates_each` |
+| bot | `history_text_labels_roles_and_skips_empty`、`history_card_marks_page_and_uses_session_style`、命令解析 `/history` `/recall`（lark-bot 合计 **69** 项） |
+| 门禁 | `cargo test --workspace` 全绿（lib 605 + lark-bot 69 + lark-gate 13 + 集成/HTTP/……）+ `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
+| 真机 | ⏳ 待用户验收：`/history` 召回；换主题提问看是否自动另起会话（`/sessions` 里会多一条） |
+
+> ⚠️ 本轮跑门禁时撞上"构建与运行互锁"：用户正在跑的应用/机器人锁着 `lark-bot.exe`
+> （`tauri-build` 复制 sidecar 报 `拒绝访问`）——按 AGENTS.md ⑤″ 先停应用再跑；
+> **改 bot 本就需重启应用才生效**（AGENTS.md ⑤‴）。
+
 ## 2026-10-17（第三十轮）：飞书停止命令（能真打断生成）+ `/current` + 标题醒目化
 
 > 用户三条反馈：①"标题不明显" ②"需要一个命令可以看出当前的会话" ③"加一个停止命令，

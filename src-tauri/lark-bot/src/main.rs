@@ -71,9 +71,9 @@ use std::time::{Duration, Instant};
 use std::collections::HashMap;
 
 use card::{
-    render_answer_card, render_delete_list_card, render_error, render_search_card,
-    render_session_list_card, render_working, split_for_cards, CardActionEvent, ListItem, SseAccum,
-    Throttle, MAX_BODY_BYTES, MAX_CARDS, MAX_MENU_LINES,
+    render_answer_card, render_delete_list_card, render_error, render_history_card,
+    render_search_card, render_session_list_card, render_working, split_for_cards, CardActionEvent,
+    ListItem, SseAccum, Throttle, MAX_BODY_BYTES, MAX_CARDS, MAX_MENU_LINES,
 };
 use commands::{parse_command, parse_selection, Command as Cmd};
 use lark_gate::{
@@ -347,6 +347,7 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
         Cmd::New => return reply_new_session(http, &ev),
         Cmd::List => return reply_session_list(http, &ev),
         Cmd::Current => return reply_current(http, &ev),
+        Cmd::History => return reply_history(http, &ev),
         Cmd::Switch(arg) => return reply_switch(http, &ev, &arg),
         Cmd::Rename(name) => return reply_rename(http, &ev, &name),
         Cmd::Stop => return reply_stop(http, &ev),
@@ -398,7 +399,16 @@ fn ask_with_session(
     session_id: &str,
     retry_prior_answer: Option<&str>,
 ) -> Result<(), String> {
-    let session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+    let mut session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+    let mut session_id = session_id.to_string();
+    // **自动新话题**（§11.9）：仅"新提问"路径判定（重跑是对原问题重搜，绝不切换）。
+    // 判定失败/拿不准 → 一律留在当前会话（丢上下文比会话凌乱严重得多）。
+    if retry_prior_answer.is_none()
+        && let Some(fresh) = maybe_auto_switch(http, ev, question, &session)
+    {
+        session_id = fresh;
+        session = http.get(&format!("/api/chat/sessions/{session_id}?origin=lark"))?;
+    }
     // 历史**原样透传**（见文件头注释：结构化解析一旦与服务端不一致就会静默丢空历史）
     let mut messages: Vec<Value> = session
         .get("messages")
@@ -413,12 +423,74 @@ fn ask_with_session(
     // 但**卡片还没发出去之前**的任何失败 → 完全退回纯文本，用户不会看到两套答案。
     // `LS_LARK_CARDS=off` 是逃生阀（排查卡片问题时强制走纯文本）。
     if cards_enabled() {
-        match answer_with_card(http, ev, question, session_id, session.clone(), messages.clone(), retry_prior_answer) {
+        match answer_with_card(http, ev, question, &session_id, session.clone(), messages.clone(), retry_prior_answer) {
             Ok(()) => return Ok(()),
             Err(e) => log::warn!("[bot] 卡片流程未能启动（{e}）→ 退回纯文本"),
         }
     }
-    answer_with_text(http, ev, question, session_id, session, messages, retry_prior_answer)
+    answer_with_text(http, ev, question, &session_id, session, messages, retry_prior_answer)
+}
+
+/// 自动新话题开关的逃生阀：`LS_LARK_AUTO_SWITCH=off` → 关闭自动切换（排查/偏好用）。
+fn auto_switch_enabled() -> bool {
+    !std::env::var("LS_LARK_AUTO_SWITCH")
+        .map(|v| v.eq_ignore_ascii_case("off"))
+        .unwrap_or(false)
+}
+
+/// 自动新话题判定 + 切换（§11.9）：返回 `Some(新 session_id)` ＝ 已另起会话。
+///
+/// 三个刻意的边界：
+/// - **空会话不判定**：没有"当前话题"可对比，切换无意义；
+/// - **判定失败/超时/拿不准 → 不切换**（错误只记日志）—— 判定是"锦上添花"，
+///   绝不能因为它让正常问答失败或丢上下文；
+/// - 切换后给用户**一句提示**（否则"列表里怎么多了一条"无从解释）。
+fn maybe_auto_switch(
+    http: &Http,
+    ev: &LarkMessageEvent,
+    question: &str,
+    session: &Value,
+) -> Option<String> {
+    if !auto_switch_enabled() {
+        return None;
+    }
+    let history: Vec<Value> = session
+        .get("messages")
+        .and_then(|v| v.as_array().cloned())
+        .unwrap_or_default();
+    if history.is_empty() {
+        return None; // 首问：没有可切换的对象
+    }
+    let verdict = match http.post(
+        "/api/ai/topic-shift",
+        &json!({ "messages": history, "question": question }),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[bot] 新话题判定失败（留在当前会话）：{e}");
+            return None;
+        }
+    };
+    if verdict.get("new_topic").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    match http.session_for_chat_fresh(&ev.chat_id, &ev.sender_id) {
+        Ok(fresh) => {
+            log::info!(
+                "[bot] 判定为新话题 → 自动另起会话 {fresh}（chat={}）",
+                ev.chat_id
+            );
+            reply(
+                &ev.message_id,
+                "检测到新话题，已自动为你开一条新会话（旧会话保留，发 /sessions 可切换回去）。",
+            );
+            Some(fresh)
+        }
+        Err(e) => {
+            log::warn!("[bot] 自动新会话创建失败（留在当前会话）：{e}");
+            None
+        }
+    }
 }
 
 /// 从会话响应的 `title` 字段读会话名（`Option<&str>` 直接喂给卡片渲染）。
@@ -866,6 +938,71 @@ fn reply_stop(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
     stop_generation(http, ev, &session_id)
 }
 
+/// `/history`（别名 `/recall`）：把**当前会话的全部内容**召回成飞书卡片。
+///
+/// 长会话按 [`split_for_cards`] 分多张卡（与长回答同一套分页/截断规则）：
+/// 超上限时尾部合并并提示到 WebUI/桌面端看完整版。
+fn reply_history(http: &Http, ev: &LarkMessageEvent) -> Result<(), String> {
+    let briefs = http.chat_sessions(&ev.chat_id)?;
+    let Some(active) = briefs.iter().find(|b| b.is_active) else {
+        reply(
+            &ev.message_id,
+            "当前还没有会话 —— 直接提问会自动创建一条（发 /new 也可以）。",
+        );
+        return Ok(());
+    };
+    let session = http.get(&format!("/api/chat/sessions/{}?origin=lark", active.id))?;
+    let title = session_title_of(&session).filter(|t| t != "新会话");
+    let messages = session
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if messages.is_empty() {
+        reply(&ev.message_id, "当前会话还没有内容 —— 直接提问即可。");
+        return Ok(());
+    }
+    let text = build_history_text(&messages);
+    let chunks = split_for_cards(&text, MAX_BODY_BYTES, MAX_CARDS);
+    let pages = chunks.len();
+    let mut sent = 0usize;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let footer = (i + 1 == pages)
+            .then(|| format!("共 {} 条消息 · 当前会话的完整记录", messages.len()));
+        let card = render_history_card(chunk, title.as_deref(), i + 1, pages, footer.as_deref());
+        match reply_card(&ev.message_id, &card) {
+            Ok(_) => sent += 1,
+            // 单页失败不拖垮其余页（与长回答续发同一策略）
+            Err(e) => log::warn!("[bot] 历史记录第 {}/{} 页发送失败：{e}", i + 1, pages),
+        }
+    }
+    log::info!(
+        "[bot] 已回历史记录（chat={} session={} 消息 {} 条 / {sent}/{pages} 页）",
+        ev.chat_id,
+        active.id,
+        messages.len()
+    );
+    Ok(())
+}
+
+/// 把会话消息渲染成召回文本（纯函数，便于单测）。
+///
+/// 形态：`**你：** …` / `**助手：** …` 交替、块间空行。空内容的消息（如被停止的空轮）
+/// 直接跳过 —— 别在卡里留一排孤零零的名字。
+fn build_history_text(messages: &[Value]) -> String {
+    let mut blocks: Vec<String> = Vec::new();
+    for m in messages {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let content = m.get("content").and_then(|c| c.as_str()).unwrap_or("").trim();
+        if content.is_empty() {
+            continue;
+        }
+        let label = if role == "user" { "你" } else { "助手" };
+        blocks.push(format!("**{label}：**{content}"));
+    }
+    blocks.join("\n\n")
+}
+
 /// `/find <关键词> [页码]`：调 `/api/search`，把命中渲染成搜索结果卡。
 fn reply_find(http: &Http, ev: &LarkMessageEvent, query: &str, page: usize) -> Result<(), String> {
     let query = query.trim();
@@ -1026,6 +1163,7 @@ fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Resul
             Ok(())
         }
         Cmd::Current => reply_current(http, &ev),
+        Cmd::History => reply_history(http, &ev),
         Cmd::New => reply_new_session(http, &ev),
         Cmd::List => reply_session_list(http, &ev),
         Cmd::Switch(arg) => reply_switch(http, &ev, &arg),
@@ -2411,6 +2549,26 @@ mod tests {
             GeneratingGuard::begin(chat, "s-3").is_some(),
             "释放后应能再次开始生成"
         );
+    }
+
+    /// `/history` 的召回文本：角色标注、空内容跳过、顺序保持。
+    #[test]
+    fn history_text_labels_roles_and_skips_empty() {
+        let messages = vec![
+            json!({"role":"user","content":"第一问"}),
+            json!({"role":"assistant","content":"第一答"}),
+            json!({"role":"assistant","content":"   "}),
+            json!({"role":"user","content":"第二问"}),
+        ];
+        let text = build_history_text(&messages);
+        assert!(text.starts_with("**你：**第一问"), "{text}");
+        assert!(text.contains("**助手：**第一答"), "{text}");
+        assert!(text.contains("**你：**第二问"), "{text}");
+        let q1 = text.find("第一问").unwrap();
+        let a1 = text.find("第一答").unwrap();
+        let q2 = text.find("第二问").unwrap();
+        assert!(q1 < a1 && a1 < q2, "顺序必须保持：{text}");
+        assert!(!text.contains("**助手：**\n"), "空内容不得留下孤零零的角色名");
     }
 
     /// `/current` 卡片：名字进页眉；无名时有解释；时间/计数都在正文里。

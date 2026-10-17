@@ -19,6 +19,7 @@ use serde_json::json;
 pub const HELP_TEXT: &str = "**可用命令**\n\
 - `/help` — 显示本帮助\n\
 - `/current` — 查看当前会话（名字 / 消息数）\n\
+- `/history` — 召回当前会话的**全部内容**（别名 `/recall`）\n\
 - `/new` — 新建会话并切换过去\n\
 - `/sessions` — 查看会话列表\n\
 - `/switch 3` — 切换到第 3 个会话（也可用标题前缀，如 `/switch 合同`）\n\
@@ -38,6 +39,8 @@ pub enum Command {
     Help,
     /// 查看当前会话（名字/消息数）。
     Current,
+    /// 召回当前会话的完整内容。
+    History,
     New,
     List,
     Switch(String),
@@ -70,6 +73,7 @@ pub fn parse_command(text: &str) -> Command {
     match head.as_str() {
         "help" => Command::Help,
         "current" | "session" => Command::Current,
+        "history" | "recall" => Command::History,
         "new" => Command::New,
         "sessions" | "list" => Command::List,
         "stop" | "cancel" => Command::Stop,
@@ -181,6 +185,8 @@ mod tests {
         assert_eq!(parse_command("/list"), Command::List, "list 是 sessions 的别名");
         assert_eq!(parse_command("/current"), Command::Current);
         assert_eq!(parse_command("/session"), Command::Current, "单数别名校验");
+        assert_eq!(parse_command("/history"), Command::History);
+        assert_eq!(parse_command("/recall"), Command::History, "recall 是 history 的别名");
         assert_eq!(parse_command("/stop"), Command::Stop);
         assert_eq!(parse_command("/cancel"), Command::Stop, "cancel 是 stop 的别名");
         assert_eq!(parse_command("/switch 3"), Command::Switch("3".into()));

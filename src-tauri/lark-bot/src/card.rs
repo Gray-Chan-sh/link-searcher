@@ -355,6 +355,25 @@ pub fn render_answer_card(
     render_card(&headline(&base, title), body, footer.as_deref(), Some(TEMPLATE_SESSION))
 }
 
+/// 会话**历史召回**卡片（`/history`）：与回答卡同款会话配色，页眉带页码。
+///
+/// `footer` 由调用方给（如"共 N 条消息"）；分页文案放页眉（`历史记录（1 / 3）`），
+/// 因为它决定"这段是第几页"——用户点开就要知道从哪读起。
+pub fn render_history_card(
+    body: &str,
+    title: Option<&str>,
+    page: usize,
+    pages: usize,
+    footer: Option<&str>,
+) -> serde_json::Value {
+    let base = if pages > 1 {
+        format!("历史记录（{page} / {pages}）")
+    } else {
+        "历史记录".to_string()
+    };
+    render_card(&headline(&base, title), body, footer, Some(TEMPLATE_SESSION))
+}
+
 /// 把长回答切成**多张卡片**（每张 ≤ `max_bytes`），最多 `max_cards` 张。
 ///
 /// 切分规则与理由：
@@ -942,6 +961,20 @@ mod tests {
         assert_eq!(c["header"]["title"]["content"], "合同审查 · 已停止");
         let c2 = render_answer_card("部分内容", None, 1, 1, 0, 0, true);
         assert_eq!(c2["header"]["title"]["content"], "已停止");
+    }
+
+    /// 历史召回卡：页眉带页码与会话名、会话配色；footer 走 note。
+    #[test]
+    fn history_card_marks_page_and_uses_session_style() {
+        let c = render_history_card("内容", Some("合同审查"), 1, 2, Some("共 12 条消息"));
+        assert_eq!(c["header"]["title"]["content"], "合同审查 · 历史记录（1 / 2）");
+        assert_eq!(c["header"]["template"], "blue");
+        let tags: Vec<&str> = c["elements"].as_array().unwrap().iter()
+            .map(|e| e["tag"].as_str().unwrap_or("")).collect();
+        assert_eq!(tags, vec!["markdown", "hr", "note"], "footer 走 note 元素");
+        // 单页时不显示页码
+        let one = render_history_card("内容", None, 1, 1, None);
+        assert_eq!(one["header"]["title"]["content"], "历史记录");
     }
 
     /// 工作卡带「停止」按钮（有 session_id 时），并往返成 `CardAction::Stop`。

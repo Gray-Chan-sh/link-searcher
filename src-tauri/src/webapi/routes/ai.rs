@@ -50,6 +50,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/chat/sessions/{id}/rename",
             put(rename_chat_session_handler),
         )
+        .route("/api/ai/topic-shift", post(topic_shift_handler))
         .route("/api/ai/gateways/test", get(test_gateway_handler))
         .route("/api/ai/cancel", post(cancel_ai_request_handler))
         .route("/api/ai/events", get(ai_events_handler))
@@ -611,6 +612,28 @@ async fn rename_chat_session_handler(
     )
     .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "ok": true, "title": saved })))
+}
+
+#[derive(serde::Deserialize)]
+struct TopicShiftBody {
+    #[serde(default)]
+    messages: Vec<crate::commands::ai::ChatMessage>,
+    question: String,
+}
+
+/// **自动新话题判定**（飞书 bot 在回答前提问："要不要另起一条会话"；§11.9）。
+///
+/// 这是**判定**不是**动作**：切不切会话由 bot（绑定关系的主人）决定 ——
+/// 服务端不该悄悄搬会话。失败一律按"不切换"处理（由调用方兜底）。
+async fn topic_shift_handler(
+    Json(body): Json<TopicShiftBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let result = crate::commands::ai::detect_topic_shift(body.messages, body.question)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    serde_json::to_value(result)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
 }
 
 async fn test_gateway_handler() -> Result<Json<serde_json::Value>, ApiError> {

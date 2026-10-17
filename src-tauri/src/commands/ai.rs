@@ -474,6 +474,139 @@ pub async fn smart_search_stream(
     Ok(())
 }
 
+// ─────────────────────── 自动新话题判定（会话管理，§11.9） ───────────────────────
+
+/// 新话题判定结果（`POST /api/ai/topic-shift` 的响应形状）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TopicShiftResult {
+    /// 该问题是否**明显**与当前对话主题无关（应当另起一条会话）。
+    pub new_topic: bool,
+    /// 原始输出摘录（诊断用；不参与判定）。
+    pub reason: String,
+}
+
+/// "新话题"判定的历史截取条数与单条截断长度（**给 LLM 的上下文要小而准**）。
+const TOPIC_SHIFT_HISTORY_MESSAGES: usize = 6;
+const TOPIC_SHIFT_MESSAGE_CHARS: usize = 500;
+
+/// 判定一次提问是否应当**自动切换到新会话**（`docs/LARK_BOT.md` §11.9）。
+///
+/// 谁在用：飞书 bot 在回答前调用（除"重跑"外）。**判定失败一律不切换**
+/// （宁可"该切没切"，不可"不该切乱切"——丢上下文比会话凌乱严重得多）。
+pub async fn detect_topic_shift(
+    messages: Vec<ChatMessage>,
+    question: String,
+) -> Result<TopicShiftResult, String> {
+    if !crate::ai::llm_enabled() {
+        return Err(crate::ai::llm_unavailable_reason()
+            .unwrap_or("AI 服务未配置，请在设置页配置 API Base URL")
+            .into());
+    }
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Err("问题不能为空".into());
+    }
+    let (system, user) = build_topic_shift_prompt(&messages, &question);
+    let raw = tokio::task::spawn_blocking(move || crate::ai::chat(&system, &user))
+        .await
+        .map_err(|e| format!("task panicked: {e}"))?
+        .ok_or_else(|| "LLM 无回复".to_string())?;
+    let result = parse_topic_shift(&raw);
+    log::info!(
+        "[AI] topic-shift: new_topic={} raw={:?}",
+        result.new_topic,
+        result.reason
+    );
+    Ok(result)
+}
+
+/// 组装判定提示（纯函数，便于单测）：只带**最近**几条消息，单条截断 —— 判定看的是
+/// "主题是否延续"，不需要全文。
+fn build_topic_shift_prompt(messages: &[ChatMessage], question: &str) -> (String, String) {
+    let recent: Vec<&ChatMessage> = {
+        let mut v: Vec<&ChatMessage> = messages.iter().collect();
+        if v.len() > TOPIC_SHIFT_HISTORY_MESSAGES {
+            v.drain(..v.len() - TOPIC_SHIFT_HISTORY_MESSAGES);
+        }
+        v
+    };
+    let mut transcript = String::new();
+    for m in recent {
+        let role = if m.role == "user" { "用户" } else { "助手" };
+        let content: String = m.content.trim().chars().take(TOPIC_SHIFT_MESSAGE_CHARS).collect();
+        if content.is_empty() {
+            continue;
+        }
+        transcript.push_str(&format!("{role}：{content}\n"));
+    }
+    let system = "你是对话管理助手，判断“新问题”相对“当前对话”是否是**新话题**。\n\
+只输出一行 JSON：{\"new_topic\": true} 或 {\"new_topic\": false}\n\
+判定规则：\n\
+- 追问、细化、澄清、简短补充（比如只给一个名字或日期）、围绕同一份文档/同一件事 → false\n\
+- 明显换了对象、主题或文件，与当前对话毫无关联 → true\n\
+- 拿不准时一律 false（保持当前会话更安全）";
+    let user = format!("当前对话（最近若干条）：\n{transcript}\n新问题：{question}");
+    (system.to_string(), user)
+}
+
+/// 解析判定输出（纯函数）：**严格 JSON 优先，宽松兜底**；任何解析不出 → `false`。
+fn parse_topic_shift(raw: &str) -> TopicShiftResult {
+    let compact: String = raw
+        .to_lowercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let new_topic = if compact.contains("new_topic\":true") || compact.contains("new_topic:true") {
+        true
+    } else if compact.contains("new_topic\":false") || compact.contains("new_topic:false") {
+        false
+    } else {
+        // 退化路径：模型没按格式输出 → **一律 false**（宁可不切，不可乱切）
+        false
+    };
+    TopicShiftResult {
+        new_topic,
+        reason: raw.trim().chars().take(200).collect(),
+    }
+}
+
+#[cfg(test)]
+mod topic_shift_tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage { role: role.into(), content: content.into() }
+    }
+
+    /// 判定解析：严格 JSON 为准；格式漂了/乱说一律 false（**保守是硬要求**）。
+    #[test]
+    fn parse_prefers_strict_json_and_defaults_to_false() {
+        assert!(parse_topic_shift(r#"{"new_topic": true}"#).new_topic);
+        assert!(parse_topic_shift(r#"{"new_topic":true}"#).new_topic);
+        assert!(parse_topic_shift("{\n \"new_topic\" : true \n}").new_topic, "空白变体要认");
+        assert!(!parse_topic_shift(r#"{"new_topic": false}"#).new_topic);
+        assert!(!parse_topic_shift("这是一个新话题。").new_topic, "没有结构化输出 → 不切");
+        assert!(!parse_topic_shift("true").new_topic, "缺 new_topic 字段时不能凭 true 乱切");
+        assert!(!parse_topic_shift("").new_topic);
+        assert!(parse_topic_shift("{\"new_topic\": true}").reason.contains("new_topic"), "reason 是原输出摘录");
+    }
+
+    /// 判定提示：只带最近几条、单条截断 —— 判定看"主题是否延续"，不需要全文。
+    #[test]
+    fn prompt_keeps_recent_messages_and_truncates_each() {
+        let mut msgs: Vec<ChatMessage> = (0..10).map(|i| msg("user", &format!("旧消息{i}"))).collect();
+        msgs.push(msg("assistant", &"字".repeat(1000)));
+        let (system, user) = build_topic_shift_prompt(&msgs, "新问题");
+        assert!(system.contains("new_topic"), "系统提示必须给出输出格式");
+        assert!(system.contains("拿不准"), "必须有保守规则");
+        assert!(!user.contains("旧消息4"), "超过最近 6 条的上下文不该带上");
+        assert!(user.contains("旧消息5"), "最近 6 条要带上：{user}");
+        assert!(user.contains("新问题"));
+        assert!(user.contains(&"字".repeat(500)), "单条应截到 500 字");
+        assert!(!user.contains(&"字".repeat(501)));
+    }
+}
+
 mod rewrite;
 pub use rewrite::{RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
 use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity, rewrite_adds_foreign_entity};

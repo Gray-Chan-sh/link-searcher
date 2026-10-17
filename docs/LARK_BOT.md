@@ -1689,6 +1689,7 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 |---|---|---|
 | `/help`（或单独 `/`） | 命令卡片（附「新建会话」按钮） | 零配置的"弹出列表"替代 |
 | `/current` | 查看**当前会话**：名字（页眉）、消息数、会话总数 | 别名 `/session` |
+| `/history` | **召回当前会话的全部内容**（分页卡片） | 别名 `/recall`；超长提示到 WebUI 看完整版 |
 | `/new` | 新建 lark 会话并置活动，回会话列表卡 | |
 | `/sessions` | 会话列表卡（活动置顶，带时间与标题） | 记点选映射 |
 | `/switch <序号或标题前缀>` | 切换并回"锚点"（会话名 + 上一个问题）；前缀多命中时列表让选 | 序号优先按**上次列表快照**解析 |
@@ -1808,3 +1809,36 @@ CREATE UNIQUE INDEX idx_lcs_active ON lark_chat_sessions(chat_id) WHERE is_activ
 | app | `terminal_done_tests::terminal_done_payload_matches_subscriber_contract` |
 | 门禁 | `cargo test --workspace` 全绿 + `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
 | 真机 | ⏳ 待用户验收（长回答中点「停止」/发 `/stop`；`/current`；页眉蓝色会话名） |
+
+### 11.9 历史召回 + 自动新话题切换（第三十一轮，2026-10-17）
+
+#### ① `/history`（别名 `/recall`）：召回当前会话全文
+
+- 渲染：`**你：** …` / `**助手：** …` 交替（空内容消息跳过）；分页沿用长回答的规则
+  （每页 ≤20KB、上限 6 页、超限尾部合并提示到 WebUI/桌面端）；
+  页眉 `会话名 · 历史记录（1 / 3）`，末页 footer "共 N 条消息"。
+- **它是"只读投影"**：不改会话、不落库 —— 数据源就是 `GET /api/chat/sessions/{id}`。
+
+#### ② LLM 自动新话题 → 自动另起会话
+
+- **分工**：服务端只做**判定**（`POST /api/ai/topic-shift` → `{new_topic, reason}`），
+  **动作**在 bot（绑定的主人）—— 服务端悄悄搬会话会让"当前会话"变得不可预测。
+- **判定输入**：最近 6 条消息（单条截 500 字）+ 新问题；要求 LLM 只输出
+  `{"new_topic": true|false}`。
+- **保守性（硬要求）**：
+  - 解析**只认结构化输出**（`new_topic:true/false`），格式漂移/乱说 → 一律 `false`；
+  - 提示词明确"追问/细化/澄清/简短补充（只给一个名字或日期）/同一份文档 → false；
+    拿不准 → false"；
+  - bot 侧：空会话不判定；判定失败/超时只记日志并留在当前会话。
+- **切换后**：建新会话并置活动 + 回一句提示（旧会话保留，可 `/switch` 回去），
+  回答落进新会话；`LS_LARK_AUTO_SWITCH=off` 可整体关闭（排查/偏好）。
+- **不适用范围**：重跑（`retryPriorAnswer`）绝不切换 —— 它是对原问题重搜。
+
+#### ③ 验收（第三十一轮）
+
+| 项 | 证据 |
+|---|---|
+| app | `topic_shift_tests::parse_prefers_strict_json_and_defaults_to_false`、`prompt_keeps_recent_messages_and_truncates_each` |
+| bot | `history_text_labels_roles_and_skips_empty`、`history_card_marks_page_and_uses_session_style`（lark-bot 合计 **69** 项） |
+| 门禁 | `cargo test --workspace` 全绿（lib 605 + lark-bot 69 + lark-gate 13 + 集成/HTTP/……）+ `tsc` 0 错 + `vitest` 81/81 + semgrep ERROR 0 发现 |
+| 真机 | ⏳ 待用户验收（`/history`；换个主题提问 → `/sessions` 应多出一条新会话） |
