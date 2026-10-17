@@ -1,3 +1,27 @@
+## 2026-10-17（第三十二轮）：右键「在文件夹中显示」打开的是「文档」目录 —— explorer `/select,` 引号位置 + 正斜杠
+
+> 用户报告：搜索页右键菜单的「在文件夹中显示」打不开文件所在目录，总是跳到「文档」。
+
+**根因（本机实测复现）**：`commands/files.rs::reveal_in_file_manager`（Windows 分支）用
+`Command::arg(format!("/select,{}", path))`，两处都不满足 explorer `/select,` 的要求，
+任一处都会让它**静默回退**去打开「文档」/桌面（正是用户所见）：
+
+1. **引号范围**：`Command::arg` 在参数含空格时把**整串**加引号 → `"/select,D:\…\我的 文件.pdf"`；
+   explorer 要求只给**路径**加引号 → `/select,"D:\…\我的 文件.pdf"`。实测整串加引号 → 打开
+   `C:\Users\Gray\Documents`（＝用户症状）。
+2. **分隔符**：`file_tracking.path` / `dir_config.path` 经 `normalize_os_path` 存的是**正斜杠**，
+   而 `/select,` 不认正斜杠。实测 `D:/Syncthing/工作日志` → 桌面；`D:\Syncthing\工作日志` → 正确目录。
+
+> 复核：DB 里 `dir.path.join(file.path)` 拼出的绝对路径**确实存在**（逻辑无错），故障纯在调用 explorer 的方式。
+
+**修复**：抽出纯函数 `reveal_arg()` —— 路径 `\` 化后**只对路径加引号**，经 `CommandExt::raw_arg`
+原样传入命令行（绕过 std 的自动引号）；保留 `process::new()` 的 CREATE_NO_WINDOW。
+新增 Windows 单测 `reveal_arg_quotes_only_path_and_uses_backslashes` 锁死这两条规则，防回归
+（`commands/files.rs`）。macOS/Linux 分支不受影响。
+
+**验证**：全 workspace 测试目标绿（含新单测）、`npx tsc --noEmit` / `npx vitest run` 绿、
+`semgrep --severity ERROR` 零发现；实测修复后 explorer 正确打开文件所在目录并选中目标文件。
+
 ## 2026-10-17：发布 v1.3.0
 
 版本号 `1.2.2 → 1.3.0`。自 v1.2.2 以来共 64 个提交，重点是**飞书机器人集成（全新）**，

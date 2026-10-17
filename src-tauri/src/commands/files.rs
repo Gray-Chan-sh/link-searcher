@@ -374,11 +374,29 @@ fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// Build the single `explorer.exe` argument that reveals `path` via `/select,`.
+///
+/// Explorer 对 `/select,` 有两条硬性要求，违反任一条都会**静默回退**去打开
+/// 「文档」/桌面（用户看到的正是这个现象）：
+///   ① **只给路径加引号** —— `/select,"<path>"`。`Command::arg` 在参数含空格时
+///      会把整串加引号（`"/select,<path>"`），explorer 便认不出 `/select,`；
+///   ② 路径用**反斜杠** —— `file_tracking.path` / `dir_config.path` 经
+///      [`crate::scanner::helpers::normalize_os_path`] 存的是正斜杠，`/select,` 不认。
+/// 故这里手工拼串，交由 [`std::os::windows::process::CommandExt::raw_arg`] 原样传递，
+/// 绕过 std 的自动引号。
+#[cfg(target_os = "windows")]
+fn reveal_arg(path: &std::path::Path) -> String {
+    let win = path.to_string_lossy().replace('/', "\\");
+    format!("/select,\"{win}\"")
+}
+
 #[cfg(target_os = "windows")]
 fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
     // process::new adds CREATE_NO_WINDOW — bare std spawn flashes a console.
+    // raw_arg 原样写入命令行：只对**路径**加引号，分隔符改反斜杠（见 reveal_arg）。
     crate::process::new("explorer")
-        .arg(format!("/select,{}", path.to_string_lossy()))
+        .raw_arg(reveal_arg(path))
         .spawn()
         .map(|_| ())
 }
@@ -753,6 +771,23 @@ mod tests {
     fn insert_file_with_md5(conn: &rusqlite::Connection, path: &str, md5: &str) {
         db::tracker::upsert_file(conn, path, "d1", 1000, 10, Some(md5)).unwrap();
         db::tracker::update_indexed(conn, &db::tracker::get_file_by_path(conn, path).unwrap().unwrap().id, Some(md5)).unwrap();
+    }
+
+    /// `/select,` 的两条硬性要求：**只给路径加引号** + **反斜杠分隔**。
+    /// 违反任一条都会让 explorer 静默回退打开「文档」目录（见 `reveal_arg` 文档）。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reveal_arg_quotes_only_path_and_uses_backslashes() {
+        // DB 里存的是归一化正斜杠路径（normalize_os_path）；这里刻意带空格与中文。
+        let arg = reveal_arg(std::path::Path::new("D:/Syncthing/工作日志/我的 文件.pdf"));
+        assert_eq!(arg, "/select,\"D:\\Syncthing\\工作日志\\我的 文件.pdf\"");
+        // `"/select,…"`（整串被引号包住）是会导致回退的错误形式，必须避免。
+        assert_eq!(arg.matches('"').count(), 2, "只应给路径加一对引号: {arg}");
+        assert!(!arg.starts_with('"'));
+        assert!(arg.starts_with("/select,\""));
+        assert!(arg.ends_with('"'));
+        let path_part = arg.strip_prefix("/select,").unwrap();
+        assert!(!path_part.contains('/'), "explorer /select 不认正斜杠: {arg}");
     }
 
     fn insert_content(conn: &rusqlite::Connection, md5: &str, score: Option<f64>, flags: &str) {
