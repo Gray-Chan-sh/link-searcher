@@ -22,6 +22,25 @@
 **验证**：全 workspace 测试目标绿（含新单测）、`npx tsc --noEmit` / `npx vitest run` 绿、
 `semgrep --severity ERROR` 零发现；实测修复后 explorer 正确打开文件所在目录并选中目标文件。
 
+### 补记：跨平台的「相对路径 → 绝对路径」测试（回答"跨平台是否可用"）
+
+- **结论**：本缺陷是 Windows 专属（explorer `/select,` 的私有语义）；macOS 走 `open -R <path>`、
+  Linux 走 `opener::open(父目录)`，路径由 `execve` 精确传递、且 `/` 本就是它们的原生分隔符，
+  **结构上不可能犯同类错误**，两个分支一行未改。
+- **补上跨平台测试**：原先只有 `to_relative` 有测试，而它的配对函数 `to_absolute`
+  （DB 归一化正斜杠路径 → 磁盘绝对路径）**一个测试都没有**。新增
+  `to_absolute_is_platform_neutral_and_round_trips`（`scanner/helpers.rs`），断言**只用
+  `Path` 语义**（`starts_with` / `ends_with` 组件比较 + 与 `to_relative` 往返），
+  **不比对字面串** —— `join` 插入的分隔符随平台而变，写死字面串会让测试退化成平台专属。
+  用例含 Windows 归一化正斜杠根 + 中文/空格路径。
+- **顺带让测试真正守住产品代码**：`open_file` / `reveal_in_folder` 里手写的
+  `Path::new(&dir.path).join(&file.path)` 改为调用既有的 `to_absolute`（同一语义，行为不变）。
+- **实测发现（顺带确认无隐藏缺陷）**：往返断言在本机（Windows）通过 —— 说明 `strip_prefix`
+  会正确吃掉 `join` 插入的 `\` 分隔符，`to_relative` 不会产出前导分隔符。
+- **未做（如实记录）**：同样的手写拼接还散落在 `commands/index.rs`（2 处）、
+  `commands/index/verify.rs`（2 处）、`webapi/routes/index.rs`（1 处）、`commands/files.rs`（3 处）
+  —— 共约 10 处未统一到 `to_absolute`；`to_absolute` 仍未成为唯一入口。本次只改动了本 bug 相关的两处。
+
 ## 2026-10-17：发布 v1.3.0
 
 版本号 `1.2.2 → 1.3.0`。自 v1.2.2 以来共 64 个提交，重点是**飞书机器人集成（全新）**，

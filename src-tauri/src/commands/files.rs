@@ -222,7 +222,7 @@ pub async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), Str
         .ok_or_else(|| format!("dir config not found: {}", file.dir_id))?;
     drop(conn);
 
-    let abs = std::path::Path::new(&dir.path).join(&file.path);
+    let abs = crate::scanner::helpers::to_absolute(&dir.path, &file.path);
     opener::open(&abs).map_err(|e| format!("failed to open file: {e}"))
 }
 
@@ -361,7 +361,7 @@ pub async fn reveal_in_folder(state: State<'_, AppState>, id: String) -> Result<
         .ok_or_else(|| format!("dir config not found: {}", file.dir_id))?;
     drop(conn);
 
-    let abs = std::path::Path::new(&dir.path).join(&file.path);
+    let abs = crate::scanner::helpers::to_absolute(&dir.path, &file.path);
     reveal_in_file_manager(&abs).map_err(|e| format!("failed to reveal: {e}"))
 }
 

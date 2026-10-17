@@ -275,6 +275,30 @@ mod tests {
         assert!(to_relative(root, Path::new("/tmp/foobar/x.txt")).is_err());
     }
 
+    /// 「相对路径 → 绝对路径」（DB 归一化正斜杠路径 → 磁盘绝对路径）的**平台无关**契约。
+    ///
+    /// `to_absolute` / `to_relative` 是这一转换的配对入口，Windows 与 Unix 都走它，
+    /// 所以断言**只用 `Path` 语义**（组件比较、与 `to_relative` 往返），**不比对字面串**
+    /// —— `join` 插入的分隔符随平台而变（Windows `\`、Unix `/`），写死字面串会让
+    /// 测试退化成平台专属（在本机绿、换平台红，或者反过来）。
+    #[test]
+    fn to_absolute_is_platform_neutral_and_round_trips() {
+        for (root, rel) in [
+            ("/tmp/root", "a.pdf"),
+            ("/tmp/root", "sub/deep/a.pdf"),
+            // Windows 上 DB 里存的也是这种归一化正斜杠路径（normalize_os_path）
+            ("D:/Syncthing/工作日志", "67类起诉状/1.刑事（附带民事）自诉状/我的 文件.docx"),
+            ("C:/Users/x/Docs", "带 空格/子 目录.txt"),
+        ] {
+            let abs = to_absolute(root, rel);
+            assert!(abs.starts_with(Path::new(root)), "{abs:?} 应位于根 {root} 之下");
+            assert!(abs.ends_with(Path::new(rel)), "{abs:?} 应以相对路径 {rel} 结尾");
+            // 与扫描侧 to_relative 往返：锁住「存什么、还原什么」的一致性
+            //（若 strip_prefix 在 join 产生的分隔符上留下前导分隔符，这条会红）。
+            assert_eq!(to_relative(root, &abs).unwrap(), rel, "往返还原失败: {abs:?}");
+        }
+    }
+
     #[test]
     fn normalize_os_path_converts_and_strips_verbatim_prefix() {
         assert_eq!(normalize_os_path(r"D:\我的目录\子目录"), "D:/我的目录/子目录");
