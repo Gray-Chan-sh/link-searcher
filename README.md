@@ -145,6 +145,7 @@
 | **OCR 质量体检** | `link-searcher quality backfill\|audit\|reextract` |
 | **数据迁移** | 设置页一键迁移索引和数据到新目录 |
 | **数据备份** | 手动备份 / 自动定时备份 |
+| **飞书机器人** | **私聊**机器人问答本地私有库：**多组多轮会话**（`/sessions` 切换 / `/new` 新建 / `/rename` 命名）、`/find` 关键词搜索、`/history` 召回会话全文、`/stop` 停止生成、提问新话题自动另起会话；可选**机器人自定义菜单**；仅私聊 + 白名单（fail-closed）。接入步骤见 [`docs/06-settings.md`](docs/06-settings.md) 步骤 12，设计与实现记录见 [`docs/LARK_BOT.md`](docs/LARK_BOT.md) |
 | **远程 WebUI / API** | **默认开启**的 HTTPS 服务（axum + rustls，Bearer Token + 自签名 TLS），启动即监听 `0.0.0.0:8443`，其它机器浏览器直连；**单用户 IP 会话**（同一时刻仅一个会话，超时/主动退出/桌面端强制踢出）；Token 存 `config.json`（`web_api_token`，可用 `LS_WEB_API_TOKEN` 注入），设置页与 Web 端均可修改；**依赖中心在 Web 端同样可用**（查看依赖状态 + 安装/取消，进度经 SSE 事件桥） |
 
 ---
@@ -291,6 +292,8 @@ link-searcher/
 │   │   ├── cli.rs             # 命令行接口（index/scan/watch/health/chat/quality）
 │   │   ├── config.rs          # 配置文件管理
 │   │   ├── state.rs           # AppState（全局状态）
+│   │   ├── lark_bot.rs        # 飞书 bot 生命周期（GUI 拉起 / 收掉 / 重启 sidecar）
+│   │   ├── lark_setup.rs      # 飞书接入自检与一键绑定（lark-cli config init）
 │   │   ├── indexer.rs         # 索引服务（batch_index、流式 MD5、自动 commit）
 │   │   ├── ai/                # 本地嵌入推理（local_embed）
 │   │   ├── deps/              # 运行依赖模型目录/下载（PaddleOCR / BGE / FunASR）
@@ -341,13 +344,17 @@ link-searcher/
 │   │   │   ├── clarify.rs     # 指代消解（State / Grounding / Resolver）
 │   │   │   ├── bge.rs         # BGE 嵌入模型安装
 │   │   │   ├── funasr.rs      # FunASR 语音模型安装
+│   │   │   ├── lark.rs        # 飞书集成命令层（策略读写/配对/自检，与 WebAPI 共用实现）
+│   │   │   ├── sessions/      # 跨端会话协调（in_flight 取消注册表、lark 绑定与会话映射）
 │   │   │   ├── logs.rs        # 日志命令
 │   │   │   ├── helpers.rs     # 命令公共辅助
 │   │   │   └── performance.rs # 硬件检测 / 自动调参
 │   │   ├── webapi/            # 可选 HTTPS REST API（axum + rustls）
 │   │   │   ├── mod.rs         # 服务启动 + 事件桥白名单
 │   │   │   ├── auth.rs / tls.rs / static_files.rs / state.rs
-│   │   │   └── routes/        # search / files / index / ai / dirs / config / settings / backup / logs / events / tesseract
+│   │   │   └── routes/        # search / files / index / ai / dirs / config / settings / backup / logs / events / tesseract / lark
+│   ├── lark-bot/              # 飞书 bot sidecar（独立 crate：命令解析/卡片/菜单；只经 webapi 访问本库）
+│   ├── lark-gate/             # 飞书准入判定（独立 crate：仅私聊 + 白名单，fail-closed）
 │   ├── models/                # PaddleOCR ONNX 模型（PP-OCRv5）
 │   ├── capabilities/          # Tauri 权限配置
 │   └── tests/                 # 集成测试 + IPC 测试
