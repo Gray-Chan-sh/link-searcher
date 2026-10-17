@@ -799,7 +799,7 @@ fn restore_files_core(
         }
         let disk_ok = dir_roots
             .get(&rec.dir_id)
-            .map(|root| std::path::Path::new(root).join(&rec.path).exists())
+            .map(|root| crate::scanner::helpers::to_absolute(root, &rec.path).exists())
             .unwrap_or(false);
         if !disk_ok {
             log::info!("[RESTORE] {} 磁盘上已不存在，保持删除状态", rec.path);
@@ -811,7 +811,7 @@ fn restore_files_core(
         )
         .map_err(|e| format!("restore update failed for {id}: {e}"))?;
 
-        let full_path = std::path::Path::new(dir_roots.get(&rec.dir_id).map(String::as_str).unwrap_or("")).join(&rec.path);
+        let full_path = crate::scanner::helpers::to_absolute(dir_roots.get(&rec.dir_id).map(String::as_str).unwrap_or(""), &rec.path);
         match indexer.index_file(id, &full_path, &rec.dir_id, None) {
             Ok(()) => restored += 1,
             Err(e) => log::warn!("[RESTORE] 重建索引失败 {}: {e}", rec.path),
@@ -924,7 +924,7 @@ pub async fn reextract_missing_content(
                 .map_err(|e| format!("{e}"))
                 .and_then(|d| d.ok_or_else(|| "dir config missing".to_string()))
             {
-                Ok(d) => std::path::Path::new(&d.path).join(&rel_path),
+                Ok(d) => crate::scanner::helpers::to_absolute(&d.path, &rel_path),
                 Err(_) => {
                     failed += 1;
                     continue;
@@ -1064,7 +1064,7 @@ pub async fn reindex_files(
             //
             // 改法：**先让 index_file 正常走完**（它会用 INSERT OR REPLACE 覆盖
             // 同一 md5 的内容行），成功后再确保内容行存在。见下方 ensure_content_row。
-            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
             let md5_for_check = rec.md5.clone();
             drop(conn);
             // Must delete the stale Tantivy doc first — re-adding without it
@@ -1316,7 +1316,7 @@ pub(crate) fn run_quality_backfill(
         // 源文件大小：区分"本来就没有正文"（空文件）与"抽不出正文"（真问题）。
         if let (Some(dir_id), Some(rel)) = (&row.dir_id, &row.rel_path)
             && let Some(root) = dir_roots.get(dir_id) {
-                let abs = std::path::Path::new(root).join(rel);
+                let abs = crate::scanner::helpers::to_absolute(root, rel);
                 meta.file_size = std::fs::metadata(&abs).ok().map(|m| m.len());
                 if ext == "pdf" {
                     meta.page_count = crate::extractor::pdf::get_pdf_page_count(&abs).ok();
@@ -1387,7 +1387,7 @@ pub async fn reindex_file(
     if let Some(ref md5) = rec.md5 {
         let _ = tracker::delete_content(&conn, md5);
     }
-    let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+    let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
     drop(conn);
     state.indexer.index_file(&file_id, &full_path, &rec.dir_id, None)
         .map_err(|e| format!("{e}"))

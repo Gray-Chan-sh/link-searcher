@@ -78,7 +78,7 @@ pub(super) fn run_verify_core(
             if let Some(ref md5) = rec.md5 {
                 let _ = tracker::delete_content(&conn, md5);
             }
-            let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+            let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
             let file_id = rec.id.clone();
             if let Err(e) = indexer.delete_document_only(&file_id) {
                 log::warn!("[VERIFY] delete stale doc failed {file_id}: {e}");
@@ -178,7 +178,7 @@ pub(crate) fn reextract_one(
     // NOTE: 不预先 delete_content —— 见 commands/index.rs::reindex_files 的注释。
     // 「先删后写」在 index_file 走 dedup/失败时不写回，会永久丢内容行。
     // index_file 内部用 INSERT OR REPLACE，同一 md5 自然覆盖，无需先删。
-    let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+    let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
     drop(conn);
 
     // Must delete stale Tantivy doc — re-adding without it leaves duplicates.

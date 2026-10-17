@@ -279,7 +279,7 @@ async fn reindex_handler(
     if let Some(ref md5) = rec.md5 {
         let _ = tracker::delete_content(&conn, md5);
     }
-    let full_path = std::path::Path::new(&dir.path).join(&rec.path);
+    let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
     drop(conn);
     app_state
         .indexer

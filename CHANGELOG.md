@@ -37,9 +37,13 @@
   `Path::new(&dir.path).join(&file.path)` 改为调用既有的 `to_absolute`（同一语义，行为不变）。
 - **实测发现（顺带确认无隐藏缺陷）**：往返断言在本机（Windows）通过 —— 说明 `strip_prefix`
   会正确吃掉 `join` 插入的 `\` 分隔符，`to_relative` 不会产出前导分隔符。
-- **未做（如实记录）**：同样的手写拼接还散落在 `commands/index.rs`（2 处）、
-  `commands/index/verify.rs`（2 处）、`webapi/routes/index.rs`（1 处）、`commands/files.rs`（3 处）
-  —— 共约 10 处未统一到 `to_absolute`；`to_absolute` 仍未成为唯一入口。本次只改动了本 bug 相关的两处。
+- **全部统一到 `to_absolute`（唯一入口）**：这一转换此前被手写重复，且**没有任何测试**。
+  现已把 **19 处**调用点全部改为 `to_absolute` / `to_absolute(...)`（`scanner/mod.rs` 因
+  `use self::helpers::*` 用裸名），逐处核对语义相同（`PathBuf::from(root).join(rel)`）、行为不变：
+  `commands/index.rs`（6）、`commands/files.rs`（5）、`scanner/mod.rs`（3）、
+  `commands/index/verify.rs`（2）、`commands/index/integrity.rs`（2）、`webapi/routes/index.rs`（1）。
+  这样上面那条平台无关单测就能守住**全部**路径拼接点，而不是只有两处。
+  剩余 `Path::new(..).join(..)` 均为**不同用途**（`node_modules` 探测、模型目录、PATH 前缀），未动。
 
 ## 2026-10-17：发布 v1.3.0
 

@@ -246,7 +246,7 @@ pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Res
         let dir = db::dir_config::get_dir(&conn, &file_record.dir_id)
             .map_err(|e| format!("query error: {e}"))?
             .ok_or_else(|| format!("dir config not found: {}", file_record.dir_id))?;
-        let abs = std::path::Path::new(&dir.path).join(&file_record.path);
+        let abs = crate::scanner::helpers::to_absolute(&dir.path, &file_record.path);
         let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
         // P1-2: reject files >500MB before reading into memory
         let file_size = match abs.metadata() {
@@ -305,7 +305,7 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
             .unwrap_or(None)
             .map(|d| d.path)
             .unwrap_or_default();
-        let abs = std::path::Path::new(&dir).join(&file.path).to_string_lossy().into_owned();
+        let abs = crate::scanner::helpers::to_absolute(&dir, &file.path).to_string_lossy().into_owned();
         let b64 = std::fs::read(&abs).ok().map(|bytes| {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(&bytes)
@@ -713,7 +713,7 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
             .unwrap_or(None)
             .map(|d| d.path)
             .unwrap_or_default();
-        let abs = std::path::Path::new(&dir).join(&file.path).to_string_lossy().into_owned();
+        let abs = crate::scanner::helpers::to_absolute(&dir, &file.path).to_string_lossy().into_owned();
         let b64 = std::fs::read(&abs).ok().map(|bytes| {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode(&bytes)

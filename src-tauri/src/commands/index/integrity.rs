@@ -181,7 +181,7 @@ pub(crate) fn run_index_integrity_heal(
             failed += 1;
             continue;
         };
-        let full_path = std::path::Path::new(root).join(rel_path);
+        let full_path = crate::scanner::helpers::to_absolute(root, rel_path);
         if !full_path.exists() {
             // File gone from disk — the next clean scan marks it deleted; until
             // then the downgrade keeps it out of the heal's candidate set.
@@ -225,7 +225,7 @@ pub(crate) fn run_index_integrity_heal(
                 failed += 1;
                 continue;
             };
-            let full_path = std::path::Path::new(root).join(rel_path);
+            let full_path = crate::scanner::helpers::to_absolute(root, rel_path);
             if !full_path.exists() {
                 log::debug!("[HEAL] {rel_path} 已不在磁盘");
                 downgrade(&heal_conn, id, rel_path, "文件已不在磁盘");

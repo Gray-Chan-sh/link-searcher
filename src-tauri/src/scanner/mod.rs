@@ -393,7 +393,7 @@ impl Scanner {
                     // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
                     if include_exts.is_some()
                         && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
-                        && std::path::Path::new(dir_root).join(&rec.path).exists()
+                        && to_absolute(dir_root, &rec.path).exists()
                     {
                         continue;
                     }
@@ -542,7 +542,7 @@ impl Scanner {
                     // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
                     if include_exts.is_some()
                         && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
-                        && std::path::Path::new(dir_root).join(&rec.path).exists()
+                        && to_absolute(dir_root, &rec.path).exists()
                     {
                         continue;
                     }
@@ -742,7 +742,7 @@ impl Scanner {
             // ext 被 include_exts 过滤但仍在磁盘：保留记录，非删除。
             if include_exts.is_some()
                 && !extension_allowed(std::path::Path::new(&rec.path), &include_exts)
-                && std::path::Path::new(&config.path).join(&rec.path).exists()
+                && to_absolute(&config.path, &rec.path).exists()
             {
                 continue;
             }
