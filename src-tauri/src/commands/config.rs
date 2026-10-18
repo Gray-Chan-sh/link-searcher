@@ -127,6 +127,14 @@ pub fn update_config(
     }
     config.data_dir = new_config.data_dir.into();
     config.language = new_config.language;
+    // Query 向量缓存以「模型 id」为键，但**同一模型换网关/换密钥**也会产生不可比的
+    // 向量（不同服务商的同名模型）。所以端点或 provider 变了必须清缓存，否则新查询
+    // 的排序会拿旧网关的向量去比。模型切换的清缓存见 `set_active_model`。
+    let prev_embed_endpoint = (
+        config.embedding_api_base.clone(),
+        config.embedding_api_key.clone(),
+        config.providers.clone(),
+    );
     config.ai_api_base = new_config.ai_api_base;
     config.ai_api_key = new_config.ai_api_key;
     config.embedding_api_base = new_config.embedding_api_base;
@@ -144,6 +152,18 @@ pub fn update_config(
     // fields for any older consumers that still read ai_api_base/key.
     config.ai_api_base = config.embedding_api_base.clone();
     config.ai_api_key = config.embedding_api_key.clone();
+    let providers_changed = prev_embed_endpoint.2.len() != config.providers.len()
+        || prev_embed_endpoint
+            .2
+            .iter()
+            .zip(config.providers.iter())
+            .any(|(a, b)| a.id != b.id || a.base_url != b.base_url || a.api_key != b.api_key);
+    if prev_embed_endpoint.0 != config.embedding_api_base
+        || prev_embed_endpoint.1 != config.embedding_api_key
+        || providers_changed
+    {
+        crate::ai::clear_query_embed_cache();
+    }
     save_config(&config)
 }
 

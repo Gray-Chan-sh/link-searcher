@@ -1,3 +1,89 @@
+## 2026-10-18（第四十三轮）：未修清单逐条修复 P3-⑬～⑲ —— 查询缓存 LRU / watcher 背压 / HTTP agent 复用 / VACUUM 判据 / 线程池上限 / 死设置 / 死参数
+
+**P3-⑬ 查询向量缓存"满了整体清空"，换网关也不失效**（`ai/mod.rs`、`commands/config.rs`）
+
+- 根因：`QUERY_EMBED_CACHE` 是 `HashMap`，超过 256 条就 `clear()` —— 把整块热集一起丢掉，
+  紧接着的查询全都要重新嵌入；键里只含**模型 id**，换 `embedding_api_base`/密钥/provider
+  不失效（同一模型挂在另一个网关时向量不可比，排序会拿旧网关的向量去比）。
+- 修法：改成真正的 LRU（`QueryEmbedCache`：`map` + 最近使用 `order`，命中即移到队尾，
+  满则只淘汰**最久未用**的一条）；`update_config` 增加失效判定（embedding 基址/密钥/provider
+  任一变化即 `clear_query_embed_cache()`；模型切换的失效原本就有，键含模型 id）。新增 1 个单测。
+- **未做（如实记录）**：`get_all_embeddings` / `get_all_chunk_embeddings`（语义检索每次查询都把
+  全库向量从 SQLite 读出并反序列化）**刻意不加缓存** —— 要缓存就必须在**每一个**写入点
+  （upsert/delete、`purge_dir_data`、孤儿清理、向量重建、恢复备份…）正确失效，漏一处就是
+  "搜索静默返回过期结果"，正确性风险远大于收益。要做必须先定死失效契约。
+
+**P3-⑭ watcher 事件通道无界（大目录同步 → 内存无上限）**（`scanner/watcher.rs`、`maintenance.rs`、`cli.rs`）
+
+- 根因：`FileWatcher` 用 `mpsc::channel()`（**无界**）投递文件变更事件，而消费者
+  （`handle_event`：每条都查库、可能触发索引）远慢于产出 —— 一次大目录同步能堆进几百万条事件，
+  进程内存随之失控。
+- 修法：改 `sync_channel(EVENT_QUEUE_CAP = 4096)` + `try_send()`：满则丢**通知**（数据仍在磁盘上）
+  并置溢出标志（`take_overflow`/`dropped_events`），日志按 100 条节流。GUI 侧由后台维护线程
+  取走标志后跑一次全量比对补回；CLI `watch` 循环改 `recv_timeout(5s)` 轮询同一标志并自行补扫。
+
+**P3-⑮ 每批嵌入请求都重建 HTTP agent**（`ai/mod.rs`）＋`init_db` 的 WAL checkpoint
+
+- 根因：`build_agent_with_read_timeout` 每次调用都新建 rustls `ClientConfig`（含根证书装载），
+  而远程嵌入是**每组一次请求**（大批量索引时成千上万组，还有重试）——纯浪费。
+- 修法：按读超时值缓存 agent（`OnceLock<Mutex<HashMap<u64, ureq::Agent>>>`，上限 16，超限整体
+  清空）；`Agent` 克隆只是 Arc 计数。代理环境变量本就在启动时读取（改代理需重启，与缓存无关）。
+- `db::init_db` 里的 `PRAGMA wal_checkpoint(TRUNCATE)` 由 `?` 改为忽略失败：它对非 WAL/内存库
+  会报错（历史上因此逼得部分测试必须用真实文件库），而它在 `get_pool` 里已经做过一次。
+
+**P3-⑯ 启动 VACUUM 只看文件大小 → 每次启动整库重写**（`db/mod.rs`、`lib.rs`）
+
+- 根因：只判 `db_size > 100 MiB`：一个几 GB 的库**每次启动**都要整库重写（分钟级 IO），而紧接着
+  启动的向量/分块回填正在写库，两边抢锁；大多数启动其实没有任何空间可回收。
+- 修法：新增 `db::fragmentation_ratio`（`freelist_count / page_count`），**碎片率 ≥ 10%** 才 VACUUM，
+  否则只记一条 info（含实际比率与库大小）。判据从"库大"改为"确实有碎片"。
+
+**P3-⑰ `batch_io_pool` 无上限 + 池缓存无界**（`indexer.rs`、`commands/performance.rs`）
+
+- 根因：`perf_batch_io_concurrency` 是**用户可写设置**（手改 DB/config.json 也算），
+  `set_batch_io_concurrency` 与 `get_batch_io_concurrency_from_db` 都不设上限 → 会真的按荒谬值
+  （成千）建线程池；且 `BATCH_IO_POOLS` 按 cap 建池后**永久驻留**，反复改并发数即无界泄漏
+  （每个池都带着自己的线程）。
+- 修法：`MAX_BATCH_IO_THREADS = 24`（与 `scale_params` 的 aggressive 上限一致），在**建池处**、
+  `set_batch_io_concurrency`、DB 读取处三处 clamp；池缓存上限 `POOL_CACHE_MAX = 4`（淘汰只从 map
+  移除 Arc —— 仍在使用者靠 Arc 存活，在飞批次不会被中断）。新增 1 个单测（上限生效 + 缓存有界）。
+
+**P3-⑱ 三个"死设置"：定时扫描时间 / 自动备份 / 备份间隔**（新增 `src/maintenance.rs`、`lib.rs`、`db/mod.rs`）
+
+- 根因：设置页能改、写进 `app_settings`，但**没有任何代码读它们**：
+  * `scan_time`（用户键，`ALLOWED_KEYS` 里也只有它）vs `scheduled_scan_time`（旧 seed 写的键）——
+    同一个开关存在两个键名，其中一个是死的；
+  * `auto_backup` + `backup_interval`：旧 seed 写 `"1"`，而勾选框按 `== "true"` 判断 → **一直显示为关**；
+    而且从没有任何调度器读它 —— **用户以为有备份可恢复，实际一个都没有**（静默失效）。
+- 修法：
+  * 新增后台维护线程（60s 轮询）：① watcher 溢出补扫 ② 到 `scan_time` 每天跑一次扫描 ③ 到
+    `backup_interval` 且 `auto_backup == "true"` 时自动备份（复用 `trigger_backup` —— 与 Web/IPC
+    同一条路径）。所有动作**先抢 `is_scanning`**（与手动扫描/删除目录后的续扫互斥），正在恢复备份
+    或正在扫描时跳过；备份失败**不记**时间戳，下一轮重试。定时扫描走 `ScanWorker::run(None)` ——
+    与「手动扫描全部」完全同一条代码路径（进度事件、`ScanFlagReset`、扫描后回填都在里面）。
+  * 维护线程额外等一个 `startup_scan_done` 标志（启动扫描 + 启动期 VACUUM 之后置位）：**真机实测**
+    发现启动扫描**不抢** `is_scanning`（历史如此），维护线程在它跑着时开扫会变成**两个 walker 同时
+    走同一批目录**（app.log 里两条进度交错、同一批文件被重复提取/OCR）。加门后实测：启动扫描期间
+    每 60s 只打一条 debug「跳过本轮维护」，不再触发。
+  * seed 的 `scheduled_scan_time` 改为 `scan_time`；`auto_backup` 默认改为 `"false"`（默认关：写盘
+    动作不该未经勾选自己开始，且与勾选框取值域一致）。
+  * `migrate_legacy_backup_settings` 改为"死键**只删不搬**"（值从来没被任何代码读过，不存在需要
+    保留的用户选择），并把 `auto_backup` 归一：只有 `"true"` 算开，旧值 `"1"` → `"false"`（与用户
+    此前所见「关」一致，升级后不会突然开始备份）。迁移测试随之改写（含"用户真的勾过的 `true` 不得
+    被归一关掉" + 幂等）。
+  * 纯函数 `scan_due` / `backup_due` 带单测（未到点/到点/今天已跑/非法或空时间视为关闭/从未备份过/
+    间隔未到/时钟回拨）。
+- **行为变化（需知悉）**：`scan_time` 默认 `02:00` → 应用开着时每天跑一次全量比对扫描（未变更文件
+  只比 mtime/大小，不重新提取）。不想用就把时间框**清空**（空/非法值 = 关闭）。
+
+**P3-⑲ 前端死参数 `private`**（`src/api/dirs.ts`、`src/pages/AiChat.tsx`）
+
+- 根因：`private` 列已在 P6 从 `dir_config` 删除，但前端仍在 `updateDir(...)` 里发
+  `private: private_`、`DirConfig` 类型里留 `private?: boolean`、`AiChat` 的目录树状态里存
+  `private: d.private ?? false` —— 后端没有这个参数、返回里也没有这个字段，全是死代码
+  （Tauri 忽略多余参数，所以一直没报错）。
+- 修法：三处一并删除（`updateDir` 参数、TS 类型字段、`AiChat` 状态字段）。
+
 ## 2026-10-18（第四十二轮）：未修清单逐条修复 P2-⑧⑨⑩⑪⑫ —— 网关 SSRF / bot 跳过 TLS 校验 / 私钥权限 / zip bomb / 非回环绑定提示
 
 **P2-⑧ 网关 `base_url` 可指向云元数据（SSRF）**（`ai/mod.rs`、`commands/config.rs`）

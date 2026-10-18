@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -13,6 +14,12 @@ use anyhow::Result;
 use notify::RecursiveMode;
 use notify::Event;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult};
+
+/// 事件队列深度上限。消费者（`handle_event`：查库 + 可能触发索引）比事件产出慢
+/// 得多 —— 大目录同步时，无界队列会把每条变更都堆进内存（几百万条 = 进程被拖垮）。
+/// 满了就丢弃并置 `overflow` 标志，由后台维护线程补一次增量扫描兜底（见
+/// `crate::maintenance`）：丢的是"通知"，不是数据。
+const EVENT_QUEUE_CAP: usize = 4096;
 
 /// A file-system change event produced by the debounced watcher.
 #[derive(Debug, Clone)]
@@ -54,22 +61,35 @@ pub struct FileWatcher {
     #[allow(dead_code)]
     watcher: Option<notify::RecommendedWatcher>,
     tx: mpsc::Sender<WatcherCommand>,
+    /// 事件队列满过一次（至少丢过事件）。消费者取走后调用
+    /// [`take_overflow`](Self::take_overflow) 清除并补扫。
+    overflow: Arc<AtomicBool>,
+    /// 累计丢弃的事件数（仅用于日志/诊断）。
+    dropped: Arc<AtomicUsize>,
 }
 
 impl FileWatcher {
     /// Create a new debounced file watcher.
     ///
     /// Returns a handle and a [`mpsc::Receiver`] that receives [`FileChangeEvent`]s
-    /// with a 300 ms debounce window.
+    /// with a 300 ms debounce window.
+    ///
+    /// The event channel is **bounded** ([`EVENT_QUEUE_CAP`]): 消费者慢于产出时丢弃事件
+    /// 并置溢出标志，而不是无限增长。调用方可周期调用
+    /// [`take_overflow`](Self::take_overflow) 得到"需要补扫"的信号。
     pub fn new() -> (Self, mpsc::Receiver<FileChangeEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
+        let (event_tx, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAP);
         let watches: Arc<Mutex<HashMap<String, PathBuf>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let overflow = Arc::new(AtomicBool::new(false));
+        let dropped = Arc::new(AtomicUsize::new(0));
 
         let event_tx_cb = event_tx;
         let watches_cb = Arc::clone(&watches);
         let watches_cmd = Arc::clone(&watches);
+        let overflow_cb = Arc::clone(&overflow);
+        let dropped_cb = Arc::clone(&dropped);
 
         std::thread::spawn(move || {
             let mut debouncer = match new_debouncer(
@@ -87,15 +107,25 @@ impl FileWatcher {
                             let Some(dir_id) = find_matching_dir(&watches, path) else {
                                 continue;
                             };
-                            if event_tx_cb
-                                .send(FileChangeEvent {
-                                    dir_id,
-                                    path: path.clone(),
-                                    kind,
-                                })
-                                .is_err()
-                            {
-                                return;
+                            match event_tx_cb.try_send(FileChangeEvent {
+                                dir_id,
+                                path: path.clone(),
+                                kind,
+                            }) {
+                                Ok(()) => {}
+                                // 消费者已退出：整条链路可以收了。
+                                Err(mpsc::TrySendError::Disconnected(_)) => return,
+                                // 队列满：丢事件（丢的是通知，不是数据），置溢出标志让
+                                // 维护线程补一次增量扫描。日志按 100 条节流，避免刷屏。
+                                Err(mpsc::TrySendError::Full(_)) => {
+                                    overflow_cb.store(true, Ordering::Relaxed);
+                                    let n = dropped_cb.fetch_add(1, Ordering::Relaxed) + 1;
+                                    if n % 100 == 1 {
+                                        log::warn!(
+                                            "[WATCHER] 事件队列已满（cap={EVENT_QUEUE_CAP}），开始丢弃文件变更事件（累计 {n} 条）；将触发一次全量补扫"
+                                        );
+                                    }
+                                }
                             }
                         }
                     }
@@ -134,7 +164,18 @@ impl FileWatcher {
             }
         });
 
-        (Self { watcher: None, tx: cmd_tx }, event_rx)
+        (Self { watcher: None, tx: cmd_tx, overflow, dropped }, event_rx)
+    }
+
+    /// 事件队列是否溢出过（并清除标志）。`true` 表示至少丢过一条变更通知，
+    /// 调用方应做一次增量扫描补回。
+    pub fn take_overflow(&self) -> bool {
+        self.overflow.swap(false, Ordering::Relaxed)
+    }
+
+    /// 累计丢弃的事件数（不清零，用于诊断日志）。
+    pub fn dropped_events(&self) -> usize {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Start watching a directory for changes.

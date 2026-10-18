@@ -12,6 +12,7 @@ pub mod lark_bot;
 pub mod lark_setup;
 pub mod load;
 pub mod logs;
+pub mod maintenance;
 pub mod process;
 pub mod scanner;
 pub mod search;
@@ -465,11 +466,23 @@ get_dir_children,
             // 放在 bot 之后 —— 它可能在"飞书策略变了"时重启 bot。
             config_watch::spawn(app.handle().clone());
 
+            // 后台维护：定时扫描 / 自动备份 / watcher 溢出补扫。设置页里这三个开关
+            // 过去只是"写进 app_settings 的字符串"（`auto_backup` 甚至显示为关却存着
+            // "1"），没有任何代码读 —— 用户以为有备份可恢复。见 `maintenance` 模块头。
+            //
+            // `startup_scan_done`：启动扫描没有抢 `is_scanning`（历史如此），若维护线程
+            // 在它跑着时也去扫一遍，两个 walker 会同时走同一批目录。故维护线程等这个
+            // 标志（启动扫描 + 启动期 VACUUM 结束后置位）再动手。
+            let startup_scan_done = Arc::new(AtomicBool::new(false));
+            maintenance::start(app.handle().clone(), startup_scan_done.clone());
+
             let app_handle = app.handle().clone();
             let scanner_ref = scanner.clone();
             let db_ref = db_pool.clone();
             let indexer_ref = indexer_for_startup;
             let watch_tx = watcher_tx_for_startup;
+            // （`startup_scan_done` 在上面创建、已克隆给维护线程。）
+            let startup_scan_done_for_thread = startup_scan_done.clone();
 
             // R3-11: StartWatch 必须先于扫描线程，否则扫描期间的变更会丢失
             let dirs = {
@@ -602,18 +615,33 @@ get_dir_children,
                     drop(conn);
                 }
 
-                // VACUUM after watchers started — only if DB > 100 MiB
+                // VACUUM **只在确实有碎片**时做：以前只按文件大小（>100 MiB）判断，
+                // 于是一个几 GB 的库每次启动都要整库重写一遍（分钟级 IO，还会和紧接着
+                // 启动的向量回填抢写锁）。空闲页占比低于阈值时跳过，代价近乎为零。
+                const VACUUM_MIN_BYTES: u64 = 100 * 1024 * 1024;
+                const VACUUM_MIN_FREELIST_RATIO: f64 = 0.10;
                 let db_size = std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0);
-                if db_size > 100 * 1024 * 1024 {
+                if db_size > VACUUM_MIN_BYTES {
                     if let Ok(conn) = db_ref.get() {
-                        if let Err(e) = crate::db::vacuum(&conn) {
-                            log::error!("[STARTUP] VACUUM failed: {e}");
+                        let ratio = crate::db::fragmentation_ratio(&conn);
+                        if ratio.is_some_and(|r| r >= VACUUM_MIN_FREELIST_RATIO) {
+                            if let Err(e) = crate::db::vacuum(&conn) {
+                                log::error!("[STARTUP] VACUUM failed: {e}");
+                            }
+                        } else {
+                            log::info!(
+                                "[STARTUP] VACUUM skipped (fragmentation={ratio:?} < {VACUUM_MIN_FREELIST_RATIO}, db_size={db_size} B)"
+                            );
                         }
                         drop(conn);
                     }
                 } else {
-                    log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold=100 MiB)");
+                    log::info!("[STARTUP] VACUUM skipped (db_size={db_size} B, threshold={VACUUM_MIN_BYTES})");
                 }
+
+                // 启动扫描 + 启动期 VACUUM 都做完了 → 放行后台维护线程
+                // （定时扫描 / 自动备份 / watcher 溢出补扫）。
+                startup_scan_done_for_thread.store(true, std::sync::atomic::Ordering::Release);
 
                 // Chunk building + chunk/doc embedding backfills run
                 // sequentially on one background thread: they share the local

@@ -98,7 +98,7 @@ export default function AiChat() {
     })()
   }, [deepLink, t])
   // 树状文件浏览器
-  const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null; private: boolean }[]>([])
+  const [dirTrees, setDirTrees] = useState<{ id: string; basePath: string; label: string; root: DirTreeNode[] | null }[]>([])
   const [treeExpanded, setTreeExpanded] = useState(false)
   const [pendingMention, setPendingMention] = useState<string | null>(null)
   const [treeFilter, setTreeFilter] = useState('')
@@ -221,7 +221,7 @@ export default function AiChat() {
     listDirs().then(dirs => {
       setDirTrees(dirs.map(d => {
         const label = d.alias || d.path.split('/').pop() || d.path
-        return { id: d.id, basePath: d.path, label, root: null, private: d.private ?? false }
+        return { id: d.id, basePath: d.path, label, root: null }
       }))
       dirs.forEach(d => {
         getDirChildren(d.path).then(items => {

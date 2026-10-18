@@ -72,14 +72,35 @@ const DEFAULT_WRITER_BUFFER_MB: usize = 150;
 /// (num_cpus threads), which is exactly what must be avoided here.
 static BATCH_IO_POOLS: OnceLock<Mutex<HashMap<usize, Arc<ThreadPool>>>> = OnceLock::new();
 
+/// Hard upper bound on Phase-1 pool threads. `perf_batch_io_concurrency` is a
+/// **user-writable** setting (`app_settings`) and a hand-edited `config.json` /
+/// settings row could ask for thousands — one pool that big would exhaust the
+/// machine, and (before the cache bound below) it would be kept forever.
+pub(crate) const MAX_BATCH_IO_THREADS: usize = 24;
+/// Upper bound on how many distinct pools we keep alive. Changing the
+/// concurrency setting (or adaptive re-tuning) would otherwise leave every
+/// historical pool resident, each holding its threads.
+const POOL_CACHE_MAX: usize = 4;
+
 /// Return (creating on first use) a dedicated Rayon pool with at most `cap`
 /// worker threads for Phase-1 batch file reads.
 fn batch_io_pool(cap: usize) -> Result<Arc<ThreadPool>> {
-    let cap = cap.max(1);
+    // Clamp here too (not only at the setter): this is the single place a pool
+    // is actually built, so no caller can bypass the bound.
+    let cap = cap.clamp(1, MAX_BATCH_IO_THREADS);
     let pools = BATCH_IO_POOLS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut pools = pools
         .lock()
         .map_err(|_| anyhow::anyhow!("batch io pool cache lock poisoned"))?;
+    // Evict before `entry()` so the mutable borrow of the map ends first.
+    // Evicting is safe: we only drop the map's `Arc`. A pool still in use lives
+    // until its last clone is released, so in-flight batches are never interrupted.
+    if !pools.contains_key(&cap)
+        && pools.len() >= POOL_CACHE_MAX
+        && let Some(victim) = pools.keys().copied().find(|k| *k != cap)
+    {
+        pools.remove(&victim);
+    }
     Ok(match pools.entry(cap) {
         Entry::Occupied(e) => e.get().clone(),
         Entry::Vacant(e) => {
@@ -1011,8 +1032,13 @@ impl IndexerService {
     /// Set the concurrency cap for Phase-1 batch file reads (read + MD5 +
     /// extraction). Lower caps reduce IO contention and parallel SQLite
     /// writes; the default is [`DEFAULT_BATCH_IO_CONCURRENCY`].
+    ///
+    /// The value is clamped to `1..=`[`MAX_BATCH_IO_THREADS`]: it comes from a
+    /// user-writable setting, and an absurd value must not turn into that many
+    /// worker threads.
     pub fn set_batch_io_concurrency(&self, n: usize) {
-        self.batch_io_concurrency.store(n, Ordering::Relaxed);
+        self.batch_io_concurrency
+            .store(n.clamp(1, MAX_BATCH_IO_THREADS), Ordering::Relaxed);
     }
 
     /// Current Phase-1 concurrency cap (the value actually in effect).
@@ -1264,6 +1290,28 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='oldhash'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(m, 0, "内容变更后应清理旧 md5 的 chunk 向量");
+    }
+
+    /// 用户可写设置（`perf_batch_io_concurrency`）里的荒谬值不得变成那么多线程，
+    /// 池缓存也不得随"反复改并发数"无界增长。
+    #[test]
+    fn test_batch_io_pool_clamps_and_bounds_cache() {
+        let huge = batch_io_pool(10_000).unwrap();
+        assert_eq!(huge.current_num_threads(), MAX_BATCH_IO_THREADS, "上限必须生效");
+
+        let zero = batch_io_pool(0).unwrap();
+        assert_eq!(zero.current_num_threads(), 1, "下限必须生效");
+
+        // 连续请求许多不同 cap：缓存不得无界增长（旧池只从 map 移除，
+        // 仍有使用者的池靠 Arc 存活）。
+        for cap in 1..=(POOL_CACHE_MAX + 8) {
+            let _ = batch_io_pool(cap).unwrap();
+        }
+        let Some(cache) = BATCH_IO_POOLS.get() else {
+            panic!("pool cache should be initialised by the calls above");
+        };
+        let cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(cache.len() <= POOL_CACHE_MAX, "池缓存必须有界，实际 {}", cache.len());
     }
 
     #[test]

@@ -13,17 +13,62 @@ use std::sync::{Mutex, OnceLock};
 use crate::config::{ModelType, ProviderConfig};
 use serde::{Deserialize, Serialize};
 
-/// Query-embedding LRU-ish cache. `embed()` serves single query texts from
-/// the retrieval path (rewrite / BM25 query / vector scan); caching them
-/// skips repeated local-BGE / gateway inference when the same or a
-/// near-identical query returns in a session. Capped — on overflow the whole
-/// cache is dropped (simplest correct eviction for a small hot set).
-/// Document-chunk embedding goes through `embed_batch`, never cached here.
-static QUERY_EMBED_CACHE: OnceLock<Mutex<HashMap<String, Vec<f32>>>> = OnceLock::new();
+/// Query-embedding cache. `embed()` serves single query texts from the
+/// retrieval path (rewrite / BM25 query / vector scan); caching them skips
+/// repeated local-BGE / gateway inference when the same or a near-identical
+/// query returns in a session.
+///
+/// Eviction is **LRU**: 容量满时只淘汰最久未用的那一条（旧实现是"满了整体
+/// clear"，把整块热集一起丢掉，紧接着的查询全都要重新嵌入）。键里含模型 id，
+/// 换模型天然失效；换**网关/密钥**由 `update_config` 显式清空
+/// （见 `clear_query_embed_cache`）。
+/// Document/chunk embedding goes through `embed_batched`, never cached here.
+static QUERY_EMBED_CACHE: OnceLock<Mutex<QueryEmbedCache>> = OnceLock::new();
 const QUERY_EMBED_CACHE_CAP: usize = 256;
 
-fn query_embed_cache() -> &'static Mutex<HashMap<String, Vec<f32>>> {
-    QUERY_EMBED_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+/// Bounded LRU: `map` 存向量，`order` 记录最近使用顺序（末尾最新）。
+#[derive(Default)]
+struct QueryEmbedCache {
+    map: HashMap<String, Vec<f32>>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl QueryEmbedCache {
+    fn get(&mut self, key: &str) -> Option<Vec<f32>> {
+        let v = self.map.get(key)?.clone();
+        self.touch(key);
+        Some(v)
+    }
+
+    fn insert(&mut self, key: String, v: Vec<f32>) {
+        if self.map.insert(key.clone(), v).is_some() {
+            self.touch(&key);
+        } else {
+            self.order.push_back(key);
+        }
+        while self.order.len() > QUERY_EMBED_CACHE_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.map.remove(&oldest);
+            }
+        }
+    }
+
+    /// 标记为"刚用过"。
+    fn touch(&mut self, key: &str) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.to_string());
+    }
+
+    fn clear(&mut self) {
+        self.map.clear();
+        self.order.clear();
+    }
+}
+
+fn query_embed_cache() -> &'static Mutex<QueryEmbedCache> {
+    QUERY_EMBED_CACHE.get_or_init(|| Mutex::new(QueryEmbedCache::default()))
 }
 
 fn cache_key(text: &str) -> String {
@@ -40,16 +85,13 @@ pub fn cached_embed(text: &str) -> Option<Vec<f32>> {
         return embed(text);
     }
     {
-        let cache = query_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
+        let mut cache = query_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
         if let Some(v) = cache.get(&key) {
-            return Some(v.clone());
+            return Some(v);
         }
     }
     let v = embed(text)?;
     let mut cache = query_embed_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if cache.len() >= QUERY_EMBED_CACHE_CAP {
-        cache.clear();
-    }
     cache.insert(key, v.clone());
     Some(v)
 }
@@ -1669,6 +1711,29 @@ fn build_agent() -> ureq::Agent {
 }
 
 fn build_agent_with_read_timeout(read_timeout_secs: u64) -> ureq::Agent {
+    // 构建 agent 要新建 rustls ClientConfig（含根证书载入），而远程嵌入是**每组
+    // 一次请求**（成千上万组）——旧实现每请求都重建一个；对话/嵌入的读超时只有
+    // 少数几个取值，按值缓存即可（代理环境变量在启动时读取，改代理需重启，与缓存
+    // 无关）。`ureq::Agent` 克隆只是 Arc 计数。
+    static AGENTS: OnceLock<Mutex<HashMap<u64, ureq::Agent>>> = OnceLock::new();
+    let cache = AGENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(c) = cache.lock()
+        && let Some(agent) = c.get(&read_timeout_secs)
+    {
+        return agent.clone();
+    }
+    let agent = build_agent_uncached(read_timeout_secs);
+    if let Ok(mut c) = cache.lock() {
+        // 超时取值本就有限；仍给一个上限，避免任何未来调用方按动态超时值把缓存撑大。
+        if c.len() >= 16 {
+            c.clear();
+        }
+        c.insert(read_timeout_secs, agent.clone());
+    }
+    agent
+}
+
+fn build_agent_uncached(read_timeout_secs: u64) -> ureq::Agent {
     let mut builder = ureq::builder()
         .timeout_connect(std::time::Duration::from_secs(15))
         .timeout_read(std::time::Duration::from_secs(read_timeout_secs));
@@ -1966,6 +2031,23 @@ impl AuthSetter for ureq::Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// LRU 语义：容量满时淘汰**最久未用**的一条，而不是清空整个热集。
+    #[test]
+    fn query_embed_cache_evicts_least_recently_used() {
+        let mut c = QueryEmbedCache::default();
+        for i in 0..QUERY_EMBED_CACHE_CAP {
+            c.insert(format!("k{i}"), vec![i as f32]);
+        }
+        assert_eq!(c.map.len(), QUERY_EMBED_CACHE_CAP);
+        // 让 k0 变成"刚用过"，再插一个新键：应淘汰 k1（此时最久未用），k0 必须留着。
+        assert!(c.get("k0").is_some());
+        c.insert("fresh".to_string(), vec![0.0]);
+        assert!(c.map.contains_key("k0"), "刚用过的键不能被淘汰");
+        assert!(!c.map.contains_key("k1"), "应淘汰最久未用者");
+        assert!(c.map.contains_key("fresh"));
+        assert_eq!(c.map.len(), QUERY_EMBED_CACHE_CAP, "容量恒不超上限");
+    }
 
     /// SSRF 护栏：只堵云元数据/链路本地，回环与私网必须**放行**
     /// （本机 Ollama、局域网的 vLLM / llama.cpp 都是合法用法）。

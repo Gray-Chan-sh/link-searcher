@@ -78,7 +78,10 @@ pub fn get_pool(db_path: &str) -> Result<Pool<SqliteConnectionManager>> {
 /// Callers must ensure the connection's pragmas (WAL, foreign keys) are set,
 /// typically via [`get_pool`] with [`PragmaCustomizer`].
 pub fn init_db(conn: &Connection) -> Result<()> {
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    // 非致命：`wal_checkpoint` 对**非 WAL / 内存库**会报错（历史上因此要求测试必须用
+    // 真实文件库，见 `commands/sessions/lark.rs` 的注释），而它在 `get_pool` 里已经
+    // 做过一次。这里只当"顺手收拾一下"，失败不该让整个初始化失败。
+    let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     run_migrations(conn)?;
     let _ = conn.execute_batch("PRAGMA optimize;");
     Ok(())
@@ -139,8 +142,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
     seed_default_settings(&tx)?;
 
-    // Settings key rename: `auto_backup_enabled`/`auto_backup_interval_days`
-    // were seeded but never read (UI + whitelist use `auto_backup`/`backup_interval`).
+    // Settings keys cleanup: the old seed wrote `auto_backup_enabled` /
+    // `auto_backup_interval_days` / `scheduled_scan_time`, none of which any code
+    // ever read (the UI + whitelist use `auto_backup` / `backup_interval` /
+    // `scan_time`). See `migrate_legacy_backup_settings`.
     migrate_legacy_backup_settings(&tx)?;
 
     // Schema v10: one Feishu private chat may now own many local chat sessions
@@ -494,6 +499,22 @@ pub fn vacuum(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Fraction of the database file that is **free pages** (`freelist_count` /
+/// `page_count`), i.e. how much a VACUUM could actually reclaim.
+///
+/// Startup uses this to decide whether the whole-file rewrite is worth it:
+/// gating VACUUM on file size alone rewrote a multi-GB database on *every*
+/// launch (minutes of IO, racing the vector backfill that starts right after),
+/// even when there was nothing to reclaim. `None` when the pragmas fail.
+pub fn fragmentation_ratio(conn: &Connection) -> Option<f64> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0)).ok()?;
+    let freelist: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0)).ok()?;
+    if page_count <= 0 {
+        return None;
+    }
+    Some((freelist.max(0) as f64) / (page_count as f64))
+}
+
 /// Fold the WAL back into the main database file and truncate it.
 ///
 /// Used after a directory purge **instead of** [`vacuum`]: VACUUM rewrites the
@@ -536,26 +557,32 @@ pub fn cleanup_orphan_file_rows(conn: &Connection) -> Result<u64> {
     Ok(deleted)
 }
 
-/// Rename the dead `auto_backup_enabled`/`auto_backup_interval_days` setting
-/// keys to the names the UI and settings whitelist read. Copies the legacy
-/// value only when the new key is absent, then drops the dead key.
-/// Idempotent — safe on every startup.
+/// 收拾"死设置键"。三处死键，值**从来没有被任何代码读过**：
+///
+/// * `auto_backup_enabled` / `auto_backup_interval_days` —— 旧 `seed` 写的名字，
+///   而设置页读写的是 `auto_backup` / `backup_interval`（`ALLOWED_KEYS` 里也只有后者）。
+/// * `scheduled_scan_time` —— 旧 `seed` 写的名字，而设置页用户键是 `scan_time`，
+///   于是"定时扫描时间"被存进了两个不同的键，其中一个永远没人看。
+///
+/// 既然无人读过，就没有"用户选择"需要保留 → **只删不搬**（搬反而会引入新的分歧）。
+///
+/// 另外把 `auto_backup` 的取值**归一**到设置页勾选框的取值域：勾选框按 `== "true"`
+/// 判断，而旧 seed 写的是 `"1"` —— 于是一直显示为**关**、也从未生效。归一到 `"false"`
+/// 与用户所见一致，也避免升级后突然开始自动备份（写盘动作不该悄悄自己开始）。
+///
+/// 幂等 —— 每次启动都能安全重跑。
 fn migrate_legacy_backup_settings(tx: &Connection) -> Result<()> {
-    for (legacy, current) in [
-        ("auto_backup_enabled", "auto_backup"),
-        ("auto_backup_interval_days", "backup_interval"),
-    ] {
-        tx.execute(
-            "INSERT OR REPLACE INTO app_settings (key, value)
-             SELECT ?1, value FROM app_settings
-             WHERE key = ?2
-               AND NOT EXISTS (SELECT 1 FROM app_settings WHERE key = ?1)",
-            rusqlite::params![current, legacy],
-        )
-        .context(format!("failed to migrate setting '{legacy}' to '{current}'"))?;
-        tx.execute("DELETE FROM app_settings WHERE key = ?1", [legacy])
-            .context(format!("failed to drop legacy setting '{legacy}'"))?;
-    }
+    tx.execute(
+        "DELETE FROM app_settings
+         WHERE key IN ('auto_backup_enabled', 'auto_backup_interval_days', 'scheduled_scan_time')",
+        [],
+    )
+    .context("failed to drop dead settings keys")?;
+    tx.execute(
+        "UPDATE app_settings SET value = 'false' WHERE key = 'auto_backup' AND value <> 'true'",
+        [],
+    )
+    .context("failed to normalize the auto_backup value")?;
     Ok(())
 }
 
@@ -643,9 +670,11 @@ fn seed_default_settings(conn: &Connection) -> Result<()> {
         ("load_recovery_margin_pct", "5"),
         ("embed_parallelism", "0"),
         ("embed_adaptive", "1"),
-        ("scheduled_scan_time", "02:00"),
+        ("scan_time", "02:00"),
         ("max_results", "1000"),
-        ("auto_backup", "1"),
+        // 默认**关**：备份会写盘，未经用户勾选不该自己跑（设置页的勾选框读 `== "true"`，
+        // 与这里的取值保持一致；旧的 seed 写 "1" 会让"显示为关、实际为开"）。
+        ("auto_backup", "false"),
         ("backup_interval", "7"),
         ("theme", "system"),
     ];
@@ -808,12 +837,17 @@ mod tests {
 
     #[test]
     fn test_legacy_backup_settings_migrated() {
-        // Simulate a database seeded before the auto_backup key rename.
+        // 模拟旧库：三处"死键"还在（值**从来没有代码读过**），且 `auto_backup`
+        // 存着旧 seed 的 `"1"` —— 设置页勾选框按 `== "true"` 判断，所以它一直
+        // 显示为**关**。
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              INSERT INTO app_settings (key, value)
-             VALUES ('auto_backup_enabled', '1'), ('auto_backup_interval_days', '7');",
+             VALUES ('auto_backup_enabled', '1'),
+                    ('auto_backup_interval_days', '7'),
+                    ('scheduled_scan_time', '03:30'),
+                    ('auto_backup', '1');",
         )
         .unwrap();
         run_migrations(&conn).unwrap();
@@ -826,21 +860,33 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(get(&conn, "auto_backup"), "1");
-        assert_eq!(get(&conn, "backup_interval"), "7");
-        let legacy_count: i64 = conn
+        // 死键只删不搬（没有任何"用户选择"值得保留）。
+        let dead: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM app_settings WHERE key IN ('auto_backup_enabled','auto_backup_interval_days')",
+                "SELECT COUNT(*) FROM app_settings
+                 WHERE key IN ('auto_backup_enabled','auto_backup_interval_days','scheduled_scan_time')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(legacy_count, 0, "legacy keys should be removed");
+        assert_eq!(dead, 0, "死键应被删除");
+        // `auto_backup` 归一到勾选框的取值域：旧值 `"1"` 一直是"显示为关" → `"false"`。
+        assert_eq!(get(&conn, "auto_backup"), "false");
+        assert_eq!(get(&conn, "backup_interval"), "7");
+        // 定时扫描时间的**用户键**是 `scan_time`，由 seed 补默认值。
+        assert_eq!(get(&conn, "scan_time"), "02:00");
+
+        // 用户在设置页真的勾过（写 `"true"`）→ 归一不得把开手动关掉。
+        conn.execute("UPDATE app_settings SET value = 'true' WHERE key = 'auto_backup'", [])
+            .unwrap();
+        run_migrations(&conn).unwrap();
+        assert_eq!(get(&conn, "auto_backup"), "true");
 
         // Idempotent on re-run.
         run_migrations(&conn).unwrap();
-        assert_eq!(get(&conn, "auto_backup"), "1");
+        assert_eq!(get(&conn, "auto_backup"), "true");
         assert_eq!(get(&conn, "backup_interval"), "7");
+        assert_eq!(get(&conn, "scan_time"), "02:00");
     }
 
     #[test]

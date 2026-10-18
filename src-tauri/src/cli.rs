@@ -268,9 +268,25 @@ pub fn run_cli() -> Result<()> {
             );
 
             let scanner = bootstrap.scanner.clone();
-            for event in event_rx {
-                if let Err(e) = scanner.handle_event(event) {
-                    eprintln!("[watch] error: {e}");
+            // 事件队列是**有界**的（cap 见 `watcher::EVENT_QUEUE_CAP`）：消费不过来时会
+            // 丢事件并置溢出标志。CLI 没有 GUI 的维护线程，于是自己轮询补一次增量扫描
+            // ——否则大目录同步时会静默漏掉变更。
+            loop {
+                match event_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                    Ok(event) => {
+                        if let Err(e) = scanner.handle_event(event) {
+                            eprintln!("[watch] error: {e}");
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if watcher.take_overflow() {
+                            eprintln!("[watch] 事件队列溢出过，补一次增量扫描");
+                            if let Err(e) = scanner.incremental_scan(&dir_id, |_| {}) {
+                                eprintln!("[watch] 补扫失败: {e}");
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                 }
             }
         }

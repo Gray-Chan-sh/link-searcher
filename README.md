@@ -328,8 +328,9 @@ link-searcher/
 │   │   │   └── text.rs        # 纯文本提取
 │   │   ├── scanner/           # 目录扫描 + 文件监控
 │   │   │   ├── mod.rs         # full/incremental/startup_scan + handle_event
-│   │   │   ├── watcher.rs     # FileWatcher（后台线程 + 自动重连）
+│   │   │   ├── watcher.rs     # FileWatcher（后台线程 + 有界事件队列 + 溢出补扫信号）
 │   │   │   └── helpers.rs     # 排除规则 + 路径转换 + needs_reindex
+│   │   ├── maintenance.rs     # 后台维护（定时扫描 / 自动备份 / watcher 溢出补扫）
 │   │   ├── commands/          # Tauri IPC 命令
 │   │   │   ├── search.rs      # 搜索/建议/导出/文件类型统计
 │   │   │   ├── index.rs       # 索引状态/扫描/重建/取消/健康检查

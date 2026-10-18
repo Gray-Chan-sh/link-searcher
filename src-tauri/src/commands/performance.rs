@@ -145,7 +145,10 @@ pub fn get_batch_io_concurrency_from_db(
         |row| row.get::<_, String>(0),
     )
     .ok()
-    .and_then(|v| v.parse().ok())
+    .and_then(|v| v.parse::<usize>().ok())
+    // 与 `IndexerService::set_batch_io_concurrency` 同一上限：设置行是用户可写的，
+    // 荒谬值（手改 DB / 旧版本遗留）不能变成那么多线程。
+    .map(|n| n.clamp(1, crate::indexer::MAX_BATCH_IO_THREADS))
     .unwrap_or(8)
 }
 
