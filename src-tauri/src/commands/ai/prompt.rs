@@ -2,6 +2,15 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
+
+/// 查询向量（`cached_embed`）的等待上限：本地嵌入池可能被后台回填占满（bge-large
+/// 单次推理 85s 量级），绝不能把整轮聊天卡在"语义扫描中"。超时后各阶段自行退回
+/// BM25（见 `ai::cached_embed_with_timeout`）。
+///
+/// ⚠️ 所有调用 `cached_embed*` 的地方都必须走带超时的版本 —— 之前重排阶段用的是
+/// 裸 `cached_embed`，于是"向量阶段已超时退回 BM25、重排阶段却永久卡住"。
+pub(super) const QUERY_EMBED_TIMEOUT_SECS: u64 = 20;
+
 /// BM25 retrieval + content assembly shared by one-shot and streaming
 /// smart_search. Returns the prompt pair plus the source file lists.
 pub(super) struct PreparedSmart {
@@ -620,7 +629,6 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
             // 超时兜底：本地嵌入池被后台回填占满时最多等 20s，之后退回 BM25，
             // 绝不把整轮聊天卡在"语义扫描中"（见 ai::cached_embed_with_timeout）。
-            const QUERY_EMBED_TIMEOUT_SECS: u64 = 20;
             let query_emb =
                 crate::ai::cached_embed_with_timeout(&vec_query, QUERY_EMBED_TIMEOUT_SECS);
             if query_emb.is_none() {
@@ -847,7 +855,15 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             for (md5, idx, vec) in chunk_embs {
                 chunks_by_md5.entry(md5).or_default().push((idx, vec));
             }
-            let query_emb = crate::ai::cached_embed(&search_q);
+            // ⚠️ 必须走**带超时**的版本：向量阶段可能已因超时退回 BM25（查询向量
+            // 未入缓存），此处裸调用会再次真推理并**永久**卡住整轮聊天。
+            let query_emb =
+                crate::ai::cached_embed_with_timeout(&search_q, QUERY_EMBED_TIMEOUT_SECS);
+            if query_emb.is_none() {
+                log::warn!(
+                    "[AI]   重排查询向量超时 (>{QUERY_EMBED_TIMEOUT_SECS}s)；改用正文片段做重排通道"
+                );
+            }
             let mut passages: Vec<String> = Vec::new();
             let mut rerank_idx: Vec<usize> = Vec::new();
             for (i, rec) in cand_recs.iter().enumerate() {

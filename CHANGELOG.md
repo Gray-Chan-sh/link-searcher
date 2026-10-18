@@ -1,3 +1,30 @@
+## 2026-10-18（第四十轮）：未修清单逐条修复 P1-③④ —— keeper 成对启动无自愈、长事务/长耗时持连接
+
+**P1-③ 嵌入 keeper「成对占用」互锁**（`commands/index/embeddings.rs`）
+
+- 根因：`KEEPERS_ACTIVE` 用 `compare_exchange(0, 2)` 一次性占两位，**任一条 keeper 先退出
+  （排队列排空）都会把计数停在 1** → 之后 `ensure_embedding_keepers` 永远失败 → 另一个队列
+  的 keeper 再也无法重启（索引再开也只跑一条，该队列向量永远补不上），直到幸存者自己也退出。
+  另一条独立缺陷：keeper 线程里任一轮 panic 会**直接杀掉整条 keeper**。
+- 修法：改为**按位占用**（bit0=doc，bit1=chunk），每次调用只补齐"现在没在跑"的那一条；
+  线程创建失败立刻归还占位；keeper 循环用 `catch_unwind` 包住每轮（panic 只作废本轮 +
+  5s 退避），不再丢掉整条 keeper。新增单测 `keeper_bits_are_independent`。
+
+**P1-④ 连接被跨"长耗时阶段"持有**（`commands/index/verify.rs`、`commands/index/embeddings.rs`、`commands/ai/prompt.rs`）
+
+- 根因（第三十八轮 #5 的同类根因，三个入口）：
+  1. `run_verify_core` **一个连接横跨整个 200 文件循环**，每轮还要 `index_file`（PDF/OCR
+     可能数分钟）→ 单个 verify 长期占住一条池连接；
+  2. chunk 向量回填把连接持在**整轮 drain**（可能数小时）上；doc 回填的连接横跨
+     `embed_batched`（远程网关/本地大模型单批数十秒）；
+  3. 重排阶段用裸 `cached_embed`（无超时）—— 向量阶段已因超时退回 BM25 时，这里会**再真推理一次**
+     并永久卡住整轮聊天。
+- 修法：三处一律"**零连接阶段 + 短连接读写**"：verify 改为「每文件两段短连接」（段 1 取目录配置 +
+  清空内容行，段 2 复查内容 + 判定），段间 `index_file` 全程零连接；回填改为"推理零连接、
+  每批借一次连接写回"（chunk 的整轮 drain 也不再持有连接）；重排改用
+  `cached_embed_with_timeout`（超时即用正文片段兜底），并把 `QUERY_EMBED_TIMEOUT_SECS`
+  提升为模块级常量，避免再有人写出裸调用。
+
 ## 2026-10-18（第三十九轮）：未修清单逐条修复 P1-①② —— OCR 超时形同虚设 / 闸门永久卡死、metadata 每文件一线程
 
 > 承接第三十八轮的"未修清单"，按 P1→P3 逐条修复（本轮：P1 前两项）。

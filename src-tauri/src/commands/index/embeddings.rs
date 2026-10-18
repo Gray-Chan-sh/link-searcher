@@ -68,8 +68,12 @@ pub(super) fn run_backfill_embeddings(
     let _guard = crate::state::TaskGuard::new("backfill");
     const BATCH: usize = 64;
 
-    let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-    let rows = missing_embedding_rows(&conn).map_err(|e| e.to_string())?;
+    // 读候选：短连接，读完即还（下面的 `embed_batched` 可能很慢 —— 远程网关或
+    // 本地大模型单批数十秒 —— 连接绝不能跨它持有，见第三十八轮 #5 的同类根因）。
+    let rows = {
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+        missing_embedding_rows(&conn).map_err(|e| e.to_string())?
+    };
     let total = rows.len();
     if total == 0 {
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
@@ -94,7 +98,10 @@ pub(super) fn run_backfill_embeddings(
     let mut tracker = RateTracker::new(started);
     for group in unique.chunks(super_group_size()) {
         let texts: Vec<String> = group.iter().map(|(t, _)| t.clone()).collect();
+        // 零连接阶段：推理本身不需要 DB。
         let vecs = crate::ai::embed_batched(&texts, BATCH);
+        // 写入阶段才借连接（每批一次，用完即还）。
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
         for ((_, ids), v) in group.iter().zip(vecs) {
             match v {
                 Some(vec) => {
@@ -247,18 +254,64 @@ pub fn schedule_backfill_embeddings(db: &r2d2::Pool<r2d2_sqlite::SqliteConnectio
     });
 }
 
-/// Number of keeper threads currently alive (0 or 2). `compare_exchange(0, 2)`
-/// admits exactly one pair; each thread decrements on exit, so the last one out
-/// resets the counter and a later call can start a fresh pair.
-static KEEPERS_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// 每位一个 keeper（bit0 = doc，bit1 = chunk）。
+///
+/// 旧实现用 `KEEPERS_ACTIVE`（计数 0 或 2）一次性占两位：**任一条先退出都会把
+/// 计数停在 1** → `compare_exchange(0, 2)` 永远失败 → 另一个队列的 keeper 再也无法
+/// 重启（索引再开也只跑一条，另一队列的向量永远补不上），直到幸存者自己也退出。
+/// 现在按位独立占用，`ensure_embedding_keepers` 每次调用都补齐**缺的那一条**。
+static KEEPER_BITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const KEEPER_DOC: usize = 1 << 0;
+const KEEPER_CHUNK: usize = 1 << 1;
 
-/// Decrements [`KEEPERS_ACTIVE`] on drop, so a panic in a keeper can't strand
-/// the counter above 0 (which would block every future keeper pair forever).
-struct KeeperTicket;
+/// Releases this keeper's bit on drop, so a panic in a keeper can't strand the bit
+/// above 0 (which would block that keeper from ever being restarted).
+struct KeeperTicket(usize);
 
 impl Drop for KeeperTicket {
     fn drop(&mut self) {
-        KEEPERS_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+        KEEPER_BITS.fetch_and(!self.0, Ordering::SeqCst);
+    }
+}
+
+/// Atomically claim one keeper bit; `false` when that keeper is already alive.
+fn claim_keeper(bit: usize) -> bool {
+    claim_bit(&KEEPER_BITS, bit)
+}
+
+/// [`claim_keeper`] 的纯函数形态（指定位图），便于单测不碰全局状态。
+fn claim_bit(bits: &std::sync::atomic::AtomicUsize, bit: usize) -> bool {
+    let mut cur = bits.load(Ordering::SeqCst);
+    loop {
+        if cur & bit != 0 {
+            return false;
+        }
+        match bits.compare_exchange_weak(cur, cur | bit, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
+/// 启动一条 keeper；线程创建失败时立刻归还占用位（否则该 keeper 会被永久卡死）。
+fn spawn_keeper(
+    bit: usize,
+    name: &str,
+    pool: r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    flag: Arc<AtomicBool>,
+    run: fn(&r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>) -> Result<BackfillReport, String>,
+    task: &'static str,
+) {
+    let built = std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(move || {
+            let _ticket = KeeperTicket(bit);
+            log::info!("[AI] 嵌入 keeper 启动（{task}）");
+            run_keeper_loop(&pool, &flag, run, task);
+        });
+    if let Err(e) = built {
+        log::warn!("[AI] 嵌入 keeper 线程创建失败（{task}）: {e}");
+        KEEPER_BITS.fetch_and(!bit, Ordering::SeqCst);
     }
 }
 
@@ -283,33 +336,27 @@ pub fn ensure_embedding_keepers(
     if !crate::ai::embedding_enabled() {
         return;
     }
-    if KEEPERS_ACTIVE
-        .compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return; // a pair is already running
+    // 按位补齐：只启动"现在没在跑"的那一条，另一条照旧运行。
+    if claim_keeper(KEEPER_DOC) {
+        spawn_keeper(
+            KEEPER_DOC,
+            "emb-keeper-doc",
+            db.clone(),
+            is_indexing.clone(),
+            run_backfill_embeddings,
+            "backfill",
+        );
     }
-
-    let pool_doc = db.clone();
-    let flag_doc = is_indexing.clone();
-    std::thread::spawn(move || {
-        let _ticket = KeeperTicket;
-        log::info!("[AI] 嵌入 keeper 启动（doc）");
-        run_keeper_loop(&pool_doc, &flag_doc, run_backfill_embeddings, "backfill");
-    });
-
-    let pool_chunk = db.clone();
-    let flag_chunk = is_indexing;
-    std::thread::spawn(move || {
-        let _ticket = KeeperTicket;
-        log::info!("[AI] 嵌入 keeper 启动（chunk）");
-        run_keeper_loop(
-            &pool_chunk,
-            &flag_chunk,
+    if claim_keeper(KEEPER_CHUNK) {
+        spawn_keeper(
+            KEEPER_CHUNK,
+            "emb-keeper-chunk",
+            db.clone(),
+            is_indexing,
             run_backfill_chunk_embeddings,
             "backfill_chunks",
         );
-    });
+    }
 }
 
 /// Drain one backfill repeatedly until it has nothing to do and indexing has
@@ -324,20 +371,31 @@ fn run_keeper_loop(
     /// Poll interval when the queue is empty. Freshly committed rows are picked
     /// up within one poll, so this is only about not hot-looping.
     const POLL: std::time::Duration = std::time::Duration::from_millis(500);
+    /// 一轮 panic 后的退避：避免"panic → 立刻重跑 → 再 panic"的热循环刷日志。
+    const PANIC_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
     let mut logged_error = false;
     loop {
-        let processed = match run(db) {
-            Ok(r) => {
+        // 一轮的具体实现里跑着 rayon 并行 + 网络/本地推理，任一 panic 都会**只**
+        // 结束这一轮；以前它会直接杀掉整条 keeper 线程（该队列的向量从此没人补，
+        // 而且位图被占着不放，直到重启）。
+        let round = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(db)));
+        let processed = match round {
+            Ok(Ok(r)) => {
                 logged_error = false;
                 r.processed
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 // Log only the first failure: a gateway-less/disabled AI would
                 // otherwise log once per poll for the whole scan.
                 if !logged_error {
                     log::warn!("[AI] {task} keeper 暂停: {e}");
                     logged_error = true;
                 }
+                0
+            }
+            Err(_) => {
+                log::error!("[AI] {task} keeper 本轮 panic → 本轮作废，{PANIC_BACKOFF:?} 后继续");
+                std::thread::sleep(PANIC_BACKOFF);
                 0
             }
         };
@@ -494,8 +552,10 @@ pub(super) fn run_backfill_chunk_embeddings(
     const MAX_DOCS_PER_PASS: usize = 500;
     const BATCH: usize = 64;
 
-    let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-    let total_missing = count_missing_chunks(&conn).map_err(|e| e.to_string())?;
+    let total_missing = {
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+        count_missing_chunks(&conn).map_err(|e| e.to_string())?
+    };
     if total_missing == 0 {
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
     }
@@ -519,11 +579,14 @@ pub(super) fn run_backfill_chunk_embeddings(
         // 清空（扫描期间可能数小时），在调用点之前让位不起作用。doc 回填内部自己
         // 持 BACKFILL_LOCK，所以这里必须在取 pass 锁**之前**调用，否则死锁。
         if last_doc_yield.elapsed() >= DOC_YIELD_MIN_INTERVAL {
-            let has_doc_work = match has_missing_doc_embeddings(&conn) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::debug!("[AI] 检查 doc 回填队列失败: {e}");
-                    false
+            let has_doc_work = {
+                let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+                match has_missing_doc_embeddings(&conn) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::debug!("[AI] 检查 doc 回填队列失败: {e}");
+                        false
+                    }
                 }
             };
             if has_doc_work {
@@ -541,9 +604,11 @@ pub(super) fn run_backfill_chunk_embeddings(
         let pass_started = std::time::Instant::now();
         // Only the missing chunks, so every pass makes real progress and an
         // interrupted run resumes without redoing finished work.
-        let mut tasks =
+        let mut tasks = {
+            let conn = db.get().map_err(|e| format!("db error: {e}"))?;
             collect_missing_chunk_tasks(&conn, MAX_DOCS_PER_PASS, MAX_CHUNKS_PER_PASS)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())?
+        };
         if tasks.is_empty() {
             break;
         }
@@ -552,12 +617,21 @@ pub(super) fn run_backfill_chunk_embeddings(
         let pass_len = tasks.len();
         // 进度分母随扫描增长：已完成 + 本轮实测的剩余缺口。用启动时的快照作分母，
         // 扫描期间新增的块会让读数出现 48/24 这种 >100%（实测）。
-        let pass_total = processed + count_missing_chunks(&conn).unwrap_or(pass_len);
+        let pass_total = processed
+            + {
+                let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+                count_missing_chunks(&conn).unwrap_or(pass_len)
+            };
         let mut pass_ok = 0usize;
         let mut pass_failed = 0usize;
         for group in tasks.chunks(super_group_size()) {
             let texts: Vec<String> = group.iter().map(|(_, _, t)| t.clone()).collect();
+            // 零连接阶段：推理本身不需要 DB（下文才借连接写回）。
             let vecs = crate::ai::embed_batched(&texts, BATCH);
+            // ⚠️ 连接**不能**跨 `embed_batched` 持有，更不能像以前那样整轮
+            // drain（可能数小时）持有：那会长期占住一条池连接（第三十八轮 #5
+            // 同类根因）。每批借一次、写完即还。
+            let conn = db.get().map_err(|e| format!("db error: {e}"))?;
             for ((md5, idx, _), v) in group.iter().zip(vecs) {
                 match v {
                     Some(vec) => {
@@ -592,7 +666,10 @@ pub(super) fn run_backfill_chunk_embeddings(
             break;
         }
     }
-    let remaining = count_missing_chunks(&conn).unwrap_or(0);
+    let remaining = {
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+        count_missing_chunks(&conn).unwrap_or(0)
+    };
     log::info!("[AI] chunk 向量回填完成: 共 {processed} 块, {failed} 失败, 剩余 {remaining}");
     crate::state::push_task_brief(
         "backfill_chunks",
@@ -675,6 +752,27 @@ pub struct BackfillReport {
 #[cfg(test)]
 mod tests {
     use super::{collect_missing_chunk_tasks, count_missing_chunks, group_by_md5};
+
+    /// 两条 keeper 的占用位必须**互相独立**：旧实现（`KEEPERS_ACTIVE` 计数 0/2）
+    /// 在一条先退出时会把计数停在 1，导致另一条再也无法重启。
+    #[test]
+    fn keeper_bits_are_independent() {
+        use super::{KEEPER_CHUNK, KEEPER_DOC, claim_bit};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let bits = AtomicUsize::new(0);
+
+        assert!(claim_bit(&bits, KEEPER_DOC));
+        assert!(!claim_bit(&bits, KEEPER_DOC), "已在跑的那条不能重复占用");
+        assert!(claim_bit(&bits, KEEPER_CHUNK), "另一条必须能独立占用");
+
+        // 模拟 doc keeper 退出（KeeperTicket::drop 归还自己的位）
+        bits.fetch_and(!KEEPER_DOC, Ordering::SeqCst);
+        assert!(claim_bit(&bits, KEEPER_DOC), "退出后必须能重启");
+        assert!(!claim_bit(&bits, KEEPER_CHUNK), "chunk 仍在跑，不该被顶掉");
+
+        bits.fetch_and(!(KEEPER_DOC | KEEPER_CHUNK), Ordering::SeqCst);
+        assert_eq!(bits.load(Ordering::SeqCst), 0, "全部归还后位图必须清零");
+    }
 
     /// The doc-yield probe must report exactly the predicate
     /// `missing_embedding_rows` uses — and must go false once the vector exists.

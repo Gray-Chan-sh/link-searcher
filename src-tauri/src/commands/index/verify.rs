@@ -29,42 +29,59 @@ pub(super) fn run_verify_core(
         .lock()
         .map_err(|_| "verify lock poisoned".to_string())?;
     let _guard = crate::state::TaskGuard::new("verify");
-    let conn = match db_pool.get() {
-        Ok(c) => c,
-        Err(e) => return Err(format!("db error: {e}")),
-    };
-        let mut candidates = match tracker::find_empty_content_files(&conn) {
+    // 候选集合在**短连接**里取完就释放：下面的循环会逐个 `index_file`（PDF/OCR，
+    // 单个文件可能数分钟），连接绝不能跨提取期持有 —— 否则 200 个文件逐个提取时，
+    // 单个 verify 就长占一条池连接（第三十八轮 #5 的同类根因：池被饿死 →
+    // 界面/API 无响应）。
+    let mut candidates = {
+        let conn = match db_pool.get() {
+            Ok(c) => c,
+            Err(e) => return Err(format!("db error: {e}")),
+        };
+        let mut c = match tracker::find_empty_content_files(&conn) {
             Ok(v) => v,
             Err(e) => return Err(format!("{e}")),
         };
         if force_dead
             && let Ok(dead) = tracker::find_dead_files(&conn) {
-                candidates.extend(dead);
+                c.extend(dead);
             }
-        // 按 md5 去重：重复文件共享同一份内容，重复提取纯属浪费（empty 内容的
-        // md5 一样，提取一次即可对所有副本生效）。再做每轮上限，避免一次校验
-        // 在几百个空文件上长时间跑 OCR。
-        const MAX_VERIFY_PER_RUN: usize = 200;
-        {
-            let mut seen = std::collections::HashSet::new();
-            candidates.retain(|r| match &r.md5 {
-                Some(md5) => seen.insert(md5.clone()),
-                None => seen.insert(r.id.clone()),
-            });
-        }
-        if candidates.len() > MAX_VERIFY_PER_RUN {
-            log::info!(
-                "[VERIFY] 本轮候选 {} 个，按上限 {} 处理，其余留待下一轮",
-                candidates.len(), MAX_VERIFY_PER_RUN
-            );
-            candidates.truncate(MAX_VERIFY_PER_RUN);
-        }
-        let mut checked = 0u64;
-        let mut recovered = 0u64;
-        let mut dead = 0u64;
-        let mut failed = 0u64;
+        c
+    };
+    // 按 md5 去重：重复文件共享同一份内容，重复提取纯属浪费（empty 内容的
+    // md5 一样，提取一次即可对所有副本生效）。再做每轮上限，避免一次校验
+    // 在几百个空文件上长时间跑 OCR。
+    const MAX_VERIFY_PER_RUN: usize = 200;
+    {
+        let mut seen = std::collections::HashSet::new();
+        candidates.retain(|r| match &r.md5 {
+            Some(md5) => seen.insert(md5.clone()),
+            None => seen.insert(r.id.clone()),
+        });
+    }
+    if candidates.len() > MAX_VERIFY_PER_RUN {
+        log::info!(
+            "[VERIFY] 本轮候选 {} 个，按上限 {} 处理，其余留待下一轮",
+            candidates.len(), MAX_VERIFY_PER_RUN
+        );
+        candidates.truncate(MAX_VERIFY_PER_RUN);
+    }
+    let mut checked = 0u64;
+    let mut recovered = 0u64;
+    let mut dead = 0u64;
+    let mut failed = 0u64;
 
-        for rec in candidates {
+    for rec in candidates {
+        // ── 段 1（短连接）：目录配置 + 清掉该 md5 的空内容行 ──
+        let dir = {
+            let conn = match db_pool.get() {
+                Ok(c) => c,
+                Err(e) => {
+                    log::warn!("[VERIFY] 获取连接失败: {e}");
+                    failed += 1;
+                    continue;
+                }
+            };
             let dir = match db::dir_config::get_dir(&conn, &rec.dir_id)
                 .and_then(|d| d.ok_or_else(|| anyhow::anyhow!("dir config not found")))
             {
@@ -89,65 +106,81 @@ pub(super) fn run_verify_core(
                     Err(e) => log::warn!("[VERIFY] 读内容行失败 {md5}: {e}"),
                 }
             }
-            let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
-            let file_id = rec.id.clone();
-            if let Err(e) = indexer.delete_document_only(&file_id) {
-                log::warn!("[VERIFY] delete stale doc failed {file_id}: {e}");
-            }
-            match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
-                Ok(()) => {
-                    checked += 1;
-                    // 扫描被取消时 `index_file` 会**空跑成功**（不打日志、不写内容），
-                    // 不能当成"内容确认为空"判死。
-                    if indexer.is_cancelled() {
-                        log::info!("[VERIFY] 扫描已取消，跳过: {}", rec.path);
+            dir
+        }; // ← 连接在此归还：`index_file` 全程零连接
+        let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
+        let file_id = rec.id.clone();
+        if let Err(e) = indexer.delete_document_only(&file_id) {
+            log::warn!("[VERIFY] delete stale doc failed {file_id}: {e}");
+        }
+        match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
+            Ok(()) => {
+                checked += 1;
+                // 扫描被取消时 `index_file` 会**空跑成功**（不打日志、不写内容），
+                // 不能当成"内容确认为空"判死。
+                if indexer.is_cancelled() {
+                    log::info!("[VERIFY] 扫描已取消，跳过: {}", rec.path);
+                    continue;
+                }
+                // ── 段 2（短连接）：复查内容 + 判定 ──
+                let conn = match db_pool.get() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        log::warn!("[VERIFY] 复查取连接失败: {e}");
+                        failed += 1;
                         continue;
                     }
-                    // Re-check the stored content: recovery only counts when
-                    // non-empty text actually landed. DB 错误与"内容为空"必须分开：
-                    // 以前 `unwrap_or(0)` 会把一次 DB 抖动当成"确认为空"直接判死。
-                    let content_len = conn.query_row(
-                        "SELECT length(trim(text_content)) FROM content_index \
-                         JOIN file_tracking ON file_tracking.md5 = content_index.md5 \
-                         WHERE file_tracking.id = ?1",
-                        rusqlite::params![file_id],
-                        |row| row.get::<_, i64>(0),
-                    );
-                    match content_len {
-                        Ok(n) if n > 0 => {
-                            recovered += 1;
-                            log::info!("[VERIFY] 恢复: {} ({} chars)", rec.path, n);
-                        }
-                        Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {
-                            if let Err(e) = tracker::mark_dead_content(&conn, &file_id) {
-                                log::warn!("[VERIFY] {file_id}: 标记 dead 失败: {e}");
-                            }
-                            dead += 1;
-                            log::warn!("[VERIFY] 仍为空, 标记 dead: {}", rec.path);
-                        }
-                        Err(e) => {
-                            log::warn!("[VERIFY] 内容复查失败（DB 错），本次不判死: {}: {e}", rec.path);
-                            failed += 1;
-                        }
+                };
+                // Re-check the stored content: recovery only counts when
+                // non-empty text actually landed. DB 错误与"内容为空"必须分开：
+                // 以前 `unwrap_or(0)` 会把一次 DB 抖动当成"确认为空"直接判死。
+                let content_len = conn.query_row(
+                    "SELECT length(trim(text_content)) FROM content_index \
+                     JOIN file_tracking ON file_tracking.md5 = content_index.md5 \
+                     WHERE file_tracking.id = ?1",
+                    rusqlite::params![file_id],
+                    |row| row.get::<_, i64>(0),
+                );
+                match content_len {
+                    Ok(n) if n > 0 => {
+                        recovered += 1;
+                        log::info!("[VERIFY] 恢复: {} ({} chars)", rec.path, n);
                     }
-                }
-                Err(e) => {
-                    // Err 多为可恢复失败（文件读不到 / 内存压力暂停 / DB busy）：
-                    // **不**标记 dead —— `find_empty_content_files` 只挑 dead_content=0
-                    // 且 indexed=1 的行，一次取消/抖动就判死会让该文件从此跳过自动校验。
-                    log::warn!("[VERIFY] 重试失败: {}: {e}", rec.path);
-                    if let Err(e2) = tracker::mark_failed_retry(&conn, &file_id, &format!("校验重试失败: {e}")) {
-                        log::warn!("[VERIFY] {file_id}: 标记失败态失败: {e2}");
+                    Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+                        if let Err(e) = tracker::mark_dead_content(&conn, &file_id) {
+                            log::warn!("[VERIFY] {file_id}: 标记 dead 失败: {e}");
+                        }
+                        dead += 1;
+                        log::warn!("[VERIFY] 仍为空, 标记 dead: {}", rec.path);
                     }
-                    failed += 1;
+                    Err(e) => {
+                        log::warn!("[VERIFY] 内容复查失败（DB 错），本次不判死: {}: {e}", rec.path);
+                        failed += 1;
+                    }
                 }
             }
+            Err(e) => {
+                // Err 多为可恢复失败（文件读不到 / 内存压力暂停 / DB busy）：
+                // **不**标记 dead —— `find_empty_content_files` 只挑 dead_content=0
+                // 且 indexed=1 的行，一次取消/抖动就判死会让该文件从此跳过自动校验。
+                log::warn!("[VERIFY] 重试失败: {}: {e}", rec.path);
+                match db_pool.get() {
+                    Ok(conn) => {
+                        if let Err(e2) = tracker::mark_failed_retry(&conn, &file_id, &format!("校验重试失败: {e}")) {
+                            log::warn!("[VERIFY] {file_id}: 标记失败态失败: {e2}");
+                        }
+                    }
+                    Err(e2) => log::warn!("[VERIFY] {file_id}: 标记失败态取连接失败: {e2}"),
+                }
+                failed += 1;
+            }
         }
-        crate::state::push_task_brief(
-            "verify",
-            format!("索引有效性验证完成: 检查 {checked}，恢复 {recovered}，空 {dead}，失败 {failed}"),
-        );
-        Ok(VerifyReport { checked, recovered, dead, failed })
+    }
+    crate::state::push_task_brief(
+        "verify",
+        format!("索引有效性验证完成: 检查 {checked}，恢复 {recovered}，空 {dead}，失败 {failed}"),
+    );
+    Ok(VerifyReport { checked, recovered, dead, failed })
 }
 
 /// Returns (new_reextract_count, is_exhausted).
