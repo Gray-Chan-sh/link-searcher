@@ -17,10 +17,18 @@ use std::time::{Duration, Instant};
 
 use serde_json::json;
 
-/// 中间更新的**最小间隔**。实测 250ms 也安全；1.5s 既留足 QPS 余量，又符合人眼阅读节奏。
-pub const MIN_INTERVAL: Duration = Duration::from_millis(1500);
+/// 中间更新的**最小间隔**。
+///
+/// 实测依据（2026-10-18 通讯审计）：每次 `patch_card` 要起一个 `lark-cli` 进程并走一次
+/// 飞书往返，**约 0.6s**，且这条调用在 SSE 循环里是**同步**的 —— 更新太密会拖慢流式
+/// 消费与最终卡片。2.5s 仍然符合人眼阅读节奏，同时把单条长回答的更新调用量减半。
+pub const MIN_INTERVAL: Duration = Duration::from_millis(2500);
 /// 中间更新**次数上限**（**不含**最后那次收尾）。
-pub const MAX_UPDATES: usize = 12;
+///
+/// 12 → 6（2026-10-18）：12 次 × ~0.6s ≈ 7.2s 的飞书调用时间，减半后约 3.6s；
+/// 与 2.5s 间隔搭配约覆盖前 ~19s 的生成过程（更长的回答就停在最后一次更新，
+/// 收尾仍会发最终卡片）。
+pub const MAX_UPDATES: usize = 6;
 /// 卡片正文允许的**字节**上限。
 ///
 /// 为什么按**字节**而不是字符：飞书的硬约束是**卡片 JSON ≤ 30KB**（字节），

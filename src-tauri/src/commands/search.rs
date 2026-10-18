@@ -266,26 +266,45 @@ pub fn search_with_semantic(
     // 语义融合：把 BM25 命中与 embedding-cosine top-N 按 RRF 融合，让"意思相近"
     // 的结果与关键词命中一起浮现。embedding 调用有 5s 超时，挂掉的网关只会降级为
     // 纯关键词，不会把搜索冻住。
+    //
+    // **翻页复用**（2026-10-18）：查询 + 过滤条件相同的融合顺序是确定的，而"查询向量 +
+    // 全库余弦 + RRF"是整条路径最贵的一段（日志实测 ~4s）→ 缓存 5 分钟，
+    // 语义下翻页第 2 页起几乎即时。
     if should_semantic_rerank(&params, crate::ai::embedding_enabled()) {
         // 全库 top-N BM25（同过滤、不分页）作 RRF 的 BM25 侧融合源：
         // 页内 20 条的 page-local rank 会让第 2+ 页命中完全不参与融合。
         let mut top_params = params.clone();
         top_params.page = 1;
         top_params.page_size = BM25_FUSION_TOP_N;
-        match searcher
-            .search(&top_params)
-            .map_err(|e| format!("search failed: {e}"))
-            .and_then(|top| {
-                semantic_rerank_worker(
-                    &state.db,
-                    &params.query,
-                    &response,
-                    &top.hits,
-                    params.page,
-                    params.page_size,
-                )
-            }) {
-            Ok(merged) => response = merged,
+        match searcher.search(&top_params) {
+            Ok(top) => {
+                let key = semantic_cache_key(&params);
+                let fusion = match cache_get(&key) {
+                    Some(f) => f,
+                    None => match compute_semantic_fusion(&state.db, &params.query, &top.hits) {
+                        Ok(f) => {
+                            cache_put(&key, &f);
+                            f
+                        }
+                        Err(e) => {
+                            log::warn!("[AI] semantic rerank skipped: {e}");
+                            SemanticFusion::default()
+                        }
+                    },
+                };
+                if !fusion.order.is_empty() {
+                    response.hits = materialize_fused_page(
+                        &state.db,
+                        &params.query,
+                        &response.hits,
+                        &top.hits,
+                        &fusion,
+                        params.page,
+                        params.page_size,
+                    );
+                    response.semantic_applied = true;
+                }
+            }
             Err(e) => log::warn!("[AI] semantic rerank skipped: {e}"),
         }
     }
@@ -303,20 +322,105 @@ fn should_semantic_rerank(params: &SearchParams, embedding_enabled: bool) -> boo
 /// page-local ranks would let page-2+ hits never participate.
 const BM25_FUSION_TOP_N: usize = 100;
 
-/// Semantically rerank search hits: embed the query, score every stored
-/// embedding by cosine, then fuse with the BM25 ranks via Reciprocal Rank
-/// Fusion. Returns a merged `SearchResponse` with reordered hits.
+/// 语义融合的结果（供分页缓存复用）：融合后的前 [`SEMANTIC_ORDER_TOP`] 个 id + 余弦。
+#[derive(Clone, Default)]
+struct SemanticFusion {
+    /// RRF 融合后的顺序（`file_id` + 融合分）。
+    order: Vec<(String, f64)>,
+    /// `file_id` → 余弦相似度（仅 `order` 里的 id；用于"语义相似度 %"前缀）。
+    cos: std::collections::HashMap<String, f32>,
+}
+
+/// 语义融合缓存条目。
+struct SemanticCacheEntry {
+    key: String,
+    stored: std::time::Instant,
+    fusion: SemanticFusion,
+}
+
+/// 语义融合缓存：同一查询的**翻页**直接命中，免掉"查询向量 + 全库余弦 + RRF"（日志实测 ~4s）。
 ///
-/// `bm25` is the current page's response (baseline/fallback); `bm25_top` is
-/// the corpus-wide top-N used for the BM25 side of the fusion.
-fn semantic_rerank_worker(
+/// 语义下翻页的查询与过滤条件不变，融合顺序是确定的；索引变化时最多陈旧
+/// [`SEMANTIC_CACHE_TTL`]（翻页场景可接受）。内存量级：每条"前 300 个 id + 余弦"≈ 几十 KB。
+static SEMANTIC_CACHE: std::sync::Mutex<Vec<SemanticCacheEntry>> =
+    std::sync::Mutex::new(Vec::new());
+/// 缓存有效期。
+const SEMANTIC_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// 缓存最多保留几条（超了淘汰最旧）。
+const SEMANTIC_CACHE_MAX: usize = 8;
+/// 融合/缓存保留的前 N 名（覆盖 60 页 × 5 条；更深的页本就不在语义路径的稳定范围内）。
+const SEMANTIC_ORDER_TOP: usize = 300;
+
+/// 缓存键：查询 + 所有影响检索/排序的参数（**不含** page/page_size —— 那正是要复用的维度）。
+fn semantic_cache_key(params: &SearchParams) -> String {
+    format!(
+        "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+        params.query,
+        params.dir_ids,
+        params.file_ids,
+        params.ext_filter,
+        params.path_prefixes,
+        params.date_from,
+        params.date_to,
+        params.fuzzy,
+        params.sort,
+        params.sort_order,
+    )
+}
+
+/// 在缓存表里查（纯函数，`now` 注入便于单测）。
+fn cache_lookup<'a>(
+    entries: &'a [SemanticCacheEntry],
+    key: &str,
+    now: std::time::Instant,
+    ttl: std::time::Duration,
+) -> Option<&'a SemanticFusion> {
+    entries
+        .iter()
+        .find(|e| e.key == key && now.duration_since(e.stored) < ttl)
+        .map(|e| &e.fusion)
+}
+
+/// 写入缓存（纯函数）：同 key 覆盖；超过 `max` 条时淘汰**最旧**的一条。
+fn cache_store(entries: &mut Vec<SemanticCacheEntry>, entry: SemanticCacheEntry, max: usize) {
+    entries.retain(|e| e.key != entry.key);
+    entries.push(entry);
+    while entries.len() > max {
+        let Some((idx, _)) = entries.iter().enumerate().min_by_key(|(_, e)| e.stored) else {
+            break;
+        };
+        entries.remove(idx);
+    }
+}
+
+fn cache_get(key: &str) -> Option<SemanticFusion> {
+    let now = std::time::Instant::now();
+    let guard = SEMANTIC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache_lookup(&guard, key, now, SEMANTIC_CACHE_TTL).cloned()
+}
+
+fn cache_put(key: &str, fusion: &SemanticFusion) {
+    let mut guard = SEMANTIC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    cache_store(
+        &mut guard,
+        SemanticCacheEntry {
+            key: key.to_string(),
+            stored: std::time::Instant::now(),
+            fusion: fusion.clone(),
+        },
+        SEMANTIC_CACHE_MAX,
+    );
+}
+
+/// 语义融合的**昂贵前半段**：查询向量（5s 超时）→ 全库余弦 → RRF 融合，截前 N 名。
+///
+/// `bm25_top`：全库 top-N BM25 命中（同过滤、不分页）作 RRF 的 BM25 侧来源。
+/// 返回空 `order` = 没有任何向量（调用方退回纯关键词，且**不标记** `semantic_applied`）。
+fn compute_semantic_fusion(
     pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
     query: &str,
-    bm25: &SearchResponse,
     bm25_top: &[SearchHit],
-    page: usize,
-    page_size: usize,
-) -> Result<SearchResponse, String> {
+) -> Result<SemanticFusion, String> {
     use std::collections::HashMap;
 
     let q_vec = {
@@ -336,7 +440,7 @@ fn semantic_rerank_worker(
     drop(conn);
 
     if rows.is_empty() {
-        return Ok(bm25.clone());
+        return Ok(SemanticFusion::default());
     }
 
     // Semantic cosine scores: file_id -> score.
@@ -345,7 +449,6 @@ fn semantic_rerank_worker(
         .map(|(fid, vec)| (fid.clone(), crate::ai::cosine(&q_vec, vec)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let cos_map: std::collections::HashMap<String, f32> = scored.iter().cloned().collect();
 
     // RRF fusion: score = 1/(60 + rank) summed over BM25 and semantic lists.
     const K: f64 = 60.0;
@@ -357,105 +460,114 @@ fn semantic_rerank_worker(
         *fusion.entry(fid.clone()).or_insert(0.0) += 1.0 / (K + rank as f64);
     }
 
-    let mut ordered: Vec<(String, f64)> = fusion.into_iter().collect();
-    ordered.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut order: Vec<(String, f64)> = fusion.into_iter().collect();
+    order.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    order.truncate(SEMANTIC_ORDER_TOP);
 
-    // Rebuild hit list in fused order. The semantic side may surface docs
-    // that BM25 never matched — those must be materialised from the DB
-    // (file_name/path/mtime/size) instead of being silently dropped, or a
-    // pure-semantic query (different wording, same meaning) returns nothing.
-    let mut by_id: HashMap<String, SearchHit> = bm25
-        .hits
+    // 余弦只保留 order 里的 id（缓存体积与 order 同量级）。
+    let cos_all: HashMap<String, f32> = scored.into_iter().collect();
+    let cos: HashMap<String, f32> = order
+        .iter()
+        .filter_map(|(id, _)| cos_all.get(id).map(|c| (id.clone(), *c)))
+        .collect();
+
+    Ok(SemanticFusion { order, cos })
+}
+
+/// 按融合顺序取出**当前页**的命中。
+///
+/// - 当前页的 BM25 命中**直接复用**（保留 tantivy 摘要）；
+/// - 语义召回（BM25 未覆盖）的从 DB 物化（元数据 + 围绕查询词的高亮摘要）；
+/// - 只保留"落在 BM25 作用域内"的融合结果（与旧实现一致：语义侧召回必须同过滤范围）；
+/// - 页内不足时用剩余的 BM25 命中补齐（深页/过滤导致的空位）。
+fn materialize_fused_page(
+    pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    query: &str,
+    bm25_page: &[SearchHit],
+    bm25_top: &[SearchHit],
+    fusion: &SemanticFusion,
+    page: usize,
+    page_size: usize,
+) -> Vec<SearchHit> {
+    use std::collections::{HashMap, HashSet};
+
+    let mut by_id: HashMap<String, SearchHit> = bm25_page
         .iter()
         .cloned()
         .map(|h| (h.file_id.clone(), h))
         .collect();
+    let allowed: HashSet<&str> = bm25_top.iter().map(|h| h.file_id.as_str()).collect();
+    let start = page.saturating_sub(1).saturating_mul(page_size);
 
-    // Fetch metadata for semantic-only ids (top fused order, bounded).
-    let conn = pool.get().map_err(|e| format!("db error: {e}"))?;
-    // Pre-build the allowed file_id set from BM25 so semantic-only recall
-    // stays within the same filter scope (dirs / exts / paths) as BM25.
-    let allowed_ids: std::collections::HashSet<&str> = bm25_top.iter()
-        .map(|h| h.file_id.as_str())
-        .collect();
-    for (fid, _fusion) in ordered.iter().take(100) {
-        if by_id.contains_key(fid) {
+    let Ok(conn) = pool.get() else {
+        return bm25_page.to_vec(); // 拿不到连接就退回纯 BM25 页，不报错
+    };
+    let mut hits: Vec<SearchHit> = Vec::with_capacity(page_size);
+    for (fid, _) in fusion.order.iter().skip(start).take(page_size) {
+        if let Some(h) = by_id.remove(fid) {
+            hits.push(h);
             continue;
         }
-        // Skip semantic-only candidates outside the filter scope.
-        if !allowed_ids.contains(fid.as_str()) {
+        if !allowed.contains(fid.as_str()) {
             continue;
         }
-        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, fid) {
-            let file_name = std::path::Path::new(&rec.path)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| rec.path.clone());
-            // Semantic score (cosine similarity) — visible so the user can
-            // tell how close the match is; 0 means "matched via keywords".
-            let cos = cos_map.get(fid).copied().unwrap_or(0.0);
-            // Build a snippet around the query's first matching word so the
-            // user sees *why* this document matched (highlighted). When no
-            // word overlap exists (pure semantic hit), prefix the similarity
-            // percentage so the user can judge relevance.
-            let raw_snippet = match rec.md5.as_deref() {
-                Some(md5) => crate::db::tracker::get_content(&conn, md5)
-                    .ok()
-                    .flatten()
-                    .map(|text| semantic_snippet(&text, query))
-                    .unwrap_or_default(),
-                None => String::new(),
-            };
-            let snippet = if raw_snippet.contains("<em>") {
-                raw_snippet
-            } else if cos > 0.0 {
-                format!(
-                    "[语义相似度 {}%] {}",
-                    (cos * 100.0) as u32,
-                    raw_snippet,
-                )
-            } else {
-                raw_snippet
-            };
-            by_id.insert(
-                fid.clone(),
-                SearchHit {
-                    file_id: fid.clone(),
-                    file_name,
-                    file_ext: std::path::Path::new(&rec.path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("")
-                        .to_string(),
-                    path: rec.path.clone(),
-                    snippet,
-                    score: (cos * 100.0) as f64,
-                    mtime: rec.mtime,
-                    file_size: rec.size,
-                    duplicate_count: 0,
-                    duplicate_paths: vec![],
-                },
-            );
+        let cos = fusion.cos.get(fid).copied().unwrap_or(0.0);
+        if let Some(h) = build_semantic_hit(&conn, query, fid, cos) {
+            hits.push(h);
         }
     }
-    drop(conn);
+    // 页内不足：把本页 BM25 命中里没被融合顺序用到的补在末尾（不丢结果）。
+    if hits.len() < page_size {
+        let mut rest: Vec<SearchHit> = by_id.into_values().collect();
+        rest.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.extend(rest.into_iter().take(page_size - hits.len()));
+    }
+    hits
+}
 
-    let mut merged: Vec<SearchHit> = ordered
-        .iter()
-        .filter_map(|(id, _)| by_id.remove(id))
-        .collect();
-    merged.extend(by_id.into_values());
-
-    let start = page.saturating_sub(1) * page_size;
-    let page_hits: Vec<SearchHit> = merged.into_iter().skip(start).take(page_size).collect();
-
-    Ok(SearchResponse {
-        total: bm25.total,
-        page,
-        page_size,
-        took_ms: bm25.took_ms,
-        hits: page_hits,
-        semantic_applied: true,
+/// 物化一条"语义召回"的命中：元数据从 DB 取，摘要围绕查询词高亮；
+/// 纯语义命中（词不字面出现）前缀"语义相似度 %"，让用户知道**为什么**命中。
+fn build_semantic_hit(
+    conn: &rusqlite::Connection,
+    query: &str,
+    fid: &str,
+    cos: f32,
+) -> Option<SearchHit> {
+    let rec = crate::db::tracker::get_file_by_id(conn, fid).ok().flatten()?;
+    let file_name = std::path::Path::new(&rec.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| rec.path.clone());
+    let raw_snippet = match rec.md5.as_deref() {
+        Some(md5) => crate::db::tracker::get_content(conn, md5)
+            .ok()
+            .flatten()
+            .map(|text| semantic_snippet(&text, query))
+            .unwrap_or_default(),
+        None => String::new(),
+    };
+    let snippet = if raw_snippet.contains("<em>") {
+        raw_snippet
+    } else if cos > 0.0 {
+        format!("[语义相似度 {}%] {}", (cos * 100.0) as u32, raw_snippet)
+    } else {
+        raw_snippet
+    };
+    Some(SearchHit {
+        file_id: fid.to_string(),
+        file_name,
+        file_ext: std::path::Path::new(&rec.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_string(),
+        path: rec.path.clone(),
+        snippet,
+        score: (cos * 100.0) as f64,
+        mtime: rec.mtime,
+        file_size: rec.size,
+        duplicate_count: 0,
+        duplicate_paths: vec![],
     })
 }
 
@@ -1080,7 +1192,10 @@ mod snippet_tests {
 /// "请求要 + 网关可用 + 查询非空"三条件缺一不可，避免"开关点了没变化"。
 #[cfg(test)]
 mod semantic_gate_tests {
-    use super::{should_semantic_rerank, SearchParams, SortField};
+    use super::{
+        cache_lookup, cache_store, semantic_cache_key, should_semantic_rerank, SearchParams,
+        SemanticCacheEntry, SemanticFusion, SortField,
+    };
 
     fn params(query: &str, semantic: bool) -> SearchParams {
         SearchParams {
@@ -1119,6 +1234,54 @@ mod semantic_gate_tests {
             !should_semantic_rerank(&params("", true), true),
             "空查询 → 不融合（无词可嵌入）"
         );
+    }
+
+    /// 缓存键**不含** page/page_size（那正是要复用的维度）；查询/过滤变了才换键。
+    #[test]
+    fn semantic_cache_key_ignores_pagination_but_tracks_query() {
+        let a = params("合同", true);
+        let mut b = a.clone();
+        b.page = 7;
+        b.page_size = 50;
+        assert_eq!(semantic_cache_key(&a), semantic_cache_key(&b), "翻页必须命中同一键");
+        let mut c = a.clone();
+        c.query = "物业".into();
+        assert_ne!(semantic_cache_key(&a), semantic_cache_key(&c), "查询变了要换键");
+        let mut d = a.clone();
+        d.ext_filter = Some(vec!["pdf".into()]);
+        assert_ne!(semantic_cache_key(&a), semantic_cache_key(&d), "过滤变了要换键");
+    }
+
+    /// 缓存读写：TTL 内命中、过期不命中、同 key 覆盖、超上限淘汰最旧。
+    #[test]
+    fn semantic_cache_respects_ttl_and_capacity() {
+        let now = std::time::Instant::now();
+        let ttl = std::time::Duration::from_secs(300);
+        let mk = |key: &str, at: std::time::Instant| SemanticCacheEntry {
+            key: key.to_string(),
+            stored: at,
+            fusion: SemanticFusion::default(),
+        };
+        let mut entries = vec![
+            mk("a", now),
+            mk("b", now - std::time::Duration::from_secs(301)),
+        ];
+        assert!(cache_lookup(&entries, "a", now, ttl).is_some(), "新鲜条目应命中");
+        assert!(cache_lookup(&entries, "b", now, ttl).is_none(), "过期条目不命中");
+        assert!(cache_lookup(&entries, "c", now, ttl).is_none(), "不存在的键不命中");
+
+        // 同 key 覆盖 + 容量淘汰最旧
+        cache_store(&mut entries, mk("a", now), 8);
+        assert_eq!(
+            entries.iter().filter(|e| e.key == "a").count(),
+            1,
+            "同 key 只保留一条"
+        );
+        for i in 0..12 {
+            cache_store(&mut entries, mk(&format!("k{i}"), now), 8);
+        }
+        assert!(entries.len() <= 8, "容量上限：{}", entries.len());
+        assert!(entries.iter().any(|e| e.key == "k11"), "新条目应在");
     }
 }
 

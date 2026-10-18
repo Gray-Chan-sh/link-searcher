@@ -1,23 +1,22 @@
-//! 出站媒体：把本地文件上传到飞书，再以图片 / 语音 / 文件消息发出。
+//! 出站媒体：把本地文件作为图片 / 语音 / 文件消息发到飞书。
 //!
-//! 飞书没有"直接传路径"的接口：所有媒体都要**先上传拿 key，再发消息**。
-//! 两条腿都走 `lark-cli`（typed 命令上传 + raw API 回复），与 `main.rs` 现有的
-//! `reply_card` 保持同一套调用约定（`{ok, data}` 信封、参数数组不经 shell）。
+//! 走 `lark-cli im +messages-reply --image/--file/--audio`：shortcut 在**同一个进程内**
+//! 完成"上传 → 回复"（2026-10-18 通讯审计后改的）。此前的两步式（先
+//! `im images/files create` 拿 key、再 `api reply`）要起**两个** `lark-cli` 进程、取两次
+//! token —— 实测单次调用 ~0.6s，一步式直接省掉其中一次。
 //!
 //! 本模块只做两件事：
 //! - **决策**（纯函数）：这个文件该按图片、语音还是文件发；超限怎么办；
-//! - **上传**（IO）：调 `lark-cli im images/files create`，把 key 解析出来。
-//! 发消息那一步留在 `main.rs`（复用那里的 `lark_api`），不在这里重复一遍 HTTP 约定。
+//! - **发送**（IO）：调 `+messages-reply`，参数数组不经 shell、本地路径相对 cwd。
 //!
 //! 限制依据（2026-10-17 核对飞书开放平台文档）：
 //! - 图片 ≤10MB；JPG/JPEG/PNG/WEBP/GIF/BMP/ICO/TIFF/HEIC（TIFF/HEIC 上传后转 JPG）；
-//! - 文件/语音/视频 ≤30MB；语音必须是 Opus（其它格式需先转码）；
-//! - 上传时的 `file_type` 必须和发送时的 `msg_type` 匹配（否则 230055）。
+//! - 文件/语音/视频 ≤30MB；语音必须是 Opus（其它格式需先转码）。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 /// 飞书图片上传硬上限（`im/v1/images`）。
 pub const IMAGE_MAX_BYTES: u64 = 10 * 1024 * 1024;
@@ -49,7 +48,7 @@ pub fn is_audio_ext(ext: &str) -> bool {
 /// 音频的发送计划。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlan {
-    /// 已经是 Opus → 直接按 `msg_type=audio` 发（可点击播放的语音气泡）。
+    /// 已经是 Opus → 直接按语音发（可点击播放的语音气泡）。
     Direct,
     /// 其它音频且 ffmpeg 可用 → 先转 Opus 再按语音发。
     Convert,
@@ -72,9 +71,9 @@ pub fn audio_plan(ext: &str, ffmpeg_available: bool) -> AudioPlan {
 /// 非语音文件的发送形态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaPlan {
-    /// 图片且 ≤10MB → `msg_type=image`（聊天里直接预览）。
+    /// 图片且 ≤10MB → 图片消息（聊天里直接预览）。
     Image,
-    /// 其它（含 10–30MB 的图片）→ `msg_type=file`。
+    /// 其它（含 10–30MB 的图片）→ 文件消息。
     File,
 }
 
@@ -90,25 +89,29 @@ pub fn classify(ext: &str, size: u64) -> Option<MediaPlan> {
     }
 }
 
-/// 上传文件时的 `file_type`（必须与后发消息的 `msg_type` 匹配，否则 230055）。
-///
-/// 只给四个文档类专有类型；`docx`/`xlsx`/`pptx` 在飞书文件类型里没有专属枚举，
-/// 按 `stream` 上传即可（客户端按扩展名展示）。
-pub fn file_type_for(ext: &str) -> &'static str {
-    match norm_ext(ext).as_str() {
-        "pdf" => "pdf",
-        "doc" => "doc",
-        "xls" => "xls",
-        "ppt" => "ppt",
-        _ => "stream",
+/// 媒体类型（决定 `+messages-reply` 用哪个 flag，也决定 `msg_type`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaKind {
+    Image,
+    File,
+    Audio,
+}
+
+impl MediaKind {
+    /// 对应的 lark-cli flag。
+    fn flag(self) -> &'static str {
+        match self {
+            MediaKind::Image => "--image",
+            MediaKind::File => "--file",
+            MediaKind::Audio => "--audio",
+        }
     }
 }
 
 /// 统一的 `lark-cli` 调用：参数数组传值（不经 shell）、stderr 原样带进错误。
 ///
-/// `cwd`：上传媒体时设为文件所在目录，并传**相对文件名** —— lark-cli 对本地媒体路径
-/// 有一层"只能在 cwd 之内"的安全策略（`+messages-send --image` 的文档写得很明确），
-/// 走相对路径可以同时满足新旧版本，不依赖"绝对路径恰好被放行"。
+/// `cwd`：发送媒体时设为文件所在目录，并传**相对文件名** —— lark-cli 对本地媒体路径
+/// 有一层"只能在 cwd 之内"的安全策略，走相对路径可以同时满足新旧版本。
 fn run_lark_cli(program: &Path, args: &[String], cwd: Option<&Path>) -> Result<Value, String> {
     let mut cmd = Command::new(program);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -141,7 +144,7 @@ fn run_lark_cli(program: &Path, args: &[String], cwd: Option<&Path>) -> Result<V
     Ok(v)
 }
 
-/// 上传时用的 `(cwd, 路径参数)`：优先"文件所在目录 + `./文件名`"，
+/// 发送时用的 `(cwd, 路径参数)`：优先"文件所在目录 + `./文件名`"，
 /// 拿不到父目录/文件名时退回原路径（让 lark-cli 自己去解析）。
 fn upload_cwd_and_path(file: &Path) -> (Option<PathBuf>, String) {
     let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -155,63 +158,36 @@ fn upload_cwd_and_path(file: &Path) -> (Option<PathBuf>, String) {
     }
 }
 
-/// 从 `{ok, data}` 信封里取 key；兼容 key 直接挂在顶层的情况。
-fn extract_key(v: &Value, key: &str) -> Result<String, String> {
-    v.get("data")
-        .and_then(|d| d.get(key))
-        .or_else(|| v.get(key))
-        .and_then(|k| k.as_str())
-        .map(str::to_string)
-        .ok_or_else(|| format!("lark-cli 未返回 {key}：{v}"))
-}
-
-/// 上传图片（`image_type=message`）→ `image_key`。
-pub fn upload_image(program: &Path, file: &Path) -> Result<String, String> {
-    let data = json!({ "image_type": "message" }).to_string();
-    let (cwd, path) = upload_cwd_and_path(file);
-    let v = run_lark_cli(
-        program,
-        &[
-            "im".into(),
-            "images".into(),
-            "create".into(),
-            "--as".into(),
-            "bot".into(),
-            "--data".into(),
-            data,
-            "--file".into(),
-            path,
-        ],
-        cwd.as_deref(),
-    )?;
-    extract_key(&v, "image_key")
-}
-
-/// 上传文件 / 语音 / 视频 → `file_key`。
-pub fn upload_file(
+/// **一步式**发送媒体：`im +messages-reply --image/--file/--audio <本地路径>`。
+///
+/// shortcut 内部先上传再回复（同一个进程、同一次取 token）；本地路径必须相对 cwd，
+/// 故统一把 cwd 设成文件所在目录并传 `./文件名`（见 [`upload_cwd_and_path`]）。
+///
+/// 失败信息里带 lark-cli 的 stderr（例如缺 `im:resource` 权限、超限、类型不符），
+/// 由调用方决定怎么展示给用户。
+pub fn reply_media_file(
     program: &Path,
+    message_id: &str,
+    kind: MediaKind,
     file: &Path,
-    file_type: &str,
-    file_name: &str,
-) -> Result<String, String> {
-    let data = json!({ "file_type": file_type, "file_name": file_name }).to_string();
+) -> Result<(), String> {
+    if message_id.trim().is_empty() {
+        return Err("没有 message_id，无法回复".to_string());
+    }
     let (cwd, path) = upload_cwd_and_path(file);
-    let v = run_lark_cli(
+    run_lark_cli(
         program,
         &[
             "im".into(),
-            "files".into(),
-            "create".into(),
-            "--as".into(),
-            "bot".into(),
-            "--data".into(),
-            data,
-            "--file".into(),
+            "+messages-reply".into(),
+            "--message-id".into(),
+            message_id.trim().into(),
+            kind.flag().into(),
             path,
         ],
         cwd.as_deref(),
-    )?;
-    extract_key(&v, "file_key")
+    )
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -253,27 +229,37 @@ mod tests {
         assert_eq!(audio_plan("mp4", true), AudioPlan::AsFile, "视频不转语音");
     }
 
+    /// 三种媒体形态各自对应的 shortcut flag（flag 决定 `msg_type`，不能错）。
     #[test]
-    fn file_type_follows_feishu_enum() {
-        assert_eq!(file_type_for("pdf"), "pdf");
-        assert_eq!(file_type_for(".PDF"), "pdf");
-        assert_eq!(file_type_for("doc"), "doc");
-        assert_eq!(file_type_for("docx"), "stream", "docx 没有专属类型");
-        assert_eq!(file_type_for("xlsx"), "stream");
-        assert_eq!(file_type_for("pptx"), "stream");
-        assert_eq!(file_type_for("txt"), "stream");
-        assert_eq!(file_type_for("mp4"), "stream", "视频不在首版支持范围，按文件发");
+    fn media_kind_maps_to_the_right_shortcut_flag() {
+        assert_eq!(MediaKind::Image.flag(), "--image");
+        assert_eq!(MediaKind::File.flag(), "--file");
+        assert_eq!(MediaKind::Audio.flag(), "--audio");
     }
 
-    /// 上传失败必须是**可读错误**，不能 panic（lark-cli 不存在是最常见的失败）。
+    /// 发送失败必须是**可读错误**，不能 panic（lark-cli 不存在是最常见的失败）。
     #[test]
-    fn upload_reports_missing_lark_cli_instead_of_panicking() {
+    fn send_reports_missing_lark_cli_instead_of_panicking() {
         let bogus = Path::new("definitely-not-a-real-lark-cli-binary-xyz");
-        let err = upload_image(bogus, Path::new("whatever.png")).unwrap_err();
+        let err = reply_media_file(bogus, "om_x", MediaKind::File, Path::new("whatever.pdf"))
+            .unwrap_err();
         assert!(err.contains("无法启动 lark-cli"), "实际错误：{err}");
     }
 
-    /// 上传路径统一走"cwd + `./文件名`"：lark-cli 对本地媒体路径有 cwd 限制。
+    /// 空 message_id 不调 lark-cli，直接报错（防止"回复到空气里"）。
+    #[test]
+    fn send_rejects_empty_message_id_without_spawning() {
+        let err = reply_media_file(
+            Path::new("lark-cli"),
+            "   ",
+            MediaKind::Image,
+            Path::new("a.png"),
+        )
+        .unwrap_err();
+        assert!(err.contains("没有 message_id"), "实际错误：{err}");
+    }
+
+    /// 发送路径统一走"cwd + `./文件名`"：lark-cli 对本地媒体路径有 cwd 限制。
     #[test]
     fn upload_path_prefers_cwd_relative_form() {
         let (cwd, path) = upload_cwd_and_path(Path::new("D:/docs/报告 2024.pdf"));

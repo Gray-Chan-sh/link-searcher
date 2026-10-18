@@ -1901,26 +1901,10 @@ fn patch_card(card_message_id: &str, card: &Value) -> Result<(), String> {
 
 // ───────────────────────────── 出站媒体（项目 → 飞书）─────────────────────────────
 
-/// 回复一条**媒体消息**（图片 / 文件 / 语音）。
-///
-/// 与 [`reply_card`] 同一约定：`content` 是飞书要求的 **JSON 字符串**（先序列化再塞进
-/// `content` 字段），走 `messages/{id}/reply`。上传已在 `media` 模块完成（先拿 key）。
-fn reply_media(message_id: &str, msg_type: &str, content: &Value) -> Result<(), String> {
-    if message_id.is_empty() {
-        return Err("没有 message_id，无法回复".to_string());
-    }
-    let body = json!({
-        "msg_type": msg_type,
-        "content": serde_json::to_string(content)
-            .map_err(|e| format!("序列化媒体内容失败：{e}"))?,
-    });
-    lark_api("POST", &format!("/open-apis/im/v1/messages/{message_id}/reply"), &body).map(|_| ())
-}
-
 /// 把一个**索引里的文件**发到飞书（`/find` 结果卡上的「发送 N」按钮落到这里）。
 ///
 /// 数据流：`file_id` → `GET /api/files/{id}/abs-path`（服务端校验路径仍在索引目录内）
-/// → 按扩展名/大小选形态 → `media` 上传 → 回复媒体消息。
+/// → 按扩展名/大小选形态 → [`media::reply_media_file`]（**一步式**上传+回复）。
 ///
 /// 三条边界：
 /// - **只认 file_id**：不接受任意路径（模型/用户都不能指定"发哪个本地文件"）；
@@ -1971,34 +1955,24 @@ fn send_tracked_file(http: &Http, message_id: &str, file_id: &str) -> Result<(),
     let result = (|| -> Result<(), String> {
         match audio {
             media::AudioPlan::Direct => {
-                let key = media::upload_file(&program, &path, "opus", &name)?;
-                reply_media(message_id, "audio", &json!({ "file_key": key }))
+                media::reply_media_file(&program, message_id, media::MediaKind::Audio, &path)
             }
-            media::AudioPlan::Convert => {
-                match convert_to_opus(&path) {
-                    Some(opus) => {
-                        converted = Some(opus.clone());
-                        let opus_name = format!("{}.opus", file_stem(&name));
-                        let key = media::upload_file(&program, &opus, "opus", &opus_name)?;
-                        reply_media(message_id, "audio", &json!({ "file_key": key }))
-                    }
-                    // 转码失败（没有 ffmpeg / 源文件损坏）→ 退回普通文件，别让用户拿不到东西
-                    None => {
-                        let key =
-                            media::upload_file(&program, &path, media::file_type_for(&ext), &name)?;
-                        reply_media(message_id, "file", &json!({ "file_key": key }))
-                    }
+            media::AudioPlan::Convert => match convert_to_opus(&path) {
+                Some(opus) => {
+                    converted = Some(opus.clone());
+                    media::reply_media_file(&program, message_id, media::MediaKind::Audio, &opus)
                 }
-            }
+                // 转码失败（没有 ffmpeg / 源文件损坏）→ 退回普通文件，别让用户拿不到东西
+                None => {
+                    media::reply_media_file(&program, message_id, media::MediaKind::File, &path)
+                }
+            },
             media::AudioPlan::AsFile => match media::classify(&ext, size) {
                 Some(media::MediaPlan::Image) => {
-                    let key = media::upload_image(&program, &path)?;
-                    reply_media(message_id, "image", &json!({ "image_key": key }))
+                    media::reply_media_file(&program, message_id, media::MediaKind::Image, &path)
                 }
                 Some(media::MediaPlan::File) => {
-                    let key =
-                        media::upload_file(&program, &path, media::file_type_for(&ext), &name)?;
-                    reply_media(message_id, "file", &json!({ "file_key": key }))
+                    media::reply_media_file(&program, message_id, media::MediaKind::File, &path)
                 }
                 // 大小已在上面挡过；这里只是把"决策返回 None"也收口成可读错误
                 None => Err(format!("文件「{name}」不满足飞书的发送限制")),
@@ -2006,7 +1980,10 @@ fn send_tracked_file(http: &Http, message_id: &str, file_id: &str) -> Result<(),
         }
     })();
     if let Some(tmp) = converted {
-        let _ = std::fs::remove_file(tmp); // 转码产物是临时的，无论成败都清掉
+        // 转码产物在**独占临时目录**里：整目录清掉（无论成败）
+        if let Some(dir) = tmp.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
     match result {
         Ok(()) => {
@@ -2017,16 +1994,6 @@ fn send_tracked_file(http: &Http, message_id: &str, file_id: &str) -> Result<(),
         }
         Err(e) => Err(e),
     }
-}
-
-/// 文件名主干（转码后的 opus 用它命名；空名退回 `voice`）。
-fn file_stem(name: &str) -> String {
-    let stem = std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .trim();
-    if stem.is_empty() { "voice".to_string() } else { stem.to_string() }
 }
 
 /// 解析 ffmpeg：应用经 `LS_FFMPEG` 注入（依赖中心解析的路径），否则退回 PATH 上的 `ffmpeg`。
@@ -2050,16 +2017,29 @@ fn ffmpeg_program() -> Option<PathBuf> {
     ok.then(|| PathBuf::from("ffmpeg"))
 }
 
-/// mp3/wav/… → Opus（飞书语音消息的唯一可用编码），写到临时目录；失败返回 `None`。
+/// mp3/wav/… → Opus（飞书语音消息的唯一可用编码）；失败返回 `None`。
+///
+/// 产物放在**独占临时目录** `link-searcher-lark-<pid>-<millis>/<原名主干>.opus`：
+/// - 独占目录：并发转码不撞名，清理时整目录删（调用方 `remove_dir_all`）；
+/// - 文件名沿用**原主干**：一步式发送（`+messages-reply --audio`）会用磁盘上的文件名，
+///   随机名会污染语音消息的显示名。
 ///
 /// 参数按飞书文档给的建议：`-acodec libopus -ac 1 -ar 16000`（单声道 16kHz）。
 fn convert_to_opus(src: &Path) -> Option<PathBuf> {
     let ffmpeg = ffmpeg_program()?;
-    let out = std::env::temp_dir().join(format!(
-        "link-searcher-lark-{}-{}.opus",
+    let dir = std::env::temp_dir().join(format!(
+        "link-searcher-lark-{}-{}",
         std::process::id(),
         now_millis()
     ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let stem = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .trim();
+    let stem = if stem.is_empty() { "voice" } else { stem };
+    let out = dir.join(format!("{stem}.opus"));
     let status = Command::new(&ffmpeg)
         .args(["-y", "-i"])
         .arg(src)
@@ -2070,7 +2050,7 @@ fn convert_to_opus(src: &Path) -> Option<PathBuf> {
         .status()
         .ok()?;
     if !status.success() || !out.is_file() {
-        let _ = std::fs::remove_file(&out);
+        let _ = std::fs::remove_dir_all(&dir);
         return None;
     }
     Some(out)
