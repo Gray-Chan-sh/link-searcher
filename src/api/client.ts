@@ -453,7 +453,13 @@ export async function listen<T = unknown>(
         }
       }
     }
-  }).catch(() => {}); // AbortError when unlistened
+  }).catch((e: unknown) => {
+    // AbortError = 组件卸载时主动中断，属正常路径；其它错误（断网 / 401 / 500）
+    // 此前被完全吞掉 —— 表现为"聊天停在思考中、进度不动"，且无任何线索。
+    if (e instanceof DOMException && e.name === 'AbortError') return;
+    if (e instanceof Error && e.name === 'AbortError') return;
+    console.warn('[events] SSE bridge error:', e);
+  });
 
   return () => controller.abort();
 }

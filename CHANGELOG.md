@@ -1,3 +1,87 @@
+## 2026-10-18（第三十八轮）：全库审计修复 —— Zip Slip / 提权路径 / 内容行丢失 / 永久卡死标志 等 14 项
+
+> 用户要求"全面分析代码，找出漏洞与改进"；先做三个并行专项审计（安全面 / 并发与资源 /
+> 错误处理与静默失败），再**逐条回源码核实**后实施（下列每项都已读码验证，非猜测）。
+
+**安全（P0）**
+
+1. **恢复 zip 的 Zip Slip（任意文件写）**（`commands/backup.rs`）
+   - 根因：`restore_from_zip` 直接 `tmp.join(entry.name())`，`..\..\…` 条目可写到临时目录之外；
+     且"是否合法备份包"的校验在**解压之后**（畸形包也先落盘）。
+   - 修法：解压前 `validate_backup_zip()` 预检（条目名必须纯 Normal 组件、拒绝反斜杠/盘符/
+     绝对路径、必须含 `snapshot.json`、条目数 ≤ 20 万）；解压时再用 zip 官方
+     `enclosed_name()` 作第二道防线。新增 2 个单测（含 `..\` / 盘符 / 缺清单 / 超量）。
+2. **备份导出/恢复的 `backup_name` 可穿越**（`commands/backup.rs`）
+   - 根因：`data_dir/backups/join(backup_name)` 直接拼 —— `../../..` 可把任意目录（`.ssh`、
+     浏览器 profile）当"备份"打包外泄（IPC 与 `POST /api/backup/export` 都可传）。
+   - 修法：新增 `resolve_backup_dir()`（名字白名单 `[A-Za-z0-9_-]` + 存在性检查），导出/恢复统一走它。
+3. **Web API token 明文进日志**（`webapi/mod.rs`）
+   - 根因：启动日志打印完整 token（日志随备份导出、会被整份转发），而 token 是 Web API 唯一门槛。
+   - 修法：只打印 4 字符前缀指纹 + 指向设置页。
+
+**数据丢失 / 功能永久卡死（P0）**
+
+4. **恢复失败后 `is_restoring` 永久为 true**（`commands/backup.rs`，两处命令）
+   - 根因：`result?` 在 `is_restoring.store(false)` **之前**返回 —— 一次"无效的备份文件"
+     就让恢复被"正在恢复中，请稍候"永久拒绝到重启。
+   - 修法：以 `match` 收口 JoinError，任何路径先复位再传播错误。
+5. **索引目录替换失败被静默吞**（`commands/backup.rs::restore_from_dir`）
+   - 根因：`index_manager.write()` 失败（锁中毒）时什么都不做却继续 → 磁盘已换、内存没换；
+     两处 `rename` 结果被丢弃。
+   - 修法：改为 `rebuild_index` 同款「丢 writer → 内存占位 → 磁盘交换 → 最终路径重开」，
+     失败路径逐级回滚并把实例装回（`reinstall_index`）；打开失败不再静默。
+6. **verify / reindex 的「先删内容行再重提取」**（`commands/index/verify.rs`、`commands/index.rs` 两处）
+   - 根因：按 md5 先删 `content_index`，而 `index_file` 在 dedup 命中/提取失败/扫描取消时
+     **不写回** → 内容行永久消失（同一 md5 的其它副本一并受害，文件从质量页隐身）；
+     verify 还会把「取消导致的空跑」与「DB 查询失败」经 `unwrap_or(0)` 当成"确认为空"判死。
+   - 修法：只在"行存在且内容为空"时删（空行无价值、并发写回的正文绝不误删）；失败/取消/
+     DB 错一律**不判死**（只 `mark_failed_retry`）；成功路径补 `ensure_content_row` 兜底；
+     新增 `IndexerService::is_cancelled()` 供维护路径区分"取消早退"。
+7. **`is_scanning` / `is_rebuilding` / `INSTALLING` 非 RAII**（`commands/index.rs`、`bge.rs`、`funasr.rs`）
+   - 根因：panic 时不复位 → 扫描/重建/模型安装被永久拒绝到重启；bge/funasr 的
+     `create_dir_all(...)?` 早退更是**必现**卡死路径。
+   - 修法：新增 `ScanFlagReset` / `InstallingGuard`（Drop 复位）+ 早退显式复位。
+
+**用户可见功能损坏（P0/P1，前端）**
+
+8. **「导出备份」/「导出当前状态」**（`useSettingsBackup.ts` + `utils/platform.ts`）
+   - 根因：前端把**快照 id 当 `destPath`** 传（导出的是实时状态、zip 落在进程 CWD，
+     打包环境下不可写）；"导出当前状态"传空串 → 后端必报"导出路径不能为空"。
+   - 修法：新增 `askSavePath()`（保存对话框只取路径，内容仍由后端写盘）→
+     `exportBackup(dest, password, snapId)` 参数语义对齐。
+9. **「从 zip 恢复」弹的是选目录**（同上）
+   - 根因：后端 `File::open(zip_path)` 只收文件，前端却用 `openDirectory()` → 必失败。
+   - 修法：新增 `openFile()`（zip 过滤器）。
+10. **AI 流式失败被改写成"空回答"**（`ai/mod.rs` + `commands/ai.rs`）
+    - 根因：`result.text.unwrap_or_default()` —— 401/400/断网/未配置的真实原因只进日志，
+      界面与机器人只看到"没有回答"（历史故障 #2 的同类体验）。
+    - 修法：`ChatStreamOutcome` 新增 `error` 字段，6 个失败点各带上原因（含网关响应摘要）；
+      两处调用点用 `stream_text_or_error()` 把原因变成用户可见的 `❌ …` 消息。
+11. **会话列表拉取失败 → 误建空会话**（`AiChat.tsx`）
+    - 根因：`catch {/*ignore*/}` + `finally { setSessionsLoaded(true) }` 把"拉取失败"
+      当成"真的没有会话"，与 2026-09-29 会话丢失事故同形。
+    - 修法：失败自动重试 3 次，仍失败保持 `sessionsLoaded=false`（不触发自动建会话）。
+12. **扫描按钮无反应 / 事件桥静默吞错**（`IndexStatus.tsx`、`api/client.ts`）
+    - 修法：`handleScan` 包 try/catch 显示错误；SSE 桥非 AbortError 打 `console.warn`。
+
+**lark-bot**
+
+13. **中文日志截断 panic**（`lark-bot/src/main.rs` 5 处 + `media.rs` 1 处）
+    - 根因：`&s[..s.len().min(200)]` 按字节切 UTF-8，中文可切在字符中间 panic（错误路径触发）。
+    - 修法：新增 `card::clip_str()`（回退到字符边界）并全部替换。
+14. **`lark_setup.rs::extract_urls` 多字节终止符 panic**（主应用）
+    - 根因：`rest = &tail[end + 1..]` 按 1 字节步进，终止符为 `，`/`。`（3 字节）时切半字符 panic
+      —— 而 lark-cli 的验证链接后紧跟中文标点是常态。
+    - 修法：按 `char::len_utf8` 步进，新增单测覆盖中文标点与"标点后还有第二个链接"。
+
+**验证**：`cargo test --workspace` 全绿、`npx tsc --noEmit` 0 错、`npx vitest run` 81/81、
+`semgrep --severity ERROR` 零发现。
+
+> 审计确认但**本轮未修**（需产品决策或更大改动，已另行分级）：Web API 默认绑 `0.0.0.0`、
+> `GET /api/config|settings` 回显明文密钥、Web 端任意目录枚举与 provider `base_url` SSRF、
+> bot 关闭 TLS 校验仍发 token、OCR 闸门无超时/超时后仍 `join`、`metadata_timeout` 每文件
+> 一线程、全库向量每次查询整表载入、keeper/verify 长事务持连接、load 闸门 30s 强制放行。
+
 ## 2026-10-18（第三十七轮）：飞书通讯优化收尾 —— 流式预算减半 + 发文件一步式 + 语义翻页缓存
 
 > 上一轮审计留下的三项"未做"，本轮全部完成。

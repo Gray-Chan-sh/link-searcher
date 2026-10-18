@@ -75,8 +75,19 @@ pub(super) fn run_verify_core(
                     continue;
                 }
             };
+            // 清掉该 md5 的空内容行，否则 `index_file` 会命中 dedup 直接复用空文本、
+            // 根本不会重新提取。**只在"行存在且内容为空"时删**：空行本身无价值，
+            // 而并发写入的正文绝不会被误删（对照 reindex_files 的「先删后写」教训）。
             if let Some(ref md5) = rec.md5 {
-                let _ = tracker::delete_content(&conn, md5);
+                match tracker::get_content(&conn, md5) {
+                    Ok(Some(t)) if t.trim().is_empty() => {
+                        if let Err(e) = tracker::delete_content(&conn, md5) {
+                            log::warn!("[VERIFY] 清空内容行失败 {md5}: {e}");
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::warn!("[VERIFY] 读内容行失败 {md5}: {e}"),
+                }
             }
             let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
             let file_id = rec.id.clone();
@@ -86,34 +97,48 @@ pub(super) fn run_verify_core(
             match indexer.index_file(&file_id, &full_path, &rec.dir_id, None) {
                 Ok(()) => {
                     checked += 1;
+                    // 扫描被取消时 `index_file` 会**空跑成功**（不打日志、不写内容），
+                    // 不能当成"内容确认为空"判死。
+                    if indexer.is_cancelled() {
+                        log::info!("[VERIFY] 扫描已取消，跳过: {}", rec.path);
+                        continue;
+                    }
                     // Re-check the stored content: recovery only counts when
-                    // non-empty text actually landed.
-                    let ok = conn
-                        .query_row(
-                            "SELECT length(trim(text_content)) FROM content_index \
-                             JOIN file_tracking ON file_tracking.md5 = content_index.md5 \
-                             WHERE file_tracking.id = ?1",
-                            rusqlite::params![file_id],
-                            |row| row.get::<_, i64>(0),
-                        )
-                        .unwrap_or(0);
-                    if ok > 0 {
-                        recovered += 1;
-                        log::info!("[VERIFY] 恢复: {} ({} chars)", rec.path, ok);
-                    } else {
-                        let _ = tracker::mark_dead_content(&conn, &file_id);
-                        dead += 1;
-                        log::warn!("[VERIFY] 仍为空, 标记 dead: {}", rec.path);
+                    // non-empty text actually landed. DB 错误与"内容为空"必须分开：
+                    // 以前 `unwrap_or(0)` 会把一次 DB 抖动当成"确认为空"直接判死。
+                    let content_len = conn.query_row(
+                        "SELECT length(trim(text_content)) FROM content_index \
+                         JOIN file_tracking ON file_tracking.md5 = content_index.md5 \
+                         WHERE file_tracking.id = ?1",
+                        rusqlite::params![file_id],
+                        |row| row.get::<_, i64>(0),
+                    );
+                    match content_len {
+                        Ok(n) if n > 0 => {
+                            recovered += 1;
+                            log::info!("[VERIFY] 恢复: {} ({} chars)", rec.path, n);
+                        }
+                        Ok(_) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+                            if let Err(e) = tracker::mark_dead_content(&conn, &file_id) {
+                                log::warn!("[VERIFY] {file_id}: 标记 dead 失败: {e}");
+                            }
+                            dead += 1;
+                            log::warn!("[VERIFY] 仍为空, 标记 dead: {}", rec.path);
+                        }
+                        Err(e) => {
+                            log::warn!("[VERIFY] 内容复查失败（DB 错），本次不判死: {}: {e}", rec.path);
+                            failed += 1;
+                        }
                     }
                 }
                 Err(e) => {
-                    // 上面已经把这份文档从 Tantivy 删掉了；若行仍留在 indexed=1，
-                    // DB 就会声称一份索引里不存在的文档（元凶：heal 反复报"缺失"）。
+                    // Err 多为可恢复失败（文件读不到 / 内存压力暂停 / DB busy）：
+                    // **不**标记 dead —— `find_empty_content_files` 只挑 dead_content=0
+                    // 且 indexed=1 的行，一次取消/抖动就判死会让该文件从此跳过自动校验。
                     log::warn!("[VERIFY] 重试失败: {}: {e}", rec.path);
                     if let Err(e2) = tracker::mark_failed_retry(&conn, &file_id, &format!("校验重试失败: {e}")) {
                         log::warn!("[VERIFY] {file_id}: 标记失败态失败: {e2}");
                     }
-                    let _ = tracker::mark_dead_content(&conn, &file_id);
                     failed += 1;
                 }
             }

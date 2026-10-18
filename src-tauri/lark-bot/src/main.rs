@@ -266,7 +266,7 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
     // 事件类型先看一眼（在**反序列化成具体结构之前**）：
     // 菜单事件（`application.bot.menu_v6`）与消息事件字段完全不同，走各自的分支。
     let peek: Value = serde_json::from_str(line)
-        .map_err(|e| format!("事件 JSON 解析失败：{e}（原文前 200 字符：{}）", &line[..line.len().min(200)]))?;
+        .map_err(|e| format!("事件 JSON 解析失败：{e}（原文前 200 字符：{}）", card::clip_str(&line, 200)))?;
     let ev_type = peek
         .get("type")
         .and_then(|v| v.as_str())
@@ -1257,7 +1257,7 @@ fn handle_menu_line(raw: &Value, http: &Http, allowed_users: &[String]) -> Resul
 /// （`card_action_allowed`，fail-closed：取不到操作者或不在白名单一律拒绝）。
 fn handle_card_line(http: &Arc<Http>, line: &str, allowed_users: &[String]) -> Result<(), String> {
     let raw: Value = serde_json::from_str(line).map_err(|e| {
-        format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", &line[..line.len().min(200)])
+        format!("回调 JSON 解析失败：{e}（前 200 字符：{}）", card::clip_str(&line, 200))
     })?;
     let ev: CardActionEvent =
         serde_json::from_value(raw.clone()).map_err(|e| format!("回调字段解析失败：{e}"))?;
@@ -1736,7 +1736,7 @@ fn stream_turn(
             return Ok(true);
         };
         let Ok(v) = serde_json::from_str::<Value>(&data) else {
-            log::warn!("[bot] SSE 帧不是 JSON（忽略）：{}", &data[..data.len().min(120)]);
+            log::warn!("[bot] SSE 帧不是 JSON（忽略）：{}", card::clip_str(&data, 120));
             return Ok(true);
         };
         match event.as_str() {
@@ -1861,7 +1861,7 @@ fn lark_api(method: &str, path: &str, body: &Value) -> Result<Value, String> {
         ));
     }
     let v: Value = serde_json::from_str(&stdout).map_err(|e| {
-        format!("lark-cli 输出不是 JSON：{e}（前 200 字符：{}）", &stdout[..stdout.len().min(200)])
+        format!("lark-cli 输出不是 JSON：{e}（前 200 字符：{}）", card::clip_str(&stdout, 200))
     })?;
     // ⚠️ lark-cli 的封装是 `{ ok, identity, data }`，**不是**飞书的 `{ code, msg }`。
     //（§8.1 实测踩过：按 `code == 0` 判成功会把**成功读成失败**）
@@ -2686,7 +2686,7 @@ impl Http {
             Ok(resp) => {
                 let text = resp.into_string().map_err(|e| e.to_string())?;
                 serde_json::from_str(&text)
-                    .map_err(|e| format!("webapi 返回的不是 JSON：{e}（前 200 字符：{}）", &text[..text.len().min(200)]))
+                    .map_err(|e| format!("webapi 返回的不是 JSON：{e}（前 200 字符：{}）", card::clip_str(&text, 200)))
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let detail = resp.into_string().unwrap_or_default();

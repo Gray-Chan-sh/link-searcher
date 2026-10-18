@@ -82,14 +82,18 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
         }
     };
 
-    // 方便远程用户连接：把可访问地址与 token 打进日志（日志在本机
-    // data_dir/logs，可直接复制分发）。绑 0.0.0.0 时展示探测到的局域网 IP；
-    // 绑具体 IP 就展示它本身；仅回环绑定时明确提示本机访问。
+    // 方便远程用户连接：把可访问地址打进日志（绑 0.0.0.0 时展示探测到的局域网
+    // IP；绑具体 IP 就展示它本身；仅回环绑定时明确提示本机访问）。
+    //
+    // token **不打全量**：日志会随备份导出、被"发我看看"整份传走，而 token 是
+    // Web API 的唯一门槛（见 `webapi/session.rs`）。这里只给前缀指纹便于对号，
+    // 完整 token 见设置页「Web API」或 config.json。
+    let token_fp: String = token.chars().take(4).collect();
     if bind == "127.0.0.1" {
-        log::info!("[WEBAPI] 本机访问: https://127.0.0.1:{port} (token: {token})");
+        log::info!("[WEBAPI] 本机访问: https://127.0.0.1:{port} (token 见设置页，前缀 {token_fp}…)");
     } else {
         let display_host = if bind == "0.0.0.0" { lan_ip() } else { bind.clone() };
-        log::info!("[WEBAPI] 远程访问: https://{display_host}:{port} (token: {token})");
+        log::info!("[WEBAPI] 远程访问: https://{display_host}:{port} (token 见设置页，前缀 {token_fp}…)");
     }
 
     let api_state = ApiState {

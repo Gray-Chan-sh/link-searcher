@@ -72,6 +72,15 @@ pub struct BgeStatus {
     pub model_id: String,
 }
 
+/// 安装标志的 RAII 复位：下载线程 panic 也要复位，
+/// 否则"已在后台进行中"会永久残留（此后所有安装请求都被拒绝，直到重启）。
+struct InstallingGuard;
+impl Drop for InstallingGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 pub fn install_bge(state: State<'_, AppState>, app: AppHandle, model_name: Option<String>) -> Result<(), String> {
     if INSTALLING.swap(true, Ordering::SeqCst) {
@@ -85,7 +94,12 @@ pub fn install_bge(state: State<'_, AppState>, app: AppHandle, model_name: Optio
             .to_string()
     });
     let model_dir = state.data_dir.join("models").join(&name);
-    std::fs::create_dir_all(&model_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    // 早退必须复位 INSTALLING，否则这个标志永远为 true（此前就是这里
+    // `?` 直接返回：建目录失败一次，之后所有重试都报"已在后台进行中"）。
+    if let Err(e) = std::fs::create_dir_all(&model_dir) {
+        INSTALLING.store(false, Ordering::SeqCst);
+        return Err(format!("创建目录失败: {e}"));
+    }
 
     let data_dir = state.data_dir.clone();
     std::thread::spawn(move || run_download(model_dir, name, data_dir, app));
@@ -93,13 +107,13 @@ pub fn install_bge(state: State<'_, AppState>, app: AppHandle, model_name: Optio
 }
 
 fn run_download(model_dir: PathBuf, model_name: String, data_dir: PathBuf, app: AppHandle) {
+    let _reset = InstallingGuard;
     let result = download_inner(&model_dir, &model_name);
     // A successful install prunes every other dimension so only one local
     // model is kept (the settings UI is a 3-way choice).
     if result.success {
         prune_local_models_except(&data_dir, &model_name);
     }
-    INSTALLING.store(false, Ordering::SeqCst);
     let _ = app.emit("bge-install-done", &result);
 }
 

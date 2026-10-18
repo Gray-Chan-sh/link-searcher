@@ -97,19 +97,24 @@ export default function IndexStatus() {
 
   const handleScan = async () => {
     setScanError(null)
-    const settings = await getSettings()
-    const engineType = settings['ocr_engine']
-    if (!engineType) {
-      setScanError(t('scan_error_no_engine'))
-      return
+    try {
+      const settings = await getSettings()
+      const engineType = settings['ocr_engine']
+      if (!engineType) {
+        setScanError(t('scan_error_no_engine'))
+        return
+      }
+      const engines = await listOcrEngines()
+      const selected = engines.find(e => e.engine_type === engineType)
+      if (selected && !selected.available) {
+        setScanError(t('scan_error_engine_unavailable', { name: selected.name }))
+        return
+      }
+      scan()
+    } catch (e) {
+      // 此前未捕获：命令失败时点「扫描」按钮毫无反应（unhandled rejection）。
+      setScanError(e instanceof Error ? e.message : String(e))
     }
-    const engines = await listOcrEngines()
-    const selected = engines.find(e => e.engine_type === engineType)
-    if (selected && !selected.available) {
-      setScanError(t('scan_error_engine_unavailable', { name: selected.name }))
-      return
-    }
-    scan()
   }
 
   useEffect(() => {

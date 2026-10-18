@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useI18n } from '../i18n'
-import { confirm, alert, openDirectory } from '../utils/platform'
+import { confirm, alert, openDirectory, askSavePath, openFile } from '../utils/platform'
 import { triggerBackup, getBackupStatus, exportBackup, listBackups, restoreFromZip, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
 
 export function useSettingsBackup() {
@@ -37,7 +37,14 @@ export function useSettingsBackup() {
   const handleExportBackup = async (snapId?: string) => {
     setExporting(true)
     try {
-      const result = await exportBackup(snapId ?? '', exportPassword || undefined)
+      // 后端签名是 `dest_path` = zip **输出路径**、`backup_name` = 要导出的快照。
+      // 以前把快照 id 当 destPath 传入：导出的是实时状态而非所选快照，且 zip
+      // 落在进程 CWD（打包环境下不可写 → 必失败）；"导出当前状态"传空路径更是
+      // 直接报错。现在先用保存对话框拿到真实输出路径。
+      const stamp = new Date().toISOString().slice(0, 10)
+      const dest = await askSavePath(`link-searcher-backup-${snapId ? `${snapId}-` : ''}${stamp}.zip`)
+      if (!dest) return // 用户取消（或浏览器模式无对话框）
+      const result = await exportBackup(dest, exportPassword || undefined, snapId ?? null)
       await alert(t('backup_export_done', { path: result.dest_path }), t('backup_export'))
     } catch (e) {
       await alert(e instanceof Error ? e.message : String(e), t('backup_export_failed'))
@@ -47,12 +54,14 @@ export function useSettingsBackup() {
   }
 
   const handleRestoreZip = async () => {
-    const dir = await openDirectory()
-    if (!dir) return
+    // 必须选 **zip 文件**：后端 `File::open(zip_path)` 只接受文件路径。
+    // 此前弹的是"选目录"对话框，传目录进去必然 "failed to open zip"。
+    const zipPath = await openFile([{ name: 'Zip', extensions: ['zip'] }])
+    if (!zipPath) return
     const confirmed = await confirm(t('backup_restore_confirm'), t('backup_restore'))
     if (!confirmed) return
     try {
-      await restoreFromZip(dir)
+      await restoreFromZip(zipPath)
       await alert(t('backup_restore_done'), t('backup_restore'))
     } catch (e) {
       await alert(e instanceof Error ? e.message : String(e), t('backup_restore_failed'))

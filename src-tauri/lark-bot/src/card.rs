@@ -106,6 +106,23 @@ pub fn clip_bytes(text: &str, max_bytes: usize) -> String {
     )
 }
 
+/// 截断到不超过 `max_bytes` 字节（回退到字符边界），**不**追加截断说明。
+///
+/// 与 [`clip_bytes`] 的区别：这个用于日志/错误信息（只求别 panic、别刷屏），
+/// 不用于卡片正文。飞书消息几乎全是中文 —— 按字节直接切片会切出半个 UTF-8
+/// 字符并 panic（`&s[..s.len().min(200)]` 是常见写法，2026-10-18 审计在
+/// main.rs/media.rs 共 6 处发现）。
+pub fn clip_str(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// 单条回答最多占几张卡片。超过就把尾部合并进最后一张并给 WebUI 指引 ——
 /// 极端长的答案不该把聊天刷成十几条（用户要的是"看得到"，不是"被淹没"）。
 pub const MAX_CARDS: usize = 6;

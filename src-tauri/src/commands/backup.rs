@@ -77,6 +77,28 @@ fn chain_path(backup_dir: &std::path::Path) -> std::path::PathBuf {
     backup_dir.join(".chain.json")
 }
 
+/// 解析 `backups/` 下的快照目录名，**拒绝一切路径成分**。
+///
+/// `backup_name` 直接来自 IPC 与 Web API 请求体（`POST /api/backup/export`），
+/// 若原样 `join` 进路径，`../../..` 就能把任意目录（`.ssh`、浏览器 profile…）
+/// 当作"备份"打包外泄。快照 id 由本模块生成，形态固定为 `backup_<ts>`，
+/// 因此白名单（`[A-Za-z0-9_-]`）足够、且不依赖 `.chain.json` 是否完好。
+fn resolve_backup_dir(backup_dir: &std::path::Path, name: &str) -> Result<std::path::PathBuf, String> {
+    let legal = !name.is_empty()
+        && name.len() <= 128
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !legal {
+        return Err(format!("非法的备份名: {name}"));
+    }
+    let dir = backup_dir.join(name);
+    if !dir.is_dir() {
+        return Err(format!("备份不存在: {name}"));
+    }
+    Ok(dir)
+}
+
 /// 读取链文件；缺失或损坏 → 返回空链。
 fn load_chain(backup_dir: &std::path::Path) -> Result<ChainHead, String> {
     match std::fs::read_to_string(chain_path(backup_dir)) {
@@ -509,11 +531,7 @@ pub async fn export_backup(
 
     let (source_dir, cleanup_tmp) = match &backup_name {
         Some(name) if !name.is_empty() => {
-            let dir = state.data_dir.join("backups").join(name);
-            if !dir.is_dir() {
-                return Err(format!("备份不存在: {name}"));
-            }
-            (dir, None::<std::path::PathBuf>)
+            (resolve_backup_dir(&state.data_dir.join("backups"), name)?, None::<std::path::PathBuf>)
         }
         _ => {
             let tmp = std::env::temp_dir().join(format!("ls_export_{}", uuid::Uuid::new_v4().simple()));
@@ -583,6 +601,50 @@ fn has_config_secrets(config: &AppConfig) -> bool {
     false
 }
 
+/// 交换失败时把内存中的索引实例重新装回（从磁盘当前目录重开）。
+fn reinstall_index(
+    index_dir: &std::path::Path,
+    index_manager: &std::sync::Arc<std::sync::RwLock<IndexManager>>,
+) {
+    match IndexManager::open_or_create(index_dir) {
+        Ok(mgr) => {
+            let mut g = index_manager.write().unwrap_or_else(|e| e.into_inner());
+            *g = mgr;
+        }
+        Err(e) => log::error!("[RESTORE] 回滚索引实例失败（重启后恢复）: {e}"),
+    }
+}
+
+/// 备份 zip 的解压前预检（纯函数，便于单测）。
+///
+/// ① 条目名只能是**纯路径组件**（拒绝 `..` / 绝对路径 / 盘符前缀 / 反斜杠分隔，
+///    即 Zip Slip）；② 必须含 `snapshot.json`（合法备份包）；③ 条目数上限。
+///
+/// 必须**解压之前**跑：否则畸形包也能先把文件写到临时目录（再被拒绝），
+/// 按路径穿越条目就可能落在临时目录之外。
+fn validate_backup_zip(names: &[String]) -> Result<(), String> {
+    const MAX_ENTRIES: usize = 200_000;
+    if names.len() > MAX_ENTRIES {
+        return Err(format!("备份包条目过多（{}），已拒绝解压", names.len()));
+    }
+    for name in names {
+        // 反斜杠单独拒绝：本应用导出的 zip 一律用 `/`（见 zip_dir），而
+        // `..\x` 在 Windows 上是穿越、在 POSIX 上只是普通字符 —— 统一拒绝才跨平台一致。
+        let legal = !name.is_empty()
+            && !name.contains('\\')
+            && std::path::Path::new(name)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !legal {
+            return Err(format!("备份包包含非法条目路径，已拒绝解压: {name}"));
+        }
+    }
+    if !names.iter().any(|n| n == "snapshot.json") {
+        return Err("无效的备份文件：缺少 snapshot.json".to_string());
+    }
+    Ok(())
+}
+
 fn restore_from_dir(
     src: &std::path::Path,
     index_dir: &std::path::Path,
@@ -596,30 +658,49 @@ fn restore_from_dir(
         let tmp_dir = index_dir.with_file_name(&tmp_name);
         copy_dir(&index_src, &tmp_dir)?;
 
-        match IndexManager::open_or_create(&tmp_dir) {
-            Ok(new_mgr) => {
-                if let Ok(mut mgr) = index_manager.write() {
-                    *mgr = new_mgr;
-                }
-            }
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-                return Err(format!("无法打开恢复的索引: {e}"));
-            }
+        // 先验证拷出来的索引能打开；失败则磁盘/内存都还没动过。
+        if let Err(e) = IndexManager::open_or_create(&tmp_dir) {
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            return Err(format!("无法打开恢复的索引: {e}"));
         }
+
+        // 交换前必须先释放所有指向旧目录/tmp 的句柄（Windows 上 rename 会被拒，
+        // 见 rebuild_index 同款处理）：丢 writer，用内存占位 IndexManager 顶掉
+        // 旧实例（其 reader 持有旧目录内的句柄），交换完成后重开。
         indexer.reset_writer();
+        {
+            let mut mgr = index_manager.write().unwrap_or_else(|e| e.into_inner());
+            *mgr = IndexManager::create_in_ram();
+        }
 
         let old = index_dir.with_file_name("index.old");
         if index_dir.exists() {
             let _ = std::fs::remove_dir_all(&old);
-            let _ = std::fs::rename(index_dir, &old);
+            if let Err(e) = std::fs::rename(index_dir, &old) {
+                // 磁盘保持原样；把内存里的旧索引装回去（此前这里静默继续，
+                // 会让"磁盘换了、内存没换"或反之，界面与搜索结果互相打架）。
+                reinstall_index(index_dir, &index_manager);
+                return Err(format!("暂存旧索引目录失败: {e}"));
+            }
         }
         if let Err(e) = std::fs::rename(&tmp_dir, index_dir) {
             if old.exists() {
                 let _ = std::fs::rename(&old, index_dir);
             }
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            reinstall_index(index_dir, &index_manager);
             return Err(format!("切换索引目录失败: {e}"));
         }
+        // 在**最终路径**上重新打开（不能沿用 tmp_dir 上打开的实例：其内部路径
+        // 在 rename 后失效 —— 旧实现靠随后的 app.restart() 兜底）。
+        match IndexManager::open_or_create(index_dir) {
+            Ok(new_mgr) => {
+                let mut mgr = index_manager.write().unwrap_or_else(|e| e.into_inner());
+                *mgr = new_mgr;
+            }
+            Err(e) => log::error!("[RESTORE] 切换后无法打开索引目录（重启后恢复）: {e}"),
+        }
+        indexer.reset_writer();
         let _ = std::fs::remove_dir_all(&old);
     }
 
@@ -685,13 +766,20 @@ pub async fn restore_from_zip(
     let is_restoring = state.is_restoring.clone();
     let zip_path_in = zip_path.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+    let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
 
         let file = std::fs::File::open(&zip_path_in)
             .map_err(|e| format!("failed to open zip: {e}"))?;
         let mut archive = zip::ZipArchive::new(file)
             .map_err(|e| format!("failed to read zip: {e}"))?;
+
+        // ── 预检：先只读清单（不解压），任何一项不过都在**落盘之前**失败 ──
+        let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+        if let Err(e) = validate_backup_zip(&names) {
+            let _ = std::fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
 
         for i in 0..archive.len() {
             let pw = password.as_deref().unwrap_or("");
@@ -701,27 +789,28 @@ pub async fn restore_from_zip(
                 archive.by_index_decrypt(i, pw.as_bytes())
                     .map_err(|e| format!("zip entry {i} decrypt: {e}"))?
             };
-            let name = entry.name().to_string();
+            // `enclosed_name`：库官方的安全路径 API，会拒绝 RootDir/Prefix，
+            // 并保证 `..` 不逃出基准目录（预检已挡一次，这里是第二道防线）。
+            let Some(rel) = entry.enclosed_name() else {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(format!("备份包包含非法条目路径，已拒绝解压: {}", entry.name()));
+            };
+            let out = tmp.join(&rel);
             if entry.is_dir() {
-                std::fs::create_dir_all(tmp.join(&name))
-                    .map_err(|e| format!("failed to create dir {name}: {e}"))?;
+                std::fs::create_dir_all(&out)
+                    .map_err(|e| format!("failed to create dir {out:?}: {e}"))?;
             } else {
-                if let Some(parent) = tmp.join(&name).parent() {
+                if let Some(parent) = out.parent() {
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("failed to create parent {parent:?}: {e}"))?;
                 }
                 use std::io::Read;
                 let mut data = Vec::new();
                 entry.read_to_end(&mut data)
-                    .map_err(|e| format!("failed to read {name}: {e}"))?;
-                std::fs::write(tmp.join(&name), &data)
-                    .map_err(|e| format!("failed to write {name}: {e}"))?;
+                    .map_err(|e| format!("failed to read {:?}: {e}", rel))?;
+                std::fs::write(&out, &data)
+                    .map_err(|e| format!("failed to write {out:?}: {e}"))?;
             }
-        }
-
-        if !tmp.join("snapshot.json").is_file() {
-            let _ = std::fs::remove_dir_all(&tmp);
-            return Err("无效的备份文件：缺少 snapshot.json".to_string());
         }
 
         let r = restore_from_dir(&tmp, &index_dir, &index_manager, &indexer, &db_pool);
@@ -729,10 +818,16 @@ pub async fn restore_from_zip(
         r
     })
     .await
-    .map_err(|e| format!("恢复任务异常: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => Err(format!("恢复任务异常: {e}")),
+    };
+    // 无论成败都复位：此前 `result?` 在复位之前返回，一次失败（例如
+    // "无效的备份文件"）就让 `is_restoring` 永远为 true —— 恢复功能从此被
+    // "正在恢复中，请稍候"永久拒绝，直到重启应用。
+    is_restoring.store(false, Ordering::SeqCst);
     result?;
 
-    is_restoring.store(false, Ordering::SeqCst);
     log::info!("restored from zip: {zip_path}");
 
     let _ = app.emit("restore-completed", serde_json::json!({ "name": zip_path }));
@@ -812,6 +907,9 @@ pub async fn restore_backup(
 ) -> Result<(), String> {
     use std::sync::atomic::Ordering;
 
+    // 名字净化 + 存在性检查放在**占用恢复标志之前**：这条路径失败不需要复位标志。
+    let backup_dir = resolve_backup_dir(&state.data_dir.join("backups"), &backup_name)?;
+
     if state
         .is_restoring
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -820,25 +918,24 @@ pub async fn restore_backup(
         return Err("正在恢复中，请稍候".to_string());
     }
 
-    let backup_dir = state.data_dir.join("backups").join(&backup_name);
     let index_dir = state.index_dir.clone();
     let index_manager = state.index_manager.clone();
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
     let is_restoring = state.is_restoring.clone();
-    let backup_name_in = backup_name.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        if !backup_dir.is_dir() {
-            return Err(format!("备份不存在: {backup_name_in}"));
-        }
+    let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
         restore_from_dir(&backup_dir, &index_dir, &index_manager, &indexer, &db_pool)
     })
     .await
-    .map_err(|e| format!("恢复任务异常: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => Err(format!("恢复任务异常: {e}")),
+    };
+    // 失败也必须复位（同 restore_from_zip）：否则一次失败永久拒绝后续恢复。
+    is_restoring.store(false, Ordering::SeqCst);
     result?;
 
-    is_restoring.store(false, Ordering::SeqCst);
     log::info!("restored backup: {backup_name}");
 
     let _ = app.emit("restore-completed", serde_json::json!({ "name": backup_name }));
@@ -953,6 +1050,56 @@ fn copy_file_if_exists(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_backup_zip_rejects_zip_slip_and_requires_manifest() {
+        let mut good = vec!["snapshot.json".to_string(), ".ls-index/meta.json".to_string()];
+        good.push("backup_20261018/data.db".to_string());
+        assert!(validate_backup_zip(&good).is_ok());
+
+        // Zip Slip 的各类形态（含反斜杠穿越与盘符/绝对路径）一律拒绝。
+        for bad in [
+            "../evil.exe",
+            "..\\evil.exe",
+            "a/../../evil",
+            "/abs/evil",
+            "C:\\evil",
+            "\\\\server\\share\\evil",
+            "",
+        ] {
+            let names = vec![bad.to_string(), "snapshot.json".to_string()];
+            assert!(
+                validate_backup_zip(&names).is_err(),
+                "必须拒绝非法条目: {bad:?}"
+            );
+        }
+
+        // 缺 snapshot.json = 不是合法备份包（此检查必须在解压之前）。
+        let no_manifest = vec!["backup_1/data.db".to_string()];
+        assert!(validate_backup_zip(&no_manifest).is_err());
+
+        // 条目数上限：挡住"几十万小文件"式畸形包。
+        let too_many: Vec<String> = (0..200_001).map(|i| format!("f{i}")).collect();
+        assert!(validate_backup_zip(&too_many).is_err());
+    }
+
+    #[test]
+    fn resolve_backup_dir_rejects_traversal_and_missing() {
+        let base = std::env::temp_dir().join(format!("ls_bk_name_{}", std::process::id()));
+        let snap = base.join("backup_123");
+        std::fs::create_dir_all(&snap).unwrap();
+
+        assert!(resolve_backup_dir(&base, "backup_123").is_ok());
+        for bad in ["../../etc", "..", "a/b", "a\\b", "C:\\x", "", ".ssh", "backup_123/../.."] {
+            assert!(
+                resolve_backup_dir(&base, bad).is_err(),
+                "必须拒绝非法备份名: {bad:?}"
+            );
+        }
+        assert!(resolve_backup_dir(&base, "nope_123").is_err(), "不存在的快照必须拒绝");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     // 镜像 restore_backup 的核心机制：从 WAL 格式的备份副本在线恢复到活跃连接，
     // 验证数据完整、无需关闭连接池（直接 fs::copy 覆盖活跃 data.db 会损坏库）。

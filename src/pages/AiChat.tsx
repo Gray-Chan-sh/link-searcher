@@ -161,8 +161,19 @@ export default function AiChat() {
   useEffect(() => { refreshCapabilities() }, [refreshCapabilities])
 
   const refreshList = useCallback(async () => {
-    try { setSessions(await listChatSessions()) } catch { /* ignore */ }
-    finally { setSessionsLoaded(true) }
+    // 列表拉取失败**不能**当作"真的没有会话"：ensure effect 会据此新建一个空会话
+    // （2026-09-29 会话丢失事故的同类竞态）。失败自动重试几次；仍失败就保持
+    // sessionsLoaded=false —— 后续任何一次 refreshList 成功都会自然恢复。
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        setSessions(await listChatSessions())
+        setSessionsLoaded(true)
+        return
+      } catch (e) {
+        if (attempt === 2) console.warn('[AiChat] list_chat_sessions failed:', e)
+        await new Promise(r => setTimeout(r, 1500))
+      }
+    }
   }, [])
 
   useEffect(() => { refreshList() }, [refreshList])

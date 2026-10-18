@@ -109,6 +109,32 @@ export async function exportFile(content: string, defaultName: string, mimeType:
   }
 }
 
+/** 打开一个文件选择器。Tauri 返回所选路径；浏览器模式返回 null（不支持）。 */
+export async function openFile(filters?: { name: string; extensions: string[] }[]): Promise<string | null> {
+  if (isTauri()) {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const file = await open({ multiple: false, filters });
+    return (file as string | null) ?? null;
+  }
+  return null;
+}
+
+/** 询问保存路径（仅弹对话框，**不**写文件）。取消或浏览器模式返回 null。
+ *
+ * 用在后端需要"输出路径"的场景（如 `export_backup` 的 `destPath`）——
+ * 内容由后端进程写盘，不能借用 [`saveFile`]（那是前端写文本）。 */
+export async function askSavePath(defaultName: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const dot = defaultName.lastIndexOf('.');
+  const ext = dot > 0 ? defaultName.slice(dot + 1).toLowerCase() : '';
+  const filters = ext
+    ? [{ name: ext.toUpperCase(), extensions: [ext] }]
+    : [{ name: 'All Files', extensions: ['*'] }];
+  const path = await save({ defaultPath: defaultName, filters });
+  return path ?? null;
+}
+
 /** Open a directory picker. In browser mode, returns null (not supported). */
 export async function openDirectory(): Promise<string | null> {
   if (isTauri()) {

@@ -32,6 +32,15 @@ pub struct FunasrInstallResult {
 ///
 /// After extraction the inner model dir is moved up so the layout matches
 /// what `funasr_candidates()` in `extractor/audio.rs` expects.
+/// 安装标志的 RAII 复位：下载线程 panic 也要复位，
+/// 否则"已在后台进行中"会永久残留（此后所有安装请求都被拒绝，直到重启）。
+struct InstallingGuard;
+impl Drop for InstallingGuard {
+    fn drop(&mut self) {
+        INSTALLING.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 pub fn install_funasr(state: State<'_, AppState>, app: AppHandle) -> Result<(), String> {
     if INSTALLING.swap(true, Ordering::SeqCst) {
@@ -39,15 +48,19 @@ pub fn install_funasr(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
     }
 
     let model_dir = state.data_dir.join("models").join("funasr");
-    std::fs::create_dir_all(&model_dir).map_err(|e| format!("创建目录失败: {e}"))?;
+    // 早退必须复位 INSTALLING（同 bge.rs：此前 `?` 直接返回会让标志永久为 true）。
+    if let Err(e) = std::fs::create_dir_all(&model_dir) {
+        INSTALLING.store(false, Ordering::SeqCst);
+        return Err(format!("创建目录失败: {e}"));
+    }
 
     std::thread::spawn(move || run_download(model_dir, app));
     Ok(())
 }
 
 fn run_download(model_dir: PathBuf, app: AppHandle) {
+    let _reset = InstallingGuard;
     let result = download_inner(&model_dir);
-    INSTALLING.store(false, Ordering::SeqCst);
     let _ = app.emit("funasr-install-done", &result);
 }
 

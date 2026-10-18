@@ -165,6 +165,28 @@ pub(crate) struct ScanWorker<R: Runtime> {
     pub logs_dir: PathBuf,
 }
 
+/// 扫描标志的 RAII 复位：**panic 也要复位**。
+///
+/// `is_scanning` 一旦卡在 true，之后所有扫描（IPC/Web/删除目录后的续扫）都会
+/// 被「a scan is already in progress」拒绝，直到重启应用 —— Web 路径已有同名
+/// `ScanFlagGuard`，IPC 路径此前只有手写复位（panic 会漏）。`is_rebuilding`
+/// 同理会永久拒绝 `quality_audit` / 搜索等命令。
+struct ScanFlagReset {
+    is_scanning: Arc<AtomicBool>,
+    cancel_scan: Arc<AtomicBool>,
+    is_rebuilding: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for ScanFlagReset {
+    fn drop(&mut self) {
+        self.is_scanning.store(false, Ordering::SeqCst);
+        self.cancel_scan.store(false, Ordering::SeqCst);
+        if let Some(b) = &self.is_rebuilding {
+            b.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 impl<R: Runtime> ScanWorker<R> {
     /// `dir_id = None` scans every configured directory (full scan);
     /// `Some(id)` scans that one incrementally.
@@ -179,6 +201,13 @@ impl<R: Runtime> ScanWorker<R> {
             scan_delta,
             logs_dir,
         } = self;
+
+        // 任何退出路径（含 panic）都要复位标志：Drop 兜底。
+        let _flags = ScanFlagReset {
+            is_scanning: is_scanning.clone(),
+            cancel_scan: cancel_scan.clone(),
+            is_rebuilding: None,
+        };
 
         cancel_scan.store(false, Ordering::Release);
         let mut slog = crate::logs::session::SessionLogGuard::open(&logs_dir, "scan");
@@ -495,6 +524,13 @@ pub async fn rebuild_index(
 
         tokio::task::spawn_blocking(move || {
             cancel_scan.store(false, Ordering::Release);
+            // 任何退出路径（含 panic）都要复位三个标志：Drop 兜底。否则
+            // `is_rebuilding` 卡 true 会永久拒绝 quality_audit / 搜索等命令。
+            let _flags = ScanFlagReset {
+                is_scanning: is_scanning.clone(),
+                cancel_scan: cancel_scan.clone(),
+                is_rebuilding: Some(is_rebuilding.clone()),
+            };
             let mut added = 0u64;
             let mut deleted = 0u64;
             let mut modified = 0u64;
@@ -930,9 +966,9 @@ pub async fn reextract_missing_content(
                     continue;
                 }
             };
-            if !md5.is_empty() {
-                let _ = tracker::delete_content(&conn, &md5);
-            }
+            // NOTE: 这里**不能**先删内容行 —— 见 reindex_files 的「先删后写」注释。
+            // 本命令的候选本就"md5 无内容行"，删除是多余动作；而并发扫描刚写回的
+            // 内容行会被这一删打掉（index_file 失败/取消时不写回 → 永久丢失）。
             drop(conn);
             // Must delete the stale Tantivy doc first — re-adding without it
             // leaves a duplicate document for the same file.
@@ -940,7 +976,16 @@ pub async fn reextract_missing_content(
                 log::warn!("[REEXTRACT] delete stale doc failed {file_id}: {e}");
             }
             match indexer.index_file(&file_id, &full_path, &dir_id, None) {
-                Ok(()) => ok += 1,
+                Ok(()) => {
+                    // 兜底：index_file 走 dedup/早退时不落库，补一行避免文件从质量页隐身。
+                    if !md5.is_empty()
+                        && let Ok(conn) = db_pool.get()
+                        && let Err(e) = ensure_content_row(&conn, &md5, &rel_path)
+                    {
+                        log::warn!("[REEXTRACT] ensure_content_row {file_id}: {e}");
+                    }
+                    ok += 1;
+                }
                 Err(e) => {
                     log::warn!("[REEXTRACT] {rel_path}: {e}");
                     mark_failed_after_reindex(&db_pool, &file_id, &rel_path, &e.to_string());
@@ -1382,15 +1427,22 @@ pub async fn reindex_file(
     let dir = db::dir_config::get_dir(&conn, &rec.dir_id)
         .map_err(|e| format!("{e}"))?
         .ok_or_else(|| "dir config not found".to_string())?;
-    // Clear the dedup cache for this file's hash so re-extraction actually
-    // runs (important when OCR language changed).
-    if let Some(ref md5) = rec.md5 {
-        let _ = tracker::delete_content(&conn, md5);
-    }
+    // NOTE: 不预先 delete_content —— 见 reindex_files 的「先删后写」注释：
+    // index_file 失败/取消时不会写回，会永久丢内容行（同一 md5 的其它副本一并受害）。
+    // index_file 内部 INSERT OR REPLACE 覆盖同一 md5，成功后再兜底补行。
+    let md5 = rec.md5.clone();
+    let rel_path = rec.path.clone();
     let full_path = crate::scanner::helpers::to_absolute(&dir.path, &rec.path);
     drop(conn);
     state.indexer.index_file(&file_id, &full_path, &rec.dir_id, None)
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| format!("{e}"))?;
+    if let Some(md5) = md5
+        && let Ok(conn) = state.db.get()
+        && let Err(e) = ensure_content_row(&conn, &md5, &rel_path)
+    {
+        log::warn!("[REINDEX] ensure_content_row {file_id}: {e}");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

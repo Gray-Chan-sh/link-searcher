@@ -133,7 +133,7 @@ fn run_lark_cli(program: &Path, args: &[String], cwd: Option<&Path>) -> Result<V
     let v: Value = serde_json::from_str(stdout.trim()).map_err(|e| {
         format!(
             "lark-cli 输出不是 JSON：{e}（前 200 字符：{}）",
-            &stdout[..stdout.len().min(200)]
+            crate::card::clip_str(&stdout, 200)
         )
     })?;
     // ⚠️ 与 main.rs 相同的约定：lark-cli 的信封是 `{ ok, identity, data }`，

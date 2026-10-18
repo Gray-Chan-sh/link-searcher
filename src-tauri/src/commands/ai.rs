@@ -413,6 +413,26 @@ pub async fn smart_search(
     Ok(SmartSearchResponse { answer, source_ids, source_files, evidence })
 }
 
+/// 把流式结果转成可展示文本：失败时把原因（`ChatStreamOutcome::error`）翻成
+/// 用户可见的一句话，而不是留一句"空回答" —— 真实原因（401/400/断网/未配置）
+/// 此前只进日志，界面与机器人只看到"没有回答"，排障全靠翻 app.log。
+fn stream_text_or_error(
+    text: Option<String>,
+    cancelled: bool,
+    error: Option<String>,
+    tag: &str,
+) -> String {
+    match text {
+        Some(t) => t,
+        None if cancelled => String::new(),
+        None => {
+            let reason = error.unwrap_or_else(|| "AI 无回复（原因未知，请查看日志）".to_string());
+            log::error!("[AI] {tag}: 流式回答失败：{reason}");
+            format!("❌ {reason}")
+        }
+    }
+}
+
 /// Streaming variant of [`smart_search`]: emits `ai-chunk` events as the
 /// answer is generated and a final `ai-done`. Frontend renders incrementally.
 #[tauri::command]
@@ -449,7 +469,7 @@ pub async fn smart_search_stream(
     .await
     .map_err(|e| format!("task panicked: {e}"))?;
 
-    let raw_text = result.text.unwrap_or_default();
+    let raw_text = stream_text_or_error(result.text, result.cancelled, result.error, "smart_search");
     log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
     let cited_text = auto_cite(&sanitize_citations(&raw_text, evidence.len()), &evidence);
     let _ = app.emit("ai-done", AiDone {
@@ -823,7 +843,7 @@ pub async fn conversation_ask_stream(
     log::info!("[AI]   invoking chat_stream: system_chars={} user_chars={} model={}", system.chars().count(), user_msg.chars().count(), cfg.active_llm_model_id);
     let result = if clarify_blocking {
         log::info!("[AI]   clarify blocking: 指代未绑定且提问无锚点 → 只问不答（跳过 LLM）");
-        crate::ai::ChatStreamOutcome { text: clarify_note.clone(), took_ms: 0, cancelled: false, truncated: false }
+        crate::ai::ChatStreamOutcome { text: clarify_note.clone(), took_ms: 0, cancelled: false, truncated: false, error: None }
     } else {
         tokio::task::spawn_blocking(move || {
             let mut emit = |d: &str, is_reasoning: bool| {
@@ -857,7 +877,7 @@ pub async fn conversation_ask_stream(
             );
         }
      }
-     let raw_text = result.text.unwrap_or_default();
+     let raw_text = stream_text_or_error(result.text, result.cancelled, result.error, "conversation");
      log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
      let cited_text = compose_answer_text(clarify_blocking, raw_text, clarify_note, |raw| {
          auto_cite(&sanitize_citations_set(raw, &visible_nums), &visible_evidence)

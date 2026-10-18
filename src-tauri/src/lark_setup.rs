@@ -825,7 +825,11 @@ fn extract_urls(raw: &str) -> Vec<String> {
         if end >= tail.len() {
             break;
         }
-        rest = &tail[end + 1..];
+        // `end` 是终止符的**字节起点**，而终止符可能是多字节字符（`，`/`。` 各 3 字节）
+        // —— 按 1 字节步进会切在字符中间 panic（lark-cli 输出"请打开 https://…，完成绑定"
+        // 即触发；中文标点是常态，不是边角）。
+        let step = tail[end..].chars().next().map_or(1, char::len_utf8);
+        rest = &tail[end + step..];
     }
     out.truncate(5);
     out
@@ -1076,6 +1080,21 @@ mod tests {
 
         assert!(extract_urls("no link here").is_empty());
         assert!(extract_urls("https://").is_empty(), "半个 URL 不算");
+    }
+
+    #[test]
+    fn extract_urls_handles_multibyte_terminators() {
+        // 终止符紧跟多字节字符（`，`/`。`，各 3 字节）时不能按字节 +1 续扫，
+        // 否则切片落在字符中间 panic（2026-10-18 审计发现的真实崩溃路径）。
+        let raw = "请打开 https://open.feishu.cn/verify?code=abc，完成绑定";
+        assert_eq!(extract_urls(raw), vec!["https://open.feishu.cn/verify?code=abc".to_string()]);
+
+        let raw2 = "链接 https://a.b/c。";
+        assert_eq!(extract_urls(raw2), vec!["https://a.b/c".to_string()]);
+
+        // 中文标点之后还有第二个链接：续扫必须继续找到它。
+        let raw3 = "先 https://a.b/c，再 https://d.e/f。";
+        assert_eq!(extract_urls(raw3), vec!["https://a.b/c".to_string(), "https://d.e/f".to_string()]);
     }
 
     #[test]

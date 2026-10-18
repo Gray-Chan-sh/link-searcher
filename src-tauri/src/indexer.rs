@@ -462,6 +462,14 @@ impl IndexerService {
         }
     }
 
+    /// 批索引/扫描是否已被请求取消。
+    ///
+    /// 维护路径（verify 等）用它区分"没写内容行"是**取消早退**还是"内容确实为空"
+    /// —— 前者不能把文件判死（否则一次取消就永久跳过这些文件）。
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_scan.load(Ordering::Acquire)
+    }
+
     /// Batch-index multiple files.
     ///
     /// Phase 1 (Rayon `par_iter`): read file content, compute MD5, extract text

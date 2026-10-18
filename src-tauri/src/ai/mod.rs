@@ -1237,6 +1237,12 @@ pub struct ChatStreamOutcome {
     /// Upstream stopped because it hit its output-token ceiling
     /// (`finish_reason == "length"`), so `text` is incomplete.
     pub truncated: bool,
+    /// 失败原因（`text == None` 且非取消时才有值）。
+    ///
+    /// 调用方必须把它变成**用户可见**的信息 —— 以前 `text` 为 None 时被
+    /// `unwrap_or_default()` 变成空回答，网关 400/401/断网的真实原因全部丢失，
+    /// 界面只剩"没有回答"（见 `commands/ai.rs` 的两处调用）。
+    pub error: Option<String>,
 }
 
 /// Send a chat-completion prompt in streaming mode (`stream: true`), invoking
@@ -1265,13 +1271,20 @@ pub fn chat_stream_cancellable(
     use std::io::{BufRead, Read};
     let is_cancelled = || cancel.is_some_and(CancelToken::is_cancelled);
     let started = std::time::Instant::now();
-    let failed = ChatStreamOutcome { text: None, took_ms: 0, cancelled: false, truncated: false };
+    let fail = |msg: String| ChatStreamOutcome {
+        text: None,
+        took_ms: 0,
+        cancelled: false,
+        truncated: false,
+        error: Some(msg),
+    };
     if !llm_enabled() {
-        return failed;
+        let reason = llm_unavailable_reason().unwrap_or("AI 服务未配置（请在设置页配置 AI 网关）");
+        return fail(reason.to_string());
     }
     let cfg = crate::config::load_config();
     let Some(ep) = resolve_active_endpoint(&cfg, crate::config::ModelType::Llm) else {
-        return failed;
+        return fail("未找到可用的 LLM 模型（请在设置页选择模型）".to_string());
     };
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
 
@@ -1296,7 +1309,7 @@ pub fn chat_stream_cancellable(
             Ok(b) => b,
             Err(e) => {
                 log::warn!("[AI] chat stream build failed: {e}");
-                return failed;
+                return fail(format!("请求构造失败: {e}"));
             }
         };
         log::info!(
@@ -1317,11 +1330,9 @@ pub fn chat_stream_cancellable(
                 let code = r.status();
                 let mut body = String::new();
                 let _ = r.into_string().map(|s| body = s);
-                log::warn!(
-                    "[AI] chat stream HTTP {code}: {}",
-                    body.trim().chars().take(200).collect::<String>()
-                );
-                return failed;
+                let snippet: String = body.trim().chars().take(200).collect();
+                log::warn!("[AI] chat stream HTTP {code}: {snippet}");
+                return fail(format!("AI 网关返回 HTTP {code}: {snippet}"));
             }
             Err(ureq::Error::Status(code, resp)) => {
                 let body = resp.into_string().unwrap_or_default();
@@ -1356,11 +1367,12 @@ pub fn chat_stream_cancellable(
                 if retry {
                     continue;
                 }
-                return failed;
+                let snippet: String = body.trim().chars().take(200).collect();
+                return fail(format!("AI 网关拒绝（HTTP {code}）: {snippet}"));
             }
             Err(e) => {
                 log::warn!("[AI] chat stream failed: {e}");
-                return failed;
+                return fail(format!("网络错误: {e}"));
             }
         }
     };
@@ -1498,7 +1510,7 @@ pub fn chat_stream_cancellable(
             truncated
         );
     }
-    ChatStreamOutcome { text: Some(full), took_ms, cancelled, truncated }
+    ChatStreamOutcome { text: Some(full), took_ms, cancelled, truncated, error: None }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
