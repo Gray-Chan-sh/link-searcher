@@ -2209,57 +2209,128 @@ fn spawn_consumer(event_key: &str) -> Result<Child, String> {
         .map_err(|e| format!("无法启动 lark-cli（{}）：{e}", program.display()))
 }
 
+/// 卡片回调消费者的**重连退避**（纯函数，便于单测）。
+///
+/// - 就绪过再断：5s 起（多为网络抖动，尽快恢复按钮）；
+/// - 从未就绪：30s 起（大概率订阅/配置问题，别空转）；
+/// - 指数退避，300s 封顶。
+fn consumer_backoff(was_ready: bool, attempt: u32) -> Duration {
+    let base: u64 = if was_ready { 5 } else { 30 };
+    let secs = base.saturating_mul(1u64 << attempt.min(4)).min(300);
+    Duration::from_secs(secs)
+}
+
 /// 起**卡片回调**消费者（`card.action.trigger`）并在后台线程里逐行处理。
 ///
-/// **失败只记日志**：回调不可用不该影响消息主链路 —— "按钮点不动"与"机器人不能答"，
-/// 后者严重得多，绝不能因为回调起不来就整个退出。
+/// **失败只记日志 + 自动重连**：回调不可用不该影响消息主链路，也**不能永久失效** ——
+/// 翻页 / 语义 / 发送文件 / 停止全走按钮，进程一死就等于半个机器人瘫痪
+/// （2026-10-18 审计：原实现只记一条"按钮将不可用"就再也不管了）。
 fn spawn_card_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
-    let mut child = match spawn_consumer("card.action.trigger") {
-        Ok(c) => c,
-        Err(e) => {
-            log::warn!("[bot] 卡片回调消费者启动失败（按钮将不可用）：{e}");
-            return;
-        }
-    };
-    if let Err(e) = wait_ready(&mut child) {
-        log::warn!("[bot] 卡片回调长连接未就绪（按钮将不可用）：{e}");
-        let _ = child.kill();
-        return;
-    }
-    let Some(stdout) = child.stdout.take() else {
-        log::warn!("[bot] 拿不到卡片回调的 stdout（按钮将不可用）");
-        return;
-    };
-    log::info!("[bot] 卡片回调长连接就绪");
     std::thread::spawn(move || {
-        // ⚠️ `child` 必须**被这个线程持有到读完为止**：lark-cli 的优雅停机方式就是
-        // "关 stdin"，所以 `Child` 一旦 drop（stdin 管道 EOF）子进程会**立刻退出**。
-        // 2026-10-16 修：原先只把 `stdout` 移进线程、`child` 随函数返回被 drop，
-        // 于是回调消费者在"就绪"后 1 秒内就死（日志：`stdin closed → shutting down`
-        // 紧跟 `卡片回调 stdout 结束`）—— **卡片按钮从来没能用**。
-        let mut child = child;
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
+        let mut failures: u32 = 0;
+        loop {
+            let started = Instant::now();
+            let outcome = run_card_consumer_once(&http, &allowed_users);
+            // 稳定跑过一段（≥60s）再断 → 计数归零；刚起就断（<60s）→ 视为不稳定，
+            // 计数累加（避免"反复秒断"被当成正常抖动而 5s 一次空转）。
+            let (was_ready, detail) = match outcome {
+                Ok(()) if started.elapsed() >= Duration::from_secs(60) => {
+                    failures = 0;
+                    (true, String::new())
+                }
+                Ok(()) => {
+                    failures = failures.saturating_add(1);
+                    (true, String::new())
+                }
+                Err(e) => {
+                    failures = failures.saturating_add(1);
+                    (false, e)
+                }
+            };
+            let wait = consumer_backoff(was_ready, failures);
+            let attempt = failures.max(1);
+            if detail.is_empty() {
+                log::warn!(
+                    "[bot] 卡片回调{} → {}s 后重连（第 {} 次）",
+                    if was_ready { "连接断开" } else { "未就绪" },
+                    wait.as_secs(),
+                    attempt
+                );
+            } else {
+                log::warn!(
+                    "[bot] 卡片回调消费者异常（{detail}）→ {}s 后重连（第 {attempt} 次）",
+                    wait.as_secs()
+                );
             }
-            if let Err(e) = handle_card_line(&http, line, &allowed_users) {
-                log::warn!("[bot] 处理卡片回调失败：{e}");
-            }
+            std::thread::sleep(wait);
         }
-        log::warn!("[bot] 卡片回调 stdout 结束（按钮将不可用）");
-        let _ = child.wait(); // 回收子进程，别留僵尸
     });
 }
 
+/// 卡片回调消费者的**一次完整生命周期**：起进程 → 等就绪 → 读到 EOF → 回收子进程。
+///
+/// `Ok(())` = 长连接**就绪过**（之后断开/结束）；`Err` = 就绪前失败（订阅没配 / 启动失败）。
+fn run_card_consumer_once(
+    http: &Arc<Http>,
+    allowed_users: &[String],
+) -> Result<(), String> {
+    let mut child = spawn_consumer("card.action.trigger")?;
+    if let Err(e) = wait_ready(&mut child) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(format!("长连接未就绪：{e}"));
+    }
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("拿不到 stdout".to_string());
+    };
+    log::info!("[bot] 卡片回调长连接就绪");
+    // ⚠️ `child` 必须**被本函数持有到读完为止**：lark-cli 的优雅停机方式就是
+    // "关 stdin"，所以 `Child` 一旦 drop（stdin 管道 EOF）子进程会**立刻退出**。
+    // 2026-10-16 修：原先只把 `stdout` 移进线程、`child` 随函数返回被 drop，
+    // 于是回调消费者在"就绪"后 1 秒内就死（日志：`stdin closed → shutting down`）
+    // —— **卡片按钮从来没能用**。
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Err(e) = handle_card_line(http, line, allowed_users) {
+            log::warn!("[bot] 处理卡片回调失败：{e}");
+        }
+    }
+    log::warn!("[bot] 卡片回调 stdout 结束");
+    let _ = child.wait(); // 回收子进程，别留僵尸
+    Ok(())
+}
+
 // ───────────────────────── 机器人菜单消费者（§11）─────────────────────────
+
+/// 菜单消费者：**确定性失败**（事件未订阅）与**暂时性失败**的退避不同
+/// （纯函数，便于单测）。
+///
+/// 未订阅 = 要用户去开发者后台配置/发布，**不会自己好** → 1 小时退避（原实现每 5 分钟
+/// 起一个 lark-cli、等 15s、刷 20 行错误 JSON —— 2026-10-18 审计从日志里看到的浪费）。
+fn menu_backoff(not_subscribed: bool) -> Duration {
+    if not_subscribed {
+        Duration::from_secs(3600)
+    } else {
+        Duration::from_secs(300)
+    }
+}
+
+/// stderr 里是否出现"事件未订阅"（确定性失败）。大小写不敏感。
+fn is_not_subscribed(stderr: &str) -> bool {
+    stderr.to_ascii_lowercase().contains("not subscribed")
+}
 
 /// 起**机器人菜单**（`application.bot.menu_v6`）消费者并在后台线程里逐行处理。
 ///
 /// 与卡片回调（[`spawn_card_consumer`]）的两处不同，都是刻意的：
 /// - **轮询式**（[`poll_consumer_into`]）而不是"就绪后阻塞读"：菜单订阅在开发者后台
 ///   没配好时，长连接**永远不出现就绪标记** —— 若像卡片回调那样在初始化线程里等，
-///   一个后台线程会被永久占住（不致命但不干净）。这里短等即放弃，几秒后再试。
+///   一个后台线程会被永久占住（不致命但不干净）。这里短等即放弃，退避后再试。
 /// - 线程**每次尝试重建**（含 `Child`）：拿不到 stdout 时子进程要能被正确回收。
 ///
 /// 失败只记日志（降级即"点菜单没反应"）—— 消息与卡片两条主路不受影响。
@@ -2278,14 +2349,27 @@ fn spawn_menu_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
                     log::warn!("[bot] 处理菜单事件失败：{e}");
                 }
             }) {
-                Ok(read) => {
-                    if read > 0 {
+                Ok(poll) => {
+                    if poll.lines > 0 {
                         log::info!("[bot] 菜单长连接断开，5 秒后重试");
                     } else {
-                        log::warn!(
-                            "[bot] 菜单长连接未就绪（开发者后台未配置自定义菜单？）—— 5 分钟后重试"
-                        );
-                        std::thread::sleep(Duration::from_secs(300));
+                        let wait = menu_backoff(poll.not_subscribed);
+                        if poll.not_subscribed {
+                            log::warn!(
+                                "[bot] 菜单事件未订阅（开发者后台未配置/未发布自定义菜单？）\
+                                 —— {}s 后重试；配置好并发布版本后重启应用即可立即生效",
+                                wait.as_secs()
+                            );
+                        } else if poll.stderr_summary.is_empty() {
+                            log::warn!("[bot] 菜单长连接未就绪 —— {}s 后重试", wait.as_secs());
+                        } else {
+                            log::warn!(
+                                "[bot] 菜单长连接未就绪：{} —— {}s 后重试",
+                                poll.stderr_summary,
+                                wait.as_secs()
+                            );
+                        }
+                        std::thread::sleep(wait);
                         continue;
                     }
                 }
@@ -2297,6 +2381,16 @@ fn spawn_menu_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
     });
 }
 
+/// 菜单消费者一次轮询的结果。
+struct MenuPoll {
+    /// 读到的 stdout 行数；`0` ＝ 等不到就绪（大概率订阅没配）。
+    lines: usize,
+    /// stderr 摘要（失败时用于**一行**日志；成功时为空）。
+    stderr_summary: String,
+    /// stderr 明确说"事件未订阅"（确定性失败 → 长退避）。
+    not_subscribed: bool,
+}
+
 /// 短等就绪后轮询式读取一路子进程的输出，逐行交给 `on_line`。
 ///
 /// 为什么不是 [`wait_ready`] + 阻塞读：那个组合要求"就绪标记一定会出现"，否则读线程
@@ -2306,20 +2400,33 @@ fn spawn_menu_consumer(http: Arc<Http>, allowed_users: Vec<String>) {
 ///   因为 lark-cli 的输出是行缓冲的管道 —— 用 `read_until(b'\n')` 配超时太绕，
 ///   改为"就绪即转入阻塞读"：一旦拿到 ready，说明订阅有效，之后的读是安全的）。
 ///
-/// 返回读到的行数：`0` ＝ 等不到就绪（大概率订阅没配）。
+/// **日志策略**（2026-10-18 审计后改）：只有 `[event]` / `[source]` 开头的诊断行实时落
+/// info；错误 JSON 这类"多行文本"改为 debug（默认级别不落盘）并累积成**一条摘要** ——
+/// 原实现每 5 分钟把 20 行 JSON 逐行刷进日志。
 fn poll_consumer_into(
     child: &mut Child,
     tag: String,
     mut on_line: impl FnMut(&str),
-) -> Result<usize, String> {
+) -> Result<MenuPoll, String> {
     let ready = Arc::new(AtomicBool::new(false));
     let ready_reader = Arc::clone(&ready);
+    let diag = Arc::new(Mutex::new(String::new()));
     if let Some(stderr) = child.stderr.take() {
+        let diag_reader = Arc::clone(&diag);
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                log::info!("[lark-cli/{tag}] {line}");
-                if line.contains("[event] ready event_key=") {
-                    ready_reader.store(true, Ordering::Release);
+                if line.starts_with("[event]") || line.starts_with("[source]") {
+                    log::info!("[lark-cli/{tag}] {line}");
+                    if line.contains("[event] ready event_key=") {
+                        ready_reader.store(true, Ordering::Release);
+                    }
+                } else {
+                    log::debug!("[lark-cli/{tag}] {line}");
+                    let mut d = diag_reader.lock().unwrap_or_else(|e| e.into_inner());
+                    if d.len() < 4000 {
+                        d.push_str(&line);
+                        d.push('\n');
+                    }
                 }
             }
         });
@@ -2334,7 +2441,14 @@ fn poll_consumer_into(
     if !ready.load(Ordering::Acquire) {
         let _ = child.kill();
         let _ = child.wait();
-        return Ok(0);
+        // 给 stderr 读线程一点时间把剩余行收完（kill 会关闭管道）
+        std::thread::sleep(Duration::from_millis(200));
+        let raw = diag.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        return Ok(MenuPoll {
+            lines: 0,
+            stderr_summary: summarize_stderr(&raw),
+            not_subscribed: is_not_subscribed(&raw),
+        });
     }
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
@@ -2352,7 +2466,40 @@ fn poll_consumer_into(
         on_line(line);
     }
     let _ = child.wait(); // 回收子进程
-    Ok(read)
+    Ok(MenuPoll {
+        lines: read,
+        stderr_summary: String::new(),
+        not_subscribed: false,
+    })
+}
+
+/// 把累积的 stderr 压成**一行**摘要：优先取错误 JSON 里信息量最大的 `"message": "…"`，
+/// 拿不到就把整段空白压平再截断。纯函数，便于单测。
+fn summarize_stderr(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return String::new();
+    }
+    for line in raw.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("\"message\":") {
+            let v = rest.trim().trim_matches(|c| c == '"' || c == ',');
+            if !v.is_empty() {
+                return clip_chars(v, 200);
+            }
+        }
+    }
+    clip_chars(&raw.split_whitespace().collect::<Vec<_>>().join(" "), 200)
+}
+
+/// 按**字符**截断（不是字节）并加省略号。
+fn clip_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 /// 从 `GET /api/session` 的状态里选 WebUI 的**外部可达基址**。
@@ -2448,17 +2595,32 @@ fn webui_hint_text(
 /// 阻塞读 stderr，直到出现就绪标记 `[event] ready event_key=`。
 ///
 /// 这是 lark-cli 给的**子进程契约**（§2 实测）：在它出现之前不要相信 stdout。
+///
+/// **日志策略**（2026-10-18 与菜单消费者统一）：只有 `[event]` / `[source]` 开头的诊断行
+/// 实时落 info；其它（多为错误 JSON）落 debug 并累积成**一条摘要**放进失败信息 ——
+/// 否则卡片消费者每次重连失败都会把 JSON 逐行刷进日志。
 fn wait_ready(child: &mut Child) -> Result<(), String> {
     let stderr = child.stderr.take().ok_or("拿不到 lark-cli 的 stderr")?;
     let ready = Arc::new(AtomicBool::new(false));
     let ready_in_thread = Arc::clone(&ready);
+    let diag = Arc::new(Mutex::new(String::new()));
+    let diag_in_thread = Arc::clone(&diag);
 
     std::thread::spawn(move || {
         for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            // 诊断日志原样转发（`--quiet` 会隐藏事件丢失诊断，故不启用）
-            log::info!("[lark-cli] {line}");
-            if line.contains("[event] ready event_key=") {
-                ready_in_thread.store(true, Ordering::Release);
+            if line.starts_with("[event]") || line.starts_with("[source]") {
+                // 诊断日志原样转发（`--quiet` 会隐藏事件丢失诊断，故不启用）
+                log::info!("[lark-cli] {line}");
+                if line.contains("[event] ready event_key=") {
+                    ready_in_thread.store(true, Ordering::Release);
+                }
+            } else {
+                log::debug!("[lark-cli] {line}");
+                let mut d = diag_in_thread.lock().unwrap_or_else(|e| e.into_inner());
+                if d.len() < 4000 {
+                    d.push_str(&line);
+                    d.push('\n');
+                }
             }
         }
         log::warn!("[lark-cli] stderr 关闭");
@@ -2471,7 +2633,13 @@ fn wait_ready(child: &mut Child) -> Result<(), String> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err(format!("等待 {:?} 仍未收到就绪标记（长连接没建起来？）", READY_TIMEOUT))
+    let raw = diag.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let summary = summarize_stderr(&raw);
+    Err(if summary.is_empty() {
+        format!("等待 {:?} 仍未收到就绪标记（长连接没建起来？）", READY_TIMEOUT)
+    } else {
+        format!("等待 {:?} 仍未收到就绪标记：{summary}", READY_TIMEOUT)
+    })
 }
 
 /// 以 `+messages-reply` 回复一条消息。失败只记日志 —— 不让回复失败拖垮消费循环。
@@ -3040,5 +3208,43 @@ mod tests {
         assert_eq!(fmt_utc_short(0), "01-01 00:00 UTC");
         // 2026-10-16 12:34 UTC 附近（会话列表时间字段的实际量级）
         assert_eq!(fmt_utc_short(1_792_154_040), "10-16 12:34 UTC");
+    }
+
+    /// 卡片消费者重连退避：就绪过 → 5s 起（尽快恢复按钮）；从未就绪 → 30s 起；300s 封顶。
+    #[test]
+    fn card_consumer_backoff_prefers_fast_recovery_when_it_had_worked() {
+        assert_eq!(consumer_backoff(true, 0), Duration::from_secs(5));
+        assert_eq!(consumer_backoff(true, 1), Duration::from_secs(10));
+        assert_eq!(consumer_backoff(false, 0), Duration::from_secs(30));
+        assert_eq!(consumer_backoff(false, 1), Duration::from_secs(60));
+        assert_eq!(consumer_backoff(false, 99), Duration::from_secs(300), "封顶且不溢出");
+    }
+
+    /// 菜单：未订阅是确定性失败 → 1 小时；其它失败 → 5 分钟。
+    #[test]
+    fn menu_backoff_distinguishes_permanent_from_transient() {
+        assert_eq!(menu_backoff(true), Duration::from_secs(3600));
+        assert_eq!(menu_backoff(false), Duration::from_secs(300));
+    }
+
+    /// "未订阅"识别 + stderr 压成一行（错误 JSON 取 `message` 字段）。
+    #[test]
+    fn menu_stderr_is_summarized_to_one_line() {
+        let raw = "{\n  \"ok\": false,\n  \"error\": {\n    \
+                   \"message\": \"EventKey application.bot.menu_v6 requires event types \
+                   not subscribed in console: application.bot.menu_v6\",\n    \
+                   \"type\": \"validation\"\n  }\n}";
+        assert!(is_not_subscribed(raw), "含 not subscribed 应判为确定性失败");
+        assert!(!is_not_subscribed("connection reset"), "普通网络错误不是");
+        assert!(is_not_subscribed("NOT SUBSCRIBED"), "大小写不敏感");
+        let s = summarize_stderr(raw);
+        assert!(s.contains("requires event types not subscribed"), "摘要：{s}");
+        assert!(!s.contains('\n'), "必须压成一行：{s}");
+        assert_eq!(summarize_stderr("   "), "", "空白 → 空摘要");
+        assert_eq!(
+            summarize_stderr("line one\nline two"),
+            "line one line two",
+            "没有 message 字段时整段压平"
+        );
     }
 }

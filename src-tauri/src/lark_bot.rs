@@ -16,7 +16,9 @@
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::time::Duration;
 
 // W5：`lark-bot` 是 **console 子系统**程序，而 GUI 进程没有控制台 —— Windows 会为它
 // **新建一个控制台窗口**（用户看到黑框一闪）。`CREATE_NO_WINDOW` 让子进程无窗口运行。
@@ -195,6 +197,57 @@ pub fn restart() {
     spawn_if_enabled();
 }
 
+/// 看门狗停机标志：应用**退出**时置位，看门狗不再拉起（[`stop_watchdog`]）。
+///
+/// 不能复用 [`shutdown`]：`restart()` 也会调它 —— 那只是"改设置重拉"，看门狗必须继续工作。
+static WATCHDOG_STOP: AtomicBool = AtomicBool::new(false);
+
+/// bot **看门狗**：意外退出时自动拉起（指数退避）。
+///
+/// 为什么需要（2026-10-18 通讯审计发现）：bot 在消息长连接结束时**整个退出**
+/// （`main` 返回），而应用侧原先只在"改设置 / 配置热重载 / 应用启动"时拉起它 ——
+/// 一次网络抖动就可能让机器人离线到用户重启应用。看门狗每 30s 检查一次
+/// （连续失败按 [`watchdog_delay`] 退避），机器人重新跑起来后计数归零。
+///
+/// 不变量：**只做"拉起"，从不 kill** —— 正在跑的 bot 由 `is_running()` 判定后直接跳过，
+/// 与设置页的 `restart()` 不冲突。
+pub fn spawn_watchdog() {
+    std::thread::spawn(move || {
+        let mut failures: u32 = 0;
+        loop {
+            std::thread::sleep(watchdog_delay(failures));
+            if WATCHDOG_STOP.load(Ordering::Acquire) {
+                return;
+            }
+            if !crate::config::lark_integration().enabled {
+                failures = 0;
+                continue;
+            }
+            if is_running() {
+                failures = 0;
+                continue;
+            }
+            log::warn!(
+                "[LARK-BOT] 看门狗：机器人未在运行 → 重新拉起（第 {} 次）",
+                failures + 1
+            );
+            spawn_if_enabled();
+            failures = failures.saturating_add(1);
+        }
+    });
+}
+
+/// 应用退出时停掉看门狗（在 [`shutdown`] **之前**调用，避免"边退边拉"）。
+pub fn stop_watchdog() {
+    WATCHDOG_STOP.store(true, Ordering::Release);
+}
+
+/// 看门狗检查间隔（纯函数，便于单测）：正常 30s；连续失败指数退避，300s 封顶。
+fn watchdog_delay(failures: u32) -> Duration {
+    let secs = 30u64.saturating_mul(1u64 << failures.min(4)).min(300);
+    Duration::from_secs(secs)
+}
+
 /// bot 进程当前是否**在跑**（顺手回收已退出的子进程）。
 ///
 /// 为什么要 `try_wait` 而不是只看 `Option`：bot 可能**自己退出**（读到
@@ -214,5 +267,22 @@ pub fn is_running() -> bool {
         }
         // 查询失败（权限/句柄异常）：无法证明它死了，保守当"在跑"。
         Err(_) => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::watchdog_delay;
+    use std::time::Duration;
+
+    /// 看门狗退避：正常 30s；连续失败翻倍，300s 封顶（且不因计数过大溢出）。
+    #[test]
+    fn watchdog_backoff_is_exponential_and_capped() {
+        assert_eq!(watchdog_delay(0), Duration::from_secs(30));
+        assert_eq!(watchdog_delay(1), Duration::from_secs(60));
+        assert_eq!(watchdog_delay(2), Duration::from_secs(120));
+        assert_eq!(watchdog_delay(3), Duration::from_secs(240));
+        assert_eq!(watchdog_delay(4), Duration::from_secs(300), "封顶 300s");
+        assert_eq!(watchdog_delay(99), Duration::from_secs(300), "不溢出、仍封顶");
     }
 }

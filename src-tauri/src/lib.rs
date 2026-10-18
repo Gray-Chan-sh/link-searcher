@@ -457,6 +457,9 @@ get_dir_children,
             // 飞书 bot sidecar（§5.4 的 C3）：webapi 之后再拉，因为它要经 webapi 读设置。
             // bot 侧对"webapi 还没监听上"有重试（见 bin/lark-bot.rs），故这里不必等。
             lark_bot::spawn_if_enabled();
+            // 看门狗：机器人**意外退出**（消息长连接断、崩溃…）时自动拉起，避免
+            // "离线到用户重启应用"（2026-10-18 通讯审计发现）。
+            lark_bot::spawn_watchdog();
 
             // `config.json` 热重载（§5.6 B 档）：手改配置文件后自动生效。
             // 放在 bot 之后 —— 它可能在"飞书策略变了"时重启 bot。
@@ -762,8 +765,10 @@ get_dir_children,
         Ok(app) => {
             app.run(|app_handle, event| {
                 if let tauri::RunEvent::Exit = event {
-                    // 先收 bot：它一停，其 lark-cli 子进程会因 stdin EOF 优雅退出
+                    // 先停看门狗（否则它可能在退出途中把 bot 又拉起来），再收 bot：
+                    // bot 一停，其 lark-cli 子进程会因 stdin EOF 优雅退出
                     //（bus daemon 按决策**留着复用**，不在这里动它）。
+                    lark_bot::stop_watchdog();
                     lark_bot::shutdown();
                     if let Some(token) = app_handle.try_state::<tokio_util::sync::CancellationToken>() {
                         token.cancel();
