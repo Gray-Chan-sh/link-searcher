@@ -20,6 +20,7 @@ const ACTIONS: DirActionKind[] = ['keep', 'remap', 'remove']
 
 export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: RestoreMappingDialogProps) {
   const { t } = useI18n()
+  const verifyOk = plan.verify.mismatches.length === 0 && plan.verify.missing.length === 0
   const [rows, setRows] = useState<Record<string, Row>>(() => {
     const init: Record<string, Row> = {}
     for (const d of plan.dirs) init[d.id] = { action: '', path: '' }
@@ -48,13 +49,23 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
     await runPreview(id, picked)
   }
 
+  /// 「保留原路径」也要预检：备份里的原路径在本机**存在但内容不符**时，
+  /// 正是 R1 要防的危险场景 —— 命中率会很低，据此触发确认。
   const chooseAction = (d: BackupDirInfo, action: DirActionKind) => {
     if (action === 'remap') {
       void pickDir(d.id)
       return
     }
+    if (action === 'keep') {
+      setRow(d.id, { action, path: d.originalPath })
+      if (d.originalPath.trim() !== '' && d.existsLocally) void runPreview(d.id, d.originalPath)
+      return
+    }
     setRow(d.id, { action, path: '' })
   }
+
+  /** 某行是否处于「有目标路径、可/已预检」的状态（remap 与 keep 都要看命中率）。 */
+  const previewable = (r?: Row) => (r?.action === 'remap' || r?.action === 'keep') && r.path.trim() !== ''
 
   const allDecided = plan.dirs.every(d => rows[d.id]?.action !== '')
   const remapComplete = plan.dirs.every(d => {
@@ -62,8 +73,7 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
     return r?.action !== 'remap' || r.path.trim() !== ''
   })
   const hasLowHit = plan.dirs.some(d => {
-    const r = rows[d.id]
-    if (r?.action !== 'remap') return false
+    if (!previewable(rows[d.id])) return false
     const p = previews[d.id]
     return p?.kind === 'ok' && isLowHit(p.data)
   })
@@ -96,6 +106,11 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
         <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-700">
           <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">{t('backup_mapping_title')}</h3>
           <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">{t('backup_mapping_desc')}</p>
+          {!verifyOk && (
+            <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+              {t('backup_verify_warn', { n: String(plan.verify.mismatches.length + plan.verify.missing.length) })}
+            </p>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
@@ -112,6 +127,7 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
                     <p className="text-sm font-mono text-gray-900 dark:text-gray-100 truncate">{d.originalPath}</p>
                     <p className="text-xs text-gray-500 dark:text-gray-400">
                       {d.alias ? `${d.alias} · ` : ''}{t('backup_dead_dir_files', { n: String(d.fileCount) })}
+                      {d.existsLocally ? ` · ${t('backup_mapping_exists_local')}` : ''}
                     </p>
                   </div>
                   <div className="shrink-0 flex items-center gap-1">
@@ -131,18 +147,20 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
                   </div>
                 </div>
 
-                {r?.action === 'remap' && (
+                {previewable(r) && (
                   <div className="mt-2 space-y-1">
                     <div className="flex items-center gap-2">
                       <span className="flex-1 min-w-0 text-xs font-mono text-gray-700 dark:text-gray-200 truncate">
                         {r.path || t('backup_mapping_no_path')}
                       </span>
-                      <button
-                        onClick={() => void pickDir(d.id)}
-                        className="shrink-0 px-2 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
-                      >
-                        {t('backup_mapping_pick')}
-                      </button>
+                      {r.action === 'remap' && (
+                        <button
+                          onClick={() => void pickDir(d.id)}
+                          className="shrink-0 px-2 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 rounded hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+                        >
+                          {t('backup_mapping_pick')}
+                        </button>
+                      )}
                     </div>
                     {p?.kind === 'loading' && (
                       <p className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400">

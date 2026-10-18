@@ -596,6 +596,8 @@ const zh: Record<string, string> = {
     backup_mapping_cancel: '取消',
     backup_mapping_start: '开始恢复',
     backup_mapping_applying: '恢复中…',
+    backup_mapping_exists_local: '本机已存在该路径',
+    backup_verify_warn: '备份完整性校验发现 {n} 处异常（仍可继续，建议先核对来源）',
     backup_restore_desktop_only: '恢复备份仅支持桌面应用，请在本机客户端中操作。',
 
     err_empty_response: 'AI 未返回任何内容，请重试',

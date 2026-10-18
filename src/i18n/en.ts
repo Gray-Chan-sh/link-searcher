@@ -596,6 +596,8 @@ const en: Record<string, string> = {
     backup_mapping_cancel: 'Cancel',
     backup_mapping_start: 'Start restore',
     backup_mapping_applying: 'Restoring…',
+    backup_mapping_exists_local: 'This path already exists here',
+    backup_verify_warn: 'Integrity check found {n} issue(s) (you may continue, but verify the source first)',
     backup_restore_desktop_only: 'Restoring backups is only available in the desktop app.',
 
     err_empty_response: 'AI returned no content, please retry',

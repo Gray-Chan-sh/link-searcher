@@ -75,6 +75,15 @@ export interface BackupDirInfo {
     originalPath: string
     alias: string | null
     fileCount: number
+    /** 备份里的原路径在当前机器上是否已存在（仅提示，不决定任何自动行为）。 */
+    existsLocally: boolean
+}
+
+/** 备份清单（snapshot.json）的完整性校验结果。 */
+export interface BackupVerify {
+    checked: number
+    mismatches: string[]
+    missing: string[]
 }
 
 /** `plan_restore` 的结果：目录清单 + 暂存 token。 */
@@ -83,6 +92,7 @@ export interface RestorePlan {
     dirs: BackupDirInfo[]
     hasChatHistory: boolean
     hasConfig: boolean
+    verify: BackupVerify
 }
 
 /** 某个目录改指本机路径时的命中情况（只读预检）。 */
@@ -110,6 +120,11 @@ export async function planRestore(source: 'zip' | 'snapshot', path: string, pass
 /** 只读预检：某目录改指 `newPath` 时能对上多少已索引文件。 */
 export async function previewRemap(dirId: string, newPath: string, token?: string | null): Promise<RemapPreview> {
     return client.invoke<RemapPreview>('preview_remap', { token: token ?? null, dirId, newPath })
+}
+
+/** 校验某个已有快照的完整性（不恢复、不改动）。 */
+export async function verifyBackup(backupName: string): Promise<BackupVerify> {
+    return client.invoke<BackupVerify>('verify_backup', { backupName })
 }
 
 /** 执行阶段：按映射把恢复灌回当前数据并重启应用。 */

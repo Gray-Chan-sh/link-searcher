@@ -592,6 +592,8 @@ const ja: Record<string, string> = {
     backup_mapping_cancel: 'キャンセル',
     backup_mapping_start: '復元を開始',
     backup_mapping_applying: '復元中…',
+    backup_mapping_exists_local: 'このパスは既に存在します',
+    backup_verify_warn: '整合性チェックで {n} 件の異常を検出（続行可。取得元の確認を推奨）',
     backup_restore_desktop_only: 'バックアップの復元はデスクトップアプリでのみ利用できます。',
 
     err_empty_response: 'AI が応答を返しませんでした。再試行してください',

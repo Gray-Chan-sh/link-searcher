@@ -1,3 +1,28 @@
+## 2026-10-18（第四十七轮）：备份完整性校验 + 「保留原路径」也做命中预检（R3）
+
+> R1 把目录落位提前到覆盖之前，但两处仍是盲区：(a) `snapshot.json` 里记了每个文件的
+> sha256，恢复时**从不校验**；(b) 只有「指定目录」会做命中率预检，「保留原路径」不会 ——
+> 而「原路径存在但内容不符」正是最危险的场景。
+
+**后端（`commands/backup.rs`）**
+
+- 新增 `sha256_file()`（分块流式，不把大文件整段读进内存）与 `verify_backup_src()`：
+  按 `snapshot.json` 逐文件比对 sha256 与大小，返回 `{checked, mismatches, missing}`；
+  **只读、不阻塞**（异常转成结果项，不返回 Err —— 由 UI 决定是否继续）。
+- `RestorePlan` 新增 `verify` 字段；`plan_restore` 校验 zip/快照并打 WARN 日志。
+- `BackupDirInfo` 新增 `existsLocally`（原路径在本机是否存在，仅提示）。
+- 新增命令 `verify_backup(backup_name)`：不恢复、只校验某个已有快照的完整性。
+- 新增单测 `verify_backup_src_detects_mismatch_and_missing`：干净包通过、篡改→mismatch、
+  删文件→missing、缺清单→missing。
+
+**前端**
+
+- `RestoreMappingDialog`：完整性异常时顶部提示「发现 {n} 处异常（可继续）」；
+  每行显示「本机已存在该路径」；**「保留原路径」也会对原路径做命中率预检** ——
+  原路径存在但内容不符会显示低命中并需勾选确认后再恢复。
+- `api/backup.ts`：`RestorePlan.verify` / `BackupDirInfo.existsLocally` / `verifyBackup()`；
+  i18n 四语新增 2 key（`backup_mapping_exists_local` / `backup_verify_warn`）。
+
 ## 2026-10-18（第四十六轮）：恢复前先指定目录 —— plan/apply 两步恢复，杜绝「按旧路径误扫」
 
 > 起因：旧恢复是「整库覆盖 → 重启 → 按备份里记录的**原机绝对路径**扫描」。若该路径在当前

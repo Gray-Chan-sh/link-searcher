@@ -99,9 +99,28 @@ pub struct BackupDirInfo {
     pub original_path: String,
     pub alias: Option<String>,
     pub file_count: u64,
+    /// 备份记录的**原路径**在当前机器上是否已存在（UI 提示用，不决定任何自动行为）。
+    pub exists_locally: bool,
 }
 
-/// `plan_restore` 的结果：恢复前的目录清单 + 暂存 token（供 `apply_restore` 复用）。
+/// 备份清单（`snapshot.json`）的完整性校验结果。
+#[derive(Serialize, Default, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupVerify {
+    pub checked: u64,
+    /// 内容与清单不符（sha256 或大小不匹配）的文件名。
+    pub mismatches: Vec<String>,
+    /// 清单列出但文件缺失的名（含清单本身无法读取）。
+    pub missing: Vec<String>,
+}
+
+impl BackupVerify {
+    pub fn ok(&self) -> bool {
+        self.mismatches.is_empty() && self.missing.is_empty()
+    }
+}
+
+/// `plan_restore` 的结果：恢复前的目录清单 + 完整性 + 暂存 token（供 `apply_restore` 复用）。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RestorePlan {
@@ -109,6 +128,8 @@ pub struct RestorePlan {
     pub dirs: Vec<BackupDirInfo>,
     pub has_chat_history: bool,
     pub has_config: bool,
+    /// 备份完整性校验（sha256）。**不阻塞恢复**，仅供 UI 提示。
+    pub verify: BackupVerify,
 }
 
 /// plan→apply 之间暂存、已解压/已就位的备份源目录。
@@ -152,6 +173,59 @@ fn cleanup_stale_staging() {
     }
 }
 
+/// 流式计算文件的 sha256（分块读，避免把大文件整段读进内存）。
+fn sha256_file(path: &std::path::Path) -> std::io::Result<(String, u64)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 128 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    let hex = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    Ok((hex, total))
+}
+
+/// 校验备份目录的完整性：按 `snapshot.json` 逐文件比对 sha256 与大小。
+/// **只读、不阻塞**：任何异常都转化为结果里的 `mismatches` / `missing`，不返回 Err
+/// （恢复前不希望因为校验失败而挡住用户 —— 由 UI 决定是否继续）。
+fn verify_backup_src(src: &std::path::Path) -> BackupVerify {
+    let mut v = BackupVerify::default();
+    let text = match std::fs::read_to_string(src.join("snapshot.json")) {
+        Ok(t) => t,
+        Err(_) => {
+            v.missing.push("snapshot.json".to_string());
+            return v;
+        }
+    };
+    let manifest = match serde_json::from_str::<SnapshotManifest>(&text) {
+        Ok(m) => m,
+        Err(_) => {
+            v.mismatches.push("snapshot.json（无法解析）".to_string());
+            return v;
+        }
+    };
+    for f in &manifest.files {
+        let p = src.join(f.name.replace('\\', "/"));
+        match sha256_file(&p) {
+            Ok((hex, len)) => {
+                v.checked += 1;
+                if hex != f.sha256 || len != f.size {
+                    v.mismatches.push(f.name.clone());
+                }
+            }
+            Err(_) => v.missing.push(f.name.clone()),
+        }
+    }
+    v
+}
+
 /// 打开备份目录里的 `data.db`（只读）并读出全部监控目录 + 每个目录的追踪文件数。
 fn read_backup_dirs(db_path: &std::path::Path) -> Result<Vec<BackupDirInfo>, String> {
     if !db_path.is_file() {
@@ -183,6 +257,7 @@ fn read_backup_dirs(db_path: &std::path::Path) -> Result<Vec<BackupDirInfo>, Str
             .unwrap_or(0);
         out.push(BackupDirInfo {
             id,
+            exists_locally: std::path::Path::new(&path).is_dir(),
             original_path: path,
             alias,
             file_count: count.max(0) as u64,
@@ -1287,11 +1362,23 @@ pub async fn plan_restore(
         }
     };
 
+    // 完整性校验（sha256）：只读、不阻塞；结果随 plan 返回供 UI 提示。
+    let verify = verify_backup_src(&src);
+    if !verify.ok() {
+        log::warn!(
+            "[RESTORE] 备份完整性校验有异常：checked={} mismatches={} missing={}",
+            verify.checked,
+            verify.mismatches.len(),
+            verify.missing.len()
+        );
+    }
+
     let plan = RestorePlan {
         token: uuid::Uuid::new_v4().simple().to_string(),
         dirs,
         has_chat_history: src.join("chat_history.json").is_file(),
         has_config: src.join("config.json").is_file(),
+        verify,
     };
 
     {
@@ -1300,6 +1387,16 @@ pub async fn plan_restore(
     }
 
     Ok(plan)
+}
+
+/// 校验某个已有快照的完整性（不恢复、不改动）：按 `snapshot.json` 逐文件比对 sha256。
+#[tauri::command]
+pub async fn verify_backup(
+    state: State<'_, AppState>,
+    backup_name: String,
+) -> Result<BackupVerify, String> {
+    let dir = resolve_backup_dir(&state.data_dir.join("backups"), &backup_name)?;
+    Ok(verify_backup_src(&dir))
 }
 
 /// 只读预检：某目录改指 `new_path` 时，有多少已索引文件能在该目录下对上（同名+同大小）。
@@ -2038,7 +2135,52 @@ mod tests {
             original_path: path.to_string(),
             alias: None,
             file_count: 3,
+            exists_locally: false,
         }
+    }
+
+    #[test]
+    fn verify_backup_src_detects_mismatch_and_missing() {
+        let base = std::env::temp_dir().join(format!("ls_verify_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(".ls-index")).unwrap();
+        std::fs::write(base.join("data.db"), b"dbdata").unwrap();
+        std::fs::write(base.join(".ls-index").join("seg.0"), b"seg").unwrap();
+
+        let (db_hex, db_len) = sha256_file(&base.join("data.db")).unwrap();
+        let (seg_hex, seg_len) = sha256_file(&base.join(".ls-index").join("seg.0")).unwrap();
+        let manifest = serde_json::json!({
+            "files": [
+                { "name": "data.db", "size": db_len, "sha256": db_hex },
+                { "name": ".ls-index/seg.0", "size": seg_len, "sha256": seg_hex },
+            ],
+            "size": db_len + seg_len,
+        });
+        std::fs::write(base.join("snapshot.json"), manifest.to_string()).unwrap();
+
+        let v = verify_backup_src(&base);
+        assert!(v.ok(), "干净备份应通过: {v:?}");
+        assert_eq!(v.checked, 2);
+
+        // 篡改内容 → mismatches
+        std::fs::write(base.join(".ls-index").join("seg.0"), b"TAMPERED").unwrap();
+        let v = verify_backup_src(&base);
+        assert!(!v.ok());
+        assert_eq!(v.mismatches, vec![".ls-index/seg.0".to_string()]);
+
+        // 删除文件 → missing
+        std::fs::remove_file(base.join("data.db")).unwrap();
+        let v = verify_backup_src(&base);
+        assert!(!v.ok());
+        assert!(v.missing.contains(&"data.db".to_string()));
+
+        // 缺 snapshot.json → missing 清单本身
+        std::fs::remove_file(base.join("snapshot.json")).unwrap();
+        let v = verify_backup_src(&base);
+        assert!(!v.ok());
+        assert_eq!(v.missing, vec!["snapshot.json".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn mapping(id: &str, action: &str, new_path: Option<&str>) -> DirMapping {
