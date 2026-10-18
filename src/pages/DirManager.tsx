@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useDirs } from '../hooks/useDirs'
-import { addDir, type DirConfig } from '../api/dirs'
+import { addDir, setDirEnabled, type DirConfig } from '../api/dirs'
 import { PlusIcon, TrashIcon, FolderIcon } from '../icons'
 import { useI18n } from '../i18n'
 import EmptyState from '../components/EmptyState'
 import { ListSkeleton } from '../components/Skeleton'
-import { isTauri } from '../utils/platform'
+import { alert, isTauri } from '../utils/platform'
 
 type RemovePhase = 'confirm' | 'running' | 'done' | 'error'
 
@@ -101,6 +101,16 @@ export default function DirManager() {
     setPendingRemove(null)
   }
 
+  // 停用 / 启用（停用 = 暂停扫描与监控，保留数据）。
+  const toggleEnabled = async (dir: DirConfig) => {
+    try {
+      await setDirEnabled(dir.id, !dir.monitor_enabled)
+      await refresh()
+    } catch (e) {
+      await alert(e instanceof Error ? e.message : String(e), t('dir_toggle_failed'))
+    }
+  }
+
   const handleRemove = async () => {
     if (!pendingRemove) return
     setPhase('running')
@@ -181,6 +191,11 @@ export default function DirManager() {
                   {dir.recursive && (
                     <span className="text-xs text-gray-400 dark:text-gray-500">{t('recursive')}</span>
                   )}
+                  {!dir.monitor_enabled && (
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-amber-50 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400">
+                      {t('dir_disabled_badge')}
+                    </span>
+                  )}
                 </div>
                 <p className="text-xs text-gray-500 dark:text-gray-400 truncate mt-0.5 font-mono">{dir.path}</p>
                 <div className="flex items-center gap-3 mt-2 text-xs text-gray-400 dark:text-gray-500">
@@ -188,6 +203,13 @@ export default function DirManager() {
                   {dir.include_exts && <span>{t('exts_label', { exts: dir.include_exts })}</span>}
                 </div>
               </div>
+              <button
+                onClick={() => void toggleEnabled(dir)}
+                className="px-2 py-1 text-xs font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors shrink-0"
+                title={dir.monitor_enabled ? t('disable_directory') : t('enable_directory')}
+              >
+                {dir.monitor_enabled ? t('disable_directory') : t('enable_directory')}
+              </button>
               <button
                 onClick={() => openRemove(dir)}
                 className="p-1.5 rounded-md text-gray-400 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors shrink-0"

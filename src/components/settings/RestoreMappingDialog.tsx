@@ -15,8 +15,8 @@ interface RestoreMappingDialogProps {
 type Row = { action: DirActionKind | ''; path: string }
 type PreviewState = { kind: 'loading' } | { kind: 'ok'; data: RemapPreview } | { kind: 'error'; message: string }
 
-/** 目前只实现前三种落位；`disable`（暂时停用但保留数据）在后续版本。 */
-const ACTIONS: DirActionKind[] = ['keep', 'remap', 'remove']
+/** 恢复前四种落位：保留原路径 / 指定目录 / 停用扫描（保留数据）/ 移除。 */
+const ACTIONS: DirActionKind[] = ['keep', 'remap', 'disable', 'remove']
 
 export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: RestoreMappingDialogProps) {
   const { t } = useI18n()
@@ -183,6 +183,9 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
 
                 {r?.action === 'remove' && (
                   <p className="mt-2 text-xs text-red-500">{t('backup_mapping_remove_hint')}</p>
+                )}
+                {r?.action === 'disable' && (
+                  <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">{t('backup_mapping_disable_hint')}</p>
                 )}
               </div>
             )

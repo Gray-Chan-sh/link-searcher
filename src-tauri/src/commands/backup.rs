@@ -76,7 +76,8 @@ pub struct DeadDirInfo {
 #[serde(rename_all = "camelCase")]
 pub struct DirMapping {
     pub dir_id: String,
-    /// "remap"（改指本机目录）| "keep"（保留原路径）| "remove"（不要该目录，连同清理其数据）
+    /// "remap"（改指本机目录）| "keep"（保留原路径）| "disable"（停用扫描但保留数据）
+    /// | "remove"（不要该目录，连同清理其数据）
     pub action: String,
     pub new_path: Option<String>,
 }
@@ -979,6 +980,13 @@ fn restore_from_dir(
                         rusqlite::params![normalized, now, m.dir_id],
                     )
                     .map_err(|e| format!("改写备份目录 {np:?} 失败: {e}"))?;
+                } else if m.action == "disable" {
+                    // 停用：保留 path 与数据，只关掉扫描/监控开关。
+                    conn.execute(
+                        "UPDATE dir_config SET monitor_enabled=0, updated_at=?1 WHERE id=?2",
+                        rusqlite::params![now, m.dir_id],
+                    )
+                    .map_err(|e| format!("停用备份目录失败: {e}"))?;
                 }
             }
             drop(conn);

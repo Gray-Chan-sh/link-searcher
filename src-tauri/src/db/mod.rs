@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "10";
+const SCHEMA_VERSION: &str = "11";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -114,6 +114,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
     // `private` column on dir_config.
     drop_dir_config_private_column(&tx)?;
 
+    // Schema v11: `monitor_enabled` — 停用（暂停扫描/监控但保留数据）的目录。
+    ensure_monitor_enabled_column(&tx)?;
+
     // Retired feature: the offline QA-pair retrieval channel was removed.
     // Drop its table to reclaim space (idempotent — no-op on fresh DBs).
     tx.execute_batch("DROP TABLE IF EXISTS doc_qa_pairs;")
@@ -212,6 +215,30 @@ fn ensure_dead_content_column(tx: &Connection) -> Result<()> {
     }
     tx.execute_batch("ALTER TABLE file_tracking ADD COLUMN dead_content INTEGER NOT NULL DEFAULT 0")
         .context("failed to add dead_content column")?;
+    Ok(())
+}
+
+/// Add the `monitor_enabled` column to dir_config (schema v11). Idempotent —
+/// 1 = 参与扫描/监控（默认），0 = 停用（暂停扫描与监控，但保留 dir_config 行与数据）。
+fn ensure_monitor_enabled_column(tx: &Connection) -> Result<()> {
+    let has_column: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(dir_config)")
+            .context("failed to inspect dir_config")?;
+        let names = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .context("failed to read columns")?;
+        names
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("failed to collect columns")?
+            .iter()
+            .any(|n| n == "monitor_enabled")
+    };
+    if has_column {
+        return Ok(());
+    }
+    tx.execute_batch("ALTER TABLE dir_config ADD COLUMN monitor_enabled INTEGER NOT NULL DEFAULT 1")
+        .context("failed to add monitor_enabled column")?;
     Ok(())
 }
 
@@ -341,6 +368,7 @@ const CREATE_TABLES_SQL: &str = "
         exclude_patterns TEXT,
         include_exts    TEXT,
         recursive       INTEGER NOT NULL DEFAULT 1,
+        monitor_enabled INTEGER NOT NULL DEFAULT 1,
         created_at      INTEGER NOT NULL,
         updated_at      INTEGER NOT NULL
     );
@@ -913,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_10() {
+    fn test_schema_version_is_11() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -922,7 +950,27 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
+    }
+
+    #[test]
+    fn test_monitor_enabled_column_added_to_legacy_db() {
+        // 模拟 v10 之前的库：dir_config 没有 monitor_enabled。
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE dir_config (
+                id     TEXT PRIMARY KEY,
+                path   TEXT NOT NULL UNIQUE,
+                recursive INTEGER NOT NULL DEFAULT 1
+            );
+            INSERT INTO dir_config (id, path, recursive) VALUES ('d1', '/old', 1);",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        let enabled: i64 = conn
+            .query_row("SELECT monitor_enabled FROM dir_config WHERE id='d1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(enabled, 1, "旧库升级后应默认启用");
     }
 
     #[test]

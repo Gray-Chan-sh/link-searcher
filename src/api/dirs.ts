@@ -9,12 +9,19 @@ export interface DirConfig {
   exclude_patterns: string | null
   include_exts: string | null
   recursive: boolean
+  /** 是否参与扫描与文件监控；false = 已停用（保留数据）。 */
+  monitor_enabled: boolean
   total_files?: number
   indexed_files?: number
 }
 
 export async function addDir(path: string, alias?: string, recursive?: boolean): Promise<DirConfig> {
   return client.invoke<DirConfig>('add_dir', { path, alias, recursive })
+}
+
+/** 停用 / 启用某个监控目录（停用 = 暂停扫描与监控，但保留 dir_config 行与数据）。 */
+export async function setDirEnabled(id: string, enabled: boolean): Promise<void> {
+  return client.invoke('update_dir', { id, monitorEnabled: enabled })
 }
 
 /** Report returned by the `remove_dir` command. */

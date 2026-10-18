@@ -99,6 +99,8 @@ struct UpdateDirBody {
     include_exts: Option<String>,
     #[serde(default)]
     recursive: Option<bool>,
+    #[serde(default, rename = "monitorEnabled")]
+    monitor_enabled: Option<bool>,
 }
 
 async fn update_dir_handler(
@@ -116,6 +118,7 @@ async fn update_dir_handler(
         body.exclude_patterns,
         body.include_exts,
         body.recursive,
+        body.monitor_enabled,
     )
     .await
     .map_err(|e| ApiError { error: e })?;

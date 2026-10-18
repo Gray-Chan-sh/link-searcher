@@ -498,7 +498,7 @@ get_dir_children,
                         return Ok(());
                     }
                 };
-                let dirs = match crate::db::dir_config::list_dirs(&conn) {
+                let dirs = match crate::db::dir_config::list_enabled_dirs(&conn) {
                     Ok(d) => d,
                     Err(e) => {
                         log::error!("[STARTUP] 无法读取目录列表: {e}");

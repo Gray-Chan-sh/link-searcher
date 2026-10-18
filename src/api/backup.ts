@@ -103,7 +103,7 @@ export interface RemapPreview {
     sampleMissing: string[]
 }
 
-export type DirActionKind = 'remap' | 'keep' | 'remove'
+export type DirActionKind = 'remap' | 'keep' | 'remove' | 'disable'
 
 /** 恢复前，为备份里每个监控目录指定的落位方式（camelCase 对应后端 serde）。 */
 export interface DirMapping {

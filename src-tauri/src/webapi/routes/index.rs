@@ -192,7 +192,7 @@ async fn trigger_scan_handler(
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;
-    let dirs = crate::db::dir_config::list_dirs(&conn)
+    let dirs = crate::db::dir_config::list_enabled_dirs(&conn)
         .map_err(|e| ApiError {
             error: e.to_string(),
         })?;

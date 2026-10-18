@@ -238,9 +238,11 @@ impl<R: Runtime> ScanWorker<R> {
         let mut total_duration_ms = 0u64;
 
         let targets: Vec<_> = if let Some(single_id) = &dir_id {
+            // 显式指定单个目录：即使已停用也照做（用户主动操作）。
             dirs.into_iter().filter(|d| d.id == *single_id).collect()
         } else {
-            dirs
+            // 批量/自动扫描：跳过停用的目录。
+            dirs.into_iter().filter(|d| d.monitor_enabled).collect()
         };
 
         if targets.is_empty() {
@@ -586,7 +588,7 @@ pub async fn rebuild_index(
                 return;
             }
         };
-        let dirs = match db::dir_config::list_dirs(&conn) {
+        let dirs = match db::dir_config::list_enabled_dirs(&conn) {
             Ok(d) => d,
             Err(e) => {
                 log::error!("[SCAN] failed to list dirs: {e}");

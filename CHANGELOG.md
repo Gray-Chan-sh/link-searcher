@@ -1,3 +1,36 @@
+## 2026-10-18（第四十八轮）：目录「停用」—— 暂停扫描但保留数据（R2）
+
+> 恢复对话框此前只有「保留原路径 / 指定目录 / 移除」三种落位：既不想现在扫描、又不想丢掉
+> 索引数据的目录没有出口（「移除」会连数据一起删）。新增第四种落位「停用扫描」。
+
+**数据库（schema v11）**
+
+- `dir_config` 新增 `monitor_enabled INTEGER NOT NULL DEFAULT 1`；`SCHEMA_VERSION` `"10"`→`"11"`。
+- 新增幂等迁移 `ensure_monitor_enabled_column()`（旧库 ALTER TABLE 补列，默认 1 = 启用）；
+  单测 `test_monitor_enabled_column_added_to_legacy_db`（旧库升级后默认启用）。
+- `DirConfig` / `DirUpdate` / `DirConfigResponse` / `DirConfigWithStats` 增 `monitor_enabled`；
+  `add_dir` 写 1；`update_dir` 支持切换；新增 `list_enabled_dirs()`（仅 `monitor_enabled = 1`）。
+  `list_dirs()` **语义不变**（仍返回全部，供 UI 展示与手动操作）。
+
+**扫描/监控闸门**（停用目录一律跳过）
+
+- 启动扫描 + watcher 注册（`lib.rs`）、`ScanWorker::run` 批量扫描（`commands/index.rs`）、
+  「重建索引」（同文件）、Web API 触发扫描（`webapi/routes/index.rs`）改用 `list_enabled_dirs`。
+- **例外**：显式指定单个目录的扫描（`dir_id = Some(_)`）即使该目录已停用也照做（用户主动操作）。
+- `update_dir` 命令：新增 `monitor_enabled` 参数；停用 → 只停 watcher、不做增量扫描；
+  启用 → 重启 watcher 并照常增量扫描。Web 的 `PUT /api/dirs` 同步支持 `monitorEnabled`。
+- 单测 `test_monitor_enabled_toggle_and_list_enabled`（停用后仍在 `list_dirs`、不在
+  `list_enabled_dirs`；停用不改 path；可重新启用）。
+
+**前端**
+
+- 恢复对话框新增第四种落位「停用扫描」（含说明文案），`DirActionKind` 增 `'disable'`。
+- 「目录管理」页：停用目录显示「已停用」标记，右侧新增「停用 / 启用」按钮（`setDirEnabled`）。
+- `api/dirs.ts`：`DirConfig.monitor_enabled` + `setDirEnabled()`；i18n 四语新增 4 key
+  （`disable_directory` / `enable_directory` / `dir_disabled_badge` / `dir_toggle_failed`）
+  与恢复对话框 2 key（`backup_mapping_act_disable` / `backup_mapping_disable_hint`）。
+- 文档 `docs/09-backup-migrate.md`：新增「停用（暂停扫描）目录」小节 + 落位方式表补一行。
+
 ## 2026-10-18（第四十七轮）：备份完整性校验 + 「保留原路径」也做命中预检（R3）
 
 > R1 把目录落位提前到覆盖之前，但两处仍是盲区：(a) `snapshot.json` 里记了每个文件的

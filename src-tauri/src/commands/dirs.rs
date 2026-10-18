@@ -15,6 +15,7 @@ pub struct DirConfigResponse {
     pub exclude_patterns: Option<String>,
     pub include_exts: Option<String>,
     pub recursive: bool,
+    pub monitor_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -28,6 +29,7 @@ pub struct DirConfigWithStats {
     pub exclude_patterns: Option<String>,
     pub include_exts: Option<String>,
     pub recursive: bool,
+    pub monitor_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub total_files: u64,
@@ -158,6 +160,7 @@ pub async fn add_dir(
         exclude_patterns: dir.exclude_patterns,
         include_exts: dir.include_exts,
         recursive: dir.recursive,
+        monitor_enabled: dir.monitor_enabled,
         created_at: dir.created_at,
         updated_at: dir.updated_at,
     })
@@ -353,6 +356,7 @@ pub async fn list_dirs(state: State<'_, AppState>) -> Result<Vec<DirConfigWithSt
             exclude_patterns: dir.exclude_patterns,
             include_exts: dir.include_exts,
             recursive: dir.recursive,
+            monitor_enabled: dir.monitor_enabled,
             created_at: dir.created_at,
             updated_at: dir.updated_at,
             total_files: stats.total,
@@ -372,6 +376,7 @@ pub async fn update_dir(
     exclude_patterns: Option<String>,
     include_exts: Option<String>,
     recursive: Option<bool>,
+    monitor_enabled: Option<bool>,
 ) -> Result<(), String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     let updates = db::dir_config::DirUpdate {
@@ -380,6 +385,7 @@ pub async fn update_dir(
         exclude_patterns,
         include_exts,
         recursive,
+        monitor_enabled,
     };
     db::dir_config::update_dir(&conn, &id, updates)
         .map_err(|e| format!("failed to update directory: {e}"))?;
@@ -391,6 +397,14 @@ pub async fn update_dir(
     let dir = db::dir_config::get_dir(&conn, &id).map_err(|e| format!("failed to reload dir: {e}"))?
         .ok_or_else(|| format!("dir not found: {id}"))?;
     drop(conn);
+
+    // 停用的目录：只停 watcher，不启动监控、也不做增量扫描（数据保留）。
+    if !dir.monitor_enabled {
+        log::info!("[DIRS] 目录已停用（保留数据，不扫描）: {}", dir.path);
+        let _ = app.emit("dirs-changed", serde_json::json!({}));
+        return Ok(());
+    }
+
     let _ = state.watcher_tx.send(crate::scanner::watcher::WatcherCommand::StartWatch {
         dir_id: id.clone(),
         path: std::path::PathBuf::from(&dir.path),
