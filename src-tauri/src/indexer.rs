@@ -128,6 +128,44 @@ struct ExtractedData {
     hash: String,
 }
 
+/// 大文件（> 100MB，见 `extract_and_index_single::MAX_FILE_SIZE`）的内容指纹采样。
+///
+/// 采样 = **头 + 中 + 尾**各 `chunk` 字节，再混入文件大小（小端 8 字节），取 md5。
+///
+/// 旧实现只取样「头 + 尾」1MB：两份**首尾相同、中间不同**的大文件（如同一容器里
+/// 换了主体数据的镜像/视频）会算出**同一个 md5** → 第二份被当作重复内容，直接复用
+/// 第一份的文本与向量 —— 内容是**永久错误**的，且没有任何日志能看出来。
+///
+/// 返回值 `(fingerprint, head, tail)`：`head + tail` 就是提取阶段要喂给解析器的
+/// 内容片段（大文件只解析首尾 2MB，控制 OCR 成本）—— 与指纹采样共用同一次读盘。
+fn sample_large_fingerprint<R: Read + Seek>(
+    reader: &mut R,
+    file_size: u64,
+    chunk: u64,
+) -> std::io::Result<(String, Vec<u8>, Vec<u8>)> {
+    let chunk = chunk.max(1) as usize;
+
+    let mut head = vec![0u8; chunk];
+    reader.read_exact(&mut head)?;
+
+    // 中部采样起点取「正中往前半个 chunk」，保证 `[mid, mid+chunk)` 落在文件内。
+    let mid_off = (file_size / 2).saturating_sub((chunk / 2) as u64);
+    reader.seek(SeekFrom::Start(mid_off))?;
+    let mut mid = vec![0u8; chunk];
+    reader.read_exact(&mut mid)?;
+
+    reader.seek(SeekFrom::End(-(chunk as i64)))?;
+    let mut tail = vec![0u8; chunk];
+    reader.read_exact(&mut tail)?;
+
+    let mut hasher = md5::Md5::new();
+    hasher.update(&head);
+    hasher.update(&mid);
+    hasher.update(&tail);
+    hasher.update(file_size.to_le_bytes());
+    Ok((format!("{:x}", hasher.finalize()), head, tail))
+}
+
 impl IndexerService {
     /// Extract text from a single file: read content, compute MD5, dedup
     /// against `content_index`, and run the extraction fallback chain.
@@ -182,23 +220,19 @@ impl IndexerService {
         let hash: String;
 
         if file_size > MAX_FILE_SIZE {
-            let mut head = vec![0u8; CHUNK_SIZE as usize];
-            if let Err(e) = reader.read_exact(&mut head) {
-                return Err((job.file_id.clone(), format!("read head: {e}")));
-            }
-            if let Err(e) = reader.seek(SeekFrom::End(-(CHUNK_SIZE as i64))) {
-                return Err((job.file_id.clone(), format!("seek: {e}")));
-            }
-            let mut tail = vec![0u8; CHUNK_SIZE as usize];
-            if let Err(e) = reader.read_exact(&mut tail) {
-                return Err((job.file_id.clone(), format!("read tail: {e}")));
-            }
-            let mut hasher = md5::Md5::new();
-            hasher.update(&head);
-            hasher.update(&tail);
-            hash = format!("{:x}", hasher.finalize());
-            head.extend_from_slice(&tail);
-            raw = head;
+            // 大文件：头 + 中 + 尾 采样算指纹（含大小），并把「头 + 尾」作为
+            // 待提取内容（与指纹共用同一次读盘）。
+            let (h, head, tail) =
+                match sample_large_fingerprint(&mut reader, file_size, CHUNK_SIZE) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Err((job.file_id.clone(), format!("fingerprint: {e}")));
+                    }
+                };
+            hash = h;
+            let mut sampled = head;
+            sampled.extend_from_slice(&tail);
+            raw = sampled;
         } else {
             let mut buf = [0u8; 65536];
             let mut hasher = md5::Md5::new();
@@ -1204,6 +1238,52 @@ mod tests {
     use crate::db;
     use crate::search::schema::build_schema;
     use tantivy::Index;
+
+    /// 大文件指纹：**头尾相同、仅中部不同**必须算出不同的 md5（旧实现只采样头尾，
+    /// 会把两份不同的大文件判成同一份内容 → 复用错误文本/向量）。
+    #[test]
+    fn large_fingerprint_distinguishes_middle_and_mixes_in_size() {
+        // chunk=8，文件 24 字节：head=0..8, mid=8..16, tail=16..24。
+        let mk = |mid: &[u8]| -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(b"HEADHEAD");
+            v.extend_from_slice(mid);
+            v.extend_from_slice(b"TAILTAIL");
+            v
+        };
+
+        let a = mk(b"MIDMIDMI");
+        let b = mk(b"XXXXXXXX"); // 头/尾完全相同，只有中部不同
+
+        let sample = |data: &Vec<u8>| {
+            let mut cur = std::io::Cursor::new(data.clone());
+            sample_large_fingerprint(&mut cur, data.len() as u64, 8).unwrap()
+        };
+
+        let (fp_a, head_a, tail_a) = sample(&a);
+        let (fp_b, _, _) = sample(&b);
+        assert_ne!(fp_a, fp_b, "头尾相同、中部不同的大文件必须区分开");
+
+        // head + tail 仍是提取用的「首尾片段」（提取成本不变）。
+        assert_eq!(head_a, b"HEADHEAD");
+        assert_eq!(tail_a, b"TAILTAIL");
+
+        // 指纹构造 = md5(head + mid + tail + size_le)：确定且把大小算进去。
+        let expected = {
+            use md5::Digest;
+            let mut h = md5::Md5::new();
+            h.update(b"HEADHEAD");
+            h.update(b"MIDMIDMI");
+            h.update(b"TAILTAIL");
+            h.update((a.len() as u64).to_le_bytes());
+            format!("{:x}", h.finalize())
+        };
+        assert_eq!(fp_a, expected);
+
+        // 同一内容算两次结果稳定。
+        let (fp_a2, _, _) = sample(&a);
+        assert_eq!(fp_a, fp_a2);
+    }
 
     /// Create a clean DB + tantivy pair and insert a tracking record.
     ///
