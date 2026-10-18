@@ -478,6 +478,7 @@ const ko: Record<string, string> = {
     sys_max_results: '검색 결과 상한',
     sys_exclusions: '제외 규칙',
     sys_exclude_patterns: '제외 패턴',
+    sys_web_bind_warning: '현재 0.0.0.0에서 수신 중입니다(로컬 네트워크/원격에서 접근 가능): 토큰이 유일한 관문이며 인증서는 자체 서명입니다(같은 서브넷에서는 중간자 공격으로 복호화될 수 있습니다). 원격 접속이 필요 없다면 "로컬만"으로 변경하세요.',
     model_filter_placeholder: '모델 필터링…',
     ai_enabled_models: '활성화된 모델 ({n})',
     ai_enable: '활성화',

@@ -482,6 +482,7 @@ const zh: Record<string, string> = {
     sys_max_results: '搜索结果上限',
     sys_exclusions: '排除规则',
     sys_exclude_patterns: '排除模式',
+    sys_web_bind_warning: '当前监听 0.0.0.0（局域网/远程可访问）：Token 是唯一门槛，证书为自签（同网段可能被中间人解密）。不需要远程访问时请改为「仅本机」。',
     model_filter_placeholder: '过滤模型…',
     ai_enabled_models: '已启用模型 ({n})',
     ai_enable: '启用',

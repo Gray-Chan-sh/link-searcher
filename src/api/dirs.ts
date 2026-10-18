@@ -64,7 +64,3 @@ export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]>
   const items = await client.invoke<DirTreeNode[]>('get_dir_children', { parentPath })
   return items.map(normNode)
 }
-
-export async function updateDir(id: string, alias?: string, ocrLang?: string, excludePatterns?: string, includeExts?: string, recursive?: boolean): Promise<void> {
-  return client.invoke<void>('update_dir', { id, alias, ocrLang, excludePatterns, includeExts, recursive })
-}

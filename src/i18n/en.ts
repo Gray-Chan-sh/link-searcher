@@ -482,6 +482,7 @@ const en: Record<string, string> = {
     sys_max_results: 'Maximum search results',
     sys_exclusions: 'Exclusions',
     sys_exclude_patterns: 'Exclude patterns',
+    sys_web_bind_warning: 'Listening on 0.0.0.0 (reachable from the LAN/remotely): the token is the only gate and the certificate is self-signed (a same-subnet attacker may decrypt traffic). Switch to "Localhost only" unless you need remote access.',
     model_filter_placeholder: 'Filter models…',
     ai_enabled_models: 'Enabled models ({n})',
     ai_enable: 'Enable',

@@ -1608,7 +1608,6 @@ mod tests {
     #[test]
     fn verify_core_recovers_or_marks_dead() {
         use crate::search::IndexManager;
-        use tantivy::Index;
         use std::sync::Arc;
 
         let db_path = std::env::temp_dir().join(format!("verify_pool_{}.db", std::process::id()));

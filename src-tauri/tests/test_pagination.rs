@@ -23,7 +23,7 @@ fn pagination_with_507_rows_returns_correct_pages() {
     // Reproduce exact list_files_db logic: filter=failed, no ext/search
     let mut wheres: Vec<&str> = vec!["status = 'active'"];
     wheres.push("indexed = 2");
-    let mut params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
+    let params: Vec<Box<dyn rusqlite::ToSql + Send>> = Vec::new();
     let where_clause = wheres.join(" AND ");
     let ps: usize = 20;
     let p: usize = 11;

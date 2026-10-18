@@ -23,10 +23,20 @@ pub fn upsert_embedding(
 
 /// Load every stored embedding as `(file_id, Vec<f32>)`. Used by the
 /// semantic-search path to brute-force cosine over the whole corpus.
+///
+/// **每次调用都把整表读进内存，且没有缓存** —— 这是 2026-10-18 审计里**故意保留**
+/// 的取舍：单条**查询**向量有 LRU 缓存（`ai::QUERY_EMBED_CACHE`），但"全库向量快照"
+/// 的失效点散落在 upsert / delete / 目录清除 / 重建 / 迁移 / 孤儿清理里，漏掉任一处
+/// 都会**静默返回按过期向量排的序**（错误结果比慢结果糟得多）。要加缓存必须先定死
+/// 失效契约（或换 ANN 索引）。
+///
+/// 这里只做**度量**（行数 / 字节 / 耗时，debug 级），好判断"多大规模开始痛"。
 pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
+    let started = std::time::Instant::now();
     let mut s = conn.prepare(
         "SELECT file_id, dim, vector FROM doc_embeddings",
     )?;
+    let mut bytes: usize = 0;
     let rows = s.query_map([], |row| {
         let file_id: String = row.get(0)?;
         let dim: usize = row.get(1)?;
@@ -39,8 +49,16 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
     })?;
     let mut result = Vec::new();
     for row in rows {
-        result.push(row?);
+        let (file_id, v) = row?;
+        bytes += v.len() * 4;
+        result.push((file_id, v));
     }
+    log::debug!(
+        "[EMB] 全库文档向量载入（无缓存，整表反序列化）: {} 条, {:.2} MB, {} ms",
+        result.len(),
+        bytes as f64 / 1_048_576.0,
+        started.elapsed().as_millis()
+    );
     Ok(result)
 }
 
@@ -78,12 +96,17 @@ pub fn upsert_chunk_embedding(
 
 /// Load every chunk embedding as `(md5, chunk_index, Vec<f32>)`. Used by the
 /// chunk-vector scan to brute-force cosine over all chunk vectors.
+///
+/// 同样**无缓存、整表载入**（原因见 [`get_all_embeddings`]）—— 这份比文档级更贵
+/// （长文档每篇多个 chunk），所以别在热路径上反复调用；度量见下面的 debug 日志。
 pub fn get_all_chunk_embeddings(
     conn: &Connection,
 ) -> Result<Vec<(String, usize, Vec<f32>)>> {
+    let started = std::time::Instant::now();
     let mut s = conn.prepare(
         "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings",
     )?;
+    let mut bytes: usize = 0;
     let rows = s.query_map([], |row| {
         let md5: String = row.get(0)?;
         let chunk_index: usize = row.get(1)?;
@@ -97,8 +120,16 @@ pub fn get_all_chunk_embeddings(
     })?;
     let mut result = Vec::new();
     for row in rows {
-        result.push(row?);
+        let (md5, chunk_index, v) = row?;
+        bytes += v.len() * 4;
+        result.push((md5, chunk_index, v));
     }
+    log::debug!(
+        "[EMB] 全库 chunk 向量载入（无缓存，整表反序列化）: {} 条, {:.2} MB, {} ms",
+        result.len(),
+        bytes as f64 / 1_048_576.0,
+        started.elapsed().as_millis()
+    );
     Ok(result)
 }
 

@@ -243,7 +243,8 @@ pub fn seen_count(conn: &Connection) -> Result<u64, String> {
 mod tests {
     use super::*;
 
-    /// 用真实文件库（`init_db` 会跑 `PRAGMA wal_checkpoint`，内存库上不适用）。
+    /// 用真实文件库（`init_db` 里那条 `PRAGMA wal_checkpoint` 只对文件库有效，
+    /// 现在已是**非致命**的尽力而为，但内存库上测不出真实行为，故仍用文件库）。
     fn test_conn(tag: &str) -> (Connection, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("ls_lark_{tag}_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();

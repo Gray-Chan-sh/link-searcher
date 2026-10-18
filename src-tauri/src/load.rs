@@ -371,6 +371,17 @@ enum Kind {
     Doc,
 }
 
+/// 等多久算"闸门卡住"。默认 30s（单测可传更短）。
+const FORCE_AFTER: Duration = Duration::from_secs(30);
+
+/// `FORCE_AFTER` 到点后**同时**最多放行几张许可。
+///
+/// 这是防死锁的**逃生门**，不是"卡住就全体放行"：闸门防的是内存峰值（一份数千页
+/// 文档的渲染位图就是几 GB，几十份并发 = OOM），若几十个等待者到期后一起放行，
+/// 反而把"被卡住"放大成"打爆内存"。2 张足以让流水线不至于永久停摆，同时把峰值
+/// 控制在 `设计上限 + 2`。
+const MAX_FORCED_PERMITS: usize = 2;
+
 struct Gate {
     level: AtomicU8,
     page_window: AtomicUsize,
@@ -378,6 +389,8 @@ struct Gate {
     doc_max: AtomicUsize,
     ocr_in_use: AtomicUsize,
     doc_in_use: AtomicUsize,
+    /// 当前"超时强制放行"在飞中的许可数（见 [`MAX_FORCED_PERMITS`]）。
+    forced: AtomicUsize,
     lock: Mutex<()>,
     cv: Condvar,
 }
@@ -393,6 +406,7 @@ impl Gate {
             doc_max: AtomicUsize::new(n.doc_permits),
             ocr_in_use: AtomicUsize::new(0),
             doc_in_use: AtomicUsize::new(0),
+            forced: AtomicUsize::new(0),
             lock: Mutex::new(()),
             cv: Condvar::new(),
         }
@@ -410,7 +424,12 @@ impl Gate {
     }
 
     fn acquire(&self, kind: Kind) -> Permit<'_> {
-        let deadline = Instant::now() + Duration::from_secs(30);
+        self.acquire_within(kind, FORCE_AFTER)
+    }
+
+    /// 等不到许可时**最多**放行这么多张（同时在飞）。见 [`MAX_FORCED_PERMITS`]。
+    fn acquire_within(&self, kind: Kind, wait: Duration) -> Permit<'_> {
+        let mut deadline = Instant::now() + wait;
         let mut guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
         loop {
             let max = match kind {
@@ -425,19 +444,42 @@ impl Gate {
             // (document permits at Normal) — tell them apart by level.
             let paused = Level::from_u8(self.level.load(Ordering::Relaxed)) == Level::Paused;
             if max == 0 && !paused {
-                return Permit { gate: self, kind };
+                return Permit { gate: self, kind, forced: false };
             }
             if max > 0 && in_use.load(Ordering::Relaxed) < max {
                 in_use.fetch_add(1, Ordering::Relaxed);
-                return Permit { gate: self, kind };
+                return Permit { gate: self, kind, forced: false };
             }
             // 等太久必须放行：阻塞式闸门曾把一个"卡住的文档"放大成整条流水线停摆
             // （2026-10-14 实测：Hard 档 4 个文档许可被占满 → 25 分钟零进展）。
             // 放行时同样计数（drop 时会减回去），并把这件事记进日志。
+            //
+            // 但**放行数量有上限**（2026-10-18 审计 P4-①）：闸门本身防的是内存峰值
+            // （几十个文档 × 每份数千页渲染 ≈ 几十 GB），若几十个等待者同时到期后
+            // 一起放行，就把"被卡住"放大成"打爆内存"。所以只留 `MAX_FORCED_PERMITS`
+            // 个逃生位，其余继续等（许可证归还时 `notify_all` 会唤醒他们）。
             if Instant::now() >= deadline {
-                in_use.fetch_add(1, Ordering::Relaxed);
-                log::warn!("[LOAD] 并发闸门等待超过 30s → 强制放行（防止死锁，闸门被卡住时不应拖死全局）");
-                return Permit { gate: self, kind };
+                let forced_now = self.forced.fetch_add(1, Ordering::Relaxed);
+                if forced_now < MAX_FORCED_PERMITS {
+                    in_use.fetch_add(1, Ordering::Relaxed);
+                    log::warn!(
+                        "[LOAD] 并发闸门等待超过 {}ms → 强制放行（{:?}，强制许可 {}/{}；防止死锁）",
+                        wait.as_millis(),
+                        kind,
+                        forced_now + 1,
+                        MAX_FORCED_PERMITS
+                    );
+                    return Permit { gate: self, kind, forced: true };
+                }
+                self.forced.fetch_sub(1, Ordering::Relaxed);
+                log::error!(
+                    "[LOAD] 并发闸门等待超过 {}ms，但强制放行已达上限 {}（{:?}）→ 继续等待；疑似有许可长期未归还",
+                    wait.as_millis(),
+                    MAX_FORCED_PERMITS,
+                    kind
+                );
+                // 期限推后，避免每 200ms 刷一条 ERROR（真正的判断只看"许可是否归还"）。
+                deadline += wait;
             }
             let (g, _timeout) = self
                 .cv
@@ -452,6 +494,8 @@ impl Gate {
 pub struct Permit<'a> {
     gate: &'a Gate,
     kind: Kind,
+    /// 这一张是"超时强制放行"来的 —— 归还时要递减 `forced`。
+    forced: bool,
 }
 
 impl Drop for Permit<'_> {
@@ -461,6 +505,9 @@ impl Drop for Permit<'_> {
             Kind::Doc => &self.gate.doc_in_use,
         };
         slot.fetch_sub(1, Ordering::Relaxed);
+        if self.forced {
+            self.gate.forced.fetch_sub(1, Ordering::Relaxed);
+        }
         let _guard = self.gate.lock.lock();
         self.gate.cv.notify_all();
     }
@@ -718,20 +765,6 @@ fn doc_label(n: usize) -> String {
     if n == 0 { "不限".to_string() } else { n.to_string() }
 }
 
-/// Wait until the current level differs from `from` (test helper) — bounded.
-#[cfg(test)]
-fn wait_for_level_change(from: Level, timeout: Duration) -> Option<Level> {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        let l = level();
-        if l != from {
-            return Some(l);
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,6 +939,53 @@ mod tests {
             }
             assert!(h.is_finished(), "释放一个槽位后等待者应当进入");
             drop(b);
+        });
+    }
+
+    /// 强制放行是"防止死锁的逃生门"，**不是**"卡住就全体放行"：同时最多
+    /// `MAX_FORCED_PERMITS` 张，其余等待者必须等许可真的归还（2026-10-18 审计 P4-①）。
+    #[test]
+    fn forced_permits_are_bounded() {
+        let s = LoadSettings { soft_doc_permits: 1, ..settings() };
+        let g = Gate::new();
+        g.apply(Level::Soft, &s);
+        assert_eq!(g.doc_max.load(Ordering::Relaxed), 1, "先确认只剩 1 个正式文档位");
+
+        // 占满唯一的正式许可，再用"等满 50ms"的方式吃掉全部强制位。
+        let held = g.acquire_within(Kind::Doc, Duration::from_millis(10));
+        let forced: Vec<Permit<'_>> = (0..MAX_FORCED_PERMITS)
+            .map(|_| g.acquire_within(Kind::Doc, Duration::from_millis(50)))
+            .collect();
+        assert_eq!(forced.len(), MAX_FORCED_PERMITS);
+        assert_eq!(g.forced.load(Ordering::Relaxed), MAX_FORCED_PERMITS, "强制位已用满");
+
+        let gate_ref = &g;
+        std::thread::scope(|scope| {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let h = scope.spawn(move || {
+                // 再等 50ms 也不会被放行 —— 上限已到（没有上限的话它 ~50ms 就会返回）。
+                let p = gate_ref.acquire_within(Kind::Doc, Duration::from_millis(50));
+                let _ = tx.send(());
+                std::thread::sleep(Duration::from_millis(300));
+                drop(p);
+            });
+            assert!(
+                rx.recv_timeout(Duration::from_millis(300)).is_err(),
+                "超过强制放行上限后必须继续等待"
+            );
+            assert_eq!(
+                g.forced.load(Ordering::Relaxed),
+                MAX_FORCED_PERMITS,
+                "等待者不得突破强制放行上限"
+            );
+            // 全部归还（含强制位）→ 等待者必须被唤醒，而不是永久卡住。
+            drop(held);
+            drop(forced);
+            assert!(
+                rx.recv_timeout(Duration::from_secs(3)).is_ok(),
+                "许可归还后等待者必须被唤醒"
+            );
+            h.join().ok();
         });
     }
 

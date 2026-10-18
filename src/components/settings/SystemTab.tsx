@@ -256,6 +256,11 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
             { value: '127.0.0.1', label: '仅本机 (127.0.0.1)' },
           ]}
         />
+        {(settings['web_api_bind'] ?? '0.0.0.0') !== '127.0.0.1' && (
+          <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+            {t('sys_web_bind_warning')}
+          </p>
+        )}
       </Section>
     </div>
   )

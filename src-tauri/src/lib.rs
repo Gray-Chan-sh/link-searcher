@@ -71,6 +71,7 @@ fn restore_dock_icon() {
     }
 }
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // 唯一调用点在 `#[cfg(target_os = "macos")]` 门后；这个空实现只为让非 macOS 也能编译
 fn restore_dock_icon() {}
 
 pub fn run_with_data_dir(data_dir: std::path::PathBuf) {

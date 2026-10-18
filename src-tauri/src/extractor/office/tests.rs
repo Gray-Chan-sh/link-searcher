@@ -273,9 +273,3 @@ fn test_corrupt_doc_fails_without_lo_fallback() {
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
-
-fn lo_baseline_chars(path: &Path) -> Option<usize> {
-    let stem = path.file_stem()?.to_str()?;
-    let txt = Path::new("/tmp/ls-rwml-poc/lo_out").join(format!("{stem}.txt"));
-    std::fs::read_to_string(txt).ok().map(|s| s.len())
-}

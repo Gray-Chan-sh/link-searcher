@@ -1,3 +1,50 @@
+## 2026-10-18（第四十四轮）：未修清单逐条修复 P4-①～④ —— 强制放行限幅 / 全库向量度量与契约 / 警告与死代码清零 / 非回环绑定风险提示
+
+**P4-① 并发闸门"等满 30s 强制放行"没有上限**（`load.rs`）
+
+- 根因：`Gate::acquire` 等满 30s 就**无条件**放行。闸门防的是内存峰值（一份数千页文档的
+  渲染位图就是几 GB，几十份并发 = OOM）；一旦闸门被卡住（许可泄漏或极慢），几十个等待者
+  会在各自到期后**一起**越过上限 —— 把"被卡住"放大成"打爆内存"，等于闸门在最危险的时候
+  失效。原意只是"别让整条流水线永久停摆"。
+- 修法：新增 `MAX_FORCED_PERMITS = 2`（同时在飞的强制许可上限）：到点先看还剩几个逃生位，
+  有则放行并打 WARN（带上 `强制许可 n/2`），没有则**继续等**并打一条 ERROR（提示疑似许可
+  长期未归还），期限顺延以免每 200ms 刷日志。`Permit` 增加 `forced` 标记，归还时递减计数。
+  等待时长抽成 `acquire_within(kind, wait)` 以便单测（生产仍走 `FORCE_AFTER = 30s`）。
+- 新增单测 `forced_permits_are_bounded`：占满正式位 + 2 个强制位后，第 3 个等待者**不得**
+  返回（无上限时它 ~50ms 就会返回）；全部归还后必须被唤醒（不永久卡住）。
+
+**P4-② 全库向量整表载入：只度量 + 写死"失效契约"要求**（`db/tracker/embeddings.rs`）
+
+- 背景：`get_all_embeddings` / `get_all_chunk_embeddings` 每次语义查询都把整表读入内存并
+  反序列化，P3-⑬ 已判定**不加缓存**（失效点散落在 upsert/delete/目录清除/重建/迁移/孤儿
+  清理里，漏任一处就静默返回过期排序 —— 错结果比慢结果糟）。
+- 修法（**不改行为**）：两个函数加 debug 级**度量**（条数 / MB / 耗时），并在文档注释里把
+  上面这条"必须先定死失效契约（或换 ANN 索引）才能加缓存"写进代码，避免后人图省事直接加
+  一个 HashMap 缓存。
+
+**P4-③ 编译警告与死代码清零**（9 处，`cargo check --all-targets` 从 8 条 warning → 0）
+
+- `commands/index.rs` 测试里未用的 `use tantivy::Index`；`extractor/pdf.rs` 多余的
+  `let mut merged = merged;`（本就没有任何地方改它）；`commands/ai.rs` 未用的闭包参数 `i`；
+  `tests/test_pagination.rs` 多余的 `mut`。
+- `extractor/windows_ocr.rs`：`map_err(|e| ...)` 把 `e` **吃掉**了 —— 改为写进错误信息
+  （保留 WinRT 原始报错，排查语言包问题时有用），而不是简单加下划线。
+- 删除从未被调用的死代码：`extractor/office/tests.rs::lo_baseline_chars`、
+  `load.rs::wait_for_level_change`；`src/api/dirs.ts::updateDir`（前端从未调用；P3-⑲ 只删了它的
+  `private` 死参数，本轮把整个函数删掉）。
+- `lib.rs` 非 macOS 的 `restore_dock_icon` 空实现加 `#[allow(dead_code)]` + 注释（真正调用点在
+  `#[cfg(target_os = "macos")]` 门后，非 macOS 上"未被使用"是结构性的，不是遗漏）。
+- `commands/sessions/lark.rs` 测试注释过期（说 `init_db` 的 `wal_checkpoint` 内存库不适用）——
+  P3-⑮ 已把它改成非致命，注释同步。
+
+**P4-④ 非回环绑定的风险提示（默认值仍不动）**（`SystemTab.tsx`、4 个 i18n、`docs/06-settings.md`）
+
+- 绑定默认值**刻意保持** `0.0.0.0`（用户有远程/Tailscale 工作流，第三十八/四十二轮已定），
+  本轮只把"风险 + 怎么收紧"补到用户看得见的地方：设置页选到非回环绑定时显示一条 amber 提示
+  （Token 是唯一门槛、证书自签、同网段可能被中间人解密，不需要远程就改「仅本机」），
+  `docs/06-settings.md` 同步写清；启动 WARN 早在 P2-⑫ 已有。
+- 新增 i18n key `sys_web_bind_warning`（zh/en/ja/ko 四语）。
+
 ## 2026-10-18（第四十三轮）：未修清单逐条修复 P3-⑬～⑲ —— 查询缓存 LRU / watcher 背压 / HTTP agent 复用 / VACUUM 判据 / 线程池上限 / 死设置 / 死参数
 
 **P3-⑬ 查询向量缓存"满了整体清空"，换网关也不失效**（`ai/mod.rs`、`commands/config.rs`）

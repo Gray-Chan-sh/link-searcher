@@ -302,7 +302,6 @@ impl PdfExtractor {
         // 也是同一份扫描件，不该把同样的 145 页 OCR **再跑一遍**（实测跑两遍
         // = 5 分钟 × 2，日志里表现为连续两次 "running per-page OCR loop"）。
         let mut forced_ocr_attempted = false;
-        let mut merged = merged;
         if merged.trim().is_empty() && !pages.is_empty() {
             forced_ocr_attempted = true;
             log::warn!(

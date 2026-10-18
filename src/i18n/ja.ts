@@ -478,6 +478,7 @@ const ja: Record<string, string> = {
     sys_max_results: '検索結果の上限',
     sys_exclusions: '除外ルール',
     sys_exclude_patterns: '除外パターン',
+    sys_web_bind_warning: '現在 0.0.0.0 で待受中（LAN/リモートから到達可能）：トークンが唯一の関門で、証明書は自己署名です（同一サブネットでは中間者に復号され得ます）。リモートアクセスが不要なら「ローカルのみ」に変更してください。',
     model_filter_placeholder: 'モデルを絞り込み…',
     ai_enabled_models: '有効なモデル ({n})',
     ai_enable: '有効化',

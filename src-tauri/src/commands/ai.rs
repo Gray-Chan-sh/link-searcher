@@ -1057,7 +1057,7 @@ mod history_tests {
 
         // create 时按 updated_at 驱逐最旧，总量锁 50。
         let created: Vec<String> = (0..51)
-            .map(|i| create_chat_session_impl(&dir, "ui").unwrap())
+            .map(|_| create_chat_session_impl(&dir, "ui").unwrap())
             .collect();
         let h = read_history(&dir);
         assert_eq!(h.sessions.len(), 50, "超过 50 应驱逐最旧");

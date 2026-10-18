@@ -67,12 +67,13 @@ fn create_engine(lang: &str) -> Result<windows::Media::Ocr::OcrEngine, String> {
             }
         }
     }
-    OcrEngine::TryCreateFromUserProfileLanguages()
-        .map_err(|e| format!(
-            "No Windows OCR language pack found for {:?}. \
+    OcrEngine::TryCreateFromUserProfileLanguages().map_err(|e| {
+        format!(
+            "No Windows OCR language pack found for {:?} (WinRT error: {e}). \
              Install one in Settings → Time & Language → Language → Optional features → OCR",
             lang,
-        ))
+        )
+    })
 }
 
 /// Windows OCR `MaxImageDimension` ≈ 4096; resize if either axis exceeds this.
