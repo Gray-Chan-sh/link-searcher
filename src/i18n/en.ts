@@ -605,6 +605,9 @@ const en: Record<string, string> = {
     backup_mapping_exists_local: 'This path already exists here',
     backup_verify_warn: 'Integrity check found {n} issue(s) (you may continue, but verify the source first)',
     backup_restore_desktop_only: 'Restoring backups is only available in the desktop app.',
+    backup_mapping_includes: 'Also restoring: {items}',
+    backup_mapping_inc_chat: 'Chat history',
+    backup_mapping_inc_config: 'App settings (incl. API keys)',
 
     err_empty_response: 'AI returned no content, please retry',
 

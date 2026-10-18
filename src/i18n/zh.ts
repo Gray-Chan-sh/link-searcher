@@ -605,6 +605,9 @@ const zh: Record<string, string> = {
     backup_mapping_exists_local: '本机已存在该路径',
     backup_verify_warn: '备份完整性校验发现 {n} 处异常（仍可继续，建议先核对来源）',
     backup_restore_desktop_only: '恢复备份仅支持桌面应用，请在本机客户端中操作。',
+    backup_mapping_includes: '将一并恢复：{items}',
+    backup_mapping_inc_chat: '聊天记录',
+    backup_mapping_inc_config: '应用设置（含 API Key 等）',
 
     err_empty_response: 'AI 未返回任何内容，请重试',
 

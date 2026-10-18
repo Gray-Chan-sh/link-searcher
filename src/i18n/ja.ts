@@ -601,6 +601,9 @@ const ja: Record<string, string> = {
     backup_mapping_exists_local: 'このパスは既に存在します',
     backup_verify_warn: '整合性チェックで {n} 件の異常を検出（続行可。取得元の確認を推奨）',
     backup_restore_desktop_only: 'バックアップの復元はデスクトップアプリでのみ利用できます。',
+    backup_mapping_includes: 'あわせて復元：{items}',
+    backup_mapping_inc_chat: 'チャット履歴',
+    backup_mapping_inc_config: 'アプリ設定（API キー等を含む）',
 
     err_empty_response: 'AI が応答を返しませんでした。再試行してください',
 

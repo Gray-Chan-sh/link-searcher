@@ -897,6 +897,7 @@ fn validate_backup_zip(names: &[String]) -> Result<(), String> {
 fn restore_from_dir(
     src: &std::path::Path,
     index_dir: &std::path::Path,
+    data_dir: &std::path::Path,
     index_manager: &std::sync::Arc<std::sync::RwLock<IndexManager>>,
     indexer: &crate::indexer::IndexerService,
     db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
@@ -1019,6 +1020,51 @@ fn restore_from_dir(
         restore_result?;
     }
 
+    // R5：聊天记录与应用设置也随备份恢复 —— 此前它们被写进备份、恢复时却从不写回
+    // （跨机迁移后聊天记录与设置全丢）。备份里没有该文件时**保留本机文件**（不删）。
+    // 这两份文件都在进程内被读/写，因此必须在 `app.restart()` 之前落盘，重启后即生效。
+    restore_optional_file(
+        &src.join("chat_history.json"),
+        &data_dir.join("chat_history.json"),
+        "chat_history.json",
+    )?;
+    restore_optional_file(&src.join("config.json"), &config_file_path(), "config.json")?;
+
+    Ok(())
+}
+
+/// 把备份里的单个文件**原子地**写回目标位置（先写 `.restore-tmp` 再 rename）。
+/// 备份里没有该文件 → 不动本机文件，只记日志。
+///
+/// 不用 `copy_file_if_exists`：那个方向的语义是「备份时源文件缺失就跳过并记账」，
+/// 而这里是恢复，且**绝不能**因为该文件缺失就误删本机现有文件。
+fn restore_optional_file(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    label: &str,
+) -> Result<(), String> {
+    if !src.is_file() {
+        log::info!("[RESTORE] 备份不含 {label}，保留本机现有文件");
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建 {label} 目标目录失败: {e}"))?;
+    }
+    let tmp = dst.with_file_name(format!(
+        "{}.restore-tmp",
+        dst.file_name().and_then(|n| n.to_str()).unwrap_or("restore")
+    ));
+    std::fs::copy(src, &tmp).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("写入 {label} 失败: {e}")
+    })?;
+    // Windows 上 `rename` 走 MoveFileExW(MOVEFILE_REPLACE_EXISTING)，可覆盖已存在文件。
+    std::fs::rename(&tmp, dst).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("替换 {label} 失败: {e}")
+    })?;
+    log::info!("[RESTORE] 已恢复 {label}");
     Ok(())
 }
 
@@ -1116,6 +1162,7 @@ pub async fn restore_from_zip(
 
     let tmp = std::env::temp_dir().join(format!("ls_restore_zip_{}", uuid::Uuid::new_v4().simple()));
     let index_dir = state.index_dir.clone();
+    let data_dir = state.data_dir.clone();
     let index_manager = state.index_manager.clone();
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
@@ -1129,7 +1176,7 @@ pub async fn restore_from_zip(
             return Err(e);
         }
         // 快捷恢复：不做目录映射（用户指定的映射走 plan/apply）。
-        let r = restore_from_dir(&tmp, &index_dir, &index_manager, &indexer, &db_pool, &[]);
+        let r = restore_from_dir(&tmp, &index_dir, &data_dir, &index_manager, &indexer, &db_pool, &[]);
         let _ = std::fs::remove_dir_all(&tmp);
         r
     })
@@ -1235,13 +1282,14 @@ pub async fn restore_backup(
     }
 
     let index_dir = state.index_dir.clone();
+    let data_dir = state.data_dir.clone();
     let index_manager = state.index_manager.clone();
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
     let is_restoring = state.is_restoring.clone();
 
     let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
-        restore_from_dir(&backup_dir, &index_dir, &index_manager, &indexer, &db_pool, &[])
+        restore_from_dir(&backup_dir, &index_dir, &data_dir, &index_manager, &indexer, &db_pool, &[])
     })
     .await
     {
@@ -1485,6 +1533,7 @@ pub async fn apply_restore(
     }
 
     let index_dir = state.index_dir.clone();
+    let data_dir = state.data_dir.clone();
     let index_manager = state.index_manager.clone();
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
@@ -1504,6 +1553,7 @@ pub async fn apply_restore(
         restore_from_dir(
             &src,
             &index_dir,
+            &data_dir,
             &index_manager,
             &indexer,
             &db_pool,
@@ -2145,6 +2195,36 @@ mod tests {
             file_count: 3,
             exists_locally: false,
         }
+    }
+
+    #[test]
+    fn restore_optional_file_overwrites_only_when_present() {
+        let base = std::env::temp_dir().join(format!("ls_restore_opt_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let src = base.join("src");
+        let dst_dir = base.join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst_dir).unwrap();
+        let dst = dst_dir.join("chat_history.json");
+        std::fs::write(&dst, "OLD").unwrap();
+
+        // 备份里没有 → 保留本机文件（绝不因为缺失而误删）。
+        restore_optional_file(&src.join("chat_history.json"), &dst, "chat_history.json").unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "OLD");
+
+        // 备份里有 → 覆盖，且不留 .restore-tmp。
+        std::fs::write(src.join("chat_history.json"), "NEW").unwrap();
+        restore_optional_file(&src.join("chat_history.json"), &dst, "chat_history.json").unwrap();
+        assert_eq!(std::fs::read_to_string(&dst).unwrap(), "NEW");
+        assert!(!dst_dir.join("chat_history.json.restore-tmp").exists());
+
+        // 目标父目录不存在 → 自动创建。
+        let nested = base.join("a").join("b").join("config.json");
+        std::fs::write(src.join("config.json"), "{}").unwrap();
+        restore_optional_file(&src.join("config.json"), &nested, "config.json").unwrap();
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "{}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

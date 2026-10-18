@@ -1,3 +1,22 @@
+## 2026-10-18（第四十九轮）：恢复时一并写回聊天记录与应用设置（R5）
+
+> 备份一直会写入 `chat_history.json` 与 `config.json`，但**恢复侧从不写回** —— 跨机迁移或
+> 回滚后，聊天记录全丢、设置仍是本机的旧值，且 `plan_restore` 返回的 `hasChatHistory` /
+> `hasConfig` 前端拿到后从未使用（等于"备份了但恢复不了"）。
+
+- `commands/backup.rs`：`restore_from_dir` 新增 `data_dir` 参数，末尾调用新增的
+  `restore_optional_file()` 把 `chat_history.json`（→ `data_dir`）与 `config.json`
+  （→ `config_file_path()`）写回；**原子写**（先写 `.restore-tmp` 再 rename，避免半截文件）。
+- 三条恢复路径（`restore_backup` / `restore_from_zip` / `apply_restore`）均传入 `data_dir`，
+  写回发生在 `app.restart()` 之前，重启后即生效。
+- **非破坏性**：备份里没有该文件时**保留本机文件**（不删除），并记 INFO 日志。
+- 新增单测 `restore_optional_file_overwrites_only_when_present`（缺失时不动、存在时覆盖且
+  不留 tmp、父目录自动创建）。
+- 前端 `RestoreMappingDialog`：顶部显示「将一并恢复：聊天记录 / 应用设置（含 API Key 等）」
+  （复用 plan 里此前未使用的 `hasChatHistory` / `hasConfig`）；i18n 四语新增 3 key。
+- 文档 `docs/09-backup-migrate.md`：数据目录表补 `chat_history.json` / 配置目录说明，
+  恢复步骤补「一并恢复的内容」。
+
 ## 2026-10-18（第四十八轮）：目录「停用」—— 暂停扫描但保留数据（R2）
 
 > 恢复对话框此前只有「保留原路径 / 指定目录 / 移除」三种落位：既不想现在扫描、又不想丢掉

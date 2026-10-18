@@ -21,6 +21,11 @@ const ACTIONS: DirActionKind[] = ['keep', 'remap', 'disable', 'remove']
 export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: RestoreMappingDialogProps) {
   const { t } = useI18n()
   const verifyOk = plan.verify.mismatches.length === 0 && plan.verify.missing.length === 0
+  // 备份里带了哪些「非数据库」内容（会一并恢复）：聊天记录 / 应用设置。
+  const includes = [
+    plan.hasChatHistory ? t('backup_mapping_inc_chat') : '',
+    plan.hasConfig ? t('backup_mapping_inc_config') : '',
+  ].filter(Boolean)
   const [rows, setRows] = useState<Record<string, Row>>(() => {
     const init: Record<string, Row> = {}
     for (const d of plan.dirs) init[d.id] = { action: '', path: '' }
@@ -109,6 +114,11 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
           {!verifyOk && (
             <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
               {t('backup_verify_warn', { n: String(plan.verify.mismatches.length + plan.verify.missing.length) })}
+            </p>
+          )}
+          {includes.length > 0 && (
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {t('backup_mapping_includes', { items: includes.join(' / ') })}
             </p>
           )}
         </div>

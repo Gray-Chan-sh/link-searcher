@@ -601,6 +601,9 @@ const ko: Record<string, string> = {
     backup_mapping_exists_local: '이 경로가 이미 존재합니다',
     backup_verify_warn: '무결성 검사에서 {n}건의 이상 발견 (계속 가능, 출처 확인 권장)',
     backup_restore_desktop_only: '백업 복원은 데스크톱 앱에서만 사용할 수 있습니다.',
+    backup_mapping_includes: '함께 복원: {items}',
+    backup_mapping_inc_chat: '채팅 기록',
+    backup_mapping_inc_config: '앱 설정 (API 키 포함)',
 
     err_empty_response: 'AI가 응답을 반환하지 않았습니다. 다시 시도하세요',
 
