@@ -177,6 +177,12 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 **验证**：单条 **12/12** 绿、全 lib **再压 6/6** 绿（改前约 1/6 轮次红）。
 > 教训：**"失败只 warn" 的 DELETE 就是"偶发脏数据"的温床** —— 多语句的清理要么同一事务，要么带重试。
 
+> **已修（2026-10-18，schema v12）**：`doc_embeddings` 由 **file_id 键改成 md5 键**
+> （同内容只存一份向量），`purge_dir_data` 里那三条按 `file_id` 的 DELETE 变成
+> 「按 md5 + 保留共享内容」的删除，并新增 md5 键的 `cleanup_orphan_doc_embeddings`
+> 作清道夫 —— 上面那条"以 file_id 为键、没有清道夫"的缺口随之消失。
+> 只剩 `doc_summaries` / `index_errors` 仍是 file_id 键（前者由 `cleanup_orphan_file_rows` 兜）。
+
 **⚠️ 遗留（如实记录，不假装已解决）**：B 项落地期间有一次 `cargo test --workspace` **返回非 0**
 （当时被日志过滤词掩盖了用例名）。修完 A 之后复扫 **15 轮全绿**（10× `--lib` + 5× 全 workspace）
 → **无法复现**；该时段恰逢运行环境重启（我的提交命令也被打断过）→ 最可能是**环境因素**而非代码。

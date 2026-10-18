@@ -866,8 +866,9 @@ fn restore_files_core(
 ///
 /// Reads each indexed file's extracted text from `content_index` (via md5 —
 /// no re-extraction / no OCR), embeds it in batches, and upserts into
-/// `doc_embeddings`. Idempotent: only files without an embedding are picked
-/// up, so it is safe to run repeatedly and after every scan.
+/// `doc_embeddings` (**md5-keyed**: duplicate files share one vector).
+/// Idempotent: only content without an embedding (or with a stale one) is
+/// picked up, so it is safe to run repeatedly and after every scan.
 ///
 /// Exposed both as a Tauri command (manual trigger) and called by the scan
 /// completion hook in the background.
@@ -1498,7 +1499,7 @@ mod tests {
         // c: indexed + content + embedding ALREADY present → skip
         tracker::store_content(&conn, "md5c", "content c", false, None).unwrap();
         tracker::update_indexed(&conn, &id_c, Some("md5c")).unwrap();
-        tracker::upsert_embedding(&conn, &id_c, &[1.0, 2.0, 3.0]).unwrap();
+        tracker::upsert_embedding(&conn, "md5c", &[1.0, 2.0, 3.0]).unwrap();
 
         let rows = missing_embedding_rows(&conn).unwrap();
         assert_eq!(rows.len(), 1);
@@ -1515,7 +1516,7 @@ mod tests {
         let id = tracker::upsert_file(&conn, "/s.txt", "d1", 1000, 10, Some("md5s")).unwrap();
         tracker::store_content(&conn, "md5s", "old content", false, None).unwrap();
         tracker::update_indexed(&conn, &id, Some("md5s")).unwrap();
-        tracker::upsert_embedding(&conn, &id, &[1.0, 2.0]).unwrap();
+        tracker::upsert_embedding(&conn, "md5s", &[1.0, 2.0]).unwrap();
 
         assert!(
             missing_embedding_rows(&conn).unwrap().is_empty(),
@@ -1992,7 +1993,7 @@ mod clear_index_tables_tests {
         crate::db::dir_config::add_dir(&conn, "/d", None, None, None, None, true).unwrap();
         let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
         let id = crate::db::tracker::upsert_file(&conn, "a.txt", &d.id, 1, 10, None).unwrap();
-        crate::db::tracker::upsert_embedding(&conn, &id, &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        crate::db::tracker::upsert_embedding(&conn, "clear-md5", &[0.1, 0.2, 0.3, 0.4]).unwrap();
         crate::db::tracker::upsert_summary(&conn, &id, "summary").unwrap();
 
         clear_index_tables(&conn);

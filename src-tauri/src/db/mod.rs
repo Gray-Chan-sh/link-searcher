@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "11";
+const SCHEMA_VERSION: &str = "12";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -116,6 +116,9 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
     // Schema v11: `monitor_enabled` — 停用（暂停扫描/监控但保留数据）的目录。
     ensure_monitor_enabled_column(&tx)?;
+
+    // Schema v12: `doc_embeddings` 由 file_id 键改为 md5 键（同内容只存一份向量）。
+    migrate_doc_embeddings_to_md5(&tx)?;
 
     // Retired feature: the offline QA-pair retrieval channel was removed.
     // Drop its table to reclaim space (idempotent — no-op on fresh DBs).
@@ -240,6 +243,62 @@ fn ensure_monitor_enabled_column(tx: &Connection) -> Result<()> {
     tx.execute_batch("ALTER TABLE dir_config ADD COLUMN monitor_enabled INTEGER NOT NULL DEFAULT 1")
         .context("failed to add monitor_enabled column")?;
     Ok(())
+}
+
+/// Schema v12: `doc_embeddings` 从 **file_id 键** 改为 **md5 键**。
+///
+/// 动机：内容按 md5 去重（`content_index` / `doc_chunks` / `chunk_embeddings` 都是
+/// md5 键），唯独 doc 向量按 file_id 存 —— 相同内容的副本各存一份**完全一样的向量**
+/// （库内实测 7733 文件 / 6963 唯一 md5 ≈ 10% 纯冗余），并且"某文件被删"与"这份内容
+/// 的向量该不该删"被绑在一起（共享内容会被误删，需要额外的引用计数来兜）。
+///
+/// 迁移是**确定性且可重建**的：按 `ft.md5` 分组，每组保留 `updated_at` 最新的向量
+/// （SQLite 的 bare-column + MAX 语义会取到该组聚合对应的那一行）。没有 tracking 行、
+/// 或 md5 为空的旧行直接丢弃 —— 它们已无法被任何文件复用；缺向量会由「向量回填」
+/// 用 `content_index` 里的缓存文本重建，**不需要重新 OCR**。
+///
+/// 幂等：已迁移的库没有 `file_id` 列，直接返回。临时表先 drop，避免上次中断留下的
+/// 半成品导致主键冲突。
+fn migrate_doc_embeddings_to_md5(tx: &Connection) -> Result<()> {
+    if !has_column(tx, "doc_embeddings", "file_id")? {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS doc_embeddings_md5;
+         CREATE TABLE doc_embeddings_md5 (
+             md5         TEXT PRIMARY KEY,
+             dim         INTEGER NOT NULL,
+             vector      BLOB NOT NULL,
+             updated_at  INTEGER NOT NULL
+         );
+         INSERT INTO doc_embeddings_md5 (md5, dim, vector, updated_at)
+         SELECT ft.md5, e.dim, e.vector, MAX(e.updated_at)
+         FROM doc_embeddings e
+         JOIN file_tracking ft ON ft.id = e.file_id
+         WHERE ft.md5 IS NOT NULL AND ft.md5 <> ''
+         GROUP BY ft.md5;
+         DROP TABLE doc_embeddings;
+         ALTER TABLE doc_embeddings_md5 RENAME TO doc_embeddings;",
+    )
+    .context("failed to migrate doc_embeddings to md5 key")?;
+    log::info!("[DB] doc_embeddings 已迁移为 md5 键（同内容只保留一份向量）");
+    Ok(())
+}
+
+/// `PRAGMA table_info` 里是否存在某列。幂等迁移的分支判断都靠它。
+fn has_column(tx: &Connection, table: &str, column: &str) -> Result<bool> {
+    let mut stmt = tx
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .with_context(|| format!("failed to inspect {table}"))?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .with_context(|| format!("failed to read columns of {table}"))?;
+    let found = names
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .with_context(|| format!("failed to collect columns of {table}"))?
+        .iter()
+        .any(|n| n == column);
+    Ok(found)
 }
 
 /// Drop the legacy P6 `private` column from dir_config. Idempotent — safe to
@@ -410,7 +469,7 @@ const CREATE_TABLES_SQL: &str = "
     );
 
     CREATE TABLE IF NOT EXISTS doc_embeddings (
-        file_id     TEXT PRIMARY KEY,
+        md5         TEXT PRIMARY KEY,
         dim         INTEGER NOT NULL,
         vector      BLOB NOT NULL,
         updated_at  INTEGER NOT NULL
@@ -559,28 +618,48 @@ pub fn wal_checkpoint_truncate(conn: &Connection) -> Result<(i64, i64, i64)> {
     .context("wal_checkpoint(TRUNCATE) failed")
 }
 
-/// Remove `doc_embeddings` / `doc_summaries` rows whose `file_id` no longer
-/// exists in `file_tracking`.
+/// Remove `doc_summaries` rows whose `file_id` no longer exists in
+/// `file_tracking`.
 ///
-/// Both tables are keyed by `file_id`, so any path that drops a tracking row
-/// without also dropping its vector/summary leaves an orphan there **forever** —
-/// the md5-keyed cleanups above never look at these tables. Move detection is the
-/// known source: `startup_scan` hard-deletes the freshly-walked row B and only
-/// removes B's Tantivy document.
+/// `doc_summaries` is still keyed by `file_id`, so any path that drops a tracking
+/// row without also dropping its summary leaves an orphan there **forever** —
+/// the md5-keyed cleanups never look at that table. Move detection is the known
+/// source: `startup_scan` hard-deletes the freshly-walked row B and only removes
+/// B's Tantivy document.
+///
+/// `doc_embeddings` 自 v12 起是 **md5 键**，不再属于这里 —— 它由
+/// [`cleanup_orphan_doc_embeddings`] 按"没有文件再引用该 md5"清理。
 ///
 /// Returns the number of rows removed.
 pub fn cleanup_orphan_file_rows(conn: &Connection) -> Result<u64> {
-    let embeddings = conn.execute(
-        "DELETE FROM doc_embeddings WHERE file_id NOT IN (SELECT id FROM file_tracking)",
-        [],
-    )?;
     let summaries = conn.execute(
         "DELETE FROM doc_summaries WHERE file_id NOT IN (SELECT id FROM file_tracking)",
         [],
     )?;
-    let deleted = (embeddings + summaries) as u64;
+    let deleted = summaries as u64;
     if deleted > 0 {
-        log::info!("[DB] cleaned up {deleted} orphan doc_embeddings/doc_summaries rows");
+        log::info!("[DB] cleaned up {deleted} orphan doc_summaries rows");
+    }
+    Ok(deleted)
+}
+
+/// Remove `doc_embeddings` rows (md5 key) whose md5 is no longer referenced by
+/// **any** `file_tracking` row.
+///
+/// 与 [`cleanup_orphan_chunk_embeddings`] 同构：内容按 md5 共享，所以判据是
+/// "没有任何追踪行再引用它"，而不是"某个文件没了"。
+///
+/// Returns the number of rows removed.
+pub fn cleanup_orphan_doc_embeddings(conn: &Connection) -> Result<u64> {
+    let deleted = conn
+        .execute(
+            "DELETE FROM doc_embeddings
+             WHERE md5 NOT IN (SELECT DISTINCT md5 FROM file_tracking WHERE md5 IS NOT NULL)",
+            [],
+        )
+        .context("cleanup_orphan_doc_embeddings failed")? as u64;
+    if deleted > 0 {
+        log::info!("[DB] cleaned up {deleted} orphan doc_embeddings rows");
     }
     Ok(deleted)
 }
@@ -748,8 +827,11 @@ mod tests {
         run_migrations(&conn).unwrap();
     }
 
-    /// 按 `file_id` 键的表（doc 向量/摘要）没有任何 md5 清理会覆盖：只要 tracking 行
-    /// 没了，它们就是永久孤儿（移动检测 `hard_delete_file` 曾是源头）。
+    /// `doc_summaries` 仍是 `file_id` 键，且没有任何 md5 清理会覆盖它：只要 tracking
+    /// 行没了，它就是永久孤儿（移动检测 `hard_delete_file` 曾是源头）。
+    ///
+    /// `doc_embeddings` 自 v12 起是 **md5 键**，由 [`cleanup_orphan_doc_embeddings`]
+    /// 按「没有任何 tracking 行再引用该 md5」清理 —— 共享内容必须保留。
     #[test]
     fn orphan_file_rows_are_cleaned() {
         let conn = setup_conn();
@@ -760,7 +842,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO doc_embeddings (file_id,dim,vector,updated_at) VALUES ('keep',1,X'00000000',0)",
+            "INSERT INTO doc_embeddings (md5,dim,vector,updated_at) VALUES ('m1',1,X'00000000',0)",
             [],
         )
         .unwrap();
@@ -771,7 +853,7 @@ mod tests {
         .unwrap();
         // 没有对应 tracking 行的残留
         conn.execute(
-            "INSERT INTO doc_embeddings (file_id,dim,vector,updated_at) VALUES ('ghost',1,X'00000000',0)",
+            "INSERT INTO doc_embeddings (md5,dim,vector,updated_at) VALUES ('ghost-md5',1,X'00000000',0)",
             [],
         )
         .unwrap();
@@ -781,8 +863,12 @@ mod tests {
         )
         .unwrap();
 
-        let deleted = cleanup_orphan_file_rows(&conn).unwrap();
-        assert_eq!(deleted, 2, "两条孤儿（一个向量 + 一个摘要）都应清掉");
+        assert_eq!(cleanup_orphan_file_rows(&conn).unwrap(), 1, "摘要是 file_id 键，孤儿应清掉");
+        assert_eq!(
+            cleanup_orphan_doc_embeddings(&conn).unwrap(),
+            1,
+            "doc 向量是 md5 键，无人引用的 md5 应清掉"
+        );
         let left: i64 = conn
             .query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get(0))
             .unwrap();
@@ -791,6 +877,63 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM doc_summaries", [], |r| r.get(0))
             .unwrap();
         assert_eq!(left, 1);
+    }
+
+    /// v12 迁移：旧库（`doc_embeddings` 为 file_id 键）→ 新库（md5 键）。
+    /// 同内容的多个文件只保留**一条**向量（取 `updated_at` 最新者），
+    /// 没有 tracking 行 / md5 为空的旧行丢弃。
+    #[test]
+    fn migrate_doc_embeddings_to_md5_dedupes_by_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE file_tracking (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, file_ext TEXT,
+                 dir_id TEXT NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+                 md5 TEXT, status TEXT NOT NULL DEFAULT 'active', indexed INTEGER NOT NULL DEFAULT 0,
+                 error_msg TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                 dead_content INTEGER NOT NULL DEFAULT 0, fail_count INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE doc_embeddings (
+                 file_id TEXT PRIMARY KEY, dim INTEGER NOT NULL, vector BLOB NOT NULL, updated_at INTEGER NOT NULL
+             );
+             INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at)
+                VALUES ('a','pa','d1',0,0,'shared','active',1,0,0),
+                       ('b','pb','d2',0,0,'shared','active',1,0,0),
+                       ('c','pc','d1',0,0,'solo','active',1,0,0),
+                       ('d','pd','d1',0,0,NULL,'active',1,0,0);
+             INSERT INTO doc_embeddings (file_id,dim,vector,updated_at)
+                VALUES ('a',1,X'00000000',100),   -- shared 的旧向量
+                       ('b',1,X'11111111',200),   -- shared 的新向量（胜出）
+                       ('c',1,X'22222222',50),
+                       ('d',1,X'33333333',10),    -- md5 为空 → 丢弃
+                       ('ghost',1,X'44444444',10); -- 无 tracking 行 → 丢弃",
+        )
+        .unwrap();
+
+        migrate_doc_embeddings_to_md5(&conn).unwrap();
+
+        // 列已变为 md5 键。
+        assert!(!has_column(&conn, "doc_embeddings", "file_id").unwrap());
+        assert!(has_column(&conn, "doc_embeddings", "md5").unwrap());
+        let rows: Vec<(String, i64)> = {
+            let mut s = conn
+                .prepare("SELECT md5, updated_at FROM doc_embeddings ORDER BY md5")
+                .unwrap();
+            let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            r.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![("shared".to_string(), 200), ("solo".to_string(), 50)],
+            "shared 只留最新一条；无 tracking 行 / md5 为空的丢弃"
+        );
+        // 幂等：再跑一次不动任何东西。
+        migrate_doc_embeddings_to_md5(&conn).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM doc_embeddings", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
     }
 
     /// 按 md5 键的块向量必须"共享内容感知"：删掉一个目录后，只要还有别的
@@ -941,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_schema_version_is_11() {
+    fn test_schema_version_is_12() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -950,7 +1093,7 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "11");
+        assert_eq!(version, "12");
     }
 
     #[test]
@@ -971,6 +1114,59 @@ mod tests {
             .query_row("SELECT monitor_enabled FROM dir_config WHERE id='d1'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(enabled, 1, "旧库升级后应默认启用");
+    }
+
+    /// 真实升级路径：v11 及更早的库经 `run_migrations()` 整体升级后，
+    /// `doc_embeddings` 应变成 md5 键，且**已有向量不丢**（按内容重新归并）。
+    #[test]
+    fn run_migrations_upgrades_legacy_doc_embeddings_to_md5() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 旧库：doc_embeddings 以 file_id 为键（CREATE TABLE IF NOT EXISTS 不会覆盖它）。
+        conn.execute_batch(
+            "CREATE TABLE file_tracking (
+                 id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, file_ext TEXT,
+                 dir_id TEXT NOT NULL, mtime INTEGER NOT NULL, size INTEGER NOT NULL DEFAULT 0,
+                 md5 TEXT, status TEXT NOT NULL DEFAULT 'active', indexed INTEGER NOT NULL DEFAULT 0,
+                 error_msg TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+                 dead_content INTEGER NOT NULL DEFAULT 0, fail_count INTEGER NOT NULL DEFAULT 0
+             );
+             CREATE TABLE doc_embeddings (
+                 file_id TEXT PRIMARY KEY, dim INTEGER NOT NULL, vector BLOB NOT NULL, updated_at INTEGER NOT NULL
+             );
+             INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at)
+                VALUES ('a','pa','d1',0,0,'dup','active',1,0,0),
+                       ('b','pb','d2',0,0,'dup','active',1,0,0),
+                       ('c','pc','d1',0,0,'solo','active',1,0,0);
+             INSERT INTO doc_embeddings (file_id,dim,vector,updated_at)
+                VALUES ('a',1,X'00000000',10), ('b',1,X'11111111',20), ('c',1,X'22222222',30);",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        // 键已变更、内容已按 md5 归并（dup 留 updated_at 最新那条 = X'11111111'）。
+        assert!(has_column(&conn, "doc_embeddings", "md5").unwrap());
+        let rows: Vec<(String, Vec<u8>)> = {
+            let mut s = conn
+                .prepare("SELECT md5, vector FROM doc_embeddings ORDER BY md5")
+                .unwrap();
+            let r = s.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+            r.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![
+                ("dup".to_string(), vec![0x11, 0x11, 0x11, 0x11]),
+                ("solo".to_string(), vec![0x22, 0x22, 0x22, 0x22]),
+            ]
+        );
+        // 升级后 schema 版本已推进。
+        let v: String = conn
+            .query_row("SELECT value FROM app_settings WHERE key='schema_version'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+        // 再跑一次仍幂等。
+        run_migrations(&conn).unwrap();
     }
 
     #[test]

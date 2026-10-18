@@ -701,7 +701,7 @@ pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExt
 
 mod embeddings;
 pub use embeddings::{
-    count_chunk_embeddings, delete_chunk_embeddings, delete_embedding,
+    count_chunk_embeddings, delete_chunk_embeddings, delete_embedding_unreferenced,
     get_all_chunk_embeddings, get_all_embeddings,
     get_chunk_embeddings_by_md5s, upsert_chunk_embedding, upsert_embedding,
 };
@@ -1142,23 +1142,64 @@ mod tests {
         assert!(get_content(&conn, "mX").unwrap().is_none());
     }
 
+    /// Insert a minimal active tracking row (needed because `get_all_embeddings`
+    /// 按 md5 展开成 file_id)。
+    fn track(conn: &Connection, id: &str, md5: &str) {
+        conn.execute(
+            "INSERT INTO file_tracking (id,path,dir_id,mtime,size,md5,status,indexed,created_at,updated_at) \
+             VALUES (?1,?1,'d1',0,0,?2,'active',1,0,0)",
+            rusqlite::params![id, md5],
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_embedding_roundtrip() {
         let conn = db();
-        upsert_embedding(&conn, "f1", &[0.5, -1.0, 2.0]).unwrap();
-        upsert_embedding(&conn, "f2", &[1.0, 2.0]).unwrap();
+        track(&conn, "f1", "m1");
+        track(&conn, "f2", "m2");
+        upsert_embedding(&conn, "m1", &[0.5, -1.0, 2.0]).unwrap();
+        upsert_embedding(&conn, "m2", &[1.0, 2.0]).unwrap();
         let all = get_all_embeddings(&conn).unwrap();
         assert_eq!(all.len(), 2);
         let v = all.iter().find(|(id, _)| id == "f1").unwrap();
         assert_eq!(v.1, vec![0.5, -1.0, 2.0]);
 
-        upsert_embedding(&conn, "f1", &[9.0]).unwrap();
+        // 同内容再覆盖（md5 冲突 → 更新，不新增行）。
+        upsert_embedding(&conn, "m1", &[9.0]).unwrap();
         let all = get_all_embeddings(&conn).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all.iter().find(|(id, _)| id == "f1").unwrap().1, vec![9.0]);
 
-        delete_embedding(&conn, "f1").unwrap();
+        // 排除集只排除"自己"：没有**其它**活跃文件引用 m1 → 该内容确已消失 → 删。
+        assert_eq!(delete_embedding_unreferenced(&conn, "m1", "f1").unwrap(), 1);
         assert_eq!(count_embeddings(&conn).unwrap(), 1);
+        // 仍被 f2 引用 → 不删（共享内容感知）。
+        assert_eq!(delete_embedding_unreferenced(&conn, "m2", "f1").unwrap(), 0);
+        assert_eq!(count_embeddings(&conn).unwrap(), 1);
+        // 无人引用 m2（排除它唯一的持有者 f2）→ 删。
+        assert_eq!(delete_embedding_unreferenced(&conn, "m2", "f2").unwrap(), 1);
+        assert_eq!(count_embeddings(&conn).unwrap(), 0);
+    }
+
+    /// 同内容的多个文件共享**一份**向量，但读回来要按 file_id 各出一行
+    /// （检索侧按 file_id 对上 BM25 名单）。
+    #[test]
+    fn test_duplicate_content_shares_one_vector_row() {
+        let conn = db();
+        track(&conn, "a", "md5-dup");
+        track(&conn, "b", "md5-dup");
+        upsert_embedding(&conn, "md5-dup", &[1.0]).unwrap();
+        assert_eq!(count_embeddings(&conn).unwrap(), 1, "同内容只存一份");
+        let all = get_all_embeddings(&conn).unwrap();
+        assert_eq!(all.len(), 2, "读侧按 file_id 展开");
+        assert_eq!(all.iter().filter(|(_, v)| v == &vec![1.0]).count(), 2);
+        // 删掉 a 后 b 还在引用 → 向量保留。
+        conn.execute("UPDATE file_tracking SET status='deleted' WHERE id='a'", []).unwrap();
+        assert_eq!(delete_embedding_unreferenced(&conn, "md5-dup", "").unwrap(), 0);
+        assert_eq!(count_embeddings(&conn).unwrap(), 1);
+        // 非活跃文件不再出现在候选里。
+        assert_eq!(get_all_embeddings(&conn).unwrap().len(), 1);
     }
 
     #[test]

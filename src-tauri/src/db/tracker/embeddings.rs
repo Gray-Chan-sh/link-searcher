@@ -3,10 +3,12 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
-/// Store (or replace) a document's embedding vector as a little-endian f32 blob.
+/// Store (or replace) a **content's** document embedding vector as a
+/// little-endian f32 blob. Keyed by `md5`: duplicate files (same content) share
+/// one row, exactly like `chunk_embeddings`.
 pub fn upsert_embedding(
     conn: &Connection,
-    file_id: &str,
+    md5: &str,
     vector: &[f32],
 ) -> Result<()> {
     let mut bytes: Vec<u8> = Vec::with_capacity(vector.len() * 4);
@@ -14,15 +16,20 @@ pub fn upsert_embedding(
         bytes.extend_from_slice(&x.to_le_bytes());
     }
     conn.execute(
-        "INSERT INTO doc_embeddings (file_id, dim, vector, updated_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(file_id) DO UPDATE SET dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
-        rusqlite::params![file_id, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
+        "INSERT INTO doc_embeddings (md5, dim, vector, updated_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(md5) DO UPDATE SET dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
+        rusqlite::params![md5, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
     )?;
     Ok(())
 }
 
 /// Load every stored embedding as `(file_id, Vec<f32>)`. Used by the
 /// semantic-search path to brute-force cosine over the whole corpus.
+///
+/// 表按 **md5** 存（同内容一份向量），这里 `JOIN file_tracking` 展开成
+/// 「每个活跃文件一行」—— 调用方（`search.rs` / `retrieval.rs` / `ai/mod.rs`）
+/// 一直按 file_id 做 BM25 名单与候选的对应，保持这个契约就不必改检索语义。
+/// 顺带一个好处：已删除文件的向量结构性地不再出现在候选里（此前要靠孤儿清理）。
 ///
 /// **每次调用都把整表读进内存，且没有缓存** —— 这是 2026-10-18 审计里**故意保留**
 /// 的取舍：单条**查询**向量有 LRU 缓存（`ai::QUERY_EMBED_CACHE`），但"全库向量快照"
@@ -34,7 +41,10 @@ pub fn upsert_embedding(
 pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
     let started = std::time::Instant::now();
     let mut s = conn.prepare(
-        "SELECT file_id, dim, vector FROM doc_embeddings",
+        "SELECT ft.id, e.dim, e.vector
+         FROM doc_embeddings e
+         JOIN file_tracking ft ON ft.md5 = e.md5
+         WHERE ft.status = 'active'",
     )?;
     let mut bytes: usize = 0;
     let rows = s.query_map([], |row| {
@@ -62,13 +72,31 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
     Ok(result)
 }
 
-/// Remove a document's embedding (e.g. when the file is deleted or re-indexed).
-pub fn delete_embedding(conn: &Connection, file_id: &str) -> Result<()> {
-    conn.execute(
-        "DELETE FROM doc_embeddings WHERE file_id = ?1",
-        rusqlite::params![file_id],
+/// Remove a content's document embedding (md5 key), **unless another active
+/// file still references that md5**.
+///
+/// 表改为 md5 键后，"某个文件没了/内容变了"不再等于"这份内容的向量该删"：
+/// 内容按 md5 在目录间共享，无条件删会连带清掉别的目录里相同内容文件的向量
+/// （`chunk_embeddings` 早先就踩过这个坑，见 `IndexerService::delete_file`）。
+///
+/// `exclude_file_id` 用于"这个文件正在删/正在改内容"的场景 —— 把它自己排除后
+/// 再判断；传 `""` 表示不排除任何行（文件已被标记为非活跃时用）。
+///
+/// 返回实际删除的行数（0 = 因为仍被引用而保留）。
+pub fn delete_embedding_unreferenced(
+    conn: &Connection,
+    md5: &str,
+    exclude_file_id: &str,
+) -> Result<u64> {
+    let others = super::count_other_active_files_with_md5(conn, md5, exclude_file_id)?;
+    if others > 0 {
+        return Ok(0);
+    }
+    let n = conn.execute(
+        "DELETE FROM doc_embeddings WHERE md5 = ?1",
+        rusqlite::params![md5],
     )?;
-    Ok(())
+    Ok(n as u64)
 }
 
 /// Store (or replace) a chunk embedding as a little-endian f32 blob, keyed by

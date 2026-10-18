@@ -726,10 +726,14 @@ impl Scanner {
                         tracker::hard_delete_file(&conn, &new_rec.id)?;
                         let _ = self.indexer.delete_document_only(&new_rec.id);
                         // The tracking row is gone for good: drop its per-file
-                        // vector too, otherwise it lingers forever (the md5-keyed
-                        // cleanups never look at doc_embeddings).
-                        if let Err(e) = tracker::delete_embedding(&conn, &new_rec.id) {
-                            log::warn!("[STARTUP] 移位清理旧 doc 向量失败 {}: {e}", new_rec.id);
+                        // vector too, otherwise it lingers forever. doc 向量按
+                        // **md5** 键（v12）：这里 A 与 B 内容相同（同 md5），
+                        // 而 A 正接管新路径 —— 所以排除集传空、由"是否还有人
+                        // 引用该 md5"决定，向量会被正确保留。
+                        if let Some(md5) = new_rec.md5.as_deref()
+                            && let Err(e) = tracker::delete_embedding_unreferenced(&conn, md5, "")
+                        {
+                            log::warn!("[STARTUP] 移位清理 doc 向量失败 {md5}: {e}");
                         }
                         tracker::update_file_path(&conn, &rec.id, &found.rel_path, dir_id)?;
                         log::info!("[STARTUP] 移位(MD5匹配): {} -> {}", rec.path, found.abs_path);

@@ -151,7 +151,7 @@ mod tests {
     fn collects_distinct_dims_across_vector_tables() {
         let conn = mem_conn();
         conn.execute(
-            "INSERT INTO doc_embeddings (file_id, dim, vector, updated_at) VALUES ('f1', 512, x'00', 0)",
+            "INSERT INTO doc_embeddings (md5, dim, vector, updated_at) VALUES ('f1', 512, x'00', 0)",
             [],
         )
         .unwrap();

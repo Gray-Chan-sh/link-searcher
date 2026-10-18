@@ -738,10 +738,13 @@ impl IndexerService {
     /// * `dir_id`    – owning directory config id
     /// 内容变更时清理该文件的旧语义向量。
     ///
-    /// 向量回填是"只补缺失"语义（`missing_embedding_rows` 只选没有行的文件），
-    /// 而 doc 向量按 `file_id` 键、其不随内容变化 —— 不清旧向量就会永远按
-    /// 旧内容参与语义排序（搜新话题搜不到、搜旧话题却命中）。
+    /// 向量回填是"只补缺失"语义（`missing_embedding_rows` 只选没有行的 md5），
+    /// 而 doc 向量按 **md5** 键（v12）—— 内容变了就必须把**这份旧内容**的向量清掉，
+    /// 否则会永远按旧内容参与语义排序（搜新话题搜不到、搜旧话题却命中）。
     /// 清掉后由扫描结束时的 `run_backfill_embeddings` 重建。
+    ///
+    /// **共享内容感知**：只有在没有**其它活跃文件**仍引用 `old_md5` 时才删 ——
+    /// 内容按 md5 在目录间共享，无条件删会连带清掉别的目录里相同内容文件的向量。
     fn clear_stale_embeddings(conn: &Connection, file_id: &str, new_hash: &str) {
         let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(conn, file_id) else {
             return;
@@ -752,11 +755,19 @@ impl IndexerService {
         if old_md5 == new_hash {
             return;
         }
-        if let Err(e) = crate::db::tracker::delete_embedding(conn, file_id) {
-            log::warn!("[INDEX] 内容变更清理旧 doc 向量失败 {file_id}: {e}");
+        // 只有"这份旧内容不再被任何活跃文件引用"时才删其向量。
+        if let Err(e) = crate::db::tracker::delete_embedding_unreferenced(conn, old_md5, file_id) {
+            log::warn!("[INDEX] 内容变更清理旧 doc 向量失败 {old_md5}: {e}");
         }
-        if let Err(e) = crate::db::tracker::delete_chunk_embeddings(conn, old_md5) {
-            log::warn!("[INDEX] 内容变更清理旧 chunk 向量失败 {old_md5}: {e}");
+        // 块向量同理：仍被别的文件引用时保留（此前无条件按 md5 删，属缺陷）。
+        match crate::db::tracker::count_other_active_files_with_md5(conn, old_md5, file_id) {
+            Ok(0) => {
+                if let Err(e) = crate::db::tracker::delete_chunk_embeddings(conn, old_md5) {
+                    log::warn!("[INDEX] 内容变更清理旧 chunk 向量失败 {old_md5}: {e}");
+                }
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("[INDEX] md5 reference check failed {old_md5}: {e}"),
         }
     }
 
@@ -872,9 +883,15 @@ impl IndexerService {
         if let Err(e) = crate::db::tracker::mark_deleted(&conn, file_id) {
             log::warn!("[INDEX] mark_deleted failed {}: {e}", file_id);
         }
-        // 同步清理该文件的语义嵌入，避免删除后残留幽灵参与排序。
-        if let Err(e) = crate::db::tracker::delete_embedding(&conn, file_id) {
-            log::warn!("[INDEX] delete_embedding failed {}: {e}", file_id);
+        // 同步清理该文件内容的语义嵌入，避免删除后残留幽灵参与排序。
+        // doc 向量按 **md5** 键（v12）：文件已标记 deleted，所以这里排除集传空 ——
+        // 「没有任何活跃文件再引用该 md5」时才删（共享内容不能被连带清掉）。
+        if let Ok(Some(rec)) = crate::db::tracker::get_file_by_id(&conn, file_id)
+            && let Some(md5) = &rec.md5
+        {
+            if let Err(e) = crate::db::tracker::delete_embedding_unreferenced(&conn, md5, "") {
+                log::warn!("[INDEX] delete_embedding failed {md5}: {e}");
+            }
         }
         // 同步清理该文件的 chunk 级嵌入。块向量按 md5 键、内容在**目录间共享**：
         // 只有当没有其他活跃文件仍引用该 md5 时才删，否则会连带清掉别的目录里
@@ -922,10 +939,22 @@ impl IndexerService {
         // "追踪行已没、`doc_embeddings`/`doc_summaries` 还在"的**孤儿**。
         // 实测（2026-10-15）：正是这个症状让 `purge_dir_data_clears_dir_but_keeps_shared_content`
         // 约 **1/6 轮次**红（`file_tracking(dir_id)=0` 而 `doc_embeddings` ≠ 0）。
-        // 顺序也不能变：**先**删按 file_id 的行，**再**删 file_tracking（子查询依赖后者还在）。
+        // 顺序也不能变：**先**删按 file_id / md5 的行，**再**删 file_tracking
+        // （子查询依赖后者还在）。
         let tx = conn.unchecked_transaction().context("purge_dir_data: begin")?;
+        // doc 向量按 **md5** 键（v12）：删「本目录独占」的那些 md5 的向量 ——
+        // 仍被其它目录引用的 md5 保留（内容共享，与 chunk_embeddings 同规则）。
+        // 放在事务里（而不是交给事后的孤儿清理）是为了**确定性**：这里必须删干净，
+        // 否则"追踪行已没、doc_embeddings 还在"的孤儿会随并发时序偶发残留。
+        tx.execute(
+            "DELETE FROM doc_embeddings
+             WHERE md5 IS NOT NULL
+               AND md5 IN (SELECT md5 FROM file_tracking WHERE dir_id=?1 AND md5 IS NOT NULL)
+               AND md5 NOT IN (SELECT md5 FROM file_tracking WHERE dir_id<>?1 AND md5 IS NOT NULL)",
+            [dir_id],
+        )
+        .context("purge_dir_data: doc_embeddings cleanup")?;
         for sql in [
-            "DELETE FROM doc_embeddings WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
             "DELETE FROM doc_summaries  WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
             "DELETE FROM index_errors   WHERE file_id IN (SELECT id FROM file_tracking WHERE dir_id=?1)",
         ] {
@@ -943,6 +972,9 @@ impl IndexerService {
         // 这两步保持**尽力而为**（各自内部有自己的事务/幂等语义），失败只记日志。
         if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
             log::warn!("[INDEX] purge_dir_data: cleanup_orphan_content: {e}");
+        }
+        if let Err(e) = crate::db::cleanup_orphan_doc_embeddings(&conn) {
+            log::warn!("[INDEX] purge_dir_data: cleanup_orphan_doc_embeddings: {e}");
         }
         if let Err(e) = crate::db::cleanup_orphan_chunk_embeddings(&conn) {
             log::warn!("[INDEX] purge_dir_data: cleanup_orphan_chunk_embeddings: {e}");
@@ -999,6 +1031,9 @@ impl IndexerService {
         // removed them), then the md5-keyed content that lost its last owner.
         if let Err(e) = crate::db::cleanup_orphan_file_rows(&conn) {
             log::warn!("[INDEX] sweep: cleanup_orphan_file_rows: {e}");
+        }
+        if let Err(e) = crate::db::cleanup_orphan_doc_embeddings(&conn) {
+            log::warn!("[INDEX] sweep: cleanup_orphan_doc_embeddings: {e}");
         }
         if let Err(e) = crate::db::cleanup_orphan_content(&conn) {
             log::warn!("[INDEX] sweep: cleanup_orphan_content: {e}");
@@ -1352,18 +1387,18 @@ mod tests {
         let c = svc.db.get().unwrap();
 
         crate::db::tracker::update_indexed(&c, &fid, Some("oldhash")).unwrap();
-        crate::db::tracker::upsert_embedding(&c, &fid, &[1.0, 2.0, 3.0]).unwrap();
+        crate::db::tracker::upsert_embedding(&c, "oldhash", &[1.0, 2.0, 3.0]).unwrap();
         crate::db::tracker::upsert_chunk_embedding(&c, "oldhash", 0, &[1.0, 2.0]).unwrap();
 
         IndexerService::clear_stale_embeddings(&c, &fid, "oldhash");
         let n: i64 = c
-            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE file_id=?1", [&fid], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE md5='oldhash'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 1, "内容未变时不应清理向量");
 
         IndexerService::clear_stale_embeddings(&c, &fid, "newhash");
         let n: i64 = c
-            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE file_id=?1", [&fid], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE md5='oldhash'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0, "内容变更后应清理 doc 向量（否则永远按旧内容参与排序）");
         let m: i64 = c
@@ -1506,8 +1541,8 @@ mod tests {
     }
 
     /// 删除目录要能"彻底清空该目录的数据"，同时**保留与其他目录共享的内容**：
-    /// Tantivy 文档、file_tracking、doc 向量/摘要/错误按 file_id 清；md5 键的
-    /// content/chunks/块向量只在无人引用时才清。重加该目录即全新处理。
+    /// Tantivy 文档、file_tracking、摘要/错误按 file_id 清；md5 键的
+    /// doc 向量/content/chunks/块向量只在无人引用时才清。重加该目录即全新处理。
     #[test]
     fn purge_dir_data_clears_dir_but_keeps_shared_content() {
         let (svc, fid, _dir) = setup(); // dir 'd1' + fid(/tmp/test.txt)
@@ -1528,11 +1563,11 @@ mod tests {
             )
             .unwrap();
             // d2 里放一份**相同内容**（共享 md5），另在 d1 放一份独占内容。
-            let fid_shared = crate::db::tracker::upsert_file(&conn, "/tmp2/dup.txt", "d2", 1000, 42, Some(&shared_md5)).unwrap();
-            let fid_only = crate::db::tracker::upsert_file(&conn, "/tmp/only.txt", "d1", 1000, 42, Some("only1")).unwrap();
-            for f in [&fid, &fid_shared, &fid_only] {
-                crate::db::tracker::upsert_embedding(&conn, f, &[1.0, 2.0]).unwrap();
-            }
+            let _fid_shared = crate::db::tracker::upsert_file(&conn, "/tmp2/dup.txt", "d2", 1000, 42, Some(&shared_md5)).unwrap();
+            let _fid_only = crate::db::tracker::upsert_file(&conn, "/tmp/only.txt", "d1", 1000, 42, Some("only1")).unwrap();
+            // doc 向量按 **md5** 键（v12）：共享内容只写一份。
+            crate::db::tracker::upsert_embedding(&conn, &shared_md5, &[1.0, 2.0]).unwrap();
+            crate::db::tracker::upsert_embedding(&conn, "only1", &[1.0, 2.0]).unwrap();
             let md5s = [shared_md5.clone(), "only1".to_string()];
             for md5 in &md5s {
                 crate::db::tracker::upsert_chunk_embedding(&conn, md5, 0, &[1.0]).unwrap();
@@ -1557,7 +1592,8 @@ mod tests {
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='d1'"), 0, "d1 的追踪行应清空");
         assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='d2'"), 1, "d2 不受影响");
-        assert_eq!(count(&format!("SELECT COUNT(*) FROM doc_embeddings WHERE file_id='{fid}'")), 0, "d1 的 doc 向量应清空");
+        assert_eq!(count("SELECT COUNT(*) FROM doc_embeddings WHERE md5='only1'"), 0, "d1 独占内容的 doc 向量应清空");
+        assert_eq!(count(&format!("SELECT COUNT(*) FROM doc_embeddings WHERE md5='{shared_md5}'")), 1, "共享内容的 doc 向量必须保留");
         assert_eq!(count("SELECT COUNT(*) FROM doc_summaries"), 0, "摘要应按 file_id 清空");
         assert_eq!(count("SELECT COUNT(*) FROM content_index WHERE md5='only1'"), 0, "独占内容应删除");
         assert_eq!(count(&format!("SELECT COUNT(*) FROM content_index WHERE md5='{shared_md5}'")), 1, "共享内容必须保留");
@@ -1596,7 +1632,7 @@ mod tests {
                 [],
             )
             .unwrap();
-            crate::db::tracker::upsert_embedding(&conn, "ghost", &[1.0]).unwrap();
+            crate::db::tracker::upsert_embedding(&conn, "ghostmd5", &[1.0]).unwrap();
             crate::db::tracker::upsert_chunk_embedding(&conn, "ghostmd5", 0, &[1.0]).unwrap();
             crate::db::tracker::store_content(&conn, "ghostmd5", "ghost body", false, None).unwrap();
             conn.execute(
@@ -1615,7 +1651,7 @@ mod tests {
         let conn = svc.db.get().unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
         assert_eq!(count("SELECT COUNT(*) FROM file_tracking WHERE dir_id='gone-dir'"), 0, "孤儿行应删除");
-        assert_eq!(count("SELECT COUNT(*) FROM doc_embeddings WHERE file_id='ghost'"), 0);
+        assert_eq!(count("SELECT COUNT(*) FROM doc_embeddings WHERE md5='ghostmd5'"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM doc_chunks WHERE md5='ghostmd5'"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM chunk_embeddings WHERE md5='ghostmd5'"), 0);
         assert_eq!(count("SELECT COUNT(*) FROM content_index WHERE md5='ghostmd5'"), 0);

@@ -80,12 +80,12 @@ pub(super) fn run_backfill_embeddings(
     }
 
     // Duplicate files share content (same md5) and would yield identical
-    // vectors — embed each unique md5 once and write the vector to all of its
-    // file_ids. In this library ~10% of files are duplicates.
+    // vectors — embed each unique md5 once and store **one** vector under that
+    // md5 (v12: `doc_embeddings` is md5-keyed, so duplicates cost nothing).
     let mut unique = group_by_md5(rows);
     // Sort by text length so every batch is length-homogeneous and the
     // engine's `BatchLongest` padding stays short (attention is O(L²)).
-    unique.sort_by_key(|(t, _)| t.chars().count());
+    unique.sort_by_key(|(_, t, _)| t.chars().count());
 
     log::info!(
         "[AI] 向量回填开始: {total} 个文件缺向量（{} 个唯一内容，并行度 {}）",
@@ -97,25 +97,24 @@ pub(super) fn run_backfill_embeddings(
     let started = std::time::Instant::now();
     let mut tracker = RateTracker::new(started);
     for group in unique.chunks(super_group_size()) {
-        let texts: Vec<String> = group.iter().map(|(t, _)| t.clone()).collect();
+        let texts: Vec<String> = group.iter().map(|(_, t, _)| t.clone()).collect();
         // 零连接阶段：推理本身不需要 DB。
         let vecs = crate::ai::embed_batched(&texts, BATCH);
         // 写入阶段才借连接（每批一次，用完即还）。
         let conn = db.get().map_err(|e| format!("db error: {e}"))?;
-        for ((_, ids), v) in group.iter().zip(vecs) {
+        for ((md5, _, ids), v) in group.iter().zip(vecs) {
             match v {
                 Some(vec) => {
-                    for id in ids {
-                        if let Err(e) = tracker::upsert_embedding(&conn, id, &vec) {
-                            log::warn!("[AI] upsert_embedding failed {id}: {e}");
-                            failed += 1;
-                        }
+                    // 一个 md5 一行：共享同内容的多个文件不需要各写一份。
+                    if let Err(e) = tracker::upsert_embedding(&conn, md5, &vec) {
+                        log::warn!("[AI] upsert_embedding failed {md5}: {e}");
+                        failed += ids.len();
                     }
                 }
                 None => failed += ids.len(),
             }
         }
-        processed += group.iter().map(|(_, ids)| ids.len()).sum::<usize>();
+        processed += group.iter().map(|(_, _, ids)| ids.len()).sum::<usize>();
         report_progress("backfill", processed, total, failed, &mut tracker);
     }
     log::info!("[AI] 回填完成: {processed} 处理, {failed} 失败, 剩余 {}", total - processed);
@@ -425,9 +424,9 @@ pub(super) fn missing_embedding_rows(
             "SELECT ft.id, ft.md5, ci.text_content
              FROM file_tracking ft
              JOIN content_index ci ON ft.md5 = ci.md5
-             LEFT JOIN doc_embeddings e ON e.file_id = ft.id
+             LEFT JOIN doc_embeddings e ON e.md5 = ft.md5
              WHERE ft.indexed = 1 AND ft.status = 'active'
-               AND (e.file_id IS NULL OR e.updated_at < ci.indexed_at)",
+               AND (e.md5 IS NULL OR e.updated_at < ci.indexed_at)",
         )
         .context("prepare missing-embedding query")?;
     let rows = stmt
@@ -454,9 +453,9 @@ pub(super) fn has_missing_doc_embeddings(conn: &rusqlite::Connection) -> anyhow:
         "SELECT EXISTS(
              SELECT 1 FROM file_tracking ft
              JOIN content_index ci ON ft.md5 = ci.md5
-             LEFT JOIN doc_embeddings e ON e.file_id = ft.id
+             LEFT JOIN doc_embeddings e ON e.md5 = ft.md5
              WHERE ft.indexed = 1 AND ft.status = 'active'
-               AND (e.file_id IS NULL OR e.updated_at < ci.indexed_at)
+               AND (e.md5 IS NULL OR e.updated_at < ci.indexed_at)
          )",
         [],
         |r| r.get::<_, i64>(0),
@@ -465,10 +464,11 @@ pub(super) fn has_missing_doc_embeddings(conn: &rusqlite::Connection) -> anyhow:
     .context("query has_missing_doc_embeddings")
 }
 
-/// Collapse `(file_id, md5, text)` rows by md5: duplicate files (same content)
-/// become one `(text, file_ids)` entry so the text is embedded once and the
-/// resulting vector is written to every file_id.
-pub(super) fn group_by_md5(rows: Vec<(String, String, String)>) -> Vec<(String, Vec<String>)> {
+/// Collapse `(file_id, md5, text)` rows by md5 into `(md5, text, file_ids)`:
+/// duplicate files (same content) become one entry, so the text is embedded once
+/// and the vector is stored **once, under the md5**. `file_ids` is kept only for
+/// progress accounting ("N 个文件缺向量").
+pub(super) fn group_by_md5(rows: Vec<(String, String, String)>) -> Vec<(String, String, Vec<String>)> {
     let mut map: HashMap<String, (String, Vec<String>)> = HashMap::new();
     for (file_id, md5, text) in rows {
         match map.entry(md5) {
@@ -478,7 +478,7 @@ pub(super) fn group_by_md5(rows: Vec<(String, String, String)>) -> Vec<(String, 
             }
         }
     }
-    map.into_values().collect()
+    map.into_iter().map(|(md5, (text, ids))| (md5, text, ids)).collect()
 }
 
 /// Long documents (md5s that have `doc_chunks` rows) that have at least one
@@ -797,7 +797,7 @@ mod tests {
 
         assert!(has_missing_doc_embeddings(&conn).unwrap(), "有内容但无 doc 向量 → 应报告有活");
 
-        crate::db::tracker::upsert_embedding(&conn, "f1", &[1.0, 2.0]).unwrap();
+        crate::db::tracker::upsert_embedding(&conn, "m1", &[1.0, 2.0]).unwrap();
         assert!(!has_missing_doc_embeddings(&conn).unwrap(), "补上向量后应报告无活");
     }
 
@@ -871,10 +871,13 @@ mod tests {
         let mut grouped = group_by_md5(rows);
         grouped.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(grouped.len(), 2, "two unique md5s");
-        assert_eq!(grouped[0].0, "hello");
-        assert_eq!(grouped[0].1, vec!["f1", "f2"]);
-        assert_eq!(grouped[1].0, "world");
-        assert_eq!(grouped[1].1, vec!["f3"]);
+        // (md5, text, file_ids)
+        assert_eq!(grouped[0].0, "m1");
+        assert_eq!(grouped[0].1, "hello");
+        assert_eq!(grouped[0].2, vec!["f1", "f2"]);
+        assert_eq!(grouped[1].0, "m2");
+        assert_eq!(grouped[1].1, "world");
+        assert_eq!(grouped[1].2, vec!["f3"]);
     }
 
     #[test]

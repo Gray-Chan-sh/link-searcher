@@ -1,3 +1,51 @@
+## 2026-10-18（第五十一轮）：doc 向量改按 md5 键 —— 同内容只存一份（R6，schema v12）
+
+> 内容按 md5 去重（`content_index` / `doc_chunks` / `chunk_embeddings` 全是 md5 键），
+> 唯独 **doc 级向量按 `file_id` 键**：既让相同内容的副本各存一份**完全一样的向量**
+> （本库实测 7733 文件 / 6963 唯一 md5 ≈ **10% 纯冗余**），又让"某文件被删/内容变了"与
+> "这份内容的向量该不该删"绑在一起 —— 共享内容会被误删，只能靠额外引用计数兜。
+
+**数据库（schema v12）**
+
+- `doc_embeddings` 主键 `file_id` → **`md5`**；`SCHEMA_VERSION` `"11"`→`"12"`。
+- 新增确定性迁移 `migrate_doc_embeddings_to_md5()`：按 `file_tracking.md5` 分组，每组保留
+  `updated_at` 最新的一条向量（SQLite bare-column+MAX 语义），丢弃无 tracking 行/md5 为空的旧行
+  （它们已无法被复用，缺向量由回填用 `content_index` 缓存文本重建，**不重新 OCR**）；幂等。
+  新增 `has_column()` 小助手；单测 `migrate_doc_embeddings_to_md5_dedupes_by_content`
+  （共享内容只留最新、丢弃无主行、重复执行不变）。
+- `cleanup_orphan_file_rows` 只管 `doc_summaries`（file_id 键）；新增 md5 键的
+  `cleanup_orphan_doc_embeddings`（判据＝"没有任何 tracking 行再引用该 md5"）。
+
+**写入/读取**
+
+- `upsert_embedding(conn, md5, vec)`（冲突键 md5）；回填侧 `group_by_md5` 改为
+  `(md5, text, file_ids)`，**一个 md5 只写一行**（共享内容的多个文件不再各写一份）。
+- `missing_embedding_rows` / `has_missing_doc_embeddings` 的 `LEFT JOIN` 由 `e.file_id = ft.id`
+  改为 **`e.md5 = ft.md5`**（"缺失/过期"判定随内容走）。
+- `get_all_embeddings` 保持 `(file_id, vector)` 契约不变，但改为
+  `JOIN file_tracking ON ft.md5 = e.md5 WHERE status='active'` 展开 —— 检索侧
+  （`commands/search.rs` / `commands/ai/retrieval.rs` / `ai/mod.rs`）**零改动**，排序语义与改前完全一致；
+  顺带让已删除文件的向量结构性地不再进入候选（此前靠孤儿清理兜）。
+
+**删除路径（共享内容感知）**
+
+- 新增 `delete_embedding_unreferenced(conn, md5, exclude_file_id)`：只在**没有其它活跃文件**
+  仍引用该 md5 时才删（`chunk_embeddings` 早先踩过同一个坑）。
+  三处调用点改为它：`IndexerService::delete_file`、`clear_stale_embeddings`（内容变更）、
+  启动扫描的移动检测。
+- 顺带修同类缺陷：`clear_stale_embeddings` 过去**按 md5 无条件删** chunk 向量 → 改为同样先查引用计数。
+- `purge_dir_data`：原来的「按 file_id 删 doc 向量」改为**同一事务内**按 md5 删
+  （`md5 IN 本目录 AND md5 NOT IN 其它目录`），确定性保证不残留；`sweep_orphan_dirs` 追加
+  `cleanup_orphan_doc_embeddings`。
+
+**测试/文档**
+
+- 更新 `test_embedding_roundtrip`、新增 `test_duplicate_content_shares_one_vector_row`
+  （共享一份向量、读侧按 file_id 展开、删一个文件不影响另一个）、
+  `orphan_file_rows_are_cleaned`（拆分 doc_embeddings/doc_summaries 两类孤儿）、purge/sweep/
+  vector_health/backfill 各测试同步改为 md5 键。
+- `docs/index-pipeline-eval.md` 附录 A/B 与 `AGENTS.md` 的"file_id 键无清道夫"缺口注记同步更新。
+
 ## 2026-10-18（第五十轮）：大文件内容指纹补「中段 + 大小」—— 修复去重误判（R4）
 
 > 内容指纹（去重键 `content_md5`）对大文件（> 100MB）只采样**头 1MB + 尾 1MB**：

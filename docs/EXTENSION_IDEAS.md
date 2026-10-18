@@ -45,7 +45,7 @@
 1. **SQLite 只读**：`mode=ro` 或 `PRAGMA query_only=1`；**严禁** `wal_checkpoint(TRUNCATE)` /
    `VACUUM` / 任何写操作。主程序跑 WAL（`db/mod.rs:26`），第二个 writer 会锁冲突甚至损坏库。
 2. **Tantivy 只开 reader，绝不开 `IndexWriter`**：索引目录有锁，冲突直接报错。
-3. **schema 版本守卫**：读 `app_settings.schema_version`（当前 `"8"`，`db/mod.rs:14`）与 manifest 的
+3. **schema 版本守卫**：读 `app_settings.schema_version`（当前 `"12"`，`db/mod.rs:14`）与 manifest 的
    `min_schema` 比对，不匹配**直接拒绝**，不要猜着读。
 4. **别按字段序号读 Tantivy**：`search/schema.rs:84` 的注释是历史教训——`md5` 必须最后加，因为插在
    中间会移位 field id、破坏所有旧 segment。扩展要按字段名取。
