@@ -84,6 +84,25 @@ pub fn update_config(
     // 漏一个就把用户写在 `config.json` 里的东西抹掉。改成 RMW 后这类字段
     // **自动**保留，不再依赖"记得加一行"。
     let mut config = current;
+    // SSRF 护栏（见 `ai::validate_gateway_url`）：空地址表示"不使用该网关"，放行。
+    // 放在保存前，用户改动无效地址时立刻在界面上看到明确报错，而不是等下次请求
+    // 才在日志里出现。
+    for (label, url) in [
+        ("embedding_api_base", new_config.embedding_api_base.as_str()),
+        ("llm_api_base", new_config.llm_api_base.as_str()),
+        ("ai_api_base", new_config.ai_api_base.as_str()),
+    ] {
+        if !url.trim().is_empty()
+            && let Err(e) = crate::ai::validate_gateway_url(url) {
+                return Err(format!("{label}: {e}"));
+            }
+    }
+    for p in &new_config.providers {
+        if !p.base_url.trim().is_empty()
+            && let Err(e) = crate::ai::validate_gateway_url(&p.base_url) {
+                return Err(format!("provider「{}」: {e}", p.name));
+            }
+    }
     // 掩码哨兵 → "保持原值"：Web 端 `GET /api/config` 不回显任何 API Key，
     // 前端 `updateConfig` 又是「先 GET 再 spread 后 PUT」—— 不解释哨兵就会
     // 把密钥写成 `__LS_UNCHANGED__`（P1-⑤）。
@@ -139,6 +158,11 @@ pub async fn add_provider(
 ) -> Result<ProviderOutcome, String> {
     let mut config = load_config();
     let id = uuid::Uuid::new_v4().to_string();
+    // SSRF 护栏：非空地址一律先校验（见 `ai::validate_gateway_url`）。
+    if !base_url.trim().is_empty()
+        && let Err(e) = crate::ai::validate_gateway_url(&base_url) {
+            return Err(e);
+        }
     // Pull models off the UI thread: the request can block for up to 30s.
     let (models, pull_err) = if base_url.trim().is_empty() {
         (Vec::new(), None)
@@ -174,6 +198,11 @@ pub fn update_provider(
     base_url: String,
     api_key: String,
 ) -> Result<(), String> {
+    // SSRF 护栏（见 `ai::validate_gateway_url`）。
+    if !base_url.trim().is_empty()
+        && let Err(e) = crate::ai::validate_gateway_url(&base_url) {
+            return Err(e);
+        }
     let mut config = load_config();
     let Some(p) = config.providers.iter_mut().find(|p| p.id == id) else {
         return Err(format!("provider not found: {id}"));

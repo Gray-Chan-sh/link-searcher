@@ -92,6 +92,13 @@ pub fn spawn_server(app_handle: tauri::AppHandle) {
     if bind == "127.0.0.1" {
         log::info!("[WEBAPI] 本机访问: https://127.0.0.1:{port} (token 见设置页，前缀 {token_fp}…)");
     } else {
+        // 安全提示（不阻断，保持用户既有的"远程/Tailscale 可用"体验 —— 第三十八轮
+        // 明确保留 `0.0.0.0` 默认）：非回环绑定时 token 就是**唯一**门槛，且证书是
+        // 自签的（同网段中间人可解密流量）。每次启动提醒一次，便于用户按需收紧。
+        log::warn!(
+            "[WEBAPI] 绑定 {bind}（非仅本机）：局域网/远程均可访问，唯一门槛是 token，\
+             证书为自签（同网段可能被中间人解密）。不需要远程访问时请在设置页改为「仅本机 (127.0.0.1)」"
+        );
         let display_host = if bind == "0.0.0.0" { lan_ip() } else { bind.clone() };
         log::info!("[WEBAPI] 远程访问: https://{display_host}:{port} (token 见设置页，前缀 {token_fp}…)");
     }

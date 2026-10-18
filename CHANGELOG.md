@@ -1,3 +1,50 @@
+## 2026-10-18（第四十二轮）：未修清单逐条修复 P2-⑧⑨⑩⑪⑫ —— 网关 SSRF / bot 跳过 TLS 校验 / 私钥权限 / zip bomb / 非回环绑定提示
+
+**P2-⑧ 网关 `base_url` 可指向云元数据（SSRF）**（`ai/mod.rs`、`commands/config.rs`）
+
+- 根因：`base_url` 由用户（或 Web API 持有 token 者）填写，应用会**照发请求**；
+  `http://169.254.169.254/…` 这类云元数据地址可让本进程代为取回实例凭据。
+- 修法：新增 `ai::validate_gateway_url` —— **只堵必要的一类**（链路本地
+  `169.254.0.0/16`、`fe80::/10`、IPv4-mapped 变体、`metadata.google.internal`、
+  非 http(s) 协议），**回环与私网一律放行**（本机 Ollama、局域网 vLLM/llama.cpp
+  都是合法用法，第三十八轮已就此定调）。调用点两处：保存网关配置时
+  （`update_config`/`add_provider`/`update_provider`，立刻给界面明确报错）+
+  每次解析活动端点时（兜住手工改过 `config.json` 的情况，打 ERROR 并禁用该模型）
+  + `list_provider_models`（"测试连接/拉模型"是用户输入的第一站）。新增 1 个单测。
+
+**P2-⑨ bot 跳过 TLS 校验却携带 Web API token**（`lark-bot/src/main.rs`）
+
+- 根因：bot 的 HTTP 客户端对**任何**基址都接受任意证书（`AcceptAnyCert`），同时又
+  发送 `webapi` 的 Bearer token。默认基址是回环（同机，尚可接受），但 `LS_WEB_API_URL`
+  可改成任意主机 —— 那就等于把 Web API 的**唯一**门槛明文交给能做中间人/劫持 DNS 的人。
+- 修法：新增 `agent_for` —— **只有回环**（IP 解析判定，**不是**字符串前缀，避免
+  `127.0.0.1.evil.com` 这类欺骗性主机名）才用 `insecure_agent`（自签可用的老行为）；
+  非回环改用默认 agent 做**真实**公共根校验（自签会握手失败，属有意 fail-closed）；
+  确需"非回环 + 自签"的部署必须显式设 `LS_WEBAPI_INSECURE=1`（打 WARN，知情的用户选择）。
+  新增 1 个单测覆盖主机名解析（含 `[::1]`、userinfo、大小写）与回环判定（含欺骗性主机名）。
+
+**P2-⑩ TLS 私钥未收紧权限（Unix）**（`webapi/tls.rs`）
+
+- 根因：私钥 `key.pem` 用 `fs::write` 落盘，默认 umask 常给出 `0644` —— **同机其它用户
+  可直接读走私钥**（解密/冒充 Web API），这是自签证书最常见的落地缺陷。
+- 修法：新增 `harden_secret_paths`（`#[cfg(unix)]` → 私钥 `0600`、`tls` 目录 `0700`，
+  失败只 WARN 不阻断；`#[cfg(not(unix))]` 为空实现）。**两条路径都调用**：新生成时 +
+  检测到已存在证书时（老版本升级上来的用户不会重新生成证书，也必须收一次）。
+
+**P2-⑪ 恢复备份时的 zip bomb**（`commands/backup.rs`）
+
+- 根因：预检只卡条目数（20 万），单条目的解压后大小不限；而解压是
+  `read_to_end` **整段读进内存**再落盘 —— 一个几 KB 的恶意包足以撑爆进程或写满磁盘。
+- 修法：解压循环加双上限（`4 GiB`/条目、`200 GiB`/整包）：先按条目**声明**大小拦一道，
+  再用 `take(上限+1)` 兜住"声明量不可信"的第二道（超限即删临时目录并拒绝）。
+
+**P2-⑫ 非回环绑定缺少安全提示**（`webapi/mod.rs`）
+
+- 根因：默认绑 `0.0.0.0`（第三十八轮明确保留，用户有远程/Tailscale 场景），但不提醒
+  用户"此时 token 是唯一门槛、证书是自签（同网段可被中间人解密）"。
+- 修法：绑非回环时**每次启动打一条 WARN**，并给出收紧办法（设置页改为「仅本机」）。
+  **默认值刻意不动**（不破坏用户既有的远程访问工作流，这是有记录的取舍）。
+
 ## 2026-10-18（第四十一轮）：未修清单逐条修复 P1-⑤⑥⑦ —— Web API 明文回显密钥 / 目录越界枚举 / 模型半截文件
 
 **P1-⑤ Web API 明文回显密钥**（`webapi/routes/{settings,config}.rs`、`commands/{settings,config}.rs`、前端 3 处）

@@ -8,6 +8,8 @@ pub fn ensure_cert(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf), Str
     let key_path = tls_dir.join("key.pem");
 
     if cert_path.exists() && key_path.exists() {
+        // 老版本装完升级上来的用户不会重新生成证书 —— 顺手把权限收一次。
+        harden_secret_paths(&tls_dir, &key_path);
         return Ok((cert_path, key_path));
     }
 
@@ -56,7 +58,28 @@ pub fn ensure_cert(data_dir: &std::path::Path) -> Result<(PathBuf, PathBuf), Str
         .map_err(|e| format!("write cert: {e}"))?;
     std::fs::write(&key_path, key_pair.serialize_pem())
         .map_err(|e| format!("write key: {e}"))?;
+    harden_secret_paths(&tls_dir, &key_path);
 
     log::info!("[WEBAPI] generated self-signed TLS cert at {:?}", cert_path);
     Ok((cert_path, key_path))
 }
+
+/// Unix 上把私钥收到 `0600`、证书目录收到 `0700`（Windows 无此概念，整个函数
+/// 只在 unix 编译）。
+///
+/// 默认 umask 常给出 `0644` —— **同机的其它用户能直接读走私钥**（可解密/冒充
+/// Web API），这是自签证书最常见的落地缺陷。已存在的旧文件也要修（老版本装完
+/// 升级上来的用户不会重新生成证书）。
+#[cfg(unix)]
+fn harden_secret_paths(tls_dir: &std::path::Path, key_path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600)) {
+        log::warn!("[WEBAPI] 设置私钥权限 0600 失败: {e}");
+    }
+    if let Err(e) = std::fs::set_permissions(tls_dir, std::fs::Permissions::from_mode(0o700)) {
+        log::warn!("[WEBAPI] 设置证书目录权限 0700 失败: {e}");
+    }
+}
+
+#[cfg(not(unix))]
+fn harden_secret_paths(_tls_dir: &std::path::Path, _key_path: &std::path::Path) {}

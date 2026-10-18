@@ -781,6 +781,13 @@ pub async fn restore_from_zip(
             return Err(e);
         }
 
+        // 解压量双上限（zip bomb 防护）：条目数已有上限（见 `validate_backup_zip`），
+        // 但单个条目仍可声称几 GB —— 而下面的 `read_to_end` 是**整段读进内存**再落盘，
+        // 一个几 KB 的恶意包足以把进程撑爆或写满磁盘。压缩比再离谱也越不过这两道。
+        const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB / 条目
+        const MAX_TOTAL_BYTES: u64 = 200 * 1024 * 1024 * 1024; // 200 GiB / 整包
+        let mut total_uncompressed: u64 = 0;
+
         for i in 0..archive.len() {
             let pw = password.as_deref().unwrap_or("");
             let mut entry = if pw.is_empty() {
@@ -804,10 +811,29 @@ pub async fn restore_from_zip(
                     std::fs::create_dir_all(parent)
                         .map_err(|e| format!("failed to create parent {parent:?}: {e}"))?;
                 }
+                // 第一道：按条目**声明**的解压后大小拦（还没读任何字节）。
+                let declared = entry.size();
+                if declared > MAX_ENTRY_BYTES
+                    || total_uncompressed.saturating_add(declared) > MAX_TOTAL_BYTES
+                {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return Err(format!(
+                        "备份包解压量异常（条目 {declared} 字节，累计 {}），已拒绝解压（疑似 zip bomb）",
+                        total_uncompressed.saturating_add(declared)
+                    ));
+                }
+                total_uncompressed = total_uncompressed.saturating_add(declared);
+                // 第二道：声明量不可信 —— 实际读入时再用 `take` 兜一次上限。
                 use std::io::Read;
                 let mut data = Vec::new();
-                entry.read_to_end(&mut data)
+                (&mut entry)
+                    .take(MAX_ENTRY_BYTES.saturating_add(1))
+                    .read_to_end(&mut data)
                     .map_err(|e| format!("failed to read {:?}: {e}", rel))?;
+                if data.len() as u64 > MAX_ENTRY_BYTES {
+                    let _ = std::fs::remove_dir_all(&tmp);
+                    return Err("备份包条目过大，已拒绝解压（疑似 zip bomb）".to_string());
+                }
                 std::fs::write(&out, &data)
                     .map_err(|e| format!("failed to write {out:?}: {e}"))?;
             }

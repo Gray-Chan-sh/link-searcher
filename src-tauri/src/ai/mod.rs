@@ -171,6 +171,12 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
     if !provider.models.iter().any(|m| m.id == model_id) {
         return None;
     }
+    // SSRF 护栏（见 `validate_gateway_url`）：被拒的网关本轮直接禁用 ——
+    // 手工改过 config.json 的情况由这里兜住，同时打一条可定位的 ERROR 日志。
+    if let Err(e) = validate_gateway_url(&provider.base_url) {
+        log::error!("[AI] 拒绝使用网关地址（{kind:?}）: {e}");
+        return None;
+    }
     // 安全：远程 http:// 网关会明文传输 API Key 与文档内容，仅提示不阻断
     if let Some(ep) = ActiveEndpoint::new(provider, model_id).check_https() {
         ep.warn_insecure()
@@ -179,6 +185,73 @@ fn resolve_active_endpoint(cfg: &crate::config::AppConfig, kind: ModelType) -> O
 }
 
 const DEFAULT_MAX_TOKENS: u32 = 1_000_000;
+
+/// 网关 URL 的 **SSRF 护栏**：拒绝「链路上绝不该出现」的地址。
+///
+/// **只堵必要的一类**：云元数据服务（`169.254.169.254` / `100.100.100.200` 等）
+/// 与 `metadata.*` 主机名 —— 它们只可能出现在 SSRF 里，任何真实网关都不会部署在
+/// 那里。回环（`127.0.0.1`：本机 Ollama）与私网（局域网 llama.cpp / vLLM）都是
+/// **合法**用法，刻意放行（要不要连私网一起封，第三十八轮讨论后结论是不封）。
+///
+/// 调用点：保存网关配置时（立刻给用户明确报错）+ 每次解析活动端点时（兜住手工
+/// 改过 `config.json` 的情况）。
+pub fn validate_gateway_url(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("网关地址为空".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return Err(format!("只支持 http:// 或 https:// 网关地址: {url}"));
+    }
+    let authority = lower
+        .split("://")
+        .nth(1)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        .map(|a| a.rsplit_once('@').map(|(_, h)| h).unwrap_or(a))
+        .unwrap_or("");
+    // IPv6 字面量带方括号（`[::1]:8443`），端口在 `]` 之后；IPv4/域名则剥掉
+    // 末尾的 `:port`（仅当冒号后全是数字，避免把 IPv6 的冒号当端口分隔）。
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => authority,
+        }
+    };
+    if host.is_empty() {
+        return Err(format!("网关地址缺少主机名: {url}"));
+    }
+    if host == "metadata.google.internal" || host == "metadata.goog" {
+        return Err(format!("拒绝云元数据地址（SSRF 风险）: {url}"));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let is_link_local = match ip {
+            std::net::IpAddr::V4(v4) => {
+                let o = v4.octets();
+                // 169.254.0.0/16：链路本地（AWS/GCP/Azure/阿里云元数据都在这一段）
+                o[0] == 169 && o[1] == 254
+            }
+            std::net::IpAddr::V6(v6) => {
+                let seg = v6.segments();
+                let ll = (seg[0] & 0xffc0) == 0xfe80; // fe80::/10
+                let mapped_ll = v6
+                    .to_ipv4_mapped()
+                    .map(|v4| {
+                        let o = v4.octets();
+                        o[0] == 169 && o[1] == 254
+                    })
+                    .unwrap_or(false);
+                ll || mapped_ll
+            }
+        };
+        if is_link_local {
+            return Err(format!("拒绝链路本地地址（常为云元数据服务，SSRF 风险）: {url}"));
+        }
+    }
+    Ok(())
+}
 
 /// Trustworthy per-model output ceiling, from the gateway's `/v1/models`
 /// `capabilities.maxOutput` (cached on the model config).
@@ -1730,6 +1803,12 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
         max_output: Option<u32>,
     }
 
+    // SSRF 护栏：拉模型列表是用户输入 base_url 的第一站，这里挡住云元数据等
+    // 绝不该出现的地址（见 `validate_gateway_url`）。
+    if let Err(e) = validate_gateway_url(base_url) {
+        return (Vec::new(), Some(e));
+    }
+
     let url = format!("{}/models", base_url.trim_end_matches('/'));
     let agent = ureq::builder().timeout(std::time::Duration::from_secs(30)).build();
     let mut req = agent.get(&url);
@@ -1887,6 +1966,38 @@ impl AuthSetter for ureq::Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SSRF 护栏：只堵云元数据/链路本地，回环与私网必须**放行**
+    /// （本机 Ollama、局域网的 vLLM / llama.cpp 都是合法用法）。
+    #[test]
+    fn gateway_url_rejects_metadata_but_allows_local_and_private() {
+        // 放行：回环 / 私网 / 公网 / 域名
+        for ok in [
+            "http://127.0.0.1:11434/v1",
+            "http://localhost:8080",
+            "https://192.168.1.20:8000/v1",
+            "http://10.0.0.5:8000",
+            "https://api.openai.com/v1",
+            "https://my-gateway.example.com",
+            "http://[::1]:11434",
+        ] {
+            assert!(validate_gateway_url(ok).is_ok(), "应放行: {ok}");
+        }
+
+        // 拒绝：云元数据 / 链路本地 / 非 http(s) / 空
+        for bad in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://169.254.0.1",
+            "http://[fe80::1]:80",
+            "http://[::ffff:169.254.169.254]/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "ftp://169.254.169.254",
+            "file:///etc/passwd",
+            "",
+        ] {
+            assert!(validate_gateway_url(bad).is_err(), "应拒绝: {bad}");
+        }
+    }
 
     #[test]
     fn cosine_identical_is_one() {

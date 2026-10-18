@@ -45,7 +45,9 @@
 //!
 //! - **stderr 先就绪、stdout 再解析**：lark-cli 的契约是"stderr 出现 `[event] ready event_key=`
 //!   之后才开始读 stdout"（§2 实测）。两个流必须分开读，不能合并。
-//! - **自签名 TLS**：webapi 用自签证书，本进程必须显式接受（见 [`insecure_agent`]）。
+//! - **自签名 TLS**：webapi 用自签证书，**回环**地址（默认）由 [`insecure_agent`] 显式接受；
+//!   非回环地址一律走真实证书校验（见 [`agent_for`]），确需自签的异地部署要显式设
+//!   `LS_WEBAPI_INSECURE=1`。
 //! - **`lark-cli` 的可执行文件发现归应用侧的依赖中心**：应用解析出的路径经 `LS_LARK_CLI`
 //!   注入给本进程；本进程自带的 [`lark_cli_program`] 只是"被手工拉起"时的兜底
 //!   （Unix 上直接交回裸名 `lark-cli`，由 PATH 解析 —— 见该函数注释）。
@@ -2661,7 +2663,7 @@ struct BotConfig {
 
 impl Http {
     fn new(base: String, token: String) -> Self {
-        Self { agent: insecure_agent(), base, token }
+        Self { agent: agent_for(&base), base, token }
     }
 
     fn call(
@@ -2838,9 +2840,10 @@ impl Http {
 
 /// 接受自签名证书的 HTTP agent。
 ///
-/// webapi 用自签 TLS（`webapi/tls.rs`），同机调用必须跳过校验；`rustls` 的
-/// `dangerous()` 是官方给的入口。注意这只影响 **bot → 本机 webapi** 这一段，
-/// 且地址固定为回环。
+/// webapi 用自签 TLS（`webapi/tls.rs`），**同机**调用必须跳过校验；`rustls` 的
+/// `dangerous()` 是官方给的入口。唯一调用点是 [`agent_for`]，它保证只有回环地址
+/// （或用户显式设了 `LS_WEBAPI_INSECURE=1`）才会走到这里 —— 非回环一律走真实
+/// 证书校验，绝不让"跳过校验 + 携带 token"同时落在网络可达的地址上。
 fn insecure_agent() -> ureq::Agent {
     // 与 webapi 同款：先装 CryptoProvider，再建配置。
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -2900,9 +2903,92 @@ fn insecure_agent() -> ureq::Agent {
         .build()
 }
 
+/// 从 `base` 里取出主机名（小写，去掉端口 / userinfo / IPv6 方括号）。
+fn host_of(base: &str) -> String {
+    let after = base.split("://").nth(1).unwrap_or(base);
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => authority,
+        }
+    };
+    host.to_ascii_lowercase()
+}
+
+/// 目标是否在本机（回环）。**只有回环**才允许跳过 TLS 校验。
+///
+/// 用 IP 解析判定而不是字符串前缀：`127.0.0.1.evil.com` 这类主机名以 `127.` 开头
+/// 却解析到外部地址，前缀匹配会把 token 送出去。
+fn is_loopback_host(host: &str) -> bool {
+    if host == "localhost" {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback() || v4.is_unspecified(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback() || v6.is_unspecified(),
+        Err(_) => false,
+    }
+}
+
+/// 选 HTTP agent：**只有目标是回环**时才接受自签证书。
+///
+/// 跳过证书校验 + 携带 Bearer token 的组合一旦指向非回环地址，就等于把 webapi
+/// **唯一**的门槛交给任何能做中间人 / 劫持 DNS / 伪造局域网 ARP 的人。所以：
+/// 回环 → 沿用自签可用的 `insecure_agent`（流量不出本机）；非回环 → 用默认 agent
+/// 做**真实**的公共根校验（自签会握手失败，这是有意为之的 fail-closed）；
+/// 确需"非回环 + 自签"的部署必须显式设 `LS_WEBAPI_INSECURE=1`（打 WARN，属知情的
+/// 用户选择）。
+fn agent_for(base: &str) -> ureq::Agent {
+    let host = host_of(base);
+    if is_loopback_host(&host) {
+        return insecure_agent();
+    }
+    if std::env::var("LS_WEBAPI_INSECURE").is_ok_and(|v| v == "1") {
+        log::warn!(
+            "[bot] LS_WEBAPI_INSECURE=1：对非回环地址 {host} 跳过 TLS 校验 —— token 有被中间人截获的风险"
+        );
+        return insecure_agent();
+    }
+    log::warn!(
+        "[bot] 目标 {host} 非回环，启用真实证书校验（自签证书会握手失败；确需自签请设 LS_WEBAPI_INSECURE=1）"
+    );
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(5))
+        .timeout_read(Duration::from_secs(600))
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 只有回环才允许跳过 TLS 校验 —— 这条判定是"token 会不会被中间人拿走"的
+    /// 唯一开关，必须逐例覆盖。
+    #[test]
+    fn host_parsing_and_loopback_detection() {
+        assert_eq!(host_of("https://127.0.0.1:8443"), "127.0.0.1");
+        assert_eq!(host_of("https://localhost:8443/api"), "localhost");
+        assert_eq!(host_of("https://[::1]:8443"), "::1");
+        assert_eq!(host_of("https://my-host.example.com:8443"), "my-host.example.com");
+        assert_eq!(host_of("https://user:pw@example.com:8443"), "example.com");
+        assert_eq!(host_of("http://100.64.0.7"), "100.64.0.7");
+        // 大小写与无 scheme 的兜底
+        assert_eq!(host_of("HTTPS://HOST.Example.COM:8443"), "host.example.com");
+
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host(&host_of("https://127.0.0.2:9000")));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("::1"));
+
+        // 非回环：绝不放行跳过校验（含"看着像回环"的欺骗性主机名）
+        for host in ["100.64.0.7", "192.168.1.5", "127.0.0.1.evil.com", "0.0.0.1", "example.com"] {
+            assert!(!is_loopback_host(host), "{host} 不应被当成回环");
+        }
+    }
 
     #[test]
     fn truncate_reply_keeps_short_answer_intact() {
