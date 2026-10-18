@@ -114,6 +114,9 @@ fn download_inner(model_dir: &Path) -> FunasrInstallResult {
         let tmp = match extract_archive(&archive_path, model_dir) {
             Ok(d) => d,
             Err(e) => {
+                // 删掉解压失败的压缩包：否则 `archive_path.exists()` 会让每次重装
+                // 都跳过下载、用同一个坏包重复失败（用户只能手工去删文件）。
+                let _ = std::fs::remove_file(&archive_path);
                 let msg = format!("解压模型失败: {e}");
                 log::error!("[FUNASR] {msg}");
                 return FunasrInstallResult { success: false, message: msg };
@@ -182,13 +185,19 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
         .unwrap_or(0);
 
     let mut reader = resp.into_reader();
-    let mut file = File::create(dest).map_err(|e| format!("{e}"))?;
+    // 同 BGE：先写 `.part`，成功才改名。半截的 tar.bz2 若落在最终文件名上，
+    // 下次安装会 `archive_path.exists()` → 跳过下载 → 解压必然失败，且**每次重试
+    // 都卡在同一处**（除非用户手工删文件）。
+    let part = crate::deps::download::part_path_for(dest);
+    let _ = std::fs::remove_file(&part);
+    let mut file = File::create(&part).map_err(|e| format!("{e}"))?;
     let mut buf = [0u8; 64 * 1024];
     let mut written = 0u64;
     let mut last_pct = 0u32;
     let started = std::time::Instant::now();
     loop {
         if started.elapsed() > PER_SOURCE_TIMEOUT {
+            let _ = std::fs::remove_file(&part);
             return Err(format!("下载超时（{}s），已停止", PER_SOURCE_TIMEOUT.as_secs()));
         }
         let n = reader.read(&mut buf).map_err(|e| format!("{e}"))?;
@@ -211,6 +220,17 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
             }
         }
     }
+    // 截断的连接同样以 EOF 结束：声明了长度就必须对齐，否则当失败处理。
+    if total > 0 && written != total {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("下载不完整（{written}/{total} 字节）"));
+    }
+    file.flush().map_err(|e| format!("{e}"))?;
+    drop(file); // Windows：先关句柄再改名
+    std::fs::rename(&part, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        format!("重命名失败: {e}")
+    })?;
     Ok(())
 }
 

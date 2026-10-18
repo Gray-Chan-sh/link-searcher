@@ -152,6 +152,11 @@ async fn dir_children_handler(
     Query(query): Query<DirChildrenQuery>,
 ) -> Result<Json<Vec<crate::commands::dirs::DirTreeNode>>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
+    // 越界防护：Web 端只能列举已注册索引目录之内的路径（见 routes/mod.rs）。
+    {
+        let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+        super::ensure_within_registered_roots(&conn, &query.parent_path)?;
+    }
     let children = crate::commands::dirs::get_dir_children(app_state, query.parent_path)
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(children))

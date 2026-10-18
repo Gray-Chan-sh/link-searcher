@@ -1,3 +1,42 @@
+## 2026-10-18（第四十一轮）：未修清单逐条修复 P1-⑤⑥⑦ —— Web API 明文回显密钥 / 目录越界枚举 / 模型半截文件
+
+**P1-⑤ Web API 明文回显密钥**（`webapi/routes/{settings,config}.rs`、`commands/{settings,config}.rs`、前端 3 处）
+
+- 根因：`GET /api/settings` 直接把 `app_settings` 平铺返回（含 `web_api_token`），
+  `GET /api/config` 返回全部 `ai_api_key` / `embedding_api_key` / `llm_api_key` 与
+  `providers[].api_key` **明文**。token 是 Web API 的唯一门槛，日志/转发/前端缓存任一
+  环节泄露即等于把整盘数据交出去。**不能只掩码**：Web 端 `updateConfig` 是
+  「先 GET 再 spread 后 PUT」、`AiTab` 保存 provider 时也把 GET 到的值当"未改动"回传 ——
+  只掩码会把真实密钥**写坏成掩码串**（与 #4 的"静默写坏"同类）。
+- 修法：引入哨兵 `MASKED_SECRET = "__LS_UNCHANGED__"`：GET 掩码（非空 → 哨兵，空保持空），
+  写路径（`PUT /api/settings`、`update_config`、`update_provider`、`add_provider`、
+  `test_provider`）一律把哨兵解释为"保持原值"（`test_provider` 按 base_url 找回存量密钥，
+  否则"测试连接"会拿哨兵去请求 → 假失败）。桌面端 IPC **不受影响**（仍可查看/复制密钥）。
+  前端 `maskApiKey` 与 SystemTab 把哨兵显示为「（已设置，不回显）」。
+  新增 2 个单测：掩码往返、以及"当前 ALLOWED_KEYS 里只有 `web_api_token` 会被掩码"
+  （误判会让用户在 Web 端看到哨兵而非真实设置）。
+
+**P1-⑥ Web API 目录越界枚举**（`webapi/routes/{mod,files,dirs}.rs`）
+
+- 根因：`GET /api/dir-entries?path=<任意>` 与 `GET /api/dirs/children?parentPath=<任意>` 把
+  **整块磁盘**当目录浏览器（`~/.ssh`、浏览器 profile、其它项目的文件名/结构全可列举）。
+  正文虽仍受 DB 追踪限制，文件名与目录结构本身就是敏感信息。
+- 修法：Web 端只允许列举**已注册索引目录之内**的路径（`ensure_within_registered_roots`）：
+  归一化正斜杠 + Windows 大小写不敏感 + 前缀必须落在 `root/` 之下（挡住 `D:\docs2` 这类
+  同前缀兄弟目录）+ 拒绝 `..` 穿越 + 无已注册根时一律拒绝。桌面端 IPC 不受限（添加目录
+  本来就要能浏览任意位置）。新增 2 个单测（越界/兄弟前缀/`..`/空路径/无根）。
+
+**P1-⑦ 模型下载：半截文件被当成"已安装"**（`commands/{bge,funasr}.rs`、`deps/download.rs`）
+
+- 根因：两个下载器都**直接写最终文件名**，且"是否已安装"只判断 `is_file()`。于是
+  断网/进程被杀留下的半截 `model.onnx` / 归档包满足一切"已存在"判断 → 跳过下载、
+  解压必然失败，**重装多少次都卡在同一处**（FunASR 连坏归档都不删）。
+- 修法：统一改为 `deps::download::part_path_for` 的 `.part` + 成功后原子改名（关句柄再改名，
+  Windows 安全）；补 `Content-Length` 对齐校验（截断的连接也会以 EOF 正常结束，以前当成功）；
+  `bge_model_ready` 与下载跳过判断都加**最小体积门限**（1MB / 1KB，远低于真实大小，
+  只挡 0 字节与截断）；FunASR 解压失败即删除归档，让下次重试真的重新下载。
+  新增单测 `bge_model_ready_requires_plausible_size`（空 / 截断 / 达标 / 缺文件）。
+
 ## 2026-10-18（第四十轮）：未修清单逐条修复 P1-③④ —— keeper 成对启动无自愈、长事务/长耗时持连接
 
 **P1-③ 嵌入 keeper「成对占用」互锁**（`commands/index/embeddings.rs`）

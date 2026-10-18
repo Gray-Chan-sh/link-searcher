@@ -36,7 +36,17 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
 }
 
 async fn get_config_handler() -> Result<Json<config::ConfigInfo>, ApiError> {
-    config::get_config().map(Json).map_err(|e| ApiError { error: e })
+    let mut info = config::get_config().map_err(|e| ApiError { error: e })?;
+    // 密钥**不回显明文**（Web 端全程只看到哨兵）；写路径把哨兵解释为"保持原值"，
+    // 桌面端 IPC `get_config` 不受影响，AI 设置页仍可查看/复制密钥。
+    use crate::commands::settings::mask_secret;
+    info.ai_api_key = mask_secret(&info.ai_api_key);
+    info.embedding_api_key = mask_secret(&info.embedding_api_key);
+    info.llm_api_key = mask_secret(&info.llm_api_key);
+    for p in &mut info.providers {
+        p.api_key = mask_secret(&p.api_key);
+    }
+    Ok(Json(info))
 }
 
 async fn update_config_handler(

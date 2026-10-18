@@ -4,6 +4,43 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// 密钥**掩码哨兵**：Web API 的 `GET` 用它替换任何非空密钥（不回显明文）；
+/// 写路径见到它一律解释为"保持原值"（`PUT /api/settings`、`PUT /api/config`、
+/// `update_provider` 等），因此 Web 表单把哨兵原样回传也不会把密钥写坏。
+///
+/// 为什么必须这样收口：Web 端的 `updateConfig` 是「先 GET 再 spread 后 PUT」，
+/// `AiTab` 保存 provider 时也会把 GET 到的值当"未改动"回传 —— 服务端若只掩码、
+/// 不解释哨兵，一次无关的保存就会把真实密钥写成掩码串。
+pub const MASKED_SECRET: &str = "__LS_UNCHANGED__";
+
+/// 该值是否为掩码哨兵。
+pub fn is_masked(value: &str) -> bool {
+    value == MASKED_SECRET
+}
+
+/// 非空密钥 → 哨兵；空值保持空（前端据此区分"未设置"）。
+pub fn mask_secret(value: &str) -> String {
+    if value.trim().is_empty() {
+        String::new()
+    } else {
+        MASKED_SECRET.to_string()
+    }
+}
+
+/// 键名里含这些片段即视为密钥（Web 端 GET 不回显）。
+///
+/// 按**名字**判定而不是列白名单：`app_settings` 里除 `web_api_token` 还可能有
+/// 历史遗留行，漏一个就是明文外泄；而当前白名单里除 token 外没有任何含
+/// `key/secret/password/token` 的键（`*_timeout_secs` 等不会误命中）。
+const SECRET_KEY_MARKERS: &[&str] =
+    &["token", "secret", "api_key", "apikey", "password", "passwd", "credential"];
+
+/// 该设置键是否为密钥（需要掩码）。
+pub fn is_secret_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    SECRET_KEY_MARKERS.iter().any(|m| k.contains(m))
+}
+
 /// Whitelisted keys that may be modified through [`update_settings`].
 const ALLOWED_KEYS: &[&str] = &[
     "ocr_engine",
@@ -80,6 +117,11 @@ pub async fn update_settings(
         if !ALLOWED_KEYS.contains(&key.as_str()) {
             return Err(format!("unknown setting key: {key}"));
         }
+        // 掩码哨兵 = "保持原值"：Web 端表单会把 GET 回来的哨兵原样回传，
+        // 直接落库就是把密钥写成哨兵（token 历史上被同类路径写坏过）。
+        if is_masked(value) {
+            continue;
+        }
         // token **不走这条通用路径**：它有两处存储（`config.json` 权威 + `app_settings`
         // 给鉴权中间件），必须一次写完两侧才不留分叉 —— 收口在 [`crate::webapi::apply_token`]。
         if key == "web_api_token" {
@@ -96,7 +138,10 @@ pub async fn update_settings(
     // 会话——持旧 token 的客户端会在下一次请求收到 401，本机（同 IP）下一次请求则重新建立会话。
     // 空值按"没改"处理：历史行为是把它写进 DB，那会让 `db_token` 变成空串 ⇒ 鉴权**全线失效**。
     if let Some(token) = settings.get("web_api_token") {
-        if token.trim().is_empty() {
+        if is_masked(token) {
+            // Web 端 GET 不会回显 token（返回哨兵），表单若把它回传必须按"没改"处理。
+            log::debug!("[WEBAPI] 忽略掩码哨兵 web_api_token（按未修改处理）");
+        } else if token.trim().is_empty() {
             log::warn!("[WEBAPI] 忽略空的 web_api_token（按未修改处理）");
         } else {
             crate::webapi::apply_token(state.inner(), token)?;
@@ -278,6 +323,38 @@ pub fn set_autostart(app: tauri::AppHandle, enabled: bool) -> Result<AutostartSt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 密钥掩码（P1-⑤）：Web 端 GET 不回显明文；写路径把哨兵当"保持原值"。
+    #[test]
+    fn secret_masking_round_trip() {
+        // 非空密钥 → 哨兵；空值保持空
+        assert_eq!(mask_secret("sk-secret-123"), MASKED_SECRET);
+        assert_eq!(mask_secret(""), "");
+        assert_eq!(mask_secret("   "), "");
+        // 哨兵可被识别（写路径据此跳过/保留原值）
+        assert!(is_masked(MASKED_SECRET));
+        assert!(!is_masked("sk-secret-123"));
+        assert!(!is_masked(""));
+        // 真正写坏的正是这个字面量：不能被当成普通值放行
+        assert_ne!(MASKED_SECRET, "");
+    }
+
+    /// 按名字判定密钥：当前 `ALLOWED_KEYS` 里**只有** `web_api_token` 命中，
+    /// 且没有任何非密钥键被误判（误判会让用户在 Web 端看到哨兵而非真实设置）。
+    #[test]
+    fn secret_key_detection_matches_only_the_token() {
+        let flagged: Vec<&&str> = ALLOWED_KEYS.iter().filter(|k| is_secret_key(k)).collect();
+        assert_eq!(flagged, vec![&"web_api_token"], "只有 token 该被掩码");
+
+        assert!(is_secret_key("web_api_token"));
+        assert!(is_secret_key("LARK_APP_SECRET"));
+        assert!(is_secret_key("some_api_key"));
+        assert!(is_secret_key("db_password"));
+        assert!(!is_secret_key("web_session_timeout_secs"));
+        assert!(!is_secret_key("ocr_stall_timeout_secs"));
+        assert!(!is_secret_key("web_api_bind"));
+        assert!(!is_secret_key("max_results"));
+    }
 
     #[test]
     fn test_allowed_keys_contains_ocr_pdf_dpi() {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { Section, TextField, NumberField, TextareaField, ToggleField, SelectField } from './SettingsFields'
 import { invoke } from '../../api/client'
+import { MASKED_SECRET } from '../../api/settings'
 
 interface SystemTabProps {
   settings: Record<string, string>
@@ -230,7 +231,11 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
             <input
               type="text"
               readOnly
-              value={settings['web_api_token'] ?? ''}
+              value={
+                settings['web_api_token'] === MASKED_SECRET
+                  ? '（已设置，不回显）'
+                  : (settings['web_api_token'] ?? '')
+              }
               className="flex-1 px-3 py-2 text-sm bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-gray-900 dark:text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors"
             />
             <button

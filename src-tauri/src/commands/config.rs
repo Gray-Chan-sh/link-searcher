@@ -58,8 +58,9 @@ pub fn get_config() -> Result<ConfigInfo, String> {
 #[tauri::command]
 pub fn update_config(
     state: State<'_, AppState>,
-    new_config: ConfigInfo,
+    mut new_config: ConfigInfo,
 ) -> Result<(), String> {
+    use crate::commands::settings::is_masked;
     // Only validate when the data dir is actually changing.
     let current = load_config();
     if Path::new(&new_config.data_dir) != current.data_dir.as_path() {
@@ -83,6 +84,28 @@ pub fn update_config(
     // 漏一个就把用户写在 `config.json` 里的东西抹掉。改成 RMW 后这类字段
     // **自动**保留，不再依赖"记得加一行"。
     let mut config = current;
+    // 掩码哨兵 → "保持原值"：Web 端 `GET /api/config` 不回显任何 API Key，
+    // 前端 `updateConfig` 又是「先 GET 再 spread 后 PUT」—— 不解释哨兵就会
+    // 把密钥写成 `__LS_UNCHANGED__`（P1-⑤）。
+    if is_masked(&new_config.embedding_api_key) {
+        new_config.embedding_api_key = config.embedding_api_key.clone();
+    }
+    if is_masked(&new_config.llm_api_key) {
+        new_config.llm_api_key = config.llm_api_key.clone();
+    }
+    if is_masked(&new_config.ai_api_key) {
+        new_config.ai_api_key = config.ai_api_key.clone();
+    }
+    let stored_keys: std::collections::HashMap<String, String> = config
+        .providers
+        .iter()
+        .map(|p| (p.id.clone(), p.api_key.clone()))
+        .collect();
+    for p in &mut new_config.providers {
+        if is_masked(&p.api_key) {
+            p.api_key = stored_keys.get(&p.id).cloned().unwrap_or_default();
+        }
+    }
     config.data_dir = new_config.data_dir.into();
     config.language = new_config.language;
     config.ai_api_base = new_config.ai_api_base;
@@ -132,7 +155,9 @@ pub async fn add_provider(
         id: id.clone(),
         name,
         base_url: base_url.trim().to_string(),
-        api_key,
+        // 新增的 provider 没有"原值"可保持 —— 哨兵一律落空串，
+        // 绝不能把哨兵字面量写进 config.json。
+        api_key: if crate::commands::settings::is_masked(&api_key) { String::new() } else { api_key },
         models: crate::config::auto_enable_first_per_type(models),
     });
     save_config(&config)?;
@@ -155,7 +180,10 @@ pub fn update_provider(
     };
     p.name = name;
     p.base_url = base_url.trim().to_string();
-    p.api_key = api_key;
+    // 掩码哨兵 → 保持原值（Web 端不回显密钥，表单把哨兵当"未改动"回传）。
+    if !crate::commands::settings::is_masked(&api_key) {
+        p.api_key = api_key;
+    }
     save_config(&config)
 }
 
@@ -276,11 +304,26 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
 }
 
 /// Test a provider's connectivity (GET /models). Returns ok + detail.
+///
+/// Web 端不会回显密钥（GET 返回哨兵），所以哨兵必须在这里还原成**已存的那个
+/// base_url 对应的密钥**，否则"测试连接"会拿着哨兵去请求 → 401/失败，
+/// 用户会以为是自己配错了。
 #[tauri::command]
 pub async fn test_provider(base_url: String, api_key: String) -> Result<ProviderTest, String> {
     if base_url.trim().is_empty() {
         return Err("base_url 不能为空".into());
     }
+    let api_key = if crate::commands::settings::is_masked(&api_key) {
+        let stored = load_config();
+        stored
+            .providers
+            .iter()
+            .find(|p| p.base_url.trim() == base_url.trim())
+            .map(|p| p.api_key.clone())
+            .unwrap_or_default()
+    } else {
+        api_key
+    };
     let (models, pull_err) = tokio::task::spawn_blocking(move || {
         crate::ai::list_provider_models(&base_url, &api_key)
     })

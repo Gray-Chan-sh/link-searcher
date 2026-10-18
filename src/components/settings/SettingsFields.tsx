@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { MASKED_SECRET } from '../../api/settings'
 
 export function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
@@ -104,6 +105,8 @@ export function ToggleField({ label, checked, onChange }: {
 
 export function maskApiKey(key: string): string {
   if (!key) return ''
+  // Web API 不回显密钥：GET 返回哨兵，这里显示成可读文案而不是"****HANGED"。
+  if (key === MASKED_SECRET) return '（已设置，不回显）'
   return key.length <= 4 ? '****' : `****${key.slice(-4)}`
 }
 

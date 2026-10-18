@@ -57,6 +57,13 @@ async fn settings_handler(
         let (k, v) = row.map_err(|e| ApiError {
             error: e.to_string(),
         })?;
+        // 密钥（`web_api_token` 等）**不回显明文**：Web 端只拿到哨兵，
+        // 写回时哨兵按"保持原值"处理（桌面端 IPC 不受影响，仍可查看 token）。
+        let v = if crate::commands::settings::is_secret_key(&k) {
+            crate::commands::settings::mask_secret(&v)
+        } else {
+            v
+        };
         map.insert(k, serde_json::Value::String(v));
     }
     Ok(Json(serde_json::Value::Object(map)))
@@ -75,6 +82,12 @@ async fn update_settings_handler(
     let settings = body.settings.ok_or_else(|| ApiError {
         error: "missing 'settings' object".into(),
     })?;
+    // 掩码哨兵 = "保持原值"：Web 端表单会把 GET 回来的哨兵原样回传，
+    // 直接进 `update_settings` 就会把密钥写成哨兵（token 就是这样被写坏过的）。
+    let settings: HashMap<String, String> = settings
+        .into_iter()
+        .filter(|(_, v)| !crate::commands::settings::is_masked(v))
+        .collect();
     let app_state = state.app_handle.state::<AppState>();
     crate::commands::settings::update_settings(app_state, settings)
         .await

@@ -136,6 +136,11 @@ async fn dir_entries_handler(
     Query(params): Query<DirEntriesQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
+    // 越界防护：Web 端只能列举已注册索引目录之内的路径（见 mod.rs 说明）。
+    {
+        let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
+        super::ensure_within_registered_roots(&conn, &params.path)?;
+    }
     let entries = files::list_dir_entries(app_state, params.path)
         .await
         .map_err(|e| ApiError { error: e })?;

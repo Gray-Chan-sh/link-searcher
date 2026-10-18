@@ -11,6 +11,12 @@ use crate::state::AppState;
 const MODEL_FILE: &str = "model.onnx";
 const TOKENIZER_FILE: &str = "tokenizer.json";
 
+/// 「算装好了」的最小体积：任何 BGE 变体的 ONNX 都是几十 MB 起，tokenizer.json
+/// 也有数百 KB。取值远低于真实大小、又足以挡住 0 字节/截断文件（见
+/// [`bge_model_ready`] 的说明）。
+const MODEL_MIN_BYTES: u64 = 1_000_000;
+const TOKENIZER_MIN_BYTES: u64 = 1_000;
+
 /// (model_name, display_name, dim)
 const LOCAL_MODELS: &[(&str, &str, u32)] = &[
     ("bge-large-zh-v1.5", "BGE-Large (1024维)", 1024),
@@ -133,7 +139,16 @@ pub fn check_bge_installed(state: State<'_, AppState>) -> Result<Vec<BgeStatus>,
 }
 
 pub fn bge_model_ready(model_dir: &Path) -> bool {
-    model_dir.join(MODEL_FILE).is_file() && model_dir.join(TOKENIZER_FILE).is_file()
+    // ⚠️ 不能只看 `is_file()`：崩溃/断电留下的**半截文件**也满足它，于是模型被
+    // 当成"已安装"，`download_inner` 又因为 `dest.is_file()` 直接跳过 —— 坏模型
+    // 永久不可恢复（推理时才报错，用户还不明白为什么重装没用）。
+    // 这里加最小体积门限，配合 `download()` 的 `.part` + 原子改名，两道一起堵。
+    let big_enough = |name: &str, min: u64| {
+        std::fs::metadata(model_dir.join(name))
+            .map(|m| m.is_file() && m.len() >= min)
+            .unwrap_or(false)
+    };
+    big_enough(MODEL_FILE, MODEL_MIN_BYTES) && big_enough(TOKENIZER_FILE, TOKENIZER_MIN_BYTES)
 }
 
 fn download_inner(model_dir: &Path, model_name: &str) -> BgeInstallResult {
@@ -147,9 +162,19 @@ fn download_inner(model_dir: &Path, model_name: &str) -> BgeInstallResult {
     let files = [("onnx/model.onnx", MODEL_FILE), ("tokenizer.json", TOKENIZER_FILE)];
     for (remote, local) in &files {
         let dest = model_dir.join(local);
-        if dest.is_file() {
-            log::info!("[BGE] {} 已存在，跳过", local);
+        // 只认「够大」的现有文件：半截文件（旧版本直接从网络写最终文件名留下的）
+        // 必须重新下载，否则 `bge_model_ready` 永远为假、而这里永远跳过 —— 用户
+        // 重装一百次也没用。
+        let min = if *local == MODEL_FILE { MODEL_MIN_BYTES } else { TOKENIZER_MIN_BYTES };
+        let usable = std::fs::metadata(&dest)
+            .map(|m| m.is_file() && m.len() >= min)
+            .unwrap_or(false);
+        if usable {
+            log::info!("[BGE] {local} 已存在，跳过");
             continue;
+        }
+        if dest.exists() {
+            log::warn!("[BGE] {local} 体积异常（疑似半截文件），重新下载");
         }
 
         let base_urls = if forced_mirror {
@@ -226,14 +251,18 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
         .unwrap_or(0);
 
     let mut reader = resp.into_reader();
-    let mut file = File::create(dest).map_err(|e| format!("{e}"))?;
+    // **先写 `<name>.part`，成功后才原子改名**：中途断网/进程被杀留下的半成品
+    // 永远不叫 `model.onnx`，不会被下次安装当作"已存在"跳过。
+    let part = crate::deps::download::part_path_for(dest);
+    let _ = std::fs::remove_file(&part);
+    let mut file = File::create(&part).map_err(|e| format!("{e}"))?;
     let mut buf = [0u8; 64 * 1024];
     let mut written = 0u64;
     let mut last_pct = 0u32;
     let started = std::time::Instant::now();
     loop {
         if started.elapsed() > PER_SOURCE_TIMEOUT {
-            let _ = std::fs::remove_file(dest);
+            let _ = std::fs::remove_file(&part);
             return Err(format!(
                 "下载超时（{}s），已停止",
                 PER_SOURCE_TIMEOUT.as_secs()
@@ -260,5 +289,54 @@ fn download(url: &str, dest: &Path) -> Result<(), String> {
             }
         }
     }
+    // 完整性：声明了长度就必须一字不差地拿到（截断的连接也可能以 EOF 正常结束，
+    // 以前会把它当成功）。长度未知（chunked）时只能靠上面的超时兜底。
+    if total > 0 && written != total {
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("下载不完整（{written}/{total} 字节）"));
+    }
+    file.flush().map_err(|e| format!("{e}"))?;
+    drop(file); // Windows 上先关句柄再改名，避免共享冲突
+    std::fs::rename(&part, dest).map_err(|e| {
+        let _ = std::fs::remove_file(&part);
+        format!("重命名失败: {e}")
+    })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 半截文件（旧版本直接写最终文件名的遗留）必须**不算**就绪：否则
+    /// `download_inner` 跳过"已存在"的文件、`bge_model_ready` 又永远为假，
+    /// 模型永久不可恢复（重装多少次都没用）。
+    #[test]
+    fn bge_model_ready_requires_plausible_size() {
+        let dir = std::env::temp_dir().join(format!("ls_bge_ready_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 空文件 → 未就绪
+        std::fs::write(dir.join(MODEL_FILE), b"").unwrap();
+        std::fs::write(dir.join(TOKENIZER_FILE), b"").unwrap();
+        assert!(!bge_model_ready(&dir), "空文件不算就绪");
+
+        // 截断（比门限少 1 字节）→ 未就绪
+        std::fs::write(dir.join(MODEL_FILE), vec![0u8; MODEL_MIN_BYTES as usize - 1]).unwrap();
+        std::fs::write(dir.join(TOKENIZER_FILE), vec![0u8; TOKENIZER_MIN_BYTES as usize - 1])
+            .unwrap();
+        assert!(!bge_model_ready(&dir), "截断文件不算就绪");
+
+        // 达到门限 → 就绪
+        std::fs::write(dir.join(MODEL_FILE), vec![0u8; MODEL_MIN_BYTES as usize]).unwrap();
+        std::fs::write(dir.join(TOKENIZER_FILE), vec![0u8; TOKENIZER_MIN_BYTES as usize]).unwrap();
+        assert!(bge_model_ready(&dir), "达到门限即就绪");
+
+        // 缺一个文件 → 未就绪
+        std::fs::remove_file(dir.join(TOKENIZER_FILE)).unwrap();
+        assert!(!bge_model_ready(&dir), "缺文件不算就绪");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

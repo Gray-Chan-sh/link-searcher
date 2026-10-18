@@ -4,6 +4,12 @@ export async function getSettings(): Promise<Record<string, string>> {
   return client.invoke<Record<string, string>>('get_settings')
 }
 
+/**
+ * 与后端 `commands::settings::MASKED_SECRET` **必须一致**：Web API 的 `GET` 用
+ * 这个哨兵替换任何非空密钥（不回显明文），写路径见到它按"保持原值"处理。
+ */
+export const MASKED_SECRET = '__LS_UNCHANGED__'
+
 export async function updateSettings(settings: Record<string, string>): Promise<void> {
   return client.invoke('update_settings', { settings })
 }
