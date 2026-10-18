@@ -162,13 +162,38 @@ pub fn spawn_if_enabled() {
 fn forward<R: std::io::Read + Send + 'static>(reader: R, tag: &'static str, is_err: bool) {
     std::thread::spawn(move || {
         for line in BufReader::new(reader).lines().map_while(Result::ok) {
-            if is_err {
-                log::warn!("[{tag}] {line}");
-            } else {
-                log::info!("[{tag}] {line}");
-            }
+            log::log!(bot_line_level(&line, is_err), "[{tag}] {line}");
         }
     });
+}
+
+/// 子进程一行输出该记到哪个级别。
+///
+/// bot 是 tracing/log 写到 **stderr** 的（`<时间戳> <LEVEL> <target>: <消息>`），
+/// 于是 stderr 里既有 ERROR 也有 INFO。历史实现把 stderr **一律**记 WARN ——
+/// bot 的每条 INFO 都在日志里显示成 WARN，`grep WARN` 时噪声极多、真告警被淹没
+/// （2026-10-18 查看 dev 日志时实测）。
+///
+/// 这里**只看行首前几个 token** 还原真实级别：机器人自身输出、以及它转发的
+/// lark-cli 输出都带同一层 tracing 前缀，故第一条就能命中。认不出级别时退回
+/// 保守行为（stderr → WARN / stdout → INFO），不会把未知错误悄悄降级成 INFO。
+fn bot_line_level(line: &str, is_err: bool) -> log::Level {
+    for tok in line.split_whitespace().take(3) {
+        let tok = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
+        match tok.to_ascii_uppercase().as_str() {
+            "ERROR" | "ERR" | "FATAL" => return log::Level::Error,
+            "WARN" | "WARNING" => return log::Level::Warn,
+            "INFO" => return log::Level::Info,
+            "DEBUG" => return log::Level::Debug,
+            "TRACE" => return log::Level::Trace,
+            _ => {}
+        }
+    }
+    if is_err {
+        log::Level::Warn
+    } else {
+        log::Level::Info
+    }
 }
 
 /// 收掉 bot（应用退出时调用）。
@@ -272,7 +297,8 @@ pub fn is_running() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::watchdog_delay;
+    use super::{bot_line_level, watchdog_delay};
+    use log::Level;
     use std::time::Duration;
 
     /// 看门狗退避：正常 30s；连续失败翻倍，300s 封顶（且不因计数过大溢出）。
@@ -284,5 +310,34 @@ mod tests {
         assert_eq!(watchdog_delay(3), Duration::from_secs(240));
         assert_eq!(watchdog_delay(4), Duration::from_secs(300), "封顶 300s");
         assert_eq!(watchdog_delay(99), Duration::from_secs(300), "不溢出、仍封顶");
+    }
+
+    /// 转发级别按行首 token 还原：bot / lark-cli 的 tracing 前缀都以 `<时间戳> <LEVEL>` 开头。
+    #[test]
+    fn forwarded_line_level_follows_tracing_prefix() {
+        let info = "2026-10-18T15:31:05Z INFO  lark_bot] [bot] 长连接就绪";
+        let warn = "2026-10-18T15:31:23Z WARN  lark_bot] [bot] 菜单事件未订阅";
+        let err = "2026-10-18T15:31:23Z ERROR lark_bot] [bot] 发送失败";
+        // 两层前缀：bot 转发 lark-cli 的输出时，先出现 bot 自己的级别。
+        let nested = "2026-10-18T15:31:08Z INFO  lark_bot] [lark-cli] [source] connected";
+
+        assert_eq!(bot_line_level(info, true), Level::Info, "stderr 里的 INFO 不再冒充 WARN");
+        assert_eq!(bot_line_level(warn, true), Level::Warn);
+        assert_eq!(bot_line_level(err, true), Level::Error);
+        assert_eq!(bot_line_level(nested, true), Level::Info);
+        assert_eq!(bot_line_level("INFO lark_bot] [bot] 无时间戳也能认出", true), Level::Info);
+        assert_eq!(bot_line_level("ERROR: 冒号/标点应被忽略", false), Level::Error);
+    }
+
+    /// 认不出级别时保持旧行为（stderr → WARN / stdout → INFO），且消息正文里的级别词不算数。
+    #[test]
+    fn forwarded_line_level_falls_back_without_prefix() {
+        assert_eq!(bot_line_level("{\"msg_type\":\"event\"}", true), Level::Warn);
+        assert_eq!(bot_line_level("plain stdout line", false), Level::Info);
+        // "ERROR" 出现在第 4 个 token 之后（消息正文）→ 不应抢走级别判定。
+        assert_eq!(
+            bot_line_level("2026-10-18T15:31:05Z INFO  lark_bot] [bot] 捕获 ERROR 并重试", true),
+            Level::Info
+        );
     }
 }

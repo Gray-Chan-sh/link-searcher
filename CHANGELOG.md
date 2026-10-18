@@ -1,3 +1,17 @@
+## 2026-10-18（第五十二轮）：bot 日志级别按行首还原 —— stderr 不再一律 WARN
+
+> 查 dev 日志时发现 `[lark-bot]` 的**每条 INFO 都显示成 WARN**：机器人（以及它转发的
+> lark-cli）把 tracing 输出写到 **stderr**，而 `forward()` 把 stderr 一律记 WARN。
+> 结果日志里 `grep WARN` 全是正常的"长连接就绪 / 启动事件消费"，真告警被淹没。
+
+- **按行首 token 还原级别**：新增纯函数 `bot_line_level(line, is_err)`，只看前 3 个
+  whitespace token（tracing 格式 `<时间戳> <LEVEL> <target>:`；消息正文里的 "ERROR" 等字样不参与判定），
+  映射 `ERROR/ERR/FATAL`→Error、`WARN/WARNING`→Warn、`INFO`→Info、`DEBUG`/`TRACE` 同名；
+  `forward()` 改用 `log::log!(bot_line_level(...), ...)`（`lark_bot.rs`）。
+- **认不出级别时保持旧行为**（stderr→WARN / stdout→INFO）：未知来源的输出不会被悄悄降级。
+- 单测 `forwarded_line_level_follows_tracing_prefix`（含两层前缀的 lark-cli 行、无时间戳行、带标点级别）
+  与 `forwarded_line_level_falls_back_without_prefix`（回退语义＋正文关键词不误判）。
+
 ## 2026-10-18（第五十一轮）：doc 向量改按 md5 键 —— 同内容只存一份（R6，schema v12）
 
 > 内容按 md5 去重（`content_index` / `doc_chunks` / `chunk_embeddings` 全是 md5 键），
