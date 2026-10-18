@@ -9,8 +9,9 @@
 //! Falls back to English if the requested language is not installed.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -30,7 +31,17 @@ struct OcrGate {
     limit: usize,
     current: Mutex<usize>,
     cv: Condvar,
+    /// 每次**释放**许可就 +1。用于把「排队久但一直在动」与「全员卡死」区分开：
+    /// 前者只要 `progress` 在变就不该误杀，后者才会停滞。
+    progress: AtomicU64,
 }
+
+/// 闸门「零进展」容忍时长：这么长时间内没有任何许可被释放，就认定推理线程
+/// 已经卡死（而不是排队），调用者报错退出。
+///
+/// 用「零进展」而非「绝对等待时长」是必须的：批量 OCR 的队列天然很长
+/// （200 页排 8 个槽 ≈ 数分钟），按绝对时长判定会把正常任务误杀成失败。
+const OCR_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 impl OcrGate {
     fn new(limit: usize) -> Self {
@@ -38,16 +49,38 @@ impl OcrGate {
             limit: limit.max(1),
             current: Mutex::new(0),
             cv: Condvar::new(),
+            progress: AtomicU64::new(0),
         }
     }
 
-    fn acquire(&self) -> OcrGuard<'_> {
+    /// 取得一个 OCR 许可，等待期间若 `stall` 内**毫无进展**则放弃。
+    ///
+    /// 之前是无条件阻塞：一旦某个推理线程永久卡住（占着许可不还），所有后续
+    /// 调用者就**永久**挂在自己的 worker 线程上 —— 整批提取停摆，且日志里
+    /// 什么都看不到。现在改为有界等待并返回错误，让该文件标记失败、批次继续。
+    fn acquire(&self, stall: Duration) -> Result<OcrGuard<'_>, String> {
         let mut cur = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        let mut seen = self.progress.load(Ordering::Relaxed);
+        let mut last_progress = Instant::now();
         while *cur >= self.limit {
-            cur = self.cv.wait(cur).unwrap_or_else(|e| e.into_inner());
+            let (g, _) = self
+                .cv
+                .wait_timeout(cur, Duration::from_millis(200))
+                .unwrap_or_else(|e| e.into_inner());
+            cur = g;
+            let now = self.progress.load(Ordering::Relaxed);
+            if now != seen {
+                seen = now;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= stall {
+                return Err(format!(
+                    "OCR 并发闸门停滞 {:?}（{} 个许可全部被卡住的推理占用）",
+                    stall, self.limit
+                ));
+            }
         }
         *cur += 1;
-        OcrGuard { gate: self }
+        Ok(OcrGuard { gate: self })
     }
 }
 
@@ -59,7 +92,9 @@ impl Drop for OcrGuard<'_> {
     fn drop(&mut self) {
         let mut cur = self.gate.current.lock().unwrap_or_else(|e| e.into_inner());
         *cur = cur.saturating_sub(1);
-        self.gate.cv.notify_one();
+        // 先记进展（识别唤醒时判定用），再唤醒等待者。
+        self.gate.progress.fetch_add(1, Ordering::Relaxed);
+        self.gate.cv.notify_all();
     }
 }
 
@@ -222,7 +257,9 @@ pub fn map_engine(value: &str) -> OcrEngineType {
 ///
 /// Delegates to the underlying engine implementation.
 pub fn ocr_image_with_engine(path: &Path, engine: &OcrEngineType, lang: &str) -> Result<String> {
-    let _gate = ocr_gate().acquire();
+    let _gate = ocr_gate()
+        .acquire(OCR_STALL_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     match engine {
         OcrEngineType::PaddleOCR => paddleocr::recognize_from_path(path),
         OcrEngineType::Tesseract => ocr_image_tesseract(path, lang),
@@ -243,7 +280,9 @@ pub fn ocr_image_with_stats(
     engine: &OcrEngineType,
     lang: &str,
 ) -> Result<(String, OcrStats)> {
-    let _gate = ocr_gate().acquire();
+    let _gate = ocr_gate()
+        .acquire(OCR_STALL_TIMEOUT)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     match engine {
         OcrEngineType::PaddleOCR => {
             // Gradient-preserving preprocessing for DBNet: upscale small images,
@@ -513,7 +552,7 @@ mod tests {
                 let active = std::sync::Arc::clone(&active);
                 let peak = std::sync::Arc::clone(&peak);
                 std::thread::spawn(move || {
-                    let _guard = gate.acquire();
+                    let _guard = gate.acquire(Duration::from_secs(30)).expect("gate open");
                     let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
                     peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(20));
@@ -527,6 +566,34 @@ mod tests {
         }
         assert!(peak.load(std::sync::atomic::Ordering::SeqCst) <= 3, "peak {} exceeded gate", peak.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(active.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// 闸门停滞时必须**放弃等待并报错**，而不是永久挂住调用者。
+    ///
+    /// 场景：某个 OCR 推理线程永久卡住、许可不还（实测过 PaddleOCR 卡死）。
+    /// 旧实现是无条件 `cv.wait()` → 所有后续调用者永久阻塞在各自 worker 上。
+    #[test]
+    fn test_ocr_gate_fails_after_stall() {
+        let gate: &'static OcrGate = Box::leak(Box::new(OcrGate::new(1)));
+        // 占满唯一的许可（模拟"卡住的推理"）。
+        let held = gate.acquire(Duration::from_secs(5)).expect("first acquire");
+
+        let waiter = std::thread::spawn(move || {
+            let started = Instant::now();
+            let err = gate
+                .acquire(Duration::from_millis(300))
+                .err()
+                .expect("must stall");
+            (err, started.elapsed())
+        });
+        let (err, waited) = waiter.join().expect("waiter thread");
+        assert!(err.contains("停滞"), "错误信息应说明停滞: {err}");
+        assert!(waited < Duration::from_secs(5), "不应无界等待，实际 {waited:?}");
+
+        // 释放后闸门必须恢复可用（停滞判定不能把闸门弄坏）。
+        drop(held);
+        let again = gate.acquire(Duration::from_millis(500));
+        assert!(again.is_ok(), "释放许可后应能重新取得");
     }
 
     #[test]

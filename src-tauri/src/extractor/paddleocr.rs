@@ -354,7 +354,13 @@ where
     match rx.recv_timeout(Duration::from_secs(120)) {
         Ok(v) => v,
         Err(_) => {
-            let _ = handle.join();
+            // ⚠️ 超时必须**直接返回**，不要 `join()`：卡死的推理线程会让 join 永久
+            // 阻塞，超时形同虚设，还会把调用者（rayon worker）连同 OcrGate 许可一起
+            // 拖死 —— 整批提取停摆而日志里看不到任何东西（旧实现就是这样）。
+            // 这里放弃该线程：它持有引擎锁与 load 许可（有界泄漏，每个卡住的调用一次），
+            // 后续调用由 OcrGate 的「零进展」判定救出（见 `extractor/ocr.rs`）。
+            log::error!("[OCR] PaddleOCR 单图推理超过 120s → 放弃等待该线程（不 join）");
+            drop(handle); // 显式说明：故意不 join，线程自行消亡
             Err("PaddleOCR timed out after 120s".to_string())
         }
     }

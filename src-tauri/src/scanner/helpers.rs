@@ -4,28 +4,194 @@
 //! within a monitored directory root.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 use crate::db::tracker::{FileRecord, IndexedState};
 
-/// `metadata()` with a timeout guard.
+/// One metadata request: the path plus the channel the worker answers on.
+type MetaJob = (PathBuf, mpsc::Sender<std::io::Result<std::fs::Metadata>>);
+
+/// Signature of the actual metadata syscall. Injectable so tests can simulate a
+/// hung network mount without touching the filesystem.
+type MetaFetch = Arc<dyn Fn(&Path) -> std::io::Result<std::fs::Metadata> + Send + Sync>;
+
+/// Fixed-size worker pool behind [`metadata_timeout`].
 ///
-/// Network filesystems (NFS/SMB/FUSE) can hang indefinitely on `metadata`.
-/// Run the call on a helper thread and give up after `timeout` — the caller
-/// treats a timeout as "metadata unavailable" and skips the entry instead
-/// of blocking the whole scan.
-pub fn metadata_timeout(path: &Path, timeout: std::time::Duration) -> Result<std::fs::Metadata> {
-    let path_owned = path.to_path_buf();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(std::fs::metadata(&path_owned));
-    });
+/// 之前是「一个文件一条线程」：正常路径下每次 `metadata` 都 spawn+join（十万文件
+/// 就是十万次线程创建），更糟的是**挂载卡死时每超时一次就永久泄漏一条线程** ——
+/// 扫描 10 万个文件能把进程线程数打到 10 万级。
+///
+/// 现在固定 `size` 条工人 + 有界队列：
+/// * 队列满 → 立刻报错，卡死时不再无界堆积请求与 `PathBuf`；
+/// * 工人连续 `stall_window` 毫无进展（全卡在 metadata 上）→ 重建池：旧线程有界
+///   泄漏（每窗口最多 `size` 条），新线程给「挂载已恢复」一次机会。
+struct MetaPool {
+    tx: mpsc::SyncSender<MetaJob>,
+    fetch: MetaFetch,
+    size: usize,
+    /// 正在执行 metadata 的工人数。
+    busy: Arc<AtomicUsize>,
+    /// 每完成一次（无论成败）+1；用于判定「到底有没有进展」。
+    epoch: Arc<AtomicU64>,
+    /// `(epoch 值, 首次观察到该值且工人全忙的时刻)`。
+    stall: Option<(u64, Instant)>,
+    /// 已 spawn 的工人总数（有界泄漏自检 / 测试用）。
+    spawned: Arc<AtomicUsize>,
+}
+
+/// 「零进展」容忍时长：与调用方给的单次超时挂钩（4×），下限 250ms
+/// （测试用极小超时也能触发）。
+fn stall_window(timeout: Duration) -> Duration {
+    timeout.saturating_mul(4).max(Duration::from_millis(250))
+}
+
+impl MetaPool {
+    /// 工人数：扫描是顺序调用，4 条足以并行化解 SMB/NFS 往返延迟，
+    /// 同时把「挂载卡死」时的线程泄漏上限压到 4 条/窗口。
+    const WORKERS: usize = 4;
+    /// 请求队列上限：满了立刻失败，避免卡死时无界堆积。
+    const QUEUE: usize = 64;
+
+    fn new(size: usize, fetch: MetaFetch) -> Self {
+        Self::with_counter(size, fetch, Arc::new(AtomicUsize::new(0)))
+    }
+
+    /// 与 [`MetaPool::new`] 相同，但复用调用方的计数器 —— 重建时必须**累计**
+    /// 「一共 spawn 了多少工人」，否则泄漏检测会随重建被清零。
+    fn with_counter(size: usize, fetch: MetaFetch, spawned: Arc<AtomicUsize>) -> Self {
+        let size = size.max(1);
+        let (tx, rx) = mpsc::sync_channel::<MetaJob>(Self::QUEUE);
+        let rx = Arc::new(Mutex::new(rx));
+        let busy = Arc::new(AtomicUsize::new(0));
+        let epoch = Arc::new(AtomicU64::new(0));
+        for _ in 0..size {
+            let rx = Arc::clone(&rx);
+            let busy = Arc::clone(&busy);
+            let epoch = Arc::clone(&epoch);
+            let fetch = Arc::clone(&fetch);
+            // ⚠️ 计数必须**在 spawn 之前同步 +1**：放进线程体内会有竞态 ——
+            // 刚建好的池在工人被调度前 `spawned == 0`，会被 `dispatch` 误判成
+            // "工人创建失败"（实测：连测试都跑不过）。
+            spawned.fetch_add(1, Ordering::Relaxed);
+            let built = std::thread::Builder::new()
+                .name("ls-metadata".to_string())
+                .spawn(move || {
+                    loop {
+                        // 单接收端共享：同一时刻只有一名工人取任务（其余阻塞在锁上），
+                        // 取到后立刻放锁 → 真正的 metadata 并行执行。
+                        let job = {
+                            let guard = rx.lock().unwrap_or_else(|e| e.into_inner());
+                            guard.recv()
+                        };
+                        let Ok((path, reply)) = job else { break };
+                        busy.fetch_add(1, Ordering::Relaxed);
+                        let result = fetch(&path);
+                        busy.fetch_sub(1, Ordering::Relaxed);
+                        epoch.fetch_add(1, Ordering::Relaxed);
+                        let _ = reply.send(result);
+                    }
+                });
+            if let Err(e) = built {
+                log::warn!("[SCAN] metadata 工人线程创建失败: {e}");
+                spawned.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        Self { tx, fetch, size, busy, epoch, stall: None, spawned }
+    }
+
+    /// 工人全忙且窗口内毫无进展 → 认定卡死，重建工作池。
+    fn maybe_rebuild(&mut self, timeout: Duration) {
+        if self.busy.load(Ordering::Relaxed) < self.size {
+            self.stall = None;
+            return;
+        }
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        match self.stall {
+            Some((seen, at)) if seen == epoch => {
+                if at.elapsed() >= stall_window(timeout) {
+                    log::warn!(
+                        "[SCAN] metadata 工人全部卡死 {:?} 无进展 → 重建工作池（旧线程有界泄漏）",
+                        at.elapsed()
+                    );
+                    let fetch = Arc::clone(&self.fetch);
+                    *self = MetaPool::with_counter(self.size, fetch, Arc::clone(&self.spawned));
+                }
+            }
+            _ => self.stall = Some((epoch, Instant::now())),
+        }
+    }
+
+    /// 投递请求，返回应答通道（**不**在持锁期间等待结果）。
+    fn dispatch(
+        &mut self,
+        path: &Path,
+        timeout: Duration,
+    ) -> Result<mpsc::Receiver<std::io::Result<std::fs::Metadata>>> {
+        if self.spawned.load(Ordering::Relaxed) == 0 {
+            return Err(anyhow!("metadata 工作池不可用（工人线程创建失败）: {}", path.display()));
+        }
+        self.maybe_rebuild(timeout);
+        let (tx, rx) = mpsc::channel();
+        match self.tx.try_send((path.to_path_buf(), tx)) {
+            Ok(()) => Ok(rx),
+            // 队列满 = 工人全卡住且积压已满 → 立刻失败（不再排队等 15s）。
+            Err(mpsc::TrySendError::Full(_)) => Err(anyhow!(
+                "metadata 工作池队列已满（疑似挂载卡死，已排队 {} 条）: {}",
+                Self::QUEUE,
+                path.display()
+            )),
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                log::warn!("[SCAN] metadata 工人池已断开 → 重建");
+                let fetch = Arc::clone(&self.fetch);
+                *self = MetaPool::with_counter(self.size, fetch, Arc::clone(&self.spawned));
+                let (tx, rx) = mpsc::channel();
+                self.tx.try_send((path.to_path_buf(), tx)).map_err(|_| {
+                    anyhow!("metadata 工作池不可用（重建后仍无法投递）: {}", path.display())
+                })?;
+                Ok(rx)
+            }
+        }
+    }
+}
+
+static META_POOL: OnceLock<Mutex<MetaPool>> = OnceLock::new();
+
+fn global_meta_pool() -> &'static Mutex<MetaPool> {
+    META_POOL.get_or_init(|| {
+        Mutex::new(MetaPool::new(
+            MetaPool::WORKERS,
+            Arc::new(|p: &Path| std::fs::metadata(p)),
+        ))
+    })
+}
+
+fn recv_metadata(
+    rx: mpsc::Receiver<std::io::Result<std::fs::Metadata>>,
+    path: &Path,
+    timeout: Duration,
+) -> Result<std::fs::Metadata> {
     match rx.recv_timeout(timeout) {
         Ok(Ok(m)) => Ok(m),
         Ok(Err(e)) => Err(e.into()),
         Err(_) => Err(anyhow!("metadata timed out after {:?}: {}", timeout, path.display())),
     }
+}
+
+/// `metadata()` with a timeout guard.
+///
+/// Network filesystems (NFS/SMB/FUSE) can hang indefinitely on `metadata`.
+/// Run the call on a pool worker and give up after `timeout` — the caller
+/// treats a timeout as "metadata unavailable" and skips the entry instead
+/// of blocking the whole scan.
+pub fn metadata_timeout(path: &Path, timeout: std::time::Duration) -> Result<std::fs::Metadata> {
+    let rx = {
+        let mut pool = global_meta_pool().lock().unwrap_or_else(|e| e.into_inner());
+        pool.dispatch(path, timeout)?
+    }; // 锁在等待结果之前释放，并发调用不会互相串行化
+    recv_metadata(rx, path, timeout)
 }
 
 /// A discovered disk file entry carrying both absolute and relative paths.
@@ -308,5 +474,75 @@ mod tests {
         assert_eq!(normalize_os_path("D:/"), "D:/");
         assert_eq!(normalize_os_path("/"), "/");
         assert_eq!(normalize_os_path("already/normal.txt"), "already/normal.txt");
+    }
+
+    /// 正常路径：全局池（真实 `fs::metadata`）必须返回真实 metadata。
+    #[test]
+    fn metadata_timeout_returns_real_metadata() {
+        let dir = TempDir::new("meta_pool_ok").unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, b"hello").unwrap();
+        let m = metadata_timeout(&f, Duration::from_secs(5)).expect("metadata ok");
+        assert_eq!(m.len(), 5);
+
+        // 不存在的文件 → Err（io 错误，而非超时文案）
+        let missing = dir.path().join("nope.txt");
+        let err = metadata_timeout(&missing, Duration::from_secs(5)).expect_err("must fail");
+        assert!(!err.to_string().contains("timed out"), "应为 io 错误: {err}");
+    }
+
+    /// 挂载卡死 + 队列塞满 → **快速失败**，不再每条请求都干等一个超时、
+    /// 也不再每文件泄漏一条线程。
+    #[test]
+    fn metadata_pool_fails_fast_when_queue_is_full() {
+        let hang: MetaFetch = Arc::new(|_p: &Path| {
+            std::thread::sleep(Duration::from_secs(5));
+            Err(std::io::Error::other("hung"))
+        });
+        let mut pool = MetaPool::new(2, hang);
+        let timeout = Duration::from_millis(20);
+        let started = Instant::now();
+        let mut full_errors = 0;
+        for i in 0..(MetaPool::QUEUE + 10) {
+            let path = PathBuf::from(format!("/hung/{i}"));
+            if let Err(e) = pool.dispatch(&path, timeout) {
+                if e.to_string().contains("队列已满") {
+                    full_errors += 1;
+                }
+            }
+        }
+        assert!(full_errors > 0, "队列应塞满并快速失败");
+        // 2 个工人 + 64 条队列，绝不该出现「每请求一线程」式的爆炸
+        assert!(
+            pool.spawned.load(Ordering::Relaxed) <= 4,
+            "窗口内不应重建池，实际 spawn {}",
+            pool.spawned.load(Ordering::Relaxed)
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "应快速失败，实际耗时 {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// 工人全部卡死超过「零进展」窗口 → 重建池，且重建次数有界
+    /// （线程泄漏被限制在 `size`/窗口，而不是每文件一条）。
+    #[test]
+    fn metadata_pool_rebuilds_after_total_stall() {
+        let hang: MetaFetch = Arc::new(|_p: &Path| {
+            std::thread::sleep(Duration::from_secs(5));
+            Err(std::io::Error::other("hung"))
+        });
+        let mut pool = MetaPool::new(2, hang);
+        let timeout = Duration::from_millis(20); // stall 窗口 = 250ms
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < deadline {
+            let _ = pool.dispatch(Path::new("/hung/x"), timeout);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let spawned = pool.spawned.load(Ordering::Relaxed);
+        assert!(spawned > 2, "卡死超过窗口后应重建（spawn={spawned}）");
+        // 1200ms / 250ms ≈ 4 次重建 × 2 条 = 8，留一倍余量
+        assert!(spawned <= 16, "线程泄漏必须有界，实际 spawn={spawned}");
     }
 }
