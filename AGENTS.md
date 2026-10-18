@@ -67,13 +67,13 @@ npx vitest run
 
 | 目标 | 用例 | 耗时 | 性质 |
 |------|:----:|:----:|------|
-| `--lib` | 557 | 7.2s | 单元测试（拆分后：566 − `lark-gate` 的 9 个搬到成员 crate） |
-| `lark-gate`（成员 crate） | 9 | 0.00s | **准入判定策略**（仅私聊 + 白名单，唯一防线；`-p lark-gate` 单独跑） |
-| `lark-bot`（成员 crate） | 3 | 0.00s | bot 纯函数（回复截断等；`-p lark-bot`） |
+| `--lib` | 633（+2 ignored） | 5.6s | 单元测试（拆分后：`lark-gate` 的 9 条搬到成员 crate；2026-10-18 实测） |
+| `lark-gate`（成员 crate） | 13 | 0.00s | **准入判定策略**（仅私聊 + 白名单，唯一防线；`-p lark-gate` 单独跑） |
+| `lark-bot`（成员 crate） | 84 | 0.00s | bot 纯函数（回复截断等；`-p lark-bot`） |
 | `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（**最慢**，但无网络依赖） |
 | `auto_ui_e2e` | 15 | 0.5s | mock runtime（`MockRuntime`） |
 | `ipc_test` | 8 | 5.3s | mock runtime |
-| `integration` | 9 | 1.8s | 真实模块（db/indexer/scanner/search） |
+| `integration` | 10 | 1.8s | 真实模块（db/indexer/scanner/search） |
 | `webapi_http` | 冒烟 | ~0s | 真 axum + 真 Wry app（`harness = false`，主线程） |
 | `focus_mode_test` / `merge_scope_test` / `test_pagination` | 4 / 4 / 2 | <0.1s | 纯逻辑 |
 | `doc_rs_poc` / `doc_rs_poc_fallback` | 1 + 1 | 0.00s | POC 证据 |

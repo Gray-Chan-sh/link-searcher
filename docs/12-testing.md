@@ -24,25 +24,35 @@ mock E2E，于是"测试目标编译不过 / 断言过时"可以长期无人发�
 `AGENTS.md`「测试门禁」。
 
 ```bash
-cargo test --manifest-path src-tauri/Cargo.toml   # 全部 15 个目标，约 3 分钟（编译占大头）
+cargo test --manifest-path src-tauri/Cargo.toml --workspace   # 全部目标，约 3 分钟（编译占大头）
 npx tsc --noEmit && npx vitest run
 ```
 
-当前全部目标与实测耗时（本机基线）：
+> ⚠️ **必须带 `--workspace`**：`src-tauri` 既是 workspace 根**又是** package，此时不带参数的
+> `cargo test` **只作用于主程序包** → 成员 crate `lark-gate`（飞书机器人准入判定：仅私聊 + 白名单，
+> **唯一防线**）与 `lark-bot` 会**静默不跑**。
+
+当前全部目标与实测耗时（本机基线，2026-10-18）：
 
 | 目标 | 用例 | 耗时 | 性质 |
 |------|:----:|:----:|------|
-| `--lib` | 542 | 7.2s | 单元 |
+| `--lib` | 633（+2 ignored） | 5.6s | 单元 |
+| `lark-gate`（成员 crate） | 13 | 0.00s | 准入判定策略（**唯一防线**） |
+| `lark-bot`（成员 crate） | 84 | 0.01s | bot 纯函数（回复截断等） |
 | `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（最慢，无网络依赖） |
 | `auto_ui_e2e` | 15 | 0.5s | mock runtime |
 | `ipc_test` | 8 | 5.3s | mock runtime |
-| `integration` | 9 | 1.8s | 真实模块 |
+| `integration` | 10 | 1.8s | 真实模块 |
 | `webapi_http` | 冒烟 | ~0s | 真 axum + 真 Wry（`harness = false`） |
 | `focus_mode_test` / `merge_scope_test` / `test_pagination` | 4 / 4 / 2 | <0.1s | 纯逻辑 |
 | `doc_rs_poc` / `doc_rs_poc_fallback` | 1 + 1 | 0.00s | POC |
 | `test_pdf_inspector_ab` | 2（+1 ignored） | 0.02s | A/B |
 | `funasr_smoke` / `ocr_eval` / `test_pdf_ocr` | 3 / 1 / 2 | ≤0.25s | **缺样例或 env 时快速早退**，样例存在时才真跑 |
 | `remote_embed_adaptive_bench` | 0（1 ignored） | 0.00s | 手动基准，需 `--ignored` + 网络 |
+
+> 换机器/全新克隆后先跑一次 `npm run sidecar`：`bundle.externalBin` 在**编译期**就要求
+> `src-tauri/binaries/lark-bot-<triple>.exe` 存在，缺了连 `cargo test` 都会以
+> `failed to run custom build command` 失败（看起来像代码坏了，其实是缺文件）。
 
 ### Web API HTTP 冒烟测试（`webapi_http.rs`）
 
