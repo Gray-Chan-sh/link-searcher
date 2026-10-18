@@ -1,7 +1,8 @@
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
-import type { BackupStatus, BackupSnapshot, DeadDir } from '../../api/backup'
+import type { BackupStatus, BackupSnapshot, DeadDir, DirMapping, RemapPreview, RestorePlan } from '../../api/backup'
 import { Section, formatSize } from './SettingsFields'
+import { RestoreMappingDialog } from './RestoreMappingDialog'
 
 interface BackupTabProps {
   backupStatus: BackupStatus | null
@@ -10,6 +11,7 @@ interface BackupTabProps {
   exportPassword: string
   deadDirs: DeadDir[]
   backups: BackupSnapshot[]
+  restorePlan: RestorePlan | null
   onBackupNow: () => void
   onExportBackup: (snapId?: string) => void
   onRestoreZip: () => void
@@ -17,9 +19,12 @@ interface BackupTabProps {
   onRemoveDir: (dirId: string) => void
   onDeleteBackup: (snapId: string) => void
   onExportPasswordChange: (password: string) => void
+  onPreviewMapping: (dirId: string, newPath: string) => Promise<RemapPreview>
+  onApplyMapping: (mappings: DirMapping[], acknowledgeRisks: boolean) => void
+  onCancelRestore: () => void
 }
 
-export function BackupTab({ backupStatus, backingUp, exporting, exportPassword, deadDirs, backups, onBackupNow, onExportBackup, onRestoreZip, onRemapDir, onRemoveDir, onDeleteBackup, onExportPasswordChange }: BackupTabProps) {
+export function BackupTab({ backupStatus, backingUp, exporting, exportPassword, deadDirs, backups, restorePlan, onBackupNow, onExportBackup, onRestoreZip, onRemapDir, onRemoveDir, onDeleteBackup, onExportPasswordChange, onPreviewMapping, onApplyMapping, onCancelRestore }: BackupTabProps) {
   const { t } = useI18n()
 
   return (
@@ -130,6 +135,15 @@ export function BackupTab({ backupStatus, backingUp, exporting, exportPassword, 
             ))}
           </div>
         </Section>
+      )}
+
+      {restorePlan && (
+        <RestoreMappingDialog
+          plan={restorePlan}
+          onPreview={onPreviewMapping}
+          onApply={onApplyMapping}
+          onCancel={onCancelRestore}
+        />
       )}
     </div>
   )

@@ -1,3 +1,42 @@
+## 2026-10-18（第四十六轮）：恢复前先指定目录 —— plan/apply 两步恢复，杜绝「按旧路径误扫」
+
+> 起因：旧恢复是「整库覆盖 → 重启 → 按备份里记录的**原机绝对路径**扫描」。若该路径在当前
+> 机器上**存在但内容不是用户所需**，它不会被列为死目录，而是被当成一次正常的目录变更扫描 ——
+> 原记录被删除/覆盖，且**没有任何确认**。本轮把「目录落位」提前到覆盖之前。
+
+**后端（`commands/backup.rs`）**
+
+- **新增两条命令 + 一条预检**，注册进 `lib.rs`：
+  - `plan_restore(source, path, password)`：只读阶段。`zip` 只解压到 `temp/ls_restore_plan_<uuid>`；
+    `snapshot` 直接用快照目录。读备份 `data.db` 的 `dir_config` + 每个目录的追踪文件数，
+    返回目录清单 + 暂存 token。**不触碰 live 数据**。
+  - `apply_restore(token, mappings, acknowledgeRisks)`：执行阶段。校验映射（必须覆盖备份里的
+    **每个**目录、无重复项、`remap` 目标存在、目标路径归一化后互不重复、嵌套根需确认）→
+    把 `remap` 先写进 staging 副本的 `dir_config` → 灌回 live → 对 `remove` 的目录做
+    `purge_dir_data` + 删 `dir_config` 行 → 重启。
+  - `preview_remap(token, dirId, newPath)`：只读预检，逐条 `stat` 统计「命中 / 大小一致」，
+    **不读内容**；追踪记录取自备份库（token 为空时退化为 live 库，供死目录补救复用）。
+- `restore_from_dir` 增加 `mappings: &[DirMapping]` 参数：复制 `data.db` 到 staging 后、开
+  `Backup` 之前，先把 `remap` 写进 staging 副本 —— 于是重启后 `startup_scan` 用的就是新路径。
+- 把 `restore_from_zip` 里的解压逻辑（Zip Slip 预检 + 条目数/解压量双上限）抽成
+  `extract_backup_zip()`，供 `plan_restore` 与 `restore_from_zip` 共用，避免两处安全逻辑分叉。
+- 暂存目录用带 `Drop` 的 `Staging` 保管，`apply`/失败/cancel 时自动清理；`plan_restore` 开头
+  扫掉上次残留的 `ls_restore_plan_*`。
+- `restore_backup` / `restore_from_zip` 保留为「不做映射的快捷恢复」（传 `&[]`）。
+- 新增 3 条单测：映射覆盖/重复/未知校验、重复目标 + 嵌套确认 + 非目录拒绝、从伪造备份库
+  读目录与预检命中统计。
+
+**前端**
+
+- `api/backup.ts` 新增 `planRestore` / `previewRemap` / `applyRestore` 与
+  `RestorePlan` / `BackupDirInfo` / `RemapPreview` / `DirMapping` 类型。
+- 新增 `components/settings/RestoreMappingDialog.tsx`：为备份里每个目录选「保留原路径 /
+  指定目录 / 移除」，`指定目录`即时显示命中率；命中率偏低需勾选确认；未全部决定不允许开始。
+- `useSettingsBackup` 改为两步：选 zip → `plan_restore` → 无目录则直接恢复，否则开对话框 →
+  `apply_restore`。恢复为**桌面端专属**，Web 端显式提示（此前 Web 的恢复入口是服务端 501 桩）。
+  `BackupTab` / `Settings.tsx` 透传新 props。i18n 四语新增 18 个 key。
+- `docs/09-backup-migrate.md` 恢复章节改写为两步流程 + 落位方式表。
+
 ## 2026-10-18（第四十五轮）：文档补齐 —— 用户手册与开发文档跟上已上线行为
 
 > 纯文档修改（无代码变更）。复核 P1～P4 时，按"用户可见 / 架构可见"两个标准逐篇盘点

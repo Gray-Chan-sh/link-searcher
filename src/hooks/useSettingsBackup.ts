@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useI18n } from '../i18n'
-import { confirm, alert, openDirectory, askSavePath, openFile } from '../utils/platform'
-import { triggerBackup, getBackupStatus, exportBackup, listBackups, restoreFromZip, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, type BackupStatus, type BackupSnapshot, type DeadDir } from '../api/backup'
+import { confirm, alert, openDirectory, askSavePath, openFile, isTauri } from '../utils/platform'
+import { triggerBackup, getBackupStatus, exportBackup, listBackups, deleteBackup, getDeadDirs, remapDir, removeDirWithFiles, planRestore, applyRestore, previewRemap, type BackupStatus, type BackupSnapshot, type DeadDir, type RestorePlan, type RemapPreview, type DirMapping } from '../api/backup'
 
 export function useSettingsBackup() {
   const { t } = useI18n()
@@ -11,6 +11,7 @@ export function useSettingsBackup() {
   const [exportPassword, setExportPassword] = useState('')
   const [deadDirs, setDeadDirs] = useState<DeadDir[]>([])
   const [backups, setBackups] = useState<BackupSnapshot[]>([])
+  const [restorePlan, setRestorePlan] = useState<RestorePlan | null>(null)
 
   useEffect(() => {
     getBackupStatus().then(setBackupStatus).catch(() => {})
@@ -54,19 +55,51 @@ export function useSettingsBackup() {
   }
 
   const handleRestoreZip = async () => {
+    // 恢复是**桌面端专属**：需要重启进程、访问本地文件系统与临时目录；Web 端只读 API
+    // 无恢复实现（服务端为 501）。这里显式拦截，避免 Web 端走到「无 HTTP 映射」的报错。
+    if (!isTauri()) {
+      await alert(t('backup_restore_desktop_only'), t('backup_restore'))
+      return
+    }
     // 必须选 **zip 文件**：后端 `File::open(zip_path)` 只接受文件路径。
     // 此前弹的是"选目录"对话框，传目录进去必然 "failed to open zip"。
     const zipPath = await openFile([{ name: 'Zip', extensions: ['zip'] }])
     if (!zipPath) return
+    try {
+      // 两步恢复第一步：只读列出备份里的监控目录（zip 只解压到临时目录，不碰当前数据）。
+      const plan = await planRestore('zip', zipPath)
+      if (plan.dirs.length === 0) {
+        const confirmed = await confirm(t('backup_restore_confirm'), t('backup_restore'))
+        if (!confirmed) return
+        await applyRestore(plan.token, [], false)
+        await alert(t('backup_restore_done'), t('backup_restore'))
+        return
+      }
+      setRestorePlan(plan)
+    } catch (e) {
+      await alert(e instanceof Error ? e.message : String(e), t('backup_restore_failed'))
+    }
+  }
+
+  const handlePreviewMapping = async (dirId: string, newPath: string): Promise<RemapPreview> => {
+    if (!restorePlan) throw new Error('no restore plan')
+    return previewRemap(dirId, newPath, restorePlan.token)
+  }
+
+  const handleApplyMapping = async (mappings: DirMapping[], acknowledgeRisks: boolean) => {
+    if (!restorePlan) return
     const confirmed = await confirm(t('backup_restore_confirm'), t('backup_restore'))
     if (!confirmed) return
     try {
-      await restoreFromZip(zipPath)
+      await applyRestore(restorePlan.token, mappings, acknowledgeRisks)
+      setRestorePlan(null)
       await alert(t('backup_restore_done'), t('backup_restore'))
     } catch (e) {
       await alert(e instanceof Error ? e.message : String(e), t('backup_restore_failed'))
     }
   }
+
+  const handleCancelRestore = () => setRestorePlan(null)
 
   const handleRemapDir = async (dirId: string) => {
     const newPath = await openDirectory()
@@ -109,8 +142,9 @@ export function useSettingsBackup() {
 
   return {
     backupStatus, backingUp, exporting, exportPassword, setExportPassword,
-    deadDirs, backups,
+    deadDirs, backups, restorePlan,
     handleBackupNow, handleExportBackup, handleRestoreZip,
+    handlePreviewMapping, handleApplyMapping, handleCancelRestore,
     handleRemapDir, handleRemoveDir, handleDeleteBackup,
   }
 }

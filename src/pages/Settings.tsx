@@ -273,6 +273,7 @@ export default function Settings() {
             exportPassword={backup.exportPassword}
             deadDirs={backup.deadDirs}
             backups={backup.backups}
+            restorePlan={backup.restorePlan}
             onBackupNow={backup.handleBackupNow}
             onExportBackup={backup.handleExportBackup}
             onRestoreZip={backup.handleRestoreZip}
@@ -280,6 +281,9 @@ export default function Settings() {
             onRemoveDir={backup.handleRemoveDir}
             onDeleteBackup={backup.handleDeleteBackup}
             onExportPasswordChange={backup.setExportPassword}
+            onPreviewMapping={backup.handlePreviewMapping}
+            onApplyMapping={backup.handleApplyMapping}
+            onCancelRestore={backup.handleCancelRestore}
           />
         )}
 

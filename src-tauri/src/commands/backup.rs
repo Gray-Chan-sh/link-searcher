@@ -63,6 +63,179 @@ pub struct DeadDirInfo {
     pub file_count: u64,
 }
 
+// ───────────────────────── 恢复前目录映射（R1）─────────────────────────
+//
+// 旧流程是「先整库覆盖，重启后按备份里记录的**原机绝对路径**去扫」。若某条路径在当前
+// 机器上存在、但内容并非用户所需，就会被当成一次正常的目录变更扫描 —— 原记录被删除/
+// 覆盖，而且没有任何确认。R1 把「目录落位」提前到覆盖之前：plan 只读列出备份里的目录，
+// 用户逐个指定本机路径 → apply 时先把新路径写进 **staging 的 data.db 副本**，再灌回
+// live，重启后就不会再用旧路径扫描。
+
+/// 恢复前，为备份里每个监控目录指定的落位方式。
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct DirMapping {
+    pub dir_id: String,
+    /// "remap"（改指本机目录）| "keep"（保留原路径）| "remove"（不要该目录，连同清理其数据）
+    pub action: String,
+    pub new_path: Option<String>,
+}
+
+/// 某备份目录映射到候选本机路径时的命中情况（只读预检）。
+#[derive(Serialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RemapPreview {
+    pub tracked: u64,
+    pub found: u64,
+    pub size_match: u64,
+    pub sample_missing: Vec<String>,
+}
+
+/// 备份里记录的一个监控目录。
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupDirInfo {
+    pub id: String,
+    pub original_path: String,
+    pub alias: Option<String>,
+    pub file_count: u64,
+}
+
+/// `plan_restore` 的结果：恢复前的目录清单 + 暂存 token（供 `apply_restore` 复用）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestorePlan {
+    pub token: String,
+    pub dirs: Vec<BackupDirInfo>,
+    pub has_chat_history: bool,
+    pub has_config: bool,
+}
+
+/// plan→apply 之间暂存、已解压/已就位的备份源目录。
+struct Staging {
+    /// 含 `data.db` / `.ls-index` / `chat_history.json` 的源目录。
+    src: std::path::PathBuf,
+    /// 需要清理的临时目录（zip 解压产物）；快照恢复时为 None（不删用户的备份目录）。
+    tmp: Option<std::path::PathBuf>,
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        if let Some(t) = &self.tmp {
+            let _ = std::fs::remove_dir_all(t);
+        }
+    }
+}
+
+fn staging_registry()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, Staging>> {
+    static S: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Staging>>,
+    > = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// 清掉上次未走完 plan/apply 的临时解压目录（进程重启后注册表为空，任何同名前缀目录
+/// 都是残留）。best-effort，失败只记日志。
+fn cleanup_stale_staging() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("ls_restore_plan_")
+            && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+            log::info!("[RESTORE] 清理残留的 plan 暂存目录: {name}");
+        }
+    }
+}
+
+/// 打开备份目录里的 `data.db`（只读）并读出全部监控目录 + 每个目录的追踪文件数。
+fn read_backup_dirs(db_path: &std::path::Path) -> Result<Vec<BackupDirInfo>, String> {
+    if !db_path.is_file() {
+        return Err(format!("备份缺少 data.db: {db_path:?}"));
+    }
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("读取备份数据库失败: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT id, path, alias FROM dir_config ORDER BY path")
+        .map_err(|e| format!("读取备份目录失败: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|e| format!("读取备份目录失败: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, path, alias) = row.map_err(|e| format!("读取备份目录失败: {e}"))?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_tracking WHERE dir_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        out.push(BackupDirInfo {
+            id,
+            original_path: path,
+            alias,
+            file_count: count.max(0) as u64,
+        });
+    }
+    Ok(out)
+}
+
+/// 计算某个目录映射到 `new_path` 时的命中率（每个追踪记录一次 stat，**不读内容**）。
+fn compute_remap_preview(
+    conn: &Connection,
+    dir_id: &str,
+    new_path: &std::path::Path,
+) -> Result<RemapPreview, String> {
+    const SAMPLE: usize = 10;
+    let mut stmt = conn
+        .prepare("SELECT path, size FROM file_tracking WHERE dir_id=?1")
+        .map_err(|e| format!("读取追踪记录失败: {e}"))?;
+    let rows = stmt
+        .query_map([dir_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| format!("读取追踪记录失败: {e}"))?;
+    let mut p = RemapPreview::default();
+    for row in rows {
+        let (rel, size) = row.map_err(|e| format!("读取追踪记录失败: {e}"))?;
+        p.tracked += 1;
+        match std::fs::metadata(new_path.join(&rel)) {
+            Ok(m) if m.is_file() => {
+                p.found += 1;
+                if m.len() == size.max(0) as u64 {
+                    p.size_match += 1;
+                }
+            }
+            _ => {
+                if p.sample_missing.len() < SAMPLE {
+                    p.sample_missing.push(rel);
+                }
+            }
+        }
+    }
+    Ok(p)
+}
+
+/// 路径归一化 key：统一分隔符、去尾部分隔符、盘符/整串小写——
+/// 仅用于「是否指向同一个目录」的判重，不写回数据库。
+fn path_key(p: &str) -> String {
+    let norm = crate::scanner::helpers::normalize_os_path(p);
+    let mut s = norm.trim_end_matches('/').to_string();
+    if s.is_empty() {
+        s = "/".to_string();
+    }
+    s.to_lowercase()
+}
+
 /// 增量备份链：`{data_dir}/backups/.chain.json`，记录全部快照 + 已存储的
 /// 不可变 segment 文件集合（segment_store，链内去重，硬链接共享一份物理副本）。
 #[derive(Serialize, Deserialize, Default)]
@@ -651,6 +824,7 @@ fn restore_from_dir(
     index_manager: &std::sync::Arc<std::sync::RwLock<IndexManager>>,
     indexer: &crate::indexer::IndexerService,
     db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    mappings: &[DirMapping],
 ) -> Result<(), String> {
     let index_src = src.join(INDEX_DIR_NAME);
     if index_src.is_dir() {
@@ -711,6 +885,30 @@ fn restore_from_dir(
             uuid::Uuid::new_v4().simple()
         ));
         std::fs::copy(&db_src, &staging).map_err(|e| format!("复制备份数据库失败: {e}"))?;
+
+        // R1：把用户指定的「重映射」先写进 staging 副本，再灌回 live —— 这样重启后
+        // `startup_scan` 用的就是新路径，不会再拿备份里的旧路径去扫。
+        // 只处理 remap（keep 不动、remove 在 apply_restore 里于恢复后清理）。
+        if !mappings.is_empty() {
+            let conn = Connection::open(&staging)
+                .map_err(|e| format!("打开备份数据库失败: {e}"))?;
+            let now = chrono::Utc::now().timestamp();
+            for m in mappings {
+                if m.action == "remap"
+                    && let Some(np) = m.new_path.as_deref()
+                    && !np.trim().is_empty()
+                {
+                    let normalized = crate::scanner::helpers::normalize_os_path(np);
+                    conn.execute(
+                        "UPDATE dir_config SET path=?1, updated_at=?2 WHERE id=?3",
+                        rusqlite::params![normalized, now, m.dir_id],
+                    )
+                    .map_err(|e| format!("改写备份目录 {np:?} 失败: {e}"))?;
+                }
+            }
+            drop(conn);
+        }
+
         let restore_result = (|| -> Result<(), String> {
             let src_conn = Connection::open(&staging)
                 .map_err(|e| format!("打开备份数据库失败: {e}"))?;
@@ -741,6 +939,81 @@ fn restore_from_dir(
     Ok(())
 }
 
+/// 解压备份 zip 到 `tmp`：先做条目预检（Zip Slip / 必须有 snapshot.json / 条目数上限），
+/// 再逐条目解压并施加解压量双上限（zip bomb 防护）。**不碰 live 数据**——失败由调用方
+/// 清理 `tmp`。`plan_restore` 与 `restore_from_zip` 共用此函数，避免两处安全逻辑分叉。
+fn extract_backup_zip(
+    zip_path: &str,
+    password: Option<&str>,
+    tmp: &std::path::Path,
+) -> Result<(), String> {
+    std::fs::create_dir_all(tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+    let file = std::fs::File::open(zip_path).map_err(|e| format!("failed to open zip: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip: {e}"))?;
+
+    // ── 预检：先只读清单（不解压），任何一项不过都在**落盘之前**失败 ──
+    let names: Vec<String> = archive.file_names().map(str::to_string).collect();
+    validate_backup_zip(&names)?;
+
+    // 解压量双上限（zip bomb 防护）：条目数已有上限（见 `validate_backup_zip`），
+    // 但单个条目仍可声称几 GB —— 而下面的 `read_to_end` 是**整段读进内存**再落盘，
+    // 一个几 KB 的恶意包足以把进程撑爆或写满磁盘。压缩比再离谱也越不过这两道。
+    const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB / 条目
+    const MAX_TOTAL_BYTES: u64 = 200 * 1024 * 1024 * 1024; // 200 GiB / 整包
+    let mut total_uncompressed: u64 = 0;
+
+    for i in 0..archive.len() {
+        let pw = password.unwrap_or("");
+        let mut entry = if pw.is_empty() {
+            archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?
+        } else {
+            archive
+                .by_index_decrypt(i, pw.as_bytes())
+                .map_err(|e| format!("zip entry {i} decrypt: {e}"))?
+        };
+        // `enclosed_name`：库官方的安全路径 API，会拒绝 RootDir/Prefix，
+        // 并保证 `..` 不逃出基准目录（预检已挡一次，这里是第二道防线）。
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(format!("备份包包含非法条目路径，已拒绝解压: {}", entry.name()));
+        };
+        let out = tmp.join(&rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)
+                .map_err(|e| format!("failed to create dir {out:?}: {e}"))?;
+        } else {
+            if let Some(parent) = out.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create parent {parent:?}: {e}"))?;
+            }
+            // 第一道：按条目**声明**的解压后大小拦（还没读任何字节）。
+            let declared = entry.size();
+            if declared > MAX_ENTRY_BYTES
+                || total_uncompressed.saturating_add(declared) > MAX_TOTAL_BYTES
+            {
+                return Err(format!(
+                    "备份包解压量异常（条目 {declared} 字节，累计 {}），已拒绝解压（疑似 zip bomb）",
+                    total_uncompressed.saturating_add(declared)
+                ));
+            }
+            total_uncompressed = total_uncompressed.saturating_add(declared);
+            // 第二道：声明量不可信 —— 实际读入时再用 `take` 兜一次上限。
+            use std::io::Read;
+            let mut data = Vec::new();
+            (&mut entry)
+                .take(MAX_ENTRY_BYTES.saturating_add(1))
+                .read_to_end(&mut data)
+                .map_err(|e| format!("failed to read {:?}: {e}", rel))?;
+            if data.len() as u64 > MAX_ENTRY_BYTES {
+                return Err("备份包条目过大，已拒绝解压（疑似 zip bomb）".to_string());
+            }
+            std::fs::write(&out, &data).map_err(|e| format!("failed to write {out:?}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn restore_from_zip(
     state: State<'_, AppState>,
@@ -768,78 +1041,12 @@ pub async fn restore_from_zip(
 
     let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&tmp).map_err(|e| format!("failed to create temp dir: {e}"))?;
-
-        let file = std::fs::File::open(&zip_path_in)
-            .map_err(|e| format!("failed to open zip: {e}"))?;
-        let mut archive = zip::ZipArchive::new(file)
-            .map_err(|e| format!("failed to read zip: {e}"))?;
-
-        // ── 预检：先只读清单（不解压），任何一项不过都在**落盘之前**失败 ──
-        let names: Vec<String> = archive.file_names().map(str::to_string).collect();
-        if let Err(e) = validate_backup_zip(&names) {
+        if let Err(e) = extract_backup_zip(&zip_path_in, password.as_deref(), &tmp) {
             let _ = std::fs::remove_dir_all(&tmp);
             return Err(e);
         }
-
-        // 解压量双上限（zip bomb 防护）：条目数已有上限（见 `validate_backup_zip`），
-        // 但单个条目仍可声称几 GB —— 而下面的 `read_to_end` 是**整段读进内存**再落盘，
-        // 一个几 KB 的恶意包足以把进程撑爆或写满磁盘。压缩比再离谱也越不过这两道。
-        const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GiB / 条目
-        const MAX_TOTAL_BYTES: u64 = 200 * 1024 * 1024 * 1024; // 200 GiB / 整包
-        let mut total_uncompressed: u64 = 0;
-
-        for i in 0..archive.len() {
-            let pw = password.as_deref().unwrap_or("");
-            let mut entry = if pw.is_empty() {
-                archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?
-            } else {
-                archive.by_index_decrypt(i, pw.as_bytes())
-                    .map_err(|e| format!("zip entry {i} decrypt: {e}"))?
-            };
-            // `enclosed_name`：库官方的安全路径 API，会拒绝 RootDir/Prefix，
-            // 并保证 `..` 不逃出基准目录（预检已挡一次，这里是第二道防线）。
-            let Some(rel) = entry.enclosed_name() else {
-                let _ = std::fs::remove_dir_all(&tmp);
-                return Err(format!("备份包包含非法条目路径，已拒绝解压: {}", entry.name()));
-            };
-            let out = tmp.join(&rel);
-            if entry.is_dir() {
-                std::fs::create_dir_all(&out)
-                    .map_err(|e| format!("failed to create dir {out:?}: {e}"))?;
-            } else {
-                if let Some(parent) = out.parent() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("failed to create parent {parent:?}: {e}"))?;
-                }
-                // 第一道：按条目**声明**的解压后大小拦（还没读任何字节）。
-                let declared = entry.size();
-                if declared > MAX_ENTRY_BYTES
-                    || total_uncompressed.saturating_add(declared) > MAX_TOTAL_BYTES
-                {
-                    let _ = std::fs::remove_dir_all(&tmp);
-                    return Err(format!(
-                        "备份包解压量异常（条目 {declared} 字节，累计 {}），已拒绝解压（疑似 zip bomb）",
-                        total_uncompressed.saturating_add(declared)
-                    ));
-                }
-                total_uncompressed = total_uncompressed.saturating_add(declared);
-                // 第二道：声明量不可信 —— 实际读入时再用 `take` 兜一次上限。
-                use std::io::Read;
-                let mut data = Vec::new();
-                (&mut entry)
-                    .take(MAX_ENTRY_BYTES.saturating_add(1))
-                    .read_to_end(&mut data)
-                    .map_err(|e| format!("failed to read {:?}: {e}", rel))?;
-                if data.len() as u64 > MAX_ENTRY_BYTES {
-                    let _ = std::fs::remove_dir_all(&tmp);
-                    return Err("备份包条目过大，已拒绝解压（疑似 zip bomb）".to_string());
-                }
-                std::fs::write(&out, &data)
-                    .map_err(|e| format!("failed to write {out:?}: {e}"))?;
-            }
-        }
-
-        let r = restore_from_dir(&tmp, &index_dir, &index_manager, &indexer, &db_pool);
+        // 快捷恢复：不做目录映射（用户指定的映射走 plan/apply）。
+        let r = restore_from_dir(&tmp, &index_dir, &index_manager, &indexer, &db_pool, &[]);
         let _ = std::fs::remove_dir_all(&tmp);
         r
     })
@@ -951,7 +1158,7 @@ pub async fn restore_backup(
     let is_restoring = state.is_restoring.clone();
 
     let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
-        restore_from_dir(&backup_dir, &index_dir, &index_manager, &indexer, &db_pool)
+        restore_from_dir(&backup_dir, &index_dir, &index_manager, &indexer, &db_pool, &[])
     })
     .await
     {
@@ -965,6 +1172,264 @@ pub async fn restore_backup(
     log::info!("restored backup: {backup_name}");
 
     let _ = app.emit("restore-completed", serde_json::json!({ "name": backup_name }));
+    app.restart()
+}
+
+/// 校验恢复映射：必须覆盖备份里的**每一个**目录；remap 目标必须存在且互不重复；
+/// 嵌套根视为风险，需要 `acknowledge_risks`。
+///
+/// 注：「内容不符」（命中率过低）由前端预检提示、用户勾选后置 `acknowledge_risks=true`，
+/// 后端不重复做全量 stat（成本按记录数增长，且前端已展示）。
+fn validate_mappings(
+    backup_dirs: &[BackupDirInfo],
+    mappings: &[DirMapping],
+    acknowledge_risks: bool,
+) -> Result<(), String> {
+    let known: std::collections::HashSet<&str> =
+        backup_dirs.iter().map(|d| d.id.as_str()).collect();
+
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for m in mappings {
+        if !known.contains(m.dir_id.as_str()) {
+            return Err(format!("映射包含备份中不存在的目录: {}", m.dir_id));
+        }
+        if !seen.insert(m.dir_id.as_str()) {
+            return Err(format!("目录出现重复映射: {}", m.dir_id));
+        }
+    }
+    for d in backup_dirs {
+        if !seen.contains(d.id.as_str()) {
+            return Err(format!(
+                "目录未指定处理方式（保留/重映射/移除）: {}",
+                d.original_path
+            ));
+        }
+    }
+
+    // remap：目标存在 + 归一化判重 + 嵌套风险。
+    let mut keys: Vec<(String, String)> = Vec::new();
+    for m in mappings {
+        if m.action != "remap" {
+            continue;
+        }
+        let np = m.new_path.as_deref().unwrap_or("").trim().to_string();
+        if np.is_empty() {
+            return Err("重映射缺少目标路径".to_string());
+        }
+        if !std::path::Path::new(&np).is_dir() {
+            return Err(format!("目标路径不存在或不是目录: {np}"));
+        }
+        keys.push((m.dir_id.clone(), path_key(&np)));
+    }
+    for i in 0..keys.len() {
+        for j in (i + 1)..keys.len() {
+            if keys[i].1 == keys[j].1 {
+                return Err(format!(
+                    "两个目录被映射到同一个本机目录（{} / {}），请改为不同目录",
+                    keys[i].0, keys[j].0
+                ));
+            }
+        }
+    }
+    if !acknowledge_risks {
+        for i in 0..keys.len() {
+            for j in 0..keys.len() {
+                if i != j && keys[j].1.starts_with(&format!("{}/", keys[i].1)) {
+                    return Err(format!(
+                        "目录存在嵌套（{} 位于 {} 之下），会重复索引；确认无误请勾选风险提示后重试",
+                        keys[j].0, keys[i].0
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 恢复前只读阶段：列出备份里的监控目录 + 暂存备份源，供用户在 `apply_restore`
+/// 里逐个指定落位。**不触碰 live 数据**（zip 只解压到临时目录）。
+#[tauri::command]
+pub async fn plan_restore(
+    state: State<'_, AppState>,
+    source: String,
+    path: String,
+    password: Option<String>,
+) -> Result<RestorePlan, String> {
+    cleanup_stale_staging();
+
+    let (src, tmp): (std::path::PathBuf, Option<std::path::PathBuf>) = match source.as_str() {
+        "zip" => {
+            if path.trim().is_empty() {
+                return Err("zip 路径不能为空".to_string());
+            }
+            let tmp = std::env::temp_dir()
+                .join(format!("ls_restore_plan_{}", uuid::Uuid::new_v4().simple()));
+            if let Err(e) = extract_backup_zip(&path, password.as_deref(), &tmp) {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e);
+            }
+            (tmp.clone(), Some(tmp))
+        }
+        "snapshot" => {
+            let dir = resolve_backup_dir(&state.data_dir.join("backups"), &path)?;
+            (dir, None)
+        }
+        other => return Err(format!("未知的备份来源类型: {other}")),
+    };
+
+    let dirs = match read_backup_dirs(&src.join("data.db")) {
+        Ok(d) => d,
+        Err(e) => {
+            if let Some(t) = &tmp {
+                let _ = std::fs::remove_dir_all(t);
+            }
+            return Err(e);
+        }
+    };
+
+    let plan = RestorePlan {
+        token: uuid::Uuid::new_v4().simple().to_string(),
+        dirs,
+        has_chat_history: src.join("chat_history.json").is_file(),
+        has_config: src.join("config.json").is_file(),
+    };
+
+    {
+        let mut reg = staging_registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.insert(plan.token.clone(), Staging { src, tmp });
+    }
+
+    Ok(plan)
+}
+
+/// 只读预检：某目录改指 `new_path` 时，有多少已索引文件能在该目录下对上（同名+同大小）。
+/// 成本 = 每个追踪记录一次 `stat`，**不读内容**；规模只与备份里该目录的记录数相关。
+///
+/// 追踪记录来自 **staging（备份）的 `data.db`**——备份里的 dir id 在 live 库里还不存在；
+/// 传 `token` 为空时退化为读 live 库（供恢复后「死目录补救」使用）。
+#[tauri::command]
+pub async fn preview_remap(
+    state: State<'_, AppState>,
+    token: Option<String>,
+    dir_id: String,
+    new_path: String,
+) -> Result<RemapPreview, String> {
+    if dir_id.trim().is_empty() || new_path.trim().is_empty() {
+        return Err("dir_id 和 new_path 不能为空".to_string());
+    }
+    let p = std::path::PathBuf::from(&new_path);
+    if !p.is_dir() {
+        return Err(format!("目标路径不存在或不是目录: {new_path}"));
+    }
+
+    // 取追踪记录来源：有 token → staging 的备份库（缺失即视为计划过期）；否则 live 库。
+    if let Some(t) = &token {
+        let src = {
+            let reg = staging_registry().lock().unwrap_or_else(|e| e.into_inner());
+            reg.get(t).map(|s| s.src.clone())
+        };
+        let Some(src) = src else {
+            return Err("恢复计划不存在或已过期，请重新选择备份".to_string());
+        };
+        let conn = Connection::open_with_flags(
+            src.join("data.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| format!("读取备份数据库失败: {e}"))?;
+        return compute_remap_preview(&conn, &dir_id, &p);
+    }
+
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    compute_remap_preview(&conn, &dir_id, &p)
+}
+
+/// 恢复执行阶段：校验映射（覆盖全部目录、路径互不重复、remap 目标存在）→ 把 remap
+/// 写进 staging 的 `data.db` → 灌回 live → 清理被 `remove` 的目录 → 重启。
+///
+/// 重启后 `startup_scan` 用的是用户指定的路径，不会再拿备份里的原机旧路径扫描。
+#[tauri::command]
+pub async fn apply_restore(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    token: String,
+    mappings: Vec<DirMapping>,
+    acknowledge_risks: bool,
+) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+
+    // 取出暂存（不在则说明 plan 未跑 / 已过期）。
+    let staging = {
+        let mut reg = staging_registry().lock().unwrap_or_else(|e| e.into_inner());
+        reg.remove(&token)
+    };
+    let Some(staging) = staging else {
+        return Err("恢复计划不存在或已过期，请重新选择备份".to_string());
+    };
+
+    // 从 staging 的 data.db 读出目录集合，据此校验映射。失败时 `staging` 在此 drop
+    // → 自动清理临时解压目录。
+    let backup_dirs = read_backup_dirs(&staging.src.join("data.db"))?;
+    validate_mappings(&backup_dirs, &mappings, acknowledge_risks)?;
+
+    if state
+        .is_restoring
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("正在恢复中，请稍候".to_string());
+    }
+
+    let index_dir = state.index_dir.clone();
+    let index_manager = state.index_manager.clone();
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    let is_restoring = state.is_restoring.clone();
+    let src = staging.src.clone();
+    let mappings_in = mappings.clone();
+    let remove_ids: Vec<String> = mappings
+        .iter()
+        .filter(|m| m.action == "remove")
+        .map(|m| m.dir_id.clone())
+        .collect();
+    let remove_count = remove_ids.len();
+
+    let result = match tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // 让临时目录的清理跟着这次恢复的结束走。
+        let _staging = staging;
+        restore_from_dir(
+            &src,
+            &index_dir,
+            &index_manager,
+            &indexer,
+            &db_pool,
+            &mappings_in,
+        )?;
+        // 恢复完成后，清理用户选择「移除」的目录：Tantivy 文档 + 追踪行 + 内容 + dir_config 行。
+        for id in &remove_ids {
+            indexer
+                .purge_dir_data(id, true)
+                .map_err(|e| format!("清理目录 {id} 失败: {e}"))?;
+            if let Ok(conn) = db_pool.get() {
+                let _ = crate::db::dir_config::remove_dir(&conn, id);
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => Err(format!("恢复任务异常: {e}")),
+    };
+    // 失败也必须复位（同 restore_backup）。
+    is_restoring.store(false, Ordering::SeqCst);
+    result?;
+
+    log::info!(
+        "applied restore via plan mapping ({} dirs, {} removed)",
+        mappings.len(),
+        remove_count
+    );
+    let _ = app.emit("restore-completed", serde_json::json!({ "name": "mapped" }));
     app.restart()
 }
 
@@ -1563,5 +2028,133 @@ mod tests {
         drop(state);
         let _ = std::fs::remove_dir_all(&base);
         unsafe { std::env::remove_var("LS_CONFIG_DIR") };
+    }
+
+    // ───────────────────────── R1：恢复前目录映射 ─────────────────────────
+
+    fn dir_info(id: &str, path: &str) -> BackupDirInfo {
+        BackupDirInfo {
+            id: id.to_string(),
+            original_path: path.to_string(),
+            alias: None,
+            file_count: 3,
+        }
+    }
+
+    fn mapping(id: &str, action: &str, new_path: Option<&str>) -> DirMapping {
+        DirMapping {
+            dir_id: id.to_string(),
+            action: action.to_string(),
+            new_path: new_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn validate_mappings_requires_full_coverage() {
+        let dirs = vec![dir_info("d1", "/old/a"), dir_info("d2", "/old/b")];
+        // 少一条 → 拒绝
+        let partial = vec![mapping("d1", "keep", None)];
+        assert!(validate_mappings(&dirs, &partial, false).is_err());
+
+        // 全给出且均为 keep → 通过
+        let full = vec![mapping("d1", "keep", None), mapping("d2", "remove", None)];
+        assert!(validate_mappings(&dirs, &full, false).is_ok());
+
+        // 多出未知目录 → 拒绝
+        let unknown = vec![
+            mapping("d1", "keep", None),
+            mapping("d2", "keep", None),
+            mapping("dX", "keep", None),
+        ];
+        assert!(validate_mappings(&dirs, &unknown, false).is_err());
+
+        // 同一目录两条映射 → 拒绝
+        let dup = vec![
+            mapping("d1", "keep", None),
+            mapping("d1", "remove", None),
+            mapping("d2", "keep", None),
+        ];
+        assert!(validate_mappings(&dirs, &dup, false).is_err());
+    }
+
+    #[test]
+    fn validate_mappings_rejects_duplicate_target_and_needs_ack_for_nesting() {
+        let base = std::env::temp_dir().join(format!("ls_mapv_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let a = base.join("a");
+        let a_sub = a.join("sub");
+        std::fs::create_dir_all(&a_sub).unwrap();
+
+        let dirs = vec![dir_info("d1", "/old/1"), dir_info("d2", "/old/2")];
+        let a_str = a.to_str().unwrap().to_string();
+
+        // 两个映射指向同一个目录 → 拒绝（归一化判重）
+        let same = vec![
+            mapping("d1", "remap", Some(&a_str)),
+            mapping("d2", "remap", Some(&a_str)),
+        ];
+        assert!(validate_mappings(&dirs, &same, true).is_err());
+
+        // 嵌套根：未确认 → 拒绝；确认后 → 通过
+        let nested = vec![
+            mapping("d1", "remap", Some(&a_str)),
+            mapping("d2", "remap", Some(a_sub.to_str().unwrap())),
+        ];
+        assert!(validate_mappings(&dirs, &nested, false).is_err());
+        assert!(validate_mappings(&dirs, &nested, true).is_ok());
+
+        // remap 目标不是目录 → 拒绝
+        let missing = vec![
+            mapping("d1", "remap", Some(base.join("nope").to_str().unwrap())),
+            mapping("d2", "keep", None),
+        ];
+        assert!(validate_mappings(&dirs, &missing, true).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn read_backup_dirs_and_preview_use_snapshot_db() {
+        let base = std::env::temp_dir().join(format!("ls_plandb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // 伪造一个备份 db：dir_config + file_tracking（read_backup_dirs 只读这些列）
+        let db = base.join("data.db");
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE dir_config (id TEXT, path TEXT, alias TEXT);
+                 CREATE TABLE file_tracking (dir_id TEXT, path TEXT, size INTEGER);
+                 INSERT INTO dir_config VALUES ('d1','/old/docs','Docs');
+                 INSERT INTO file_tracking VALUES ('d1','keep.txt',5);
+                 INSERT INTO file_tracking VALUES ('d1','gone.txt',3);",
+            )
+            .unwrap();
+        }
+
+        let dirs = read_backup_dirs(&db).unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].id, "d1");
+        assert_eq!(dirs[0].original_path, "/old/docs");
+        assert_eq!(dirs[0].alias.as_deref(), Some("Docs"));
+        assert_eq!(dirs[0].file_count, 2);
+
+        // 候选目录里只放 keep.txt（同名+同大小）→ found=1, size_match=1, 缺 gone.txt
+        let cand = base.join("cand");
+        std::fs::create_dir_all(&cand).unwrap();
+        std::fs::write(cand.join("keep.txt"), b"hello").unwrap();
+
+        let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let p = compute_remap_preview(&conn, "d1", &cand).unwrap();
+        assert_eq!(p.tracked, 2);
+        assert_eq!(p.found, 1);
+        assert_eq!(p.size_match, 1);
+        assert_eq!(p.sample_missing, vec!["gone.txt".to_string()]);
+
+        // 缺失 data.db → 明确报错（不 panic）
+        assert!(read_backup_dirs(&base.join("nope.db")).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
