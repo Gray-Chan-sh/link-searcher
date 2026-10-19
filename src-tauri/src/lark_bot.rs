@@ -1,24 +1,27 @@
 //! 飞书 bot 的**生命周期**（`docs/LARK_BOT.md` §5.4 的 C3 —— 文档里标为"唯一必做"）。
 //!
 //! 由 GUI 拉起 bot（`docs/LARK_BOT.md` §5.1「最优形态：GUI 拉起 bot sidecar」），
-//! 应用退出时把它收掉。三条设计要点：
+//! 应用退出时把它收掉。四条设计要点：
 //!
 //! 1. **可执行文件按"与主程序同目录"解析**（`current_exe()` 的旁边）。
 //!    开发下 `cargo` 已把两个 bin 都放进 `target/debug/`，所以**无需** `externalBin`
 //!    就能跑 —— 这很重要：`externalBin` 要求 `<name>-<target-triple>` 文件存在，
 //!    配置了却没准备文件会**直接打断 `tauri dev`**。打包时再补那一步。
-//! 2. **退出时 kill bot 即可**，不需要给它发信号：bot 持有 lark-cli 的 stdin 管道，
-//!    bot 一死该管道即 EOF，lark-cli 会**优雅退出**（它自己的提示就说了 "close stdin"）。
-//!    这条路已实测：kill bot 后 lark-cli 消费者退出、**bus daemon 存活**。
+//! 2. **停机一律"先递指令、再等、最后才杀"**（§十二）：bot 持有 lark-cli 的 stdin 管道，
+//!    它一死该管道即 EOF，lark-cli 会**优雅退出**（它自己的提示就说了 "close stdin"）。
+//!    但"应用优雅退出"这一条要借 bot 的最后几秒给飞书发「正在下线」→ 递 `shutdown`；
+//!    "改设置重拉"则要**安静**（用户不该收到通知）→ 递 `stop`。超时兜底才 `kill`。
 //! 3. **不主动停 bus daemon**（按决策"留着复用"）：它是跨 app 单例，杀掉既有订阅泄漏风险，
 //!    又会迫使下次启动重连。留着它，下次 bot 起来直接复用。
+//! 4. **所有"动 bot 进程"的操作走同一把锁**（[`OPS`]）：优雅停机要等几秒，这期间
+//!    [`BOT`] 槽是空的 —— 看门狗若正好醒来会**再拉起一个**（两个 bot 同时在线、重复回答）。
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // W5：`lark-bot` 是 **console 子系统**程序，而 GUI 进程没有控制台 —— Windows 会为它
 // **新建一个控制台窗口**（用户看到黑框一闪）。`CREATE_NO_WINDOW` 让子进程无窗口运行。
@@ -31,6 +34,35 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 已拉起的 bot 子进程。`None` ＝ 没在跑。
 static BOT: Mutex<Option<Child>> = Mutex::new(None);
+
+/// 应用发给 bot 的控制指令（经它的 **stdin** 写一行；bot 侧解析见 `lark-bot/src/notify.rs`）。
+///
+/// ⚠️ 这两条字符串与 `lark-bot` crate 里的常量**必须逐字一致**（那边是独立 crate，
+/// 不能共享常量）：改一处就得改两处。
+/// 静默退出：改设置 / 配置热重载后的重启用它 —— 用户不该因为改了个开关就收到"下线"通知。
+const CMD_STOP: &str = "stop";
+/// 优雅退出：bot **先向飞书发「正在下线」**再退出（应用正在退出，§十二）。
+const CMD_SHUTDOWN: &str = "shutdown";
+
+/// 优雅停机的等待上限：bot 要在这几秒里读完绑定列表（自身 2s 上限）、发完通知
+/// （单条 5s 上限、多私聊并发）、写下待办清单 —— 取 8s 是"两个上限之和 + 余量"。
+/// 正常一轮约 1–2s（读完列表 + 发一条消息），所以用户几乎感觉不到。
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(8);
+/// 静默停机的等待上限：不发消息，只等进程收尾（正常几十毫秒）。
+const STOP_GRACE: Duration = Duration::from_secs(2);
+
+/// 串行化**所有"动 bot 进程"的操作**（拉起 / 停机 / 看门狗）。
+///
+/// 为什么必须有：优雅停机要等几秒才结束，而这期间 [`BOT`] 槽是 `None` ——
+/// 看门狗（30s 一跳）若正好此时醒来，会判定"没在跑"并**再拉起一个**，
+/// 于是两个 bot 同时在线、重复回答。改成"先递指令再等"之后才出现这个窗口
+/// （以前的 `kill()` 是瞬时的，看不出来）。2026-10-19 立此门。
+static OPS: Mutex<()> = Mutex::new(());
+
+/// 取 [`OPS`]（中毒也照用：这把锁保护的只是"顺序"，没有必须保持一致的不变量）。
+fn ops() -> std::sync::MutexGuard<'static, ()> {
+    OPS.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// bot 的可执行文件名（与主程序同目录）。
 fn bot_file_name() -> &'static str {
@@ -89,6 +121,12 @@ fn lark_cli_path() -> Option<PathBuf> {
 /// 配置来源在 C1 从 DB `lark_bot_enabled` 改为 `config.json` —— 后者是唯一
 /// 真相来源，重启进程/重启 bot 都读同一处（见 `docs/LARK_BOT.md` §5.6）。
 pub fn spawn_if_enabled() {
+    let _g = ops();
+    spawn_locked();
+}
+
+/// [`spawn_if_enabled`] 的实体：**调用方必须已持 [`OPS`]**。
+fn spawn_locked() {
     let enabled = crate::config::lark_integration().enabled;
     if !enabled {
         log::info!("[LARK-BOT] 未启用（integrations.lark.enabled = false），不拉起");
@@ -137,6 +175,17 @@ pub fn spawn_if_enabled() {
     // 所以由应用解析好路径、经 `LS_FFMPEG` 注入（找不到就不注入，bot 会退回"按文件发"）。
     if let Some(ff) = crate::extractor::audio::ffmpeg_binary() {
         cmd.env("LS_FFMPEG", &ff);
+    }
+
+    // ── data 目录也归应用侧（§十二）─────────────────────────────────────────
+    // bot 的「下线/上线」通知要在 data_dir 里记一份待办清单（谁该收到上线通知）。
+    // 不把"默认值推导"复刻到 bot：`config.json` 里的 `data_dir` **可能是空串**
+    // （真值由 `load_config` 在内存里补），只有应用这边能给出**最终**路径。
+    let data_dir = crate::config::load_config().data_dir;
+    if data_dir.as_os_str().is_empty() {
+        log::warn!("[LARK-BOT] data_dir 为空 → 不注入 LS_DATA_DIR（下线/上线通知将无法配对）");
+    } else {
+        cmd.env("LS_DATA_DIR", &data_dir);
     }
 
     match cmd.spawn() {
@@ -196,30 +245,75 @@ fn bot_line_level(line: &str, is_err: bool) -> log::Level {
     }
 }
 
-/// 收掉 bot（应用退出时调用）。
+/// 收掉 bot（应用**优雅退出**时调用）。
+///
+/// 递给它 `shutdown`：bot 会在退出前给"有会话绑定的私聊"发一条「⚠️ Link-Searcher 正在下线」
+/// 并记下这批私聊，供**下次上线**补发「已重新上线」（§十二，配对出现）。等它自己退，
+/// 最多 [`SHUTDOWN_GRACE`]；超时才强杀。
 ///
 /// **只 kill bot，不去动 lark-cli 的 bus daemon** —— 见模块注释第 2、3 点。
 pub fn shutdown() {
-    let mut slot = BOT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(mut child) = slot.take() {
-        match child.kill() {
-            Ok(()) => log::info!("[LARK-BOT] 已停止（pid={}）", child.id()),
-            Err(e) => log::warn!("[LARK-BOT] 停止失败：{e}"),
-        }
-        let _ = child.wait();
-    }
+    let _g = ops();
+    stop_locked(CMD_SHUTDOWN, SHUTDOWN_GRACE);
 }
 
-/// 重启 bot：**先停再按当前配置拉起**。
+/// 停掉 bot：**先递一条控制指令**，等它自己收尾，超时才强杀。
+///
+/// 调用方必须已持 [`OPS`]。
+fn stop_locked(command: &str, grace: Duration) {
+    let mut slot = BOT.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(mut child) = slot.take() else {
+        return;
+    };
+    let pid = child.id();
+
+    // ① 递指令。写失败无所谓（它可能已经自己退了）。
+    //    **刻意不关 stdin**：一关就是 EOF，而"关 stdin"是 lark-cli 的停机契约，
+    //    与"给 bot 递指令"是两件事 —— bot 只看指令行（EOF 对它什么都不做）。
+    match child.stdin.as_mut() {
+        Some(stdin) => {
+            let _ = stdin.write_all(format!("{command}\n").as_bytes());
+            let _ = stdin.flush();
+        }
+        // 拿不到 stdin（不该发生：拉起时就是 `Stdio::piped()`）→ 只能等它自己走
+        None => log::warn!("[LARK-BOT] bot 的 stdin 不可用（无法递「{command}」）"),
+    }
+
+    // ② 等它自己退：优雅路径要在这几秒里发完通知。
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                log::warn!("[LARK-BOT] 递「{command}」后 {grace:?} 内仍未退出 → 强制结束（pid={pid}）");
+                let _ = child.kill();
+                break;
+            }
+            Err(e) => {
+                log::warn!("[LARK-BOT] 等待退出失败：{e}");
+                break;
+            }
+        }
+    }
+    let _ = child.wait();
+    log::info!("[LARK-BOT] 已停止（pid={pid}，指令={command}）");
+}
+
+/// 重启 bot：**先静默停掉（`stop`，不发通知）再按当前配置拉起**。
 ///
 /// 为什么需要它：策略是 bot **启动时读一次**的（`GET /api/integrations/lark`），
 /// 之后不会自己发现 `config.json` 变了。所以"改设置即生效"与"手改文件热重载"
 /// 两条路都汇到这里。
 ///
-/// 未启用时等价于 [`shutdown`] —— 这一点很重要：关掉开关必须**真的停掉**在跑的旧 bot。
+/// 用 `stop` 而不是 [`shutdown`] 是刻意的：改设置/热重载**不该打扰用户**
+/// —— 机器人马上又会回来，发一条"正在下线"只会让人以为坏了（§十二）。
+///
+/// 未启用时等价于"静默停掉" —— 这一点很重要：关掉开关必须**真的停掉**在跑的旧 bot。
 pub fn restart() {
-    shutdown();
-    spawn_if_enabled();
+    let _g = ops();
+    stop_locked(CMD_STOP, STOP_GRACE);
+    spawn_locked();
 }
 
 /// 看门狗停机标志：应用**退出**时置位，看门狗不再拉起（[`stop_watchdog`]）。
@@ -236,6 +330,9 @@ static WATCHDOG_STOP: AtomicBool = AtomicBool::new(false);
 ///
 /// 不变量：**只做"拉起"，从不 kill** —— 正在跑的 bot 由 `is_running()` 判定后直接跳过，
 /// 与设置页的 `restart()` 不冲突。
+///
+/// ⚠️ 判定与拉起都必须在 [`OPS`] 之下：优雅停机期间 [`BOT`] 槽是空的（要等几秒），
+/// 不加锁就会在这几秒里**再拉起一个 bot**（见 [`OPS`] 的注释）。
 pub fn spawn_watchdog() {
     std::thread::spawn(move || {
         let mut failures: u32 = 0;
@@ -248,15 +345,23 @@ pub fn spawn_watchdog() {
                 failures = 0;
                 continue;
             }
-            if is_running() {
-                failures = 0;
-                continue;
+            {
+                let _g = ops();
+                // 等锁期间应用可能已经开始退出：拿到锁后**再看一眼**标志，
+                // 否则会在退出途中拉起一个"刚起来就被收掉"的 bot。
+                if WATCHDOG_STOP.load(Ordering::Acquire) {
+                    return;
+                }
+                if is_running() {
+                    failures = 0;
+                    continue;
+                }
+                log::warn!(
+                    "[LARK-BOT] 看门狗：机器人未在运行 → 重新拉起（第 {} 次）",
+                    failures + 1
+                );
+                spawn_locked();
             }
-            log::warn!(
-                "[LARK-BOT] 看门狗：机器人未在运行 → 重新拉起（第 {} 次）",
-                failures + 1
-            );
-            spawn_if_enabled();
             failures = failures.saturating_add(1);
         }
     });
@@ -297,9 +402,22 @@ pub fn is_running() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{bot_line_level, watchdog_delay};
+    use super::{bot_line_level, stop_locked, watchdog_delay, CMD_STOP, OPS};
     use log::Level;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
+
+    /// 停机在"没有在跑的 bot"时必须是**无操作**：立刻返回、不 panic、不卡住。
+    /// 这条路很常见 —— 未启用时的 `restart()`、还没拉起时的 `shutdown()` 都走它。
+    #[test]
+    fn stop_without_a_running_bot_is_a_no_op() {
+        let _g = OPS.lock().unwrap_or_else(|e| e.into_inner());
+        let started = Instant::now();
+        stop_locked(CMD_STOP, Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "空槽必须立刻返回（不能白等 grace 时间）"
+        );
+    }
 
     /// 看门狗退避：正常 30s；连续失败翻倍，300s 封顶（且不因计数过大溢出）。
     #[test]

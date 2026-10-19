@@ -65,6 +65,7 @@ mod card;
 mod commands;
 mod media;
 mod menu;
+mod notify;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -176,6 +177,16 @@ fn main() {
     let http = Arc::new(Http::new(base.clone(), token));
     log::info!("[bot] webapi = {base}");
 
+    // ── 1b. 应用侧控制通道（§十二）─────────────────────────────────────────
+    // 应用经**我们的 stdin** 发一行指令：`shutdown` = 发「正在下线」再退（应用正在退出），
+    // `stop` = 静默退（改设置 / 配置热重载后重拉）。
+    // 放在这里（而不是等长连接就绪）是刻意的：应用只等几秒就强杀，中间那 20s 的设置重试
+    // 窗口里也得能响应停机。发通知要读一次绑定列表 → 现在就把取数口给它。
+    notify::spawn_control({
+        let http = Arc::clone(&http);
+        move || http.bound_chats()
+    });
+
     // ── 2. 策略（§7.1 ⑤；默认关，必须显式开启）─────────────────────────────
     // 由 GUI 拉起时，webapi 的 bind 可能还在异步进行 → 重试一小会儿再判定失败。
     let cfg = match http.load_gate_config_with_retry(Duration::from_secs(20)) {
@@ -212,6 +223,14 @@ fn main() {
         std::process::exit(5);
     }
     log::info!("[bot] 长连接就绪，开始消费事件");
+
+    // ── 3a. 生命周期通知的"上线"半边（§十二）──────────────────────────────
+    // 上次是**优雅退出**（我们发过「正在下线」）→ 现在补一条「已重新上线」给同一批私聊；
+    // 顺带预热"见过消息的私聊"缓存。后台线程：它要调 lark-cli（秒级），不能挡住消费。
+    notify::spawn_startup({
+        let http = Arc::clone(&http);
+        move || http.bound_chats()
+    });
 
     // ── 3b. 卡片回调：**第二个消费者**（D）──────────────────────────────────
     // 实测（§8.4）：本地多消费者**是允许的** —— "同一 app 只能有一条 bus 连接"指**上游**（daemon→飞书）。
@@ -323,6 +342,10 @@ fn handle_line(line: &str, http: &Http, gate_cfg: &LarkGateConfig) -> Result<(),
         }
         GateVerdict::Pass => {}
     }
+
+    // 有真实会话的私聊 → 记下来当"下线通知"的收件人（§十二）。
+    // 应用退出时可能已经连不上 webapi，这份缓存是那时的唯一来源。
+    notify::remember_chat(&ev.chat_id);
 
     // 去重（§8：键是 message_id，不是 event_id）
     let seen = http.post("/api/lark/seen", &json!({ "message_id": ev.message_id }))?;
@@ -2706,6 +2729,15 @@ impl Http {
     }
     fn put(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
         self.call("PUT", path, Some(body))
+    }
+
+    /// 已绑定的私聊 `chat_id` 列表（`GET /api/lark/bindings`）—— 生命周期通知的收件人。
+    ///
+    /// 只在"应用还在跑"时可用：优雅退出路径上 webapi **可能已经停了**，
+    /// 所以调用方要接受失败（退回 [`notify::cached_chats`]，见 `notify::collect_targets`）。
+    fn bound_chats(&self) -> Result<Vec<String>, String> {
+        let v = self.get("/api/lark/bindings")?;
+        Ok(notify::parse_bound_chats(&v))
     }
 
     /// 发一个 **SSE** 请求并逐行回调；回调返回 `Ok(false)` 表示下游已拿到要的内容、可以停止读取。
