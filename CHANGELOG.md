@@ -34,6 +34,16 @@
 - 仓库换行符**无问题**：`git ls-files --eol` 为 `i/lf w/crlf`（仓库里存的是 LF，仅 Windows 工作区因
   `core.autocrlf=true` 呈现 CRLF），故**不**新增 `.gitattributes`。
 
+**打包验证（Linux）**
+
+- `npm run tauri build --bundles deb,appimage` 实测通过：`.deb` 44 MB（含 `usr/bin/lark-bot` sidecar
+  与 `.desktop`）、`AppImage` 113 MB；AppImage 直接运行正常（窗口渲染、启动扫描 5 文件 0 错误、
+  `[HEAL] DB(5) 与 Tantivy(5) 一致`）。
+- **AppImage 在墙内会卡死**：bundler 需从 GitHub 现下 `AppRun-x86_64` / `linuxdeploy-x86_64.AppImage` /
+  `linuxdeploy-plugin-{gtk,appimage}`，直连被重置且**无超时**（表现为长时间无输出）。官方变量
+  `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://gh-proxy.com` 可解；README「构建」段与
+  `setup-dev.sh` 收尾提示已写明。`.deb` 不依赖这些工具。
+
 ## 2026-10-19（第五十三轮）：生命周期通知 —— 优雅退出发「正在下线」，下次上线配对补发「已重新上线」
 
 > 需求："飞书中能不能感知程序在线状态？要像 Hermes 那样 —— 退出时提示

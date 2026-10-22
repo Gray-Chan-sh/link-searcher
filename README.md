@@ -257,6 +257,12 @@ npm run tauri build
 - **Windows** → `.msi` / `.exe`（NSIS）
 - **Linux** → `.deb` / `.AppImage`
 
+> **Linux 打 AppImage 需要 bundler 工具**（`AppRun` / `linuxdeploy` / 插件），Tauri 会从 GitHub 现下；国内网络会**卡在下载**（表现为长时间无输出，最后 `Connection reset by peer`）。设镜像即可：
+> ```bash
+> TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://gh-proxy.com npm run tauri build
+> ```
+> `.deb` 不需要这些工具，不受影响。
+
 > **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE-large（~1.2GB）/FunASR（~850MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等）：PaddleOCR / FunASR 走 GitHub Releases 加速镜像链（ghfast.top → gh-proxy.com → GitHub 直连兜底），BGE-large 走 hf-mirror.com（ModelScope 兜底）。可跳过、可稍后在设置页「依赖中心」补装。
 
 ---
