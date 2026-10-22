@@ -1163,6 +1163,21 @@ pub async fn backfill_audio_timeline(
                 Ok(()) => {
                     ok += 1;
                     log::info!("[AUDIO-TL] 完成 {rel_path} ({}/{total})", i + 1);
+                    // 文本变了、**md5 没变**（同一份文件重新转写）：`index_file` 里
+                    // `clear_stale_embeddings` 只在 md5 变化时才清向量，这里抓不到
+                    // → 旧向量仍按"占位文本/旧转写"参与语义排序。显式作废，交给
+                    // 向量回填任务重建（代价远小于重跑 ASR）。
+                    if let Ok(conn) = db_pool.get()
+                        && let Ok(Some(rec)) = tracker::get_file_by_id(&conn, file_id)
+                        && let Some(md5) = rec.md5.as_deref()
+                    {
+                        if let Err(e) = conn.execute("DELETE FROM doc_embeddings WHERE md5 = ?1", [md5]) {
+                            log::warn!("[AUDIO-TL] 作废 doc 向量失败 {md5}: {e}");
+                        }
+                        if let Err(e) = crate::db::tracker::delete_chunk_embeddings(&conn, md5) {
+                            log::warn!("[AUDIO-TL] 作废 chunk 向量失败 {md5}: {e}");
+                        }
+                    }
                 }
                 Err(e) => {
                     failed += 1;
