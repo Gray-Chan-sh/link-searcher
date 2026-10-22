@@ -76,6 +76,7 @@ fn create_engine(lang: &str) -> Result<windows::Media::Ocr::OcrEngine, String> {
     })
 }
 
+#[cfg(target_os = "windows")]
 /// Windows OCR `MaxImageDimension` ≈ 4096; resize if either axis exceeds this.
 const WIN_OCR_MAX_DIM: u32 = 4000;
 

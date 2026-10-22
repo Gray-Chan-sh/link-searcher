@@ -30,7 +30,7 @@
 
 **说明**
 
-- 应用 Rust 代码零改动（本轮只动前端类型标注、构建脚本与文档）。
+- 应用 Rust 代码**仅**动了下面两处 Linux 编译告警（无行为变化）。
 - 仓库换行符**无问题**：`git ls-files --eol` 为 `i/lf w/crlf`（仓库里存的是 LF，仅 Windows 工作区因
   `core.autocrlf=true` 呈现 CRLF），故**不**新增 `.gitattributes`。
 
@@ -43,6 +43,17 @@
   `linuxdeploy-plugin-{gtk,appimage}`，直连被重置且**无超时**（表现为长时间无输出）。官方变量
   `TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://gh-proxy.com` 可解；README「构建」段与
   `setup-dev.sh` 收尾提示已写明。`.deb` 不依赖这些工具。
+
+**Linux 编译告警（2 处，非阻塞但属噪声）**
+
+- `src/lib.rs`：原来是 `let mut builder` + `#[cfg(debug_assertions)] { builder = builder.plugin(…) }`，
+  而唯一的可变赋值就在那个 debug-only 分支里 → **release 下必报 `unused_mut`**（`debug_assertions` 关闭）。
+  改为 `#[cfg(debug_assertions)] let builder = builder.plugin(tauri_plugin_mcp::init());` 遮蔽绑定，
+  两种 profile 都不再需要 `mut`，debug 行为不变。
+- `src/extractor/windows_ocr.rs`：`WIN_OCR_MAX_DIM` 只被 `#[cfg(target_os = "windows")]` 的
+  `resize_for_ocr` 使用 → 非 Windows 下报 dead_code。给常量本身加同款 `cfg`。
+- 验证：Linux 虚拟机 `cargo check`（debug）与 `cargo check --release` **均 0 warning**；
+  Windows `cargo check` 0 warning。
 
 ## 2026-10-19（第五十三轮）：生命周期通知 —— 优雅退出发「正在下线」，下次上线配对补发「已重新上线」
 

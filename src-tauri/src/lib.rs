@@ -83,7 +83,7 @@ pub fn run_with_data_dir(data_dir: std::path::PathBuf) {
 fn run_with_config(app_config: config::AppConfig) {
     let data_dir = app_config.data_dir.clone();
 
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Must precede other plugins so the second instance exits before they initialize.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
@@ -97,11 +97,11 @@ fn run_with_config(app_config: config::AppConfig) {
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .manage(app_config);
 
-    // MCP plugin — debug-only AI agent integration
+    // MCP plugin — debug-only AI agent integration.
+    // Shadow the binding instead of `let mut builder` + reassignment: release builds would
+    // otherwise carry an `unused_mut` warning (the only mutation is this debug-only branch).
     #[cfg(debug_assertions)]
-    {
-        builder = builder.plugin(tauri_plugin_mcp::init());
-    }
+    let builder = builder.plugin(tauri_plugin_mcp::init());
 
     let result = builder.invoke_handler(tauri::generate_handler![
             search,
