@@ -114,6 +114,7 @@ const MAPPINGS: Record<string, Mapping> = {
       load_page_window: (d.load_page_window as number) ?? 0,
       load_ocr_permits: (d.load_ocr_permits as number) ?? 0,
       load_doc_permits: (d.load_doc_permits as number) ?? 0,
+      pending_audio_timeline: (d.pending_audio_timeline as number) ?? 0,
     };
   }},
   check_index_health: { method: 'GET', path: '/api/index/health' },
@@ -133,6 +134,12 @@ const MAPPINGS: Record<string, Mapping> = {
   get_index_errors: { method: 'GET', path: '/api/index/errors' },
   check_index_integrity: { method: 'GET', path: '/api/index/integrity' },
   backfill_embeddings: { method: 'POST', path: '/api/index/backfill-embeddings' },
+  // 分批回填音频时间轴：服务端读 body 的 `limit`（snake 无需转换）
+  backfill_audio_timeline: (a) => ({
+    method: 'POST',
+    path: '/api/index/audio-timeline',
+    body: { limit: a.limit ?? null },
+  }),
   backfill_chunk_embeddings: { method: 'POST', path: '/api/index/backfill-chunk-embeddings' },
   check_embedding_consistency: { method: 'GET', path: '/api/index/embedding-consistency' },
   rebuild_embeddings: { method: 'POST', path: '/api/index/rebuild-embeddings' },

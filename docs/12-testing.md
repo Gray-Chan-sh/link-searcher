@@ -36,7 +36,7 @@ npx tsc --noEmit && npx vitest run
 
 | 目标 | 用例 | 耗时 | 性质 |
 |------|:----:|:----:|------|
-| `--lib` | 672（+2 ignored） | 4.5s | 单元 |
+| `--lib` | 675（+2 ignored） | 8.3s | 单元 |
 | `lark-gate`（成员 crate） | 13 | 0.00s | 准入判定策略（**唯一防线**） |
 | `lark-bot`（成员 crate） | 84 | 0.01s | bot 纯函数（回复截断等） |
 | `ai_chat_stream_wire` | 15 | 39.7s | mock SSE 网关（最慢，无网络依赖） |

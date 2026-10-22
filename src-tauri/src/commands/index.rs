@@ -60,6 +60,8 @@ pub struct IndexStatus {
     pub load_page_window: usize,
     pub load_ocr_permits: usize,
     pub load_doc_permits: usize,
+    /// 待回填时间轴的音频数（同内容只算一次）。0 = 无需回填。
+    pub pending_audio_timeline: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -142,6 +144,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         running_tasks: crate::state::running_task_ids(),
         briefs: crate::state::task_brief_snapshot(),
         task_progress: crate::state::task_progress_snapshot(),
+        pending_audio_timeline: pending_audio_timeline_count(&conn),
     })
 }
 
@@ -1059,6 +1062,129 @@ pub(crate) fn ensure_content_row(
     Ok(())
 }
 
+/// 音频扩展名集合（SQL `IN (...)` 片段，纯常量、无注入面）。
+const AUDIO_EXTS_SQL: &str = "'mp3','wav','m4a','aac','flac','ogg','opus','wma'";
+
+/// 待回填时间轴的音频数：**同内容（md5）只算一次**。
+///
+/// 判据是 `audio_timeline IS NULL` —— 老音频（v12 及更早索引的）都为 NULL；
+/// 本次改动后新索引的音频一定有值（除非确实无人声）。
+pub(crate) fn pending_audio_timeline_count(conn: &rusqlite::Connection) -> u64 {
+    let sql = format!(
+        "SELECT COUNT(DISTINCT ft.md5)
+         FROM file_tracking ft
+         JOIN content_index ci ON ci.md5 = ft.md5
+         WHERE ft.status = 'active'
+           AND ft.indexed = 1
+           AND lower(coalesce(ft.file_ext, '')) IN ({AUDIO_EXTS_SQL})
+           AND ci.audio_timeline IS NULL"
+    );
+    conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
+#[derive(Serialize, Clone)]
+pub struct AudioTimelineReport {
+    pub processed: usize,
+    pub ok: usize,
+    pub failed: usize,
+    /// 本批结束后仍待回填的音频数（0 = 完成）。
+    pub remaining: u64,
+}
+
+/// 为**已索引但没有时间轴**的老音频补时间轴（分批，供 UI 循环调用）。
+///
+/// 为什么必须强制重提取：`index_file` 命中 md5 去重就直接复用旧正文，
+/// 旧正文没有时间轴 —— 不跳过去重就永远补不出来（`index_file_forced`）。
+///
+/// 成本 ≈ 音频总时长 ÷ 4~6（ASR 实测倍率）+ 分离模型额外一遍。所以默认一批只做
+/// 3 个、由前端循环驱动并随时可停，而不是一次跑到底。
+#[tauri::command]
+pub async fn backfill_audio_timeline(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<AudioTimelineReport, String> {
+    let limit = limit.unwrap_or(3).clamp(1, 50);
+    let indexer = state.indexer.clone();
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let _guard = crate::state::TaskGuard::new("audio-timeline");
+        let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+        let sql = format!(
+            "SELECT ft.id, ft.dir_id, ft.path
+             FROM file_tracking ft
+             JOIN content_index ci ON ci.md5 = ft.md5
+             WHERE ft.status = 'active'
+               AND ft.indexed = 1
+               AND lower(coalesce(ft.file_ext, '')) IN ({AUDIO_EXTS_SQL})
+               AND ci.audio_timeline IS NULL
+             GROUP BY ft.md5
+             ORDER BY ft.mtime
+             LIMIT ?1"
+        );
+        let candidates: Vec<(String, String, String)> = {
+            let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
+            let rows = stmt
+                .query_map(rusqlite::params![limit as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .map_err(|e| format!("db query error: {e}"))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| format!("{e}"))?
+        };
+        drop(conn);
+
+        let total = candidates.len();
+        let (mut ok, mut failed) = (0usize, 0usize);
+        for (i, (file_id, dir_id, rel_path)) in candidates.iter().enumerate() {
+            crate::state::set_task_progress(
+                "audio-timeline",
+                (i + 1) as u64,
+                total as u64,
+                rel_path.clone(),
+            );
+            // 目录配置 → 绝对路径（目录被移除的残留记录直接算失败）。
+            let full_path = db_pool
+                .get()
+                .ok()
+                .and_then(|c| db::dir_config::get_dir(&c, dir_id).ok().flatten())
+                .map(|d| crate::scanner::helpers::to_absolute(&d.path, rel_path));
+            let Some(full_path) = full_path else {
+                failed += 1;
+                log::warn!("[AUDIO-TL] {rel_path}: 目录配置缺失，跳过");
+                continue;
+            };
+            // 必须先删旧文档：同一 file_id 重复 add 会留重复 doc（与 reindex_files 同）。
+            if let Err(e) = indexer.delete_document_only(file_id) {
+                log::warn!("[AUDIO-TL] delete stale doc failed {file_id}: {e}");
+            }
+            match indexer.index_file_forced(file_id, &full_path, dir_id, None) {
+                Ok(()) => {
+                    ok += 1;
+                    log::info!("[AUDIO-TL] 完成 {rel_path} ({}/{total})", i + 1);
+                }
+                Err(e) => {
+                    failed += 1;
+                    log::warn!("[AUDIO-TL] {rel_path}: {e}");
+                }
+            }
+        }
+
+        let remaining = db_pool
+            .get()
+            .map(|c| pending_audio_timeline_count(&c))
+            .unwrap_or(0);
+        crate::state::push_task_brief(
+            "audio-timeline",
+            format!("音频时间轴回填：{ok} 成功 / {failed} 失败，剩余 {remaining}"),
+        );
+        Ok(AudioTimelineReport { processed: total, ok, failed, remaining })
+    })
+    .await
+    .map_err(|e| format!("task panicked: {e}"))?
+}
+
 #[tauri::command]
 pub async fn reindex_files(
     state: State<'_, AppState>,
@@ -1457,6 +1583,82 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn pending_audio_timeline_counts_only_audio_without_timeline() {
+        let conn = setup_conn();
+        // a.mp3 无时间轴（待回填）、b.mp3 有时间轴、c.mp3 与 a 同内容（只算一次）、
+        // d.pdf 非音频、e.mp3 还没索引完（indexed=0，不算）。
+        for (path, md5, indexed) in [
+            ("x/a.mp3", "same-md5", 1),
+            ("x/b.mp3", "with-timeline", 1),
+            ("x/c.mp3", "same-md5", 1),
+            ("x/d.pdf", "pdf-md5", 1),
+            ("x/e.mp3", "pending-md5", 0),
+        ] {
+            tracker::upsert_file(&conn, path, "d1", 0, 1, Some(md5)).unwrap();
+            let fid = tracker::get_file_by_path(&conn, path).unwrap().unwrap().id;
+            conn.execute(
+                "UPDATE file_tracking SET indexed = ?1 WHERE id = ?2",
+                rusqlite::params![indexed, fid],
+            )
+            .unwrap();
+        }
+
+        tracker::store_content(&conn, "same-md5", "同一段音频", false, None).unwrap();
+        tracker::store_content(&conn, "with-timeline", "有轴音频", false, None).unwrap();
+        tracker::store_audio_timeline(
+            &conn,
+            "with-timeline",
+            &[crate::transcript::AudioSegment {
+                start_ms: 0,
+                end_ms: 1_000,
+                speaker: Some(0),
+                text: "有轴音频".into(),
+            }],
+        )
+        .unwrap();
+        tracker::store_content(&conn, "pdf-md5", "合同", false, None).unwrap();
+        tracker::store_content(&conn, "pending-md5", "还没索引完", false, None).unwrap();
+
+        assert_eq!(
+            pending_audio_timeline_count(&conn),
+            1,
+            "只应统计「已索引 + 音频 + 无时间轴」的唯一内容（a/c 同 md5 只算一次）"
+        );
+
+        // 补上时间轴后归零
+        tracker::store_audio_timeline(
+            &conn,
+            "same-md5",
+            &[crate::transcript::AudioSegment {
+                start_ms: 0,
+                end_ms: 1_000,
+                speaker: None,
+                text: "同一段音频".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(pending_audio_timeline_count(&conn), 0);
+    }
+
+    #[test]
+    fn audio_timeline_roundtrips_through_db() {
+        let conn = setup_conn();
+        tracker::store_content(&conn, "m1", "第一句\n第二句", false, None).unwrap();
+        // 无时间轴 → 空
+        assert!(tracker::get_audio_timeline(&conn, "m1").is_empty());
+        let segs = vec![
+            crate::transcript::AudioSegment { start_ms: 0, end_ms: 2_000, speaker: Some(1), text: "第一句".into() },
+            crate::transcript::AudioSegment { start_ms: 2_000, end_ms: 4_000, speaker: None, text: "第二句".into() },
+        ];
+        tracker::store_audio_timeline(&conn, "m1", &segs).unwrap();
+        assert_eq!(tracker::get_audio_timeline(&conn, "m1"), segs);
+        // 重写正文（INSERT OR REPLACE）会把时间轴清成 NULL —— 这正是
+        // indexer 必须「先正文、后时间轴」的原因。
+        tracker::store_content(&conn, "m1", "重写了", false, None).unwrap();
+        assert!(tracker::get_audio_timeline(&conn, "m1").is_empty());
     }
 
     #[test]

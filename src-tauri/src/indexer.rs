@@ -183,6 +183,7 @@ impl IndexerService {
         job: &BatchJob,
         db: &Pool<SqliteConnectionManager>,
         engine_override: Option<crate::extractor::ocr::OcrEngineType>,
+        force: bool,
     ) -> Result<ExtractedData, (String, String)> {
         let file_name = job
             .file_path
@@ -262,12 +263,18 @@ impl IndexerService {
                 .map_err(|e| (job.file_id.clone(), format!("DB conn: {e}")))?;
 
             // Dedup – reuse previously extracted content for the same hash.
-            let dedup_hit = match crate::db::tracker::get_content(&conn, &hash) {
-                Ok(Some(t)) => Some(t),
-                Ok(None) => None,
-                Err(e) => {
-                    log::warn!("[INDEX] dedup query failed, falling back to extraction: {e}");
-                    None
+            // `force` skips this: 音频时间轴回填必须真的重跑提取器，否则命中去重
+            // 就直接复用旧正文（旧正文没有时间轴），永远补不出来。
+            let dedup_hit = if force {
+                None
+            } else {
+                match crate::db::tracker::get_content(&conn, &hash) {
+                    Ok(Some(t)) => Some(t),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log::warn!("[INDEX] dedup query failed, falling back to extraction: {e}");
+                        None
+                    }
                 }
             };
 
@@ -593,7 +600,7 @@ impl IndexerService {
                         let _doc_permit = crate::load::acquire_doc();
                         // 连接由 extract_and_index_single 内部按需短持有：这里不再
                         // 跨整个提取期占着池连接。
-                        Self::extract_and_index_single(job, &db, None)
+                        Self::extract_and_index_single(job, &db, None, false)
                     })
                     .collect()
             });
@@ -793,6 +800,31 @@ impl IndexerService {
         dir_id: &str,
         engine_override: Option<crate::extractor::ocr::OcrEngineType>,
     ) -> Result<()> {
+        self.index_file_inner(file_id, file_path, dir_id, engine_override, false)
+    }
+
+    /// 同 [`Self::index_file`]，但**跳过去重缓存**、强制重跑提取器。
+    ///
+    /// 仅用于「必须重新算一遍提取结果」的场景（音频时间轴回填）。普通重索引/重提取
+    /// 保持去重语义：同 md5 的内容早已提取过，重复跑一遍只会白烧 CPU。
+    pub fn index_file_forced(
+        &self,
+        file_id: &str,
+        file_path: &Path,
+        dir_id: &str,
+        engine_override: Option<crate::extractor::ocr::OcrEngineType>,
+    ) -> Result<()> {
+        self.index_file_inner(file_id, file_path, dir_id, engine_override, true)
+    }
+
+    fn index_file_inner(
+        &self,
+        file_id: &str,
+        file_path: &Path,
+        dir_id: &str,
+        engine_override: Option<crate::extractor::ocr::OcrEngineType>,
+        force: bool,
+    ) -> Result<()> {
         if self.cancel_scan.load(Ordering::Acquire) {
             log::info!("[INDEX] 跳过 {file_id}: 扫描已取消");
             return Ok(());
@@ -832,7 +864,7 @@ impl IndexerService {
 
         let result = (|| -> Result<()> {
             // 提取期不持有连接（见 `extract_and_index_single` 的文档）。
-            let data = Self::extract_and_index_single(&job, &self.db, engine_override)
+            let data = Self::extract_and_index_single(&job, &self.db, engine_override, force)
                 .map_err(|(_, e)| anyhow::anyhow!(e))?;
 
             {
@@ -1504,6 +1536,44 @@ mod tests {
         let c = svc.db.get().unwrap();
         let rec = crate::db::tracker::get_file_by_id(&c, &fid).unwrap().unwrap();
         assert_eq!(rec.indexed, 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `index_file_forced` 必须**跳过去重缓存**：音频时间轴回填就靠它。
+    ///
+    /// 用「把已有内容行改成 STALE」来证明差异：普通 `index_file` 命中 md5 去重后
+    /// 直接复用（STALE 原样保留），而 forced 会真的重跑提取器把正文写回来。
+    #[test]
+    fn forced_index_bypasses_dedup_cache() {
+        let (svc, fid, _dir) = setup();
+        let content = "forced extraction bypasses dedup cache";
+        let path = tmp_file("forced.txt", content);
+
+        svc.index_file(&fid, &path, "d1", None).unwrap();
+        let c = svc.db.get().unwrap();
+        let md5: String = c
+            .query_row("SELECT md5 FROM file_tracking WHERE id = ?1", [&fid], |r| r.get(0))
+            .unwrap();
+        c.execute("UPDATE content_index SET text_content = 'STALE' WHERE md5 = ?1", [&md5])
+            .unwrap();
+        drop(c);
+
+        // 普通重索引：命中去重 → 仍是 STALE（证明缓存确实生效）
+        svc.index_file(&fid, &path, "d1", None).unwrap();
+        assert_eq!(
+            crate::db::tracker::get_content(&svc.db.get().unwrap(), &md5).unwrap().unwrap(),
+            "STALE",
+            "普通 index_file 应命中去重"
+        );
+
+        // 强制重索引：跳过去重 → 正文被重新提取
+        svc.index_file_forced(&fid, &path, "d1", None).unwrap();
+        assert_eq!(
+            crate::db::tracker::get_content(&svc.db.get().unwrap(), &md5).unwrap().unwrap(),
+            content,
+            "index_file_forced 必须真的重跑提取器"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

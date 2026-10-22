@@ -1,3 +1,45 @@
+## 2026-10-23（第五十六轮）：老音频时间轴批量回填（分批 + 可中断 + 进度可见）
+
+> 背景：上一轮只让**新索引**的音频带时间轴；库里已有音频 `audio_timeline IS NULL`，
+> 预览/导出拿不到时间戳与说话人。本轮补上批量回填。
+
+**为什么必须「强制重提取」（`indexer.rs`）**
+
+- `index_file` 命中 md5 去重就直接复用 `content_index` 的旧正文 —— 旧正文没有时间轴，
+  **不跳过去重就永远补不出来**（回填会瞬间"成功"但什么都没变）。
+- 新增 `IndexerService::index_file_forced()`（内部 `index_file_inner(..., force: true)`）：
+  `extract_and_index_single` 在 `force` 时不查去重、真的重跑提取器。
+  普通扫描/重索引仍走原语义（去重照常生效），只有回填用 forced。
+- 顺带说明：`re_extract_file` / `reindex_files` 仍是去重语义（内容没变就不会重跑），
+  这是既有行为，本轮不动。
+
+**分批命令（`commands/index.rs`）**
+
+- `backfill_audio_timeline(limit)`：默认一批 **3** 个（单个音频可能要几分钟），
+  `clamp(1, 50)`；返回 `{processed, ok, failed, remaining}`，`remaining == 0` 即完成。
+- 候选：`status='active' AND indexed=1 AND ext ∈ 8 种音频 AND audio_timeline IS NULL`，
+  **按 md5 分组**（同内容只跑一次）；每个文件先 `delete_document_only` 再 forced 索引
+  （与 `reindex_files` 同：不先删会留重复 doc）。
+- 进度：`TaskGuard("audio-timeline")` + `set_task_progress`（当前文件/第几个）+ 结束
+  `push_task_brief`。**不做后端长跑**：由前端循环调用，随时可停。
+- `IndexStatus` 新增 `pending_audio_timeline`（唯一内容计数），Web `/api/index/status`
+  同步返回；Web 新增 `POST /api/index/audio-timeline`。
+
+**UI（索引状态页 → 维护工具）**
+
+- 当 `pending_audio_timeline > 0` 时出现「为音频补时间轴（剩余 N）」；点击后前端按批循环，
+  每批结束刷新并显示「已处理 X，剩余 Y」，运行中按钮变「停止回填」。
+- 完成/停止/失败都有结果条（与「补齐语义向量」同一处展示）。
+
+**测试**
+
+- `indexer::forced_index_bypasses_dedup_cache`：把内容行改成 `STALE` → 普通 `index_file`
+  仍是 STALE（去重生效），`index_file_forced` 把正文真正写回。
+- `pending_audio_timeline_counts_only_audio_without_timeline`：只数「已索引 + 音频 +
+  无时间轴」，同 md5 只算一次，非音频/未索引完不算；补上时间轴后归零。
+- `audio_timeline_roundtrips_through_db`：读写往返，并锁定「重写正文会把时间轴清成 NULL」
+  这条约束（indexer 必须先正文后时间轴）。
+
 ## 2026-10-22（第五十五轮）：音频转写「时间戳 + 说话人」可读输出（纯文本导出保持零污染）
 
 > 背景：此前音频只产出整段纯文本；FunASR 链路其实一直在算时间轴（VAD/diarization 段边界）

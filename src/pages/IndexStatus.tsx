@@ -1,8 +1,8 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, verifyIndexContent, reextractMissingContent, retryFailedFiles, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, backfillAudioTimeline, verifyIndexContent, reextractMissingContent, retryFailedFiles, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
@@ -55,6 +55,9 @@ export default function IndexStatus() {
   const [backfillingQuality, setBackfillingQuality] = useState(false)
   const [qualityBackfillMsg, setQualityBackfillMsg] = useState<string | null>(null)
   const [showTools, setShowTools] = useState(false)
+  const [audioTlMsg, setAudioTlMsg] = useState<string | null>(null)
+  const [audioTlRunning, setAudioTlRunning] = useState(false)
+  const audioTlStop = useRef(false)
 
   const loadEmbedConsistency = async () => {
     try {
@@ -155,6 +158,45 @@ export default function IndexStatus() {
       setScanError(e instanceof Error ? e.message : String(e))
     } finally {
       setRebuilding(false)
+    }
+  }
+
+  /** 分批给老音频补时间轴（每批 3 个，可随时停）。 */
+  const handleAudioTimeline = async () => {
+    if (audioTlRunning) {
+      audioTlStop.current = true
+      return
+    }
+    setAudioTlMsg(null)
+    audioTlStop.current = false
+    setAudioTlRunning(true)
+    let ok = 0
+    let failed = 0
+    let remaining = status?.pending_audio_timeline ?? 0
+    try {
+      while (!audioTlStop.current) {
+        const r = await backfillAudioTimeline(3)
+        ok += r.ok
+        failed += r.failed
+        remaining = r.remaining
+        setAudioTlMsg(
+          `已处理 ${ok + failed}，剩余 ${remaining}${failed > 0 ? `，${failed} 个失败` : ''}`,
+        )
+        await refresh()
+        if (r.remaining === 0 || r.processed === 0) break
+      }
+      if (audioTlStop.current) {
+        setAudioTlMsg(
+          `已停止：${ok} 成功${failed > 0 ? `，${failed} 失败` : ''}，剩余 ${remaining}`,
+        )
+      } else if (remaining === 0) {
+        setAudioTlMsg(`✓ 完成：${ok} 个音频已生成时间轴${failed > 0 ? `，${failed} 个失败` : ''}`)
+      }
+    } catch (e) {
+      setAudioTlMsg(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAudioTlRunning(false)
+      void refresh()
     }
   }
 
@@ -388,6 +430,12 @@ export default function IndexStatus() {
         </div>
       )}
 
+      {audioTlMsg && (
+        <div className="mb-4 px-4 py-3 text-sm text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg">
+          {audioTlMsg}
+        </div>
+      )}
+
       {loading && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <StatsCardSkeleton />
@@ -559,6 +607,19 @@ export default function IndexStatus() {
                   {taskActive('reextract') && <LoadingSpinner className="size-4" />}
                   ↻ 重提取缺失内容
                 </button>
+                {(status?.pending_audio_timeline ?? 0) > 0 || audioTlRunning ? (
+                  <button
+                    onClick={handleAudioTimeline}
+                    disabled={!audioTlRunning && (taskActive('audio-timeline') || status?.is_scanning)}
+                    title="为已索引但没有时间轴的老音频补『时间戳 + 说话人』（需要重新转写，单个文件可能要几分钟）"
+                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-900/20 border border-indigo-200 dark:border-indigo-800 rounded-lg hover:bg-indigo-100 dark:hover:bg-indigo-900/40 disabled:opacity-50 transition-colors"
+                  >
+                    {(audioTlRunning || taskActive('audio-timeline')) && <LoadingSpinner className="size-4" />}
+                    {audioTlRunning
+                      ? '停止回填'
+                      : `为音频补时间轴（剩余 ${status?.pending_audio_timeline ?? 0}）`}
+                  </button>
+                ) : null}
                 <button
                   onClick={handleVerify}
                   disabled={taskActive('verify') || status?.is_scanning}

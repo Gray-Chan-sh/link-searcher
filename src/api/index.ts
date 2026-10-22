@@ -37,10 +37,28 @@ export interface IndexStatus {
   load_page_window: number
   load_ocr_permits: number
   load_doc_permits: number
+  /** 待回填时间轴的音频数（同内容只算一次）；0 = 无需回填 */
+  pending_audio_timeline: number
 }
 
 export async function getIndexStatus(): Promise<IndexStatus> {
   return client.invoke<IndexStatus>('get_index_status')
+}
+
+export interface AudioTimelineReport {
+  processed: number
+  ok: number
+  failed: number
+  /** 本批结束后仍待回填的音频数（0 = 完成） */
+  remaining: number
+}
+
+/**
+ * 分批为老音频补时间轴（每批默认 3 个，单个文件可能要几分钟）。
+ * 调用方循环到 `remaining === 0`，期间可随时停止。
+ */
+export async function backfillAudioTimeline(limit?: number): Promise<AudioTimelineReport> {
+  return client.invoke<AudioTimelineReport>('backfill_audio_timeline', { limit })
 }
 
 export interface BackfillReport {

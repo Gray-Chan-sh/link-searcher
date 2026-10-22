@@ -26,6 +26,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/index/rebuild", post(rebuild_handler))
         .route("/api/index/reindex-batch", post(reindex_files_handler))
         .route("/api/index/reextract", post(reextract_handler))
+        .route("/api/index/audio-timeline", post(audio_timeline_handler))
         .route("/api/index/verify", post(verify_handler))
         .route("/api/index/retry-failed", post(retry_failed_handler))
         .route("/api/index/errors", get(errors_handler))
@@ -130,6 +131,7 @@ async fn index_status_handler(
     let is_scanning = app_state.is_scanning.load(Ordering::Relaxed);
     let is_rebuilding = app_state.is_rebuilding.load(Ordering::Relaxed);
     let load = crate::load::current_limits();
+    let pending_audio_timeline = crate::commands::index::pending_audio_timeline_count(&conn);
 
     Ok(Json(serde_json::json!({
         "total": total,
@@ -142,6 +144,7 @@ async fn index_status_handler(
         "load_page_window": load.page_window,
         "load_ocr_permits": load.ocr_permits,
         "load_doc_permits": load.doc_permits,
+        "pending_audio_timeline": pending_audio_timeline,
         "recent_errors": errors,
     })))
 }
@@ -325,6 +328,19 @@ async fn reindex_files_handler(
 struct LimitBody {
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// `POST /api/index/audio-timeline` —— 分批回填音频时间轴，返回本批报告
+/// （前端循环调用，`remaining == 0` 即完成）。
+async fn audio_timeline_handler(
+    State(state): State<ApiState>,
+    axum::Json(body): axum::Json<LimitBody>,
+) -> Result<Json<crate::commands::index::AudioTimelineReport>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::backfill_audio_timeline(app_state, body.limit)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
 }
 
 async fn reextract_handler(
