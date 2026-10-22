@@ -145,6 +145,8 @@ fn main() {
         "models/funasr/llm.int8.onnx",
         "models/funasr/embedding.int8.onnx",
         "models/funasr/Qwen3-0.6B/tokenizer.json",
+        "models/funasr/Qwen3-0.6B/vocab.json",
+        "models/funasr/Qwen3-0.6B/merges.txt",
     ]
     .iter()
     .all(|p| std::path::Path::new(p).is_file());

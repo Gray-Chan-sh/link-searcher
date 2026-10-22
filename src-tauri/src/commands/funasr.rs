@@ -126,8 +126,16 @@ fn download_inner(model_dir: &Path) -> FunasrInstallResult {
         tmp
     };
 
-    // Verify required files landed.
-    let ok = ["encoder_adaptor.int8.onnx", "llm.int8.onnx", "embedding.int8.onnx", "Qwen3-0.6B/tokenizer.json"]
+    // Verify required files landed. tokenizer.json / vocab.json / merges.txt 三者
+    // 缺一 recognizer 就初始化失败（见 extractor::audio::REQUIRED_FILES）。
+    let ok = [
+        "encoder_adaptor.int8.onnx",
+        "llm.int8.onnx",
+        "embedding.int8.onnx",
+        "Qwen3-0.6B/tokenizer.json",
+        "Qwen3-0.6B/vocab.json",
+        "Qwen3-0.6B/merges.txt",
+    ]
         .iter()
         .all(|f| extracted.join(f).is_file());
     if ok {

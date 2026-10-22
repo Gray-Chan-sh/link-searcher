@@ -393,19 +393,34 @@ fn rerank_sources(repo: &str) -> Vec<Source> {
     ]
 }
 
-/// FunASR-Nano (sherpa-onnx int8) — offline audio transcription (~850MB).
+/// FunASR-Nano (sherpa-onnx int8) — offline audio transcription (~855MB).
+///
+/// `Qwen3-0.6B` 需要 **三个**文件：`tokenizer.json`（HF tokenizers）+ `vocab.json`
+/// + `merges.txt`（sherpa-onnx 自己读词表/合并规则）。早期只发布了 tokenizer.json，
+/// 导致 recognizer 初始化失败（`vocab.json does not exist`）—— 缺失的两个从
+/// 上游 Qwen3-0.6B 取，作为独立 FileSpec 锁 SHA-256。
 fn funasr() -> DepDef {
     DepDef {
         id: "funasr",
         name: "FunASR 语音转写模型",
         recommended: true,
-        size_bytes: 850 * 1024 * 1024,
-        hint: "音频转文字（约 850MB）",
+        size_bytes: 855 * 1024 * 1024,
+        hint: "音频转文字（约 855MB）",
         files: &[
             FileSpec { remote: "funasr-encoder_adaptor.int8.onnx", local: "encoder_adaptor.int8.onnx", sha256: "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422" },
             FileSpec { remote: "funasr-llm.int8.onnx", local: "llm.int8.onnx", sha256: "dfbf9aa3be41bccc257587f151e15c63fbe1b549f2b517f5ccd5bdce3bf4322a" },
             FileSpec { remote: "funasr-embedding.int8.onnx", local: "embedding.int8.onnx", sha256: "95e61cd0c9c3b9543339a4cf973c95c116815e745ccc1e0285cbd81f76d18644" },
             FileSpec { remote: "funasr-tokenizer.json", local: "Qwen3-0.6B/tokenizer.json", sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4" },
+            FileSpec {
+                remote: "https://hf-mirror.com/Qwen/Qwen3-0.6B/resolve/main/vocab.json",
+                local: "Qwen3-0.6B/vocab.json",
+                sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            },
+            FileSpec {
+                remote: "https://hf-mirror.com/Qwen/Qwen3-0.6B/resolve/main/merges.txt",
+                local: "Qwen3-0.6B/merges.txt",
+                sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+            },
         ],
         sources: vec![Source {
             label: "GitHub Releases",

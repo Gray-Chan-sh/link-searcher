@@ -55,11 +55,17 @@ pub fn ffmpeg_binary() -> Option<PathBuf> {
 const MODEL_SUBDIR: &str = "models/funasr";
 const MODEL_ARCHIVE_URL: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2";
-const REQUIRED_FILES: [&str; 4] = [
+const REQUIRED_FILES: [&str; 6] = [
     "encoder_adaptor.int8.onnx",
     "llm.int8.onnx",
     "embedding.int8.onnx",
     "Qwen3-0.6B/tokenizer.json",
+    // sherpa-onnx 的 FunASR-Nano tokenizer 同时需要 vocab.json / merges.txt：
+    // 缺了它们 recognizer 会**初始化失败**（`vocab.json does not exist`），
+    // 于是整篇音频只剩一句"ASR 初始化失败"占位文本。2026-10-23 实测：
+    // 依赖中心旧版本只下了 tokenizer.json，用户库里 86 个音频全部因此失败。
+    "Qwen3-0.6B/vocab.json",
+    "Qwen3-0.6B/merges.txt",
 ];
 
 /// Speaker diarization model files (downloaded separately).
@@ -272,7 +278,7 @@ impl AudioExtractor {
                 .join("\n  ");
             return Ok(AudioTranscript {
                 text: format!(
-                    "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未下载]\n已探测:\n  {}\n请在设置页点击「下载 FunASR 模型」（约 850MB，GitHub 下载）\n",
+                    "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未就绪]\n已探测:\n  {}\n请在「设置 → 依赖中心」安装/修复 FunASR 模型（约 850MB）；\n若曾下载过，点一次「立即安装」即可补齐缺失文件（Qwen3-0.6B 下需 tokenizer.json + vocab.json + merges.txt）\n",
                     ext,
                     meta.len() as f64 / 1_048_576.0,
                     probed,
@@ -369,7 +375,13 @@ impl AudioExtractor {
             // Sanitize **per segment** so the timeline text and the joined body
             // stay byte-identical: `sanitize_text` is idempotent, so the outer
             // pass in `extract_text_with_meta` becomes a no-op for audio.
-            let text = crate::extractor::sanitize_text(&raw);
+            // 先截断复读退化（见 transcript::collapse_repetition），再按切片时长
+            // 兜底限字：复读会漂移到"几乎不成周期"的形态（实测 811 字里是
+            // "osuoro…" + "ususus…" 两截不同的循环），单靠 n-gram 压不住。
+            let text = cap_by_duration(
+                &crate::extractor::sanitize_text(&crate::transcript::collapse_repetition(&raw)),
+                slice.end - slice.start,
+            );
             if text.is_empty() {
                 continue;
             }
@@ -413,33 +425,71 @@ struct Slice {
     speaker: Option<i32>,
 }
 
+/// 一条说话人轮次（绝对采样点）。
+#[derive(Debug, Clone, Copy)]
+struct Turn {
+    start: usize,
+    end: usize,
+    speaker: i32,
+}
+
 /// 16kHz 采样点 → 毫秒。
 fn samples_to_ms(sample: usize) -> i64 {
     (sample as f64 * 1000.0 / 16000.0).round() as i64
 }
 
+/// 按切片时长给转写文本设上限（LLM-ASR 复读兜底）。
+///
+/// 正常语速上限约 12 字/秒（中文极快也就 8~9 字/秒），再加 30 字余量。
+/// 超过这个量只能是复读/幻觉 —— 实测一段 3.2 秒的切片吐了 277 字。
+fn cap_by_duration(text: &str, sample_count: usize) -> String {
+    let secs = sample_count as f64 / 16000.0;
+    let max_chars = (secs * 12.0).ceil() as usize + 30;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let mut out: String = chars[..max_chars].iter().collect();
+    out.push('…');
+    log::debug!(
+        "[ASR] capped degenerate segment: {} -> {} chars ({:.1}s)",
+        chars.len(),
+        max_chars,
+        secs
+    );
+    out
+}
+
 /// 把整段音频切成有界切片，尽量带上说话人。
 ///
-/// 优先级：**全量说话人分离** → Silero VAD → 固定 28s 硬切。
-/// 永远返回非空列表（除非输入为空），绝不会把长音频整段喂给 LLM（会 OOM）。
+/// **转写切片**沿用既有证明可用的口径：Silero VAD（≤30s）→ 固定 28s 硬切。
+/// 说话人**不参与切分**，只按时间重叠给每个切片打「主导说话人」。
+///
+/// 为什么不用说话人轮次当转写切片（2026-10-23 实测）：FunASR-Nano 是 0.6B 的
+/// LLM，喂 1~2 秒的短轮次会大量幻觉/复读 —— 同一段 100 秒通话，按轮次切出 34 段
+/// 得到 6284 字（其中一段 7 秒吐了 2082 字 "your thoughts on your thoughts…"），
+/// 而按 VAD 切只有 4 段 417 字。所以：**切分用 VAD，说话人靠时间对齐**。
 fn recognize_slices(samples: &[f32]) -> Vec<Slice> {
     if samples.is_empty() {
         return Vec::new();
     }
-    if let Some(slices) = diarized_slices(samples) {
-        return slices;
+    let mut slices = match vad_slices(samples) {
+        Some(s) => s,
+        None => hard_split_slices(samples),
+    };
+    if let Some(turns) = diarization_turns(samples) {
+        for slice in &mut slices {
+            slice.speaker = dominant_speaker(&turns, slice.start, slice.end);
+        }
     }
-    if let Some(slices) = vad_slices(samples) {
-        return slices;
-    }
-    hard_split_slices(samples)
+    slices
 }
 
-/// 全量跑一次 diarizer，得到**全局一致**的说话人时间线。
+/// 全量跑一次 diarizer，得到**全局一致**的说话人时间线（只算时间，不切转写）。
 ///
 /// 关键：不能逐 VAD 段调用 `process()` —— 每次调用内部聚类独立，说话人编号
 /// 会按段重置（第 1 段的"说话人0"和第 5 段的"说话人0"可能是两个人）。
-fn diarized_slices(samples: &[f32]) -> Option<Vec<Slice>> {
+fn diarization_turns(samples: &[f32]) -> Option<Vec<Turn>> {
     // 先查模型在不在，**再**碰 OnceLock：模型是「依赖中心」里可随时补装的，
     // 若把"缺失"缓存进 OnceLock，装完模型后必须重启应用才生效。
     if !diarization_model_present() {
@@ -449,26 +499,49 @@ fn diarized_slices(samples: &[f32]) -> Option<Vec<Slice>> {
 
     let t0 = std::time::Instant::now();
     let result = diarizer.process(samples)?;
-    let turns = result.sort_by_start_time();
+    let raw = result.sort_by_start_time();
+    let turns: Vec<Turn> = raw
+        .iter()
+        .filter_map(|t| {
+            let start = (t.start.max(0.0) * 16000.0).round() as usize;
+            let end = ((t.end * 16000.0).round() as usize).min(samples.len());
+            (start < end).then_some(Turn { start, end, speaker: t.speaker })
+        })
+        .collect();
     log::info!(
         "[ASR] diarization: {} speaker turns in {:.1}s ({:.0}s audio)",
         turns.len(),
         t0.elapsed().as_secs_f64(),
         samples.len() as f64 / 16000.0
     );
+    if turns.is_empty() { None } else { Some(turns) }
+}
 
-    let mut out = Vec::with_capacity(turns.len());
-    for turn in turns {
-        let start = (turn.start.max(0.0) * 16000.0).round() as usize;
-        let end = ((turn.end * 16000.0).round() as usize).min(samples.len());
-        if start >= end {
-            continue;
-        }
-        for (s, e) in split_long(start, end, samples.len()) {
-            out.push(Slice { start: s, end: e, speaker: Some(turn.speaker) });
+/// 给一个转写切片挑「主导说话人」：重叠时长最多的那个。
+///
+/// 切片与轮次没有重叠（整段静音/噪声）时退化为**时间上最近**的轮次，
+/// 避免这些段落到"无说话人"而让输出忽有忽无。
+fn dominant_speaker(turns: &[Turn], start: usize, end: usize) -> Option<i32> {
+    let mut best: Option<(i32, usize)> = None;
+    for t in turns {
+        let overlap = end.min(t.end).saturating_sub(start.max(t.start));
+        if overlap > 0 && best.is_none_or(|(_, b)| overlap > b) {
+            best = Some((t.speaker, overlap));
         }
     }
-    if out.is_empty() { None } else { Some(out) }
+    if let Some((speaker, _)) = best {
+        return Some(speaker);
+    }
+    turns
+        .iter()
+        .min_by_key(|t| {
+            if t.start >= end {
+                t.start - end
+            } else {
+                start.saturating_sub(t.end)
+            }
+        })
+        .map(|t| t.speaker)
 }
 
 /// 把 `[start, end)` 再切成 ≤28s 的片段（带 1s 重叠，避免切断词）。
@@ -634,6 +707,37 @@ mod tests {
     #[test]
     fn recognize_slices_handles_empty_audio() {
         assert!(recognize_slices(&[]).is_empty());
+    }
+
+    #[test]
+    fn cap_by_duration_limits_degenerate_text() {
+        // 实测：3.2 秒切片吐出 277 字 → 上限 12*3.2≈39 + 30 = 69
+        let text = "都".repeat(277);
+        let out = cap_by_duration(&text, 3 * 16_000 + 3_200);
+        assert_eq!(out.chars().count(), 70, "69 字 + 省略号");
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn cap_by_duration_keeps_normal_text() {
+        // 10 秒 60 字（正常语速）→ 上限 150，不该动
+        let text = "这是一个正常长度的转写片段".repeat(5);
+        assert_eq!(cap_by_duration(&text, 10 * 16_000), text);
+    }
+
+    #[test]
+    fn dominant_speaker_picks_largest_overlap() {
+        let turns = [
+            Turn { start: 0, end: 16_000, speaker: 0 },
+            Turn { start: 16_000, end: 48_000, speaker: 1 },
+        ];
+        // 跨两个轮次 → 重叠更长的那个
+        assert_eq!(dominant_speaker(&turns, 8_000, 40_000), Some(1));
+        // 完全落在说话人0
+        assert_eq!(dominant_speaker(&turns, 0, 16_000), Some(0));
+        // 没有任何重叠 → 时间上最近的轮次（避免输出忽有忽无）
+        assert_eq!(dominant_speaker(&turns, 60_000, 70_000), Some(1));
+        assert_eq!(dominant_speaker(&[], 0, 10), None);
     }
 
     #[test]

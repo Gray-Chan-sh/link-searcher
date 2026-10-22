@@ -98,6 +98,88 @@ pub fn has_timeline(segments: &[AudioSegment]) -> bool {
     segments.iter().any(|s| !s.text.trim().is_empty())
 }
 
+/// 截断 LLM-ASR 的**复读退化**（"都都都都…"、"your thoughts on your thoughts…"）。
+///
+/// FunASR-Nano 是 0.6B 的 LLM 解码器，遇到噪声/短片段时会陷入重复循环，一段
+/// 7 秒的语音能吐出 2000 字（2026-10-23 实测）。
+///
+/// 判定用**主导 n-gram**而不是严格周期：真实复读会漂移（实测
+/// `suorosusuorosusuoro…`，多一个 `s` 就破掉严格周期性）。规则：
+///
+/// * 取 16/12/8/6/4/3 字窗口中出现次数最多的那个；
+/// * 它出现 ≥ 6 次、且覆盖全文 ≥ 50% → 判为复读；
+/// * 在它**首次出现之后保留一个最小周期** + 省略号（"都都都"→"都…"，
+///   "plusplus"→"plus…"）。
+///
+/// 正常文本达不到"某个 3~8 字窗口覆盖一半篇幅"这条线；短于 24 字的文本直接跳过，
+/// 所以"哈哈哈哈哈""对对对"这类口头重复不会被误伤。
+pub fn collapse_repetition(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    if n < 24 {
+        return text.to_string();
+    }
+    for len in [16usize, 12, 8, 6, 4, 3] {
+        if n < len * 8 {
+            continue;
+        }
+        // gram -> (count, first_start, second_start)
+        let mut best: Option<(&[char], usize, usize, usize)> = None;
+        let mut i = 0usize;
+        while i + len <= n {
+            let gram = &chars[i..i + len];
+            let mut count = 1usize;
+            let mut second: Option<usize> = None;
+            let mut j = i + 1;
+            while j + len <= n {
+                if &chars[j..j + len] == gram {
+                    count += 1;
+                    if second.is_none() {
+                        second = Some(j);
+                    }
+                    j += len; // 跳过整个重复单元，避免同一处重复计数
+                } else {
+                    j += 1;
+                }
+            }
+            if count >= 6
+                && count * len * 100 >= n * 50
+                && best.is_none_or(|(_, c, _, _)| count > c)
+            {
+                best = Some((gram, count, i, second.unwrap_or(i + len)));
+            }
+            i += 1;
+        }
+        if let Some((gram, count, first, _)) = best {
+            // 取该 n-gram 的**最小周期**：这样 "都都都都…" 只保留一个「都」，
+            // "plusplus…" 只保留一个 "plus"，而不是保留整个 8 字窗口。
+            let p = minimal_period(gram);
+            let keep = (first + p).min(n);
+            let mut out: String = chars[..keep].iter().collect();
+            out.push('…');
+            log::debug!(
+                "[ASR] collapsed repetition: window={} count={} period={} -> {} chars",
+                gram.len(),
+                count,
+                p,
+                keep
+            );
+            return out;
+        }
+    }
+    text.to_string()
+}
+
+/// n-gram 的最小重复周期（"都都都都" → 1，"plusplus" → 4，无周期 → 全长）。
+fn minimal_period(gram: &[char]) -> usize {
+    for p in 1..=gram.len() {
+        if gram.iter().enumerate().all(|(i, c)| *c == gram[i % p]) {
+            return p;
+        }
+    }
+    gram.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,5 +266,51 @@ mod tests {
         assert!(!has_timeline(&[]));
         assert!(!has_timeline(&[seg(0, 1_000, None, "  ")]));
         assert!(has_timeline(&[seg(0, 1_000, None, "有字")]));
+    }
+
+    #[test]
+    fn collapse_repetition_truncates_chinese_loop() {
+        // 实测形态：正常开场 + 一长串「都」（末尾常带句号）
+        let text = format!("个人的对对对,其实大家{}。", "都".repeat(18));
+        let out = collapse_repetition(&text);
+        assert_eq!(out, "个人的对对对,其实大家都…");
+    }
+
+    #[test]
+    fn collapse_repetition_handles_ascii_loop_with_trailing_dot() {
+        // 实测形态："arcsplusplusplusplus…."（末尾句号不能挡住判定）
+        let text = format!("arcs{}", "plus".repeat(30)) + ".";
+        let out = collapse_repetition(&text);
+        assert!(out.ends_with('…'), "应截断: {out}");
+        assert!(out.starts_with("arcspl"), "保留一个周期左右: {out}");
+        assert!(out.chars().count() < 12, "截断后应很短: {out}");
+    }
+
+    #[test]
+    fn collapse_repetition_truncates_english_loop() {
+        // 实测形态：一段 7 秒的语音吐了 2082 字
+        let text = format!("SEE {}", "your thoughts on ".repeat(40));
+        let out = collapse_repetition(&text);
+        assert!(out.ends_with('…'), "应截断: {out}");
+        assert!(out.chars().count() < 40, "截断后应很短: {out}");
+        assert!(out.starts_with("SEE your"), "保留开头: {out}");
+        assert_eq!(
+            out.matches("thoughts").count(),
+            1,
+            "复读单元应只剩一次: {out}"
+        );
+    }
+
+    #[test]
+    fn collapse_repetition_keeps_normal_text() {
+        for ok in [
+            "现在都是这样,你看这样加起来多少",
+            "对对对，我同意",
+            "哈哈哈哈哈",              // 短促重复不该被误伤
+            "好的好的好的，那就这样吧", // 正常口头重复
+            "",
+        ] {
+            assert_eq!(collapse_repetition(ok), ok, "不该改动正常文本: {ok:?}");
+        }
     }
 }

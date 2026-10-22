@@ -1,19 +1,35 @@
 //! End-to-end smoke test for FunASR-Nano via sherpa-onnx.
 //!
-//! Uses the real model files from `src-tauri/models/funasr` and a test wav
-//! from `LINK_SEARCHER_TEST_WAV` (set by the run). Skips cleanly when either
-//! is absent, so CI without the 950MB model download stays green.
+//! Uses the real model files from `LINK_SEARCHER_FUNASR_DIR` (or the default
+//! `src-tauri/models/funasr`) and a test audio file from
+//! `LINK_SEARCHER_TEST_MP3` / `LINK_SEARCHER_TEST_LONG_MP3`. Skips cleanly when
+//! either is absent, so CI without the ~950MB model download stays green.
 use std::path::PathBuf;
 
+/// Model dir: `LINK_SEARCHER_FUNASR_DIR` wins (lets you point the test at an
+/// installed data dir instead of copying ~1GB into the checkout).
+fn model_dir() -> Option<PathBuf> {
+    let dir = match std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+        Ok(p) => PathBuf::from(p),
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/funasr"),
+    };
+    let required = [
+        "encoder_adaptor.int8.onnx",
+        "llm.int8.onnx",
+        "embedding.int8.onnx",
+        "Qwen3-0.6B/tokenizer.json",
+        "Qwen3-0.6B/vocab.json",
+        "Qwen3-0.6B/merges.txt",
+    ];
+    if required.iter().all(|f| dir.join(f).is_file()) {
+        Some(dir)
+    } else {
+        None
+    }
+}
+
 fn model_present() -> bool {
-    ["encoder_adaptor.int8.onnx", "llm.int8.onnx", "embedding.int8.onnx", "Qwen3-0.6B/tokenizer.json"]
-        .iter()
-        .all(|f| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("models/funasr")
-                .join(f)
-                .is_file()
-        })
+    model_dir().is_some()
 }
 
 #[test]
@@ -30,7 +46,7 @@ fn funasr_nano_transcribes_smoke() {
         }
     };
 
-    let model_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/funasr");
+    let model_dir = model_dir().expect("model dir present (checked above)");
     let p = |name: &str| model_dir.join(name).to_string_lossy().to_string();
     let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
     config.model_config.num_threads = 4;
@@ -99,6 +115,45 @@ fn audio_extractor_full_pipeline() {
         for s in &transcript.segments {
             assert!(s.end_ms >= s.start_ms, "段结束时间不能早于开始: {s:?}");
             assert!(!s.text.trim().is_empty(), "空文本段不该进时间轴");
+        }
+        // 输出层（预览/导出用的就是它）必须真的带上时间戳
+        let tagged = link_searcher_lib::transcript::render_tagged(
+            &transcript.text,
+            &transcript.segments,
+        );
+        assert!(
+            tagged.starts_with("[00:00:") || tagged.starts_with("[00:00:0"),
+            "带标签输出的首行应形如 [HH:MM:SS] …，got: {}",
+            &tagged[..tagged.len().min(80)]
+        );
+        let speakers = transcript.segments.iter().filter(|s| s.speaker.is_some()).count();
+        eprintln!(
+            "[PIPELINE] tagged head:\n{}",
+            tagged.lines().take(3).collect::<Vec<_>>().join("\n")
+        );
+        eprintln!(
+            "[PIPELINE] segments with speaker: {speakers}/{}",
+            transcript.segments.len()
+        );
+        // 诊断：重复退化（LLM-ASR 的典型失败）会把某段撑到几百字。列出最长的几段，
+        // 顺便在设置了 `LINK_SEARCHER_TEST_DUMP` 时把带标签全文写盘供人工核对。
+        let mut longest: Vec<(usize, i64, i64, &str)> = transcript
+            .segments
+            .iter()
+            .map(|s| (s.text.chars().count(), s.start_ms, s.end_ms, s.text.as_str()))
+            .collect();
+        longest.sort_by_key(|x| std::cmp::Reverse(x.0));
+        for (chars, start, end, text) in longest.iter().take(3) {
+            eprintln!(
+                "[PIPELINE] longest seg: {chars} chars / {}ms..{}ms: {}",
+                start,
+                end,
+                text.chars().take(60).collect::<String>()
+            );
+        }
+        if let Ok(dump) = std::env::var("LINK_SEARCHER_TEST_DUMP") {
+            std::fs::write(&dump, &tagged).expect("dump tagged transcript");
+            eprintln!("[PIPELINE] tagged transcript written to {dump}");
         }
     }
     eprintln!(
