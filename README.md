@@ -53,7 +53,22 @@
 | 代码 | `.py` `.rs` `.ts` `.js` `.html` `.css` `.sql` `.sh` | 作为文本处理 |
 | 未知 | 任意 | 纯文本回退尝试 |
 | 压缩包 | `.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.gz` `.bz2` `.xz` | 枚举条目，文本直接读，Office/PDF/图片走提取管线 |
-| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + pyannote 分段 + CAM++ 说话人分离 |
+| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + pyannote 分段 + CAM++ 说话人分离（输出段级时间戳与说话人，见下） |
+
+### 音频输出：纯文本 / 带标签
+
+音频的正文**始终是纯转写文本**（进全文索引、语义向量与 RAG），时间戳与说话人存在旁路列
+`content_index.audio_timeline`，只在**输出**时拼成可读稿：
+
+- **纯文本**（`.txt`）：与库中正文逐字节相同；
+- **带标签**（`.md`）：每段一行，`[00:12:34 · 说话人1] 正文…`。
+
+导出入口：预览面板「导出文字」、浏览页右键「导出文字」、Web API
+`GET /api/files/{id}/export?format=raw|tagged`。只有完成分段识别/说话人分离的音频才有
+「带标签」；老音频需要重新提取（暂未提供批量回填）。
+
+时间戳是**段级**（VAD / 说话人轮次边界，500ms 量级），不是逐字对齐 —— FunASR-Nano 走 LLM
+解码，sherpa-onnx 对它不提供 token 级时间戳。
 
 ### OCR（文字识别）
 
@@ -211,7 +226,7 @@
 
 - **Node.js** 20+
 - **Rust** 1.85+
-- **音频识别（可选）**：ffmpeg，音频转写模型（FunASR-Nano ~850MB）在应用「依赖中心」下载（镜像优先）
+- **音频识别（可选）**：ffmpeg，音频转写模型（FunASR-Nano ~850MB）在应用「依赖中心」下载（镜像优先）；说话人标注另需「说话人分离模型」（~35MB，可选项）
 - **Linux 额外（Debian/Ubuntu）**：Tauri 构建依赖——`libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`libayatana-appindicator3-dev`、`libssl-dev`、`libsoup-3.0-dev`、`libxdo-dev`、`libgbm-dev`（缺了链接期报 `unable to find library -lgbm`）、`libpipewire-0.3-dev` 与 `clang` / `libclang-dev`（`tauri-plugin-mcp` → `xcap` → `pipewire` 的 `libspa-sys` 需要；缺 clang 时 bindgen 会报 `stdbool.h file not found`）、`build-essential`、`pkg-config`。`./scripts/setup-dev.sh` 会自动检测并安装。
 - **Windows 额外**：VS Build Tools（MSVC + Windows SDK）。`cargo build` 需从 GitHub 拉 `tauri-plugin-mcp`（git 依赖）与 sherpa-onnx 预编译库——国内网络建议先跑 `scripts/setup-dev.ps1`（自动配 cargo/npm 镜像、预下载 sherpa 库），或设代理 `HTTPS_PROXY`
 

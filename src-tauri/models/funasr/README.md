@@ -6,9 +6,11 @@ ONNX 导出模型，**不再需要 Python / venv / torch / 外部进程**。
 
 支持中文（含吴语、粤语、闽语、客家话、赣语、湘语、晋语等 7 大方言 + 26 地区口音）、英文、日文，以及歌词/说唱识别。
 
-> ⚠️ 与旧版（Python venv）相比，**说话人分离仍然保留**——sherpa-onnx 的
-> `OfflineSpeakerDiarization` 流水线（pyannote 分段 + CAM++ 嵌入）在模型就绪时输出
-> `[说话人N]` 前缀。索引搜索不受影响。
+> ⚠️ 说话人分离由**独立的可选依赖**提供（「依赖中心 → 说话人分离模型」，约 35MB）：
+> sherpa-onnx 的 `OfflineSpeakerDiarization` 流水线（pyannote 分段 + CAM++ 嵌入），
+> 模型就绪时对整段音频跑一次，得到全局一致的说话人时间线。
+> 标签**不写进正文**（正文保持纯文本，检索不受影响），只在预览/导出时渲染成
+> `[00:12:34 · 说话人1] 正文…`；纯文本导出与正文逐字节相同。
 
 ## 模型下载（一次性，~850MB）
 
@@ -48,7 +50,7 @@ models/funasr/
 ├── embedding.int8.onnx         # 149M 文本嵌入
 ├── silero_vad.onnx             # VAD 长音频分段（独立下载，非归档内）
 ├── Qwen3-0.6B/                 # tokenizer（merges.txt / tokenizer.json / vocab.json）
-└── models/diarization/         # 说话人分离模型（独立下载）
+└── models/diarization/         # 说话人分离模型（依赖中心可选，~35MB）
     ├── seg.onnx                # pyannote 分段
     └── emb.onnx                # CAM++ 说话人嵌入
 ```
@@ -57,7 +59,10 @@ models/funasr/
 
 1. `extractor/audio.rs` 先用 ffmpeg 将音频解码为 16kHz 单声道 WAV（完整时长，不截断）
 2. sherpa-onnx `OfflineRecognizer` 进程内推理（首次加载 ~1–2s，之后复用单例）
-3. 输出整段转写文本（支持 ITN 数字归一化），进入全文索引
+3. 切片：diarization 可用时按**说话人轮次**（整段只跑一次，编号全局一致）→ 否则 Silero VAD
+   （保留段起始偏移）→ 否则 28s 硬切；单段 >28s 会再切，避免超窗口静默返回空
+4. 输出**纯转写文本**（无 `[说话人N]`、无头部）+ 段级时间轴（`content_index.audio_timeline`）；
+   标签只在预览/导出时渲染，正文进入全文索引与语义向量
 
 识别器在 `OnceLock` 中全局复用，避免每个文件重新加载 ~950M int8 权重。
 解码参数对齐官方配置：`greedy_search`、`temperature=1e-6`、`top_p=0.8`、

@@ -79,12 +79,33 @@ fn audio_extractor_full_pipeline() {
     };
 
     let extractor = link_searcher_lib::extractor::audio::AudioExtractor::new();
-    let text = extractor.extract_audio(&mp3).expect("extract should not fail");
+    let transcript = extractor.transcribe(&mp3).expect("extract should not fail");
+    assert!(!transcript.text.trim().is_empty(), "转写不应为空");
+    // 正文必须是**纯文本**：格式化头部与说话人标签都已移到时间轴/输出层，
+    // 留在正文里会污染全文检索（搜「音频文件」命中全部音频）。
     assert!(
-        text.contains("─── 音频文件"),
-        "expected formatted audio header in output, got: {text:?}"
+        !transcript.text.contains("─── 音频文件"),
+        "正文不应包含格式化头部，got: {transcript:?}"
     );
-    eprintln!("[PIPELINE] extract_audio output head: {}", &text[..text.len().min(200)]);
+    assert!(!transcript.text.contains("[说话人"), "正文不应包含说话人标签");
+    if !transcript.segments.is_empty() {
+        let joined = transcript
+            .segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(joined, transcript.text, "时间轴文本拼起来必须等于正文");
+        for s in &transcript.segments {
+            assert!(s.end_ms >= s.start_ms, "段结束时间不能早于开始: {s:?}");
+            assert!(!s.text.trim().is_empty(), "空文本段不该进时间轴");
+        }
+    }
+    eprintln!(
+        "[PIPELINE] text={} chars, segments={}",
+        transcript.text.chars().count(),
+        transcript.segments.len()
+    );
 }
 
 /// Long audio (VAD-segmented): a >1min file must not silently produce empty
@@ -105,10 +126,14 @@ fn audio_extractor_long_audio() {
 
     let extractor = link_searcher_lib::extractor::audio::AudioExtractor::new();
     let text = extractor.extract_audio(&mp3).expect("extract should not fail");
-    let body = text.replace("─── 音频文件", "").trim().to_string();
     assert!(
-        !body.contains("无识别结果"),
-        "long audio should transcribe via VAD segments, got: {text:?}"
+        !text.contains("无识别结果"),
+        "long audio should transcribe via segments, got: {text:?}"
     );
-    eprintln!("[LONG] extract_audio (long) output head: {}", &text[..text.floor_char_boundary(text.len().min(300))]);
+    assert!(!text.contains("─── 音频文件"), "正文不应包含格式化头部");
+    eprintln!(
+        "[LONG] {} chars, head: {}",
+        text.chars().count(),
+        &text[..text.floor_char_boundary(text.len().min(300))]
+    );
 }

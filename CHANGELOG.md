@@ -1,3 +1,72 @@
+## 2026-10-22（第五十五轮）：音频转写「时间戳 + 说话人」可读输出（纯文本导出保持零污染）
+
+> 背景：此前音频只产出整段纯文本；FunASR 链路其实一直在算时间轴（VAD/diarization 段边界）
+> 和说话人，只是**全部被丢弃**。本轮把时间轴保留下来，但**不写进正文**——正文要逐字节干净地
+> 进 tantivy / `doc_chunks` / 向量，任何 `[00:12:34]`、`[说话人1]` 都会污染全文检索
+> （`12`/`34` 会变成检索词、`[说话人` 会被 jieba 切词、正文变长还会压低 BM25 权重）。
+
+**旁路时间轴（`src-tauri/src/transcript.rs` 新增 + `db` 迁移 v13）**
+
+- `content_index` 新增可空列 `audio_timeline`（JSON：`{start_ms,end_ms,speaker,text}`）。
+  迁移走现有 `ensure_quality_columns` 的幂等 `ALTER TABLE`，**不需要重建索引**。
+- 每段自带 `text` 而不是字符偏移：`sanitize_text()` 的 NFKC / 挤压 CJK 空格会改变字符数量，
+  偏移跨过那一步就错位；存文本自包含。代价是转写稿多存一份（1 小时音频约 25KB）。
+- **顺序约束**：`store_content_with_quality` 是 `INSERT OR REPLACE`，会整行重建把
+  `audio_timeline` 清成 NULL → 时间轴必须在正文写入**之后**再 `UPDATE`（`indexer.rs`）。
+
+**说话人分离改为「整段跑一次」（`extractor/audio.rs`）**
+
+- 旧实现是**逐 VAD 段**调用 `d.process()`：每次调用内部聚类独立，说话人编号按段重置
+  （第 1 段的「说话人0」和第 5 段的「说话人0」可能是两个人）。现改为对**整段音频**
+  只跑一次 diarizer，得到全局一致的说话人时间线，再按轮次切片转写。
+- 切片优先级：全量 diarization → Silero VAD → 固定 28s 硬切（保持既有 OOM 防线）；
+  超过 28s 的说话人轮次内部再切（1s 重叠）。
+- `SpeechSegment::start()`（采样点绝对偏移）此前被丢弃，现保留 → 无 diarization 模型时
+  也能输出**时间戳**，零额外计算。
+- **正文不再插入 `[说话人N]`，也不再带 `─── 音频文件 (123s) ──` 头**：两者都会被 jieba 切词
+  （搜「音频文件」命中所有音频）。旧行为只有装了 diarization 模型的用户才有标签。
+- 每个切片先 `sanitize_text` 再拼正文：`sanitize_text` 幂等，外层再跑一次是 no-op，
+  保证「时间轴文本拼起来 == 正文」这条不变量（`funasr_smoke` 断言）。
+
+**输出接口（此前没有任何"导出"接口）**
+
+- 新命令 `export_file_text(id, format)` + Web 路由 `GET /api/files/{id}/export?format=`：
+  `raw` = 纯正文（与 `text_content` 逐字节相同）；`tagged` = `[00:12:34 · 说话人1] 正文`
+  （仅对有时间轴的音频有效，否则报错）。不落盘，由前端 `exportFile()` 弹保存框/下载。
+- `get_file_preview` 与两个 Web 预览接口改为输出**带标签**版本（音频）并返回 `has_timeline`；
+  预览的 5 万字上限改为**先截断纯正文再标签**（否则会切在半个 `[00:12:` 上，且少给正文）。
+  顺手把两份重复的 `file_type` 判断合并为 `commands::files::file_type_of`（Web 侧缺 `audio`
+  分类的偏差一并修正）。
+
+**UI（桌面 + 浏览器同源）**
+
+- 预览面板底部新增「复制全文」「导出文字」；非音频直接导出 `.txt`，音频弹两项：
+  纯文本 (`.txt`) / 带标签 (`.md`)，老音频（无时间轴）第二项置灰并说明原因。
+- 浏览页右键「导出文字」同样按类型给 1 或 2 项（原来是单项 `.txt`）。
+
+**依赖中心：说话人分离模型（`deps/catalog.rs`）**
+
+- 新增可选项 `funasr-diarization`（~35MB，`recommended: false`，不阻塞首启）：
+  pyannote 分段 `seg.onnx`（hf-mirror）+ CAM++ 嵌入 `emb.onnx`（GitHub 上游）。
+  故意与主模型分开：合成一条会让"分离模型源不可达"直接判整次 FunASR 安装失败。
+- 装到 `data/models/funasr/models/diarization/`（`diarization_dir()` 的查找位置）。
+- `deps/download.rs`：`FileSpec.remote` 现在允许**绝对 URL**（两个文件来自不同上游仓库，
+  单一 `base_url` 拼不出来）；`sources` 为空时按单条上游 URL 处理。两者均锁 SHA-256。
+
+**测试**
+
+- 新增 22 条：`transcript` 9（渲染/时间格式/JSON 容错）、`audio` 6（时间换算、长轮次切分、
+  空输入）、`commands::files` 5（音频预览与导出分流、无时间轴、非音频不受影响、先截断后打标签、
+  类型分类）、`deps` 2（分离模型安装位置 + 绝对 URL 绕开 base_url）；`funasr_smoke` 断言改为
+  「正文无头部/无标签 + 时间轴与正文一致」。
+- `db::tests::test_schema_version_is_12` 改为跟随 `SCHEMA_VERSION` 常量（每次迁移不必再改测试）。
+
+**未做（明确记录）**
+
+- 老音频回填：库里已有的音频没有时间轴 → 预览为纯正文、`.md` 置灰；做懒回填/批量回填
+  需另立一个带进度的批量命令（现有 `reindex_files` 串行且无进度）。
+- SRT/VTT、DOCX/PDF 导出：按需求只保留纯文本/带标签两种。
+
 ## 2026-10-22（第五十四轮）：Linux 实机验证修复 —— 前端类型错误归零、门禁改用 `tsc -b`、补齐 Linux 构建依赖
 
 > 背景：在 Ubuntu 24.04 虚拟机（VMware + WebKitGTK）里从零构建并运行本应用。

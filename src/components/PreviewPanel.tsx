@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom'
-import { resolveAssetUrlSync as resolveAssetUrl } from '../utils/platform'
-import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities } from '../api/files'
+import { resolveAssetUrlSync as resolveAssetUrl, exportFile } from '../utils/platform'
+import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, exportFileText, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities, type ExportFormat } from '../api/files'
 import { reExtractFile } from '../api/index'
 import { useI18n } from '../i18n'
 import { XIcon, LoadingSpinner } from '../icons'
@@ -86,7 +86,10 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
   const [summaryError, setSummaryError] = useState<string | null>(null)
   const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
   const [qualityLoading, setQualityLoading] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
   const contentRef = useRef<HTMLDivElement>(null)
+  const exportBtnRef = useRef<HTMLButtonElement>(null)
   const resizingRef = useRef(false)
 
   useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
@@ -165,6 +168,44 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
       setQualityLoading(false)
     }
   }, [fileId, qualityLoading, t])
+
+  /** 导出文本：`.txt` = 纯正文（与库中逐字节相同），`.md` = 带时间/说话人标签。 */
+  const handleExport = useCallback(async (format: ExportFormat) => {
+    if (!fileId || exporting) return
+    setExportOpen(false)
+    setExporting(true)
+    try {
+      const { content } = await exportFileText(fileId, format)
+      if (!content.trim()) {
+        toast(t('no_text_to_export'))
+        return
+      }
+      const base = (meta?.file_name ?? 'export').replace(/\.[^.]+$/, '')
+      const ext = format === 'tagged' ? 'md' : 'txt'
+      await exportFile(content, `${base}.${ext}`, format === 'tagged' ? 'text/markdown' : 'text/plain')
+      toast(t('export_done'))
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    } finally {
+      setExporting(false)
+    }
+  }, [fileId, meta, exporting, t])
+
+  /** 非音频只有一种格式 → 直接导出；音频才弹格式菜单。 */
+  const onExportClick = useCallback(() => {
+    if (preview?.file_type !== 'audio') {
+      void handleExport('raw')
+      return
+    }
+    setExportOpen(v => !v)
+  }, [preview?.file_type, handleExport])
+
+  useEffect(() => {
+    if (!exportOpen) return
+    const close = () => setExportOpen(false)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [exportOpen])
 
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -479,22 +520,68 @@ export default function PreviewPanel({ fileId, searchQuery, onClose }: PreviewPa
 
       {/* Action bar */}
       {meta && (
-        <div className="flex gap-2 px-4 py-2 border-t border-gray-200 dark:border-gray-800">
+        <div className="flex flex-wrap gap-2 px-4 py-2 border-t border-gray-200 dark:border-gray-800">
           <button
             onClick={() => { navigator.clipboard.writeText(meta.path).then(() => toast(t('copied_path'))).catch(e => console.warn('复制失败:', e)) }}
-            className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            className="flex-1 min-w-[80px] px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
             {t('copy_path')}
           </button>
           <button
             onClick={() => revealInFolder(meta.id)}
-            className="flex-1 px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            className="flex-1 min-w-[80px] px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
           >
             {t('show_in_folder')}
           </button>
+          {textContent && (
+            <button
+              onClick={() => {
+                navigator.clipboard.writeText(textContent)
+                  .then(() => toast(t('copied_text')))
+                  .catch(e => console.warn('复制失败:', e))
+              }}
+              className="flex-1 min-w-[80px] px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            >
+              {t('copy_all_text')}
+            </button>
+          )}
+          {textContent && (
+            <span className="relative flex-1 min-w-[80px]">
+              <button
+                ref={exportBtnRef}
+                onClick={e => { e.stopPropagation(); onExportClick() }}
+                disabled={exporting}
+                className="w-full px-2 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {exporting ? <LoadingSpinner className="size-3" /> : t('export_text')}
+                {preview?.file_type === 'audio' ? ' ▾' : ''}
+              </button>
+              {exportOpen && preview?.file_type === 'audio' && (
+                <div
+                  className="absolute bottom-full right-0 mb-1 z-20 w-52 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <button
+                    onClick={() => void handleExport('raw')}
+                    className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  >
+                    {t('export_raw')}
+                  </button>
+                  <button
+                    onClick={() => void handleExport('tagged')}
+                    disabled={!preview?.has_timeline}
+                    title={preview?.has_timeline ? undefined : t('export_tagged_no_timeline')}
+                    className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    {t('export_tagged')}
+                  </button>
+                </div>
+              )}
+            </span>
+          )}
           <button
             onClick={() => openFile(meta.id)}
-            className="flex-1 px-2 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/40 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
+            className="flex-1 min-w-[80px] px-2 py-1.5 text-xs font-medium text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800/40 rounded-md hover:bg-blue-100 dark:hover:bg-blue-900/50 transition-colors"
           >
             {t('open')}
           </button>

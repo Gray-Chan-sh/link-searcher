@@ -341,6 +341,8 @@ impl IndexerService {
                                 ocr_used = true;
                                 let mut m = meta;
                                 m.ocr_used = true;
+                                // 正文换成 OCR 结果 → 与音频时间轴不再对应。
+                                m.audio_timeline.clear();
                                 (ocr, m)
                             }
                             _ => {
@@ -392,6 +394,9 @@ impl IndexerService {
             }
             let char_count = extracted.0.chars().count();
             log::info!("[INDEX] [{}] 提取文字: {file_name} ({char_count} 字符)", job.file_id);
+            // 时间轴只在"正文确实是提取器产出"时才有效（OCR 回退分支已将其清空）。
+            // 去重命中不会走到这里：同 md5 的时间轴库里已存在，无需重写。
+            let audio_timeline = extracted.1.audio_timeline.clone();
             let mut qmeta = extracted.1.clone();
             qmeta.file_size = Some(file_size);
             let quality =
@@ -420,6 +425,16 @@ impl IndexerService {
                             "[INDEX] {}: 内容未落库（quality 将丢失，backfill 可补回）",
                             job.file_id
                         );
+                    }
+                    // 时间轴必须在正文写入之后：`store_content_with_quality` 是
+                    // `INSERT OR REPLACE`，会整行重建并把 `audio_timeline` 清成 NULL。
+                    if !audio_timeline.is_empty()
+                        && retry_busy("store_audio_timeline", &job.file_id, || {
+                            crate::db::tracker::store_audio_timeline(&conn, &hash, &audio_timeline)
+                        })
+                        .is_none()
+                    {
+                        log::warn!("[INDEX] {}: 音频时间轴未落库", job.file_id);
                     }
                 }
                 Err(e) => {

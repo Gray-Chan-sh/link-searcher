@@ -5,7 +5,7 @@ import { invoke } from '../api/client'
 import { confirm, saveFile } from '../utils/platform'
 import { toast } from '../utils/toast'
 import { useI18n } from '../i18n'
-import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, previewFile } from '../api/files'
+import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, exportFileText, type ExportFormat } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFiles, restoreFiles } from '../api/index'
 import { LoadingSpinner, SearchIcon } from '../icons'
@@ -60,6 +60,9 @@ function statusBadge(indexed: number, error_msg: string | null | undefined, t: (
   return <span className="inline-flex items-center gap-1 text-xs text-yellow-600 dark:text-yellow-400">○ {t('pending')}</span>
 }
 
+const AUDIO_EXTS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wma']
+const isAudioExt = (ext: string) => AUDIO_EXTS.includes((ext || '').toLowerCase().replace(/^\./, ''))
+
 export default function Browse() {
   const { t } = useI18n()
   const [params, setParams] = useSearchParams()
@@ -84,6 +87,23 @@ export default function Browse() {
   const [previewCollapsed, setPreviewCollapsed] = useState(false)
   const [previewZoom, setPreviewZoom] = useState(1)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
+
+  /** 导出单文件文本：`.txt` 纯正文 / 音频额外 `.md` 带时间与说话人标签。 */
+  const handleExportText = useCallback(async (item: FileItem, format: ExportFormat) => {
+    setContextMenu(null)
+    try {
+      const { content } = await exportFileText(item.file_id, format)
+      if (!content.trim()) {
+        toast(t('no_text_to_export'))
+        return
+      }
+      const name = item.file_name.replace(/\.[^.]+$/, '') + (format === 'tagged' ? '.md' : '.txt')
+      await saveFile(content, name)
+      toast(t('export_done'))
+    } catch (e) {
+      toast(e instanceof Error ? e.message : String(e))
+    }
+  }, [t])
   const [indexLog, setIndexLog] = useState<string | null>(null)
   const [indexLogLoading, setIndexLogLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
@@ -903,19 +923,18 @@ return (
               </button>
               <button
                 className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
-                onClick={async () => {
-                  const fid = contextMenu.item.file_id
-                  setContextMenu(null)
-                  try {
-                    const text = await previewFile(fid)
-                    if (!text.trim()) { alert(t('no_text_to_export')); return }
-                    const name = contextMenu.item.file_name.replace(/\.[^.]+$/, '') + '.txt'
-                    await saveFile(text, name)
-                  } catch (e) { console.error('[Browse] export text failed:', e) }
-                }}
+                onClick={() => { void handleExportText(contextMenu.item, 'raw') }}
               >
-                {t('export_text')}
+                {t('export_raw')}
               </button>
+              {isAudioExt(contextMenu.item.file_ext) && (
+                <button
+                  className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  onClick={() => { void handleExportText(contextMenu.item, 'tagged') }}
+                >
+                  {t('export_tagged')}
+                </button>
+              )}
             </>
           ) : null}
           <button

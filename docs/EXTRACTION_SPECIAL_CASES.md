@@ -169,21 +169,23 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | 错误分类 | 加密 / 损坏 / 提取失败 三类 | `classify_extract_error` |
 | .tar.gz 显示名修复 | 去掉 `.tar` 后缀取真实 stem | `extract_single_compressed` |
 
-### 3.5 音频（9 条）
+### 3.5 音频（11 条）
 
 | 病理 | 处理 | 函数/常量 |
 |------|------|-----------|
-| ASR 模型未下载 | 返回占位文本"ASR 模型未下载" | `extract_audio` |
-| ffmpeg 解码超时 | 600s 超时杀进程 | `extract_audio` |
-| ffmpeg 解码失败 | 返回错误"ffmpeg decode failed" | `extract_audio` |
-| recognizer 初始化失败 | 返回占位文本"ASR 初始化失败" | `extract_audio` |
-| 空转写结果 | 返回占位文本"FunASR 推理完成，无识别结果" | `extract_audio` |
-| Silero VAD 分段 | `vad_segments` 可用时按语音活动分段 | `vad_segments` |
-| 固定 28s 硬切 | VAD 不可用时 28s 分段 + 1s 重叠 | `recognize_segments` |
-| 说话人分离 | `SPEAKER_DIARIZER` 可用时标注说话人 | `extract_audio` |
-| 分离失败回退 | `d.process(seg)` 返回 None -> 无说话人标注直接转写 | `extract_audio` |
+| ASR 模型未下载 | 返回占位文本"ASR 模型未下载"（无时间轴） | `transcribe` |
+| ffmpeg 解码超时 | 600s 超时杀进程 | `transcribe` |
+| ffmpeg 解码失败 | 返回错误"ffmpeg decode failed" | `transcribe` |
+| recognizer 初始化失败 | 返回占位文本"ASR 初始化失败" | `transcribe` |
+| 空转写结果 | 返回占位文本"FunASR 推理完成，无识别结果" | `transcribe` |
+| Silero VAD 分段 | `vad_slices` 用 `SpeechSegment::start()` 保留绝对时间偏移 | `vad_slices` |
+| 固定 28s 硬切 | VAD 不可用时 28s 分段 + 1s 重叠 | `hard_split_slices` |
+| 说话人分离 | **整段**跑一次 `SPEAKER_DIARIZER`，得到全局一致的说话人时间线 | `diarized_slices` |
+| 长说话人轮次 | 单轮 >28s 再切（1s 重叠），避免超 30s 窗口返回空文本 | `split_long` |
+| 分离失败回退 | `process()` 返回 None -> 退 VAD -> 退硬切，只是没有说话人 | `recognize_slices` |
+| 正文污染 | 正文**不写** `[说话人N]` / `[00:12:34]` / `─── 音频文件 ──` 头，标签只在输出层生成 | `transcribe` + `transcript::render_tagged` |
 
-> 注意：`audio.rs` 第 287 行设置 600s 超时，但第 294 行的 bail 消息写的是 "timed out after 300s"，
+> 注意：`audio.rs` 设置 600s 超时，但 bail 消息写的是 "timed out after 300s"，
 > 数值不一致。这是代码中的已知笔误，不影响行为（实际超时是 600s）。
 
 ### 3.6 OCR 引擎（14 条）

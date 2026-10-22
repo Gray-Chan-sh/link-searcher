@@ -329,15 +329,34 @@ export interface FilePreview {
   content: string | null
   image_path: string | null
   image_base64: string | null
-  file_type: string  // 'image' | 'text' | 'pdf' | 'office' | 'unknown'
+  file_type: string  // 'image' | 'text' | 'pdf' | 'office' | 'audio' | 'archive' | 'unknown'
   char_count: number
   ocr_used: boolean
   quality_score: number | null
   quality_flags: string
+  /** 音频是否有段级时间轴（决定「带标签」导出是否可选） */
+  has_timeline: boolean
 }
 
 export async function getFilePreview(id: string): Promise<FilePreview> {
   return client.invoke<FilePreview>('get_file_preview', { id })
+}
+
+/** 导出格式：纯正文（与库中 text_content 逐字节相同） */
+export type ExportFormat = 'raw' | 'tagged'
+
+export interface ExportedText {
+  content: string
+  char_count: number
+  format: string
+}
+
+/**
+ * 导出单文件文本。`tagged` 仅对**有时间轴的音频**有效（后端会报错）。
+ * 不落盘：由调用方用 `exportFile()` 弹保存框/下载。
+ */
+export async function exportFileText(id: string, format: ExportFormat): Promise<ExportedText> {
+  return client.invoke<ExportedText>('export_file_text', { id, format })
 }
 
 export async function revealInFolder(id: string): Promise<void> {

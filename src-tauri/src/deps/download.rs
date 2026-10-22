@@ -39,11 +39,18 @@ const DEFAULT_GH_MIRRORS: &[&str] = &[
 /// user-picked mirror (if set), the default mirror chain, then the canonical
 /// GitHub URL.
 fn effective_urls(source: &Source, remote: &str) -> Vec<String> {
-    let canonical = format!(
-        "{}/{}",
-        source.base_url.trim_end_matches('/'),
-        remote
-    );
+    // `remote` may be an absolute URL: the diarization models live in two
+    // different upstream repos, so one `<base>/<remote>` prefix cannot serve
+    // both files.
+    let canonical = if remote.starts_with("http://") || remote.starts_with("https://") {
+        remote.to_string()
+    } else {
+        format!(
+            "{}/{}",
+            source.base_url.trim_end_matches('/'),
+            remote
+        )
+    };
     if !canonical.starts_with("https://github.com/") {
         return vec![canonical];
     }
@@ -161,7 +168,15 @@ pub fn install_dep(
         // already written by the previous one (`.part` is never deleted on a
         // failed source so the next one can pick up where it stopped).
         let mut url_plan: Vec<(String, String)> = Vec::new();
-        for source in &def.sources {
+        // Deps whose files are all absolute URLs declare no sources; give them
+        // one synthetic source so `effective_urls` still yields the URL.
+        let fallback_source = Source { label: "上游", base_url: String::new() };
+        let sources: Vec<Source> = if def.sources.is_empty() {
+            vec![fallback_source]
+        } else {
+            def.sources.clone()
+        };
+        for source in &sources {
             for url in effective_urls(source, file.remote) {
                 url_plan.push((source.label.to_string(), url));
             }
@@ -456,6 +471,32 @@ mod tests {
         };
         let urls = effective_urls(&source, "model.onnx");
         assert_eq!(urls, vec!["https://huggingface.co/owner/resolve/main/model.onnx"]);
+    }
+
+    /// 说话人分离模型来自两个不同上游仓库 → `remote` 必须是绝对 URL，
+    /// 且不能被 `base_url` 再拼一次。
+    #[test]
+    fn absolute_remote_url_bypasses_base_url() {
+        let guard = lock_env();
+        clear_env(&guard);
+        let source = Source { label: "上游", base_url: String::new() };
+        let urls = effective_urls(
+            &source,
+            "https://hf-mirror.com/csukuangfj/pyannote/resolve/main/model.onnx",
+        );
+        assert_eq!(
+            urls,
+            vec!["https://hf-mirror.com/csukuangfj/pyannote/resolve/main/model.onnx"]
+        );
+
+        // 绝对 GitHub URL 仍享受镜像链（国内直连 ~29KB/s 实测）。
+        let gh = effective_urls(
+            &source,
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/x/emb.onnx",
+        );
+        assert_eq!(gh.len(), 3);
+        assert!(gh[0].starts_with("https://ghfast.top/"));
+        assert!(gh.last().unwrap().starts_with("https://github.com/"));
     }
 
     #[test]

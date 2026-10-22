@@ -210,6 +210,7 @@ pub fn all() -> Vec<DepDef> {
     ];
     defs.extend(rerank_defs());
     defs.push(funasr());
+    defs.push(funasr_diarization());
     defs.push(ffmpeg());
     defs.push(poppler());
     defs.push(lark_cli());
@@ -414,6 +415,41 @@ fn funasr() -> DepDef {
     }
 }
 
+/// 说话人分离模型（pyannote 分段 + CAM++ 中文嵌入，共 ~34MB）。
+///
+/// 与 `funasr` **分开一个条目**：主模型（~850MB）是必装项，这两个是可选项。
+/// 合成一条会让"分离模型源不可达"直接判整次 FunASR 安装失败 —— 用户连转写
+/// 都没有了。分开装则最坏情况只是没有说话人标签（时间戳仍由 VAD 提供）。
+///
+/// 布局对齐 `extractor::audio::diarization_dir()`：`models/funasr/models/diarization/`。
+/// 两个文件来自**不同的上游仓库**，所以 `remote` 用绝对 URL（见
+/// `deps::download::effective_urls`）。
+fn funasr_diarization() -> DepDef {
+    DepDef {
+        id: "funasr-diarization",
+        name: "说话人分离模型（音频标注说话人）",
+        recommended: false,
+        size_bytes: 35 * 1024 * 1024,
+        hint: "为音频转写标注「说话人N」（约 35MB；不装则只有时间戳）",
+        files: &[
+            // pyannote segmentation 3.0（hf-mirror 单文件；GitHub 只有 tar.bz2）
+            FileSpec {
+                remote: "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+                local: "models/diarization/seg.onnx",
+                sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+            },
+            // 3D-Speaker CAM++ 中文说话人嵌入
+            FileSpec {
+                remote: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+                local: "models/diarization/emb.onnx",
+                sha256: "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+            },
+        ],
+        sources: vec![],
+        system_package: None,
+    }
+}
+
 /// FFmpeg — audio decode. System-provided; installed via platform package
 /// manager when missing (winget/brew/apt), not downloaded from GitHub.
 fn ffmpeg() -> DepDef {
@@ -480,6 +516,9 @@ pub fn install_dir(def: &DepDef, data_dir: &Path) -> std::path::PathBuf {
         "bge-base" => "bge-base-zh-v1.5",
         "bge-small" => "bge-small-zh-v1.5",
         "funasr" => "funasr",
+        // 与主模型共用目录：`local` 里再嵌 `models/diarization/`，
+        // 最终落在 `data/models/funasr/models/diarization/{seg,emb}.onnx`。
+        "funasr-diarization" => "funasr",
         other => other,
     };
     data_dir.join("models").join(sub)
@@ -677,6 +716,8 @@ mod tests {
                 "bge-base" => "bge-base-zh-v1.5",
                 "bge-small" => "bge-small-zh-v1.5",
                 "funasr" => "funasr",
+                // 分离模型故意与主模型共用目录（见 funasr_diarization 文档）
+                "funasr-diarization" => "funasr",
                 other => other,
             };
             assert_eq!(dir, data.join("models").join(expected), "layout for {}", def.id);
@@ -710,5 +751,30 @@ mod tests {
         let data = PathBuf::from("/tmp/ls_data");
         let dest = install_dir(&def, &data).join(tok.local);
         assert_eq!(dest, data.join("models/funasr/Qwen3-0.6B/tokenizer.json"));
+    }
+
+    /// 分离模型必须装进 FunASR 目录**内部**：`extractor::audio::diarization_dir()`
+    /// 只会去 `<funasr_dir>/models/diarization/` 找 seg.onnx / emb.onnx。
+    #[test]
+    fn funasr_diarization_lands_inside_funasr_dir() {
+        let def = all().into_iter().find(|d| d.id == "funasr-diarization").unwrap();
+        assert!(!def.recommended, "分离模型是可选项，不能阻塞首启向导");
+        assert_eq!(def.files.len(), 2);
+        let data = PathBuf::from("/tmp/ls_data");
+        let dir = install_dir(&def, &data);
+        assert_eq!(dir, data.join("models/funasr"));
+        for f in def.files {
+            let dest = dir.join(f.local);
+            assert_eq!(
+                dest.parent().unwrap(),
+                data.join("models/funasr/models/diarization"),
+                "{} 装错位置",
+                f.local
+            );
+            assert_eq!(f.sha256.len(), 64, "{} 必须锁定 sha256", f.local);
+        }
+        // 两个文件来自不同上游仓库 → 必须是绝对 URL（单一 base_url 拼不出来）
+        assert!(def.sources.is_empty());
+        assert!(def.files.iter().all(|f| f.remote.starts_with("https://")));
     }
 }

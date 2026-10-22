@@ -599,6 +599,7 @@ impl PdfExtractor {
             watermark_detected: wm_detected,
             watermark_removed: wm_removed,
             watermark_tokens: wm_tokens,
+            audio_timeline: Vec::new(),
         };
         Ok((text, meta))
     }

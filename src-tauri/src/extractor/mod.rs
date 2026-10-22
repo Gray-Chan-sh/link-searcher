@@ -248,7 +248,15 @@ pub fn extract_text_with_meta(
         }
         // Audio
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus" | "wma" => {
-            (AUDIO_EXTRACTOR.extract_audio(path), quality::ExtractMeta::default())
+            // 音频额外带出**段级时间轴**（旁路，不进正文）；其它提取器一律空。
+            match AUDIO_EXTRACTOR.transcribe(path) {
+                Ok(t) => {
+                    let mut meta = quality::ExtractMeta::default();
+                    meta.audio_timeline = t.segments;
+                    (Ok(t.text), meta)
+                }
+                Err(e) => (Err(e), quality::ExtractMeta::default()),
+            }
         }
         // Unknown format: try reading as plain text (capped — a 50GB video
         // or image file must not be read fully into memory).

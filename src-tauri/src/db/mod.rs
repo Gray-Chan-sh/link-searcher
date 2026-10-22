@@ -11,7 +11,7 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "12";
+const SCHEMA_VERSION: &str = "13";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -379,6 +379,12 @@ fn ensure_quality_columns(tx: &Connection) -> Result<()> {
         tx.execute_batch("ALTER TABLE content_index ADD COLUMN mean_confidence REAL")
             .context("failed to add mean_confidence")?;
     }
+    // v13：音频段级时间轴（JSON）。正文 `text_content` 保持纯文本，
+    // 标签只在预览/导出时由 `crate::transcript` 拼出来。
+    if !has("audio_timeline") {
+        tx.execute_batch("ALTER TABLE content_index ADD COLUMN audio_timeline TEXT")
+            .context("failed to add audio_timeline")?;
+    }
     Ok(())
 }
 
@@ -415,7 +421,8 @@ const CREATE_TABLES_SQL: &str = "
         quality_score   REAL,
         quality_flags   TEXT NOT NULL DEFAULT '[]',
         reextract_count INTEGER NOT NULL DEFAULT 0,
-        mean_confidence REAL
+        mean_confidence REAL,
+        audio_timeline  TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_ci_quality ON content_index(quality_score);
 
@@ -1068,6 +1075,39 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
     }
 
+    /// v13：v12 的老库（`content_index` 没有 `audio_timeline`）启动时必须补上该列，
+    /// 且幂等 —— 否则升级后所有音频都无法写入时间轴（而且是静默失败）。
+    #[test]
+    fn test_audio_timeline_column_added_to_legacy_db() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE content_index (
+                md5             TEXT PRIMARY KEY,
+                text_content    TEXT NOT NULL,
+                indexed_at      INTEGER NOT NULL,
+                char_count      INTEGER NOT NULL DEFAULT 0,
+                ocr_used        INTEGER NOT NULL DEFAULT 0,
+                ocr_duration_ms INTEGER,
+                quality_score   REAL,
+                quality_flags   TEXT NOT NULL DEFAULT '[]',
+                reextract_count INTEGER NOT NULL DEFAULT 0,
+                mean_confidence REAL
+            );",
+        )
+        .unwrap();
+        run_migrations(&conn).unwrap();
+        run_migrations(&conn).unwrap(); // 幂等
+
+        let names: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(content_index)").unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        assert!(names.contains(&"audio_timeline".to_string()), "missing audio_timeline: {names:?}");
+    }
+
     #[test]
     fn test_quality_columns_exist_after_migration() {
         let conn = setup_conn();
@@ -1081,10 +1121,11 @@ mod tests {
         assert!(names.contains(&"quality_flags".to_string()), "missing quality_flags: {names:?}");
         assert!(names.contains(&"reextract_count".to_string()), "missing reextract_count: {names:?}");
         assert!(names.contains(&"mean_confidence".to_string()), "missing mean_confidence: {names:?}");
+        assert!(names.contains(&"audio_timeline".to_string()), "missing audio_timeline: {names:?}");
     }
 
     #[test]
-    fn test_schema_version_is_12() {
+    fn test_schema_version_matches_constant() {
         let conn = setup_conn();
         let version: String = conn
             .query_row(
@@ -1093,7 +1134,8 @@ mod tests {
                 |row| row.get(0),
             )
                 .unwrap();
-        assert_eq!(version, "12");
+        // 版本号跟常量走，避免每次迁移都要改测试（曾叫 test_schema_version_is_12）。
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

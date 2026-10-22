@@ -88,6 +88,7 @@ const MAPPINGS: Record<string, Mapping> = {
   get_duplicates: { method: 'GET', path: '/api/files', transform: () => [] },
   preview_file: (a) => ({ method: 'GET', path: `/api/files/${a.id}/preview` }),
   get_file_preview: (a) => ({ method: 'GET', path: `/api/files/${a.id}/preview` }),
+  export_file_text: (a) => ({ method: 'GET', path: `/api/files/${a.id}/export`, query: { format: a.format } }),
   preview_file_by_path: { method: 'GET', path: '/api/files/preview-by-path' },
   download_files: { method: 'POST', path: '/api/files/download' },
   open_file: { method: 'POST', path: '/api/files/open' },

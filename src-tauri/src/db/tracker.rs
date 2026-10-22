@@ -569,9 +569,9 @@ pub fn get_duplicates(conn: &Connection) -> Result<Vec<DuplicateGroup>> {
 
 mod content;
 pub use content::{
-    count_reextractable, delete_content, get_content, get_content_missing_quality,
+    count_reextractable, delete_content, get_audio_timeline, get_content, get_content_missing_quality,
     get_content_ocr_used, get_content_quality, get_contents, get_low_quality_files,
-    get_quality_summary, store_content, store_content_with_quality,
+    get_quality_summary, store_audio_timeline, store_content, store_content_with_quality,
     store_content_with_quality_and_reextract_count, update_content_quality,
     update_reextract_state, LowQualityRow, MissingQualityRow, QualitySummary,
 };

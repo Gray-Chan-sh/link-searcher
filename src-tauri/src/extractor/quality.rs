@@ -34,6 +34,12 @@ pub struct ExtractMeta {
     pub watermark_removed: bool,
     /// 检测到的水印碎片（用于跨文档字典增长与 OCR 结果二次过滤）。
     pub watermark_tokens: Vec<String>,
+    /// 音频的**段级时间轴**（旁路数据，仅用于预览/导出渲染）。
+    ///
+    /// 刻意存在 `ExtractMeta` 里而不是塞进正文：正文要逐字节干净地进
+    /// tantivy / `doc_chunks` / 向量，任何 `[00:00:12]`、`[说话人1]` 标签都会
+    /// 污染全文检索（见 `transcript.rs` 模块注释）。
+    pub audio_timeline: Vec<crate::transcript::AudioSegment>,
 }
 
 /// 源文件小到"本来就不该有正文"的阈值。0 字节按空文件处理；

@@ -16,6 +16,44 @@ pub fn store_content(conn: &Connection, md5: &str, text: &str, ocr_used: bool, o
     Ok(())
 }
 
+/// 写入音频的段级时间轴（JSON）。空时间轴写 NULL。
+///
+/// **顺序要求**：必须在 `store_content*` 之后调用 —— 那条 SQL 是
+/// `INSERT OR REPLACE`，会整行重建并把 `audio_timeline` 复位为 NULL。
+/// 反向顺序（先时间轴后正文）会把刚写的时间轴抹掉。
+pub fn store_audio_timeline(
+    conn: &Connection,
+    md5: &str,
+    timeline: &[crate::transcript::AudioSegment],
+) -> Result<()> {
+    let json = crate::transcript::to_json(timeline);
+    conn.execute(
+        "UPDATE content_index SET audio_timeline = ?1 WHERE md5 = ?2",
+        rusqlite::params![json, md5],
+    )
+    .context("store_audio_timeline failed")?;
+    Ok(())
+}
+
+/// 读取音频时间轴。无行 / 非音频 / 老数据一律返回空列表（调用方据此禁用
+/// 「带标签」导出，而不是报错）。
+pub fn get_audio_timeline(
+    conn: &Connection,
+    md5: &str,
+) -> Vec<crate::transcript::AudioSegment> {
+    let raw: Option<Option<String>> = conn
+        .query_row(
+            "SELECT audio_timeline FROM content_index WHERE md5 = ?1",
+            [md5],
+            |r| r.get(0),
+        )
+        .ok();
+    match raw {
+        Some(v) => crate::transcript::from_json(v.as_deref()),
+        None => Vec::new(),
+    }
+}
+
 pub fn store_content_with_quality(
     conn: &Connection,
     md5: &str,

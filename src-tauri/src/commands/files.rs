@@ -284,6 +284,143 @@ pub struct FilePreview {
     pub ocr_used: bool,
     pub quality_score: Option<f64>,
     pub quality_flags: String,
+    /// 音频是否带可用时间轴（决定 UI 里「带标签」导出是否可选）。
+    pub has_timeline: bool,
+}
+
+/// 文件扩展名是否为音频（`classify_ext` 的 "audio" 分类）。
+pub(crate) fn is_audio_path(path: &str) -> bool {
+    file_type_of(path) == "audio"
+}
+
+/// 与 [`crate::extractor::classify_ext`] 同一套分类，直接接受路径。
+pub(crate) fn file_type_of(path: &str) -> &'static str {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(crate::extractor::classify_ext)
+        .unwrap_or("unknown")
+}
+
+/// 读取正文，并把音频的**带标签**版本渲染出来。
+///
+/// 返回 `(展示用正文, 纯正文字符数, 是否用了 OCR, 是否有时间轴)`。
+/// 正文（`text_content`）本身始终是纯文本——标签只在这条输出路径上生成，
+/// 因此 tantivy / RAG / 片段预览都不受影响。
+pub(crate) fn preview_content(
+    conn: &rusqlite::Connection,
+    path: &str,
+    md5: Option<&str>,
+    limit: Option<usize>,
+) -> (Option<String>, usize, bool, bool) {
+    let Some(md5) = md5 else {
+        return (None, 0, false, false);
+    };
+    let Ok(Some(raw)) = db::tracker::get_content(conn, md5) else {
+        return (None, 0, false, false);
+    };
+    let ocr_used = db::tracker::get_content_ocr_used(conn, md5).unwrap_or(false);
+    let audio = is_audio_path(path);
+    let timeline = if audio { db::tracker::get_audio_timeline(conn, md5) } else { Vec::new() };
+    let has_timeline = crate::transcript::has_timeline(&timeline);
+
+    // 截断发生在**加标签之前**，且按"纯正文字数"计量：否则 5 万字的截断会
+    // 吃掉几十个段头，甚至切在半个 `[00:12:` 上。
+    let (raw, timeline) = match limit {
+        Some(n) if has_timeline => truncate_timeline(&timeline, n),
+        Some(n) => (raw.chars().take(n).collect::<String>(), timeline),
+        None => (raw, timeline),
+    };
+    let char_count = raw.chars().count();
+
+    if has_timeline {
+        (Some(crate::transcript::render_tagged(&raw, &timeline)), char_count, ocr_used, true)
+    } else {
+        (Some(raw), char_count, ocr_used, false)
+    }
+}
+
+/// 按**纯正文字数**截断时间轴，返回 `(截断后的正文, 截断后的时间轴)`。
+///
+/// 时间轴与正文共用同一份文本（逐段以 `\n` 相连），所以按段累加即可精确定位
+/// 截断点；跨界的最后一段按字符裁齐，保证"正文长度"与"带标签输出里的正文"一致。
+fn truncate_timeline(
+    timeline: &[crate::transcript::AudioSegment],
+    limit: usize,
+) -> (String, Vec<crate::transcript::AudioSegment>) {
+    let mut kept: Vec<crate::transcript::AudioSegment> = Vec::new();
+    let mut used = 0usize;
+    for seg in timeline {
+        let body = seg.text.trim();
+        if body.is_empty() {
+            continue;
+        }
+        let len = body.chars().count();
+        if used + len > limit {
+            let room = limit.saturating_sub(used);
+            if room > 0 {
+                let mut cut = seg.clone();
+                cut.text = body.chars().take(room).collect();
+                kept.push(cut);
+            }
+            break;
+        }
+        used += len + 1; // +1 for the joining '\n'
+        kept.push(seg.clone());
+    }
+    let text = kept.iter().map(|s| s.text.as_str()).collect::<Vec<_>>().join("\n");
+    (text, kept)
+}
+
+/// 导出结果（桌面与 Web 同一形状，前端只需读 `content`）。
+#[derive(Serialize)]
+pub struct ExportedText {
+    pub content: String,
+    pub char_count: usize,
+    pub format: String,
+}
+
+/// 单文件导出的实际实现（桌面命令与 Web 路由共用）。
+///
+/// * `raw`    —— 纯正文（与 `content_index.text_content` 逐字节相同）
+/// * `tagged` —— 带 `[时间 · 说话人]` 标签的可读稿（仅对**有时间轴的音频**有效）
+///
+/// 不落盘：由前端 `exportFile()` 负责弹保存框/下载。
+pub(crate) fn export_file_text_impl(
+    state: &AppState,
+    id: &str,
+    format: &str,
+) -> Result<ExportedText, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let file = db::tracker::get_file_by_id(&conn, id)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| format!("file not found: {id}"))?;
+    let md5 = file.md5.as_deref().ok_or_else(|| "文件尚未索引".to_string())?;
+    let raw = db::tracker::get_content(&conn, md5)
+        .map_err(|e| format!("query error: {e}"))?
+        .ok_or_else(|| "文件尚未索引".to_string())?;
+
+    let content = match format {
+        crate::transcript::FORMAT_RAW => raw,
+        crate::transcript::FORMAT_TAGGED => {
+            let timeline = db::tracker::get_audio_timeline(&conn, md5);
+            if !crate::transcript::has_timeline(&timeline) {
+                return Err("该文件没有时间轴（仅分段识别/说话人分离完成的音频可导出带标签版本）".into());
+            }
+            crate::transcript::render_tagged(&raw, &timeline)
+        }
+        other => return Err(format!("不支持的导出格式: {other}")),
+    };
+    Ok(ExportedText { char_count: content.chars().count(), content, format: format.to_string() })
+}
+
+#[tauri::command]
+pub async fn export_file_text(
+    state: State<'_, AppState>,
+    id: String,
+    format: String,
+) -> Result<ExportedText, String> {
+    export_file_text_impl(&state, &id, &format)
 }
 
 #[tauri::command]
@@ -315,17 +452,8 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         (None, None)
     };
 
-    let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
-        if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
-            let cc = c.chars().count();
-            let ocr = db::tracker::get_content_ocr_used(&conn, md5).unwrap_or(false);
-            (Some(c), cc, ocr)
-        } else {
-            (None, 0, false)
-        }
-    } else {
-        (None, 0, false)
-    };
+    let (content, char_count, ocr_used, has_timeline) =
+        preview_content(&conn, &file.path, file.md5.as_deref(), None);
 
     let (quality_score, quality_flags) = if let Some(md5) = &file.md5 {
         conn.query_row(
@@ -347,6 +475,7 @@ pub async fn get_file_preview(state: State<'_, AppState>, id: String) -> Result<
         ocr_used,
         quality_score,
         quality_flags,
+        has_timeline,
     })
 }
 
@@ -553,6 +682,7 @@ pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> R
         ocr_used: false,
         quality_score: None,
         quality_flags: "[]".to_string(),
+        has_timeline: false,
     })
 }
 
@@ -723,17 +853,8 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         (None, None)
     };
 
-    let (content, char_count, ocr_used) = if let Some(md5) = &file.md5 {
-        if let Ok(Some(c)) = db::tracker::get_content(&conn, md5) {
-            let cc = c.chars().count();
-            let ocr = db::tracker::get_content_ocr_used(&conn, md5).unwrap_or(false);
-            (Some(c), cc, ocr)
-        } else {
-            (None, 0, false)
-        }
-    } else {
-        (None, 0, false)
-    };
+    let (content, char_count, ocr_used, has_timeline) =
+        preview_content(&conn, &file.path, file.md5.as_deref(), None);
 
     let (quality_score, quality_flags) = if let Some(md5) = &file.md5 {
         conn.query_row(
@@ -755,6 +876,7 @@ async fn get_file_preview_inner(state: &State<'_, AppState>, file: &db::tracker:
         ocr_used,
         quality_score,
         quality_flags,
+        has_timeline,
     })
 }
 
@@ -797,6 +919,80 @@ mod tests {
              VALUES (?1,'x',?2,0,0,NULL,?3,?4,0)",
             rusqlite::params![md5, now, score, flags],
         ).unwrap();
+    }
+
+    fn store_transcript(conn: &rusqlite::Connection, md5: &str, text: &str, timeline: &[crate::transcript::AudioSegment]) {
+        db::tracker::store_content(conn, md5, text, false, None).unwrap();
+        db::tracker::store_audio_timeline(conn, md5, timeline).unwrap();
+    }
+
+    fn seg(start_ms: i64, end_ms: i64, speaker: Option<i32>, text: &str) -> crate::transcript::AudioSegment {
+        crate::transcript::AudioSegment { start_ms, end_ms, speaker, text: text.to_string() }
+    }
+
+    /// 音频预览/导出：正文纯文本 + 时间轴 → 输出带标签；纯正文与库里逐字节相同。
+    #[test]
+    fn audio_preview_and_export_split_plain_from_tagged() {
+        let conn = setup();
+        let text = "你好，能听到吗？\n听得到。";
+        store_transcript(
+            &conn,
+            "md5_audio",
+            text,
+            &[seg(0, 7_000, Some(0), "你好，能听到吗？"), seg(7_000, 15_000, Some(1), "听得到。")],
+        );
+
+        let (preview, chars, _ocr, has_timeline) =
+            preview_content(&conn, "dir/meeting.mp3", Some("md5_audio"), None);
+        let preview = preview.expect("音频预览应有正文");
+        assert!(has_timeline, "有时间轴时 has_timeline 必须为 true");
+        assert_eq!(chars, text.chars().count(), "char_count 仍按纯正文计");
+        assert_eq!(
+            preview,
+            "[00:00:00 · 说话人0] 你好，能听到吗？\n[00:00:07 · 说话人1] 听得到。"
+        );
+        // 库里正文保持纯净（标签只存在于输出层）
+        assert_eq!(db::tracker::get_content(&conn, "md5_audio").unwrap().unwrap(), text);
+    }
+
+    #[test]
+    fn audio_without_timeline_stays_plain_and_reports_no_timeline() {
+        let conn = setup();
+        db::tracker::store_content(&conn, "md5_old", "老音频只有正文", false, None).unwrap();
+        let (preview, _, _, has_timeline) =
+            preview_content(&conn, "dir/old.mp3", Some("md5_old"), None);
+        assert_eq!(preview.unwrap(), "老音频只有正文");
+        assert!(!has_timeline);
+    }
+
+    #[test]
+    fn non_audio_preview_never_tags_even_with_timeline_rows() {
+        let conn = setup();
+        store_transcript(&conn, "md5_pdf", "合同正文", &[seg(0, 1_000, Some(0), "合同正文")]);
+        let (preview, _, _, has_timeline) =
+            preview_content(&conn, "dir/a.pdf", Some("md5_pdf"), None);
+        assert_eq!(preview.unwrap(), "合同正文");
+        assert!(!has_timeline, "非音频不该报时间轴");
+    }
+
+    #[test]
+    fn preview_limit_is_applied_before_tagging() {
+        let conn = setup();
+        let text = "一".repeat(10) + "二";
+        store_transcript(&conn, "md5_long", &text, &[seg(0, 1_000, None, &text)]);
+        let (preview, chars, _, _) =
+            preview_content(&conn, "dir/long.mp3", Some("md5_long"), Some(10));
+        // 截断按纯正文算：10 个字 + 段头，不会把标签切一半
+        assert_eq!(chars, 10);
+        assert_eq!(preview.unwrap(), "[00:00:00] 一一一一一一一一一一");
+    }
+
+    #[test]
+    fn file_type_of_distinguishes_audio() {
+        assert_eq!(file_type_of("a/b/c.mp3"), "audio");
+        assert_eq!(file_type_of("a/b/c.PDF"), "pdf");
+        assert_eq!(file_type_of("a/b/c.docx"), "office");
+        assert_eq!(file_type_of("no_ext"), "unknown");
     }
 
     fn seed_quality_data(conn: &rusqlite::Connection) {

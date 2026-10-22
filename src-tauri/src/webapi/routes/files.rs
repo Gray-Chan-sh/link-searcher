@@ -15,6 +15,9 @@ use crate::webapi::state::ApiState;
 
 use super::ApiError;
 
+/// 预览接口的字符上限（**纯正文**的长度，加标签前截断）。
+pub const PREVIEW_CHAR_LIMIT: usize = 50_000;
+
 #[derive(Deserialize)]
 pub struct FilesQuery {
     pub filter: Option<String>,
@@ -33,6 +36,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/files/{id}", get(get_file_handler))
         .route("/api/files/{id}/abs-path", get(abs_path_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
+        .route("/api/files/{id}/export", get(file_export_handler))
         .route("/api/files/browse", get(files_browse_handler))
         .route("/api/dir-entries", get(dir_entries_handler))
         .route("/api/files/download", post(desktop_only_stub))
@@ -78,23 +82,23 @@ async fn preview_by_path_handler(
     let rec = tracker::get_file_by_path(&conn, &params.path)
         .map_err(|e| ApiError { error: e.to_string() })?
         .ok_or_else(|| ApiError { error: "file not found".into() })?;
-    let text = rec.md5.as_ref()
-        .and_then(|md5| tracker::get_content(&conn, md5).ok()?)
-        .unwrap_or_default();
-    let content = text.chars().take(50000).collect::<String>();
-    let ext = path_to_ext(&rec.path);
-    let file_type = if ext.is_empty() { "unknown" }
-        else if ["jpg","jpeg","png","gif","bmp","webp","tiff"].contains(&ext.as_str()) { "image" }
-        else if ext == "pdf" { "pdf" }
-        else if ["docx","doc","xlsx","xls","pptx","ppt","odt","ods","odp","rtf","epub"].contains(&ext.as_str()) { "office" }
-        else { "text" };
+    // 与桌面预览同源：音频输出带标签版本，其它类型原样；统一的 5 万字上限
+    // 作用于**纯正文**（截断发生在加标签之前）。
+    let (content, char_count, _ocr, has_timeline) = files::preview_content(
+        &conn,
+        &rec.path,
+        rec.md5.as_deref(),
+        Some(PREVIEW_CHAR_LIMIT),
+    );
+    let file_type = files::file_type_of(&rec.path);
     Ok(Json(serde_json::json!({
-        "content": content,
+        "content": content.unwrap_or_default(),
         "image_path": serde_json::Value::Null,
         "image_base64": serde_json::Value::Null,
         "file_type": file_type,
-        "char_count": content.chars().count(),
+        "char_count": char_count,
         "ocr_used": false,
+        "has_timeline": has_timeline,
     })))
 }
 
@@ -380,25 +384,46 @@ async fn file_preview_handler(
         .ok_or_else(|| ApiError {
             error: "file not found".into(),
         })?;
-    let text = rec
-        .md5
-        .as_ref()
-        .and_then(|md5| tracker::get_content(&conn, md5).ok()?)
-        .unwrap_or_default();
-    let content = text.chars().take(50000).collect::<String>();
-    let file_type = if path_to_ext(&rec.path).is_empty() { "unknown" }
-        else if ["jpg","jpeg","png","gif","bmp","webp","tiff"].contains(&path_to_ext(&rec.path).as_str()) { "image" }
-        else if path_to_ext(&rec.path) == "pdf" { "pdf" }
-        else if ["docx","doc","xlsx","xls","pptx","ppt","odt","ods","odp","rtf","epub"].contains(&path_to_ext(&rec.path).as_str()) { "office" }
-        else { "text" };
+    let (content, char_count, _ocr, has_timeline) = files::preview_content(
+        &conn,
+        &rec.path,
+        rec.md5.as_deref(),
+        Some(PREVIEW_CHAR_LIMIT),
+    );
+    let file_type = files::file_type_of(&rec.path);
     Ok(Json(serde_json::json!({
-        "content": content,
+        "content": content.unwrap_or_default(),
         "image_path": null,
         "image_base64": null,
         "file_type": file_type,
-        "char_count": content.chars().count(),
+        "char_count": char_count,
         "ocr_used": false,
+        "has_timeline": has_timeline,
     })))
+}
+
+/// `GET /api/files/{id}/export?format=raw|tagged`
+///
+/// 与桌面命令 `export_file_text` 同义：返回**全文**（不截断），由前端
+/// `exportFile()` 落盘或直接下载。
+#[derive(Deserialize)]
+pub struct ExportQuery {
+    /// `raw`（默认）或 `tagged`
+    pub format: Option<String>,
+}
+
+async fn file_export_handler(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+    Query(q): Query<ExportQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let format = q.format.unwrap_or_else(|| crate::transcript::FORMAT_RAW.to_string());
+    let exported = files::export_file_text_impl(&app_state, &id, &format)
+        .map_err(|error| ApiError { error })?;
+    serde_json::to_value(exported)
+        .map(Json)
+        .map_err(|e| ApiError { error: e.to_string() })
 }
 
 #[cfg(test)]

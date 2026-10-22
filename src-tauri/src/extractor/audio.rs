@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
+use crate::transcript::AudioSegment;
+
 /// Whether `ffmpeg` is installed: just run `ffmpeg -version` once and see if it
 /// resolves. On Windows the process PATH is refreshed from the registry at
 /// startup and after package installs (see [`crate::process::refresh_path`]),
@@ -65,6 +67,10 @@ const SEGMENTATION_MODEL_FILE: &str = "seg.onnx";
 const EMBEDDING_MODEL_FILE: &str = "emb.onnx";
 
 /// Speaker diarization pipeline: segmentation + embedding extraction + clustering.
+///
+/// Only caches **successful** builds; the "models missing" case is decided before
+/// touching this cell (see `diarized_slices`), so installing the models from the
+/// dependency center takes effect without an app restart.
 static SPEAKER_DIARIZER: OnceLock<Option<sherpa_onnx::OfflineSpeakerDiarization>> = OnceLock::new();
 
 /// Resolve the FunASR model directory across dev and bundled runs.
@@ -227,6 +233,18 @@ fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
 
 pub struct AudioExtractor;
 
+/// 转写结果：**纯正文** + **段级时间轴**。
+///
+/// 正文刻意不含任何 `[说话人N]` / `[00:00:12]` 标签：标签会进 tantivy /
+/// `doc_chunks` / 向量，污染全文检索（`[说话人` 会被 jieba 切成词、`12`/`34`
+/// 这类数字会变成检索词）。标签只在输出（预览/导出）时由
+/// [`crate::transcript::render_tagged`] 拼出来。
+#[derive(Debug, Clone, Default)]
+pub struct AudioTranscript {
+    pub text: String,
+    pub segments: Vec<AudioSegment>,
+}
+
 impl Default for AudioExtractor {
     fn default() -> Self {
         Self::new()
@@ -236,7 +254,13 @@ impl Default for AudioExtractor {
 impl AudioExtractor {
     pub fn new() -> Self { Self }
 
+    /// 兼容入口：只要纯文本。
     pub fn extract_audio(&self, path: &Path) -> Result<String> {
+        Ok(self.transcribe(path)?.text)
+    }
+
+    /// 转写音频，返回纯正文 + 段级时间轴。
+    pub fn transcribe(&self, path: &Path) -> Result<AudioTranscript> {
         let meta = std::fs::metadata(path).context("audio stat")?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
 
@@ -246,12 +270,15 @@ impl AudioExtractor {
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
                 .join("\n  ");
-            return Ok(format!(
-                "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未下载]\n已探测:\n  {}\n请在设置页点击「下载 FunASR 模型」（约 850MB，GitHub 下载）\n",
-                ext,
-                meta.len() as f64 / 1_048_576.0,
-                probed,
-            ));
+            return Ok(AudioTranscript {
+                text: format!(
+                    "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未下载]\n已探测:\n  {}\n请在设置页点击「下载 FunASR 模型」（约 850MB，GitHub 下载）\n",
+                    ext,
+                    meta.len() as f64 / 1_048_576.0,
+                    probed,
+                ),
+                segments: Vec::new(),
+            });
         }
 
         // Decode to 16kHz mono WAV (full length)
@@ -300,10 +327,13 @@ impl AudioExtractor {
         let rec = match recognizer() {
             Some(r) => r,
             None => {
-                return Ok(format!(
-                    "─── 音频文件 ({:.0}s, {}) ──\n[ASR 初始化失败：模型文件缺失或损坏，请重新下载模型]\n",
-                    dur, ext
-                ));
+                return Ok(AudioTranscript {
+                    text: format!(
+                        "─── 音频文件 ({:.0}s, {}) ──\n[ASR 初始化失败：模型文件缺失或损坏，请重新下载模型]\n",
+                        dur, ext
+                    ),
+                    segments: Vec::new(),
+                });
             }
         };
 
@@ -321,78 +351,151 @@ impl AudioExtractor {
 
         let t0 = std::time::Instant::now();
         // FunASR-Nano is an LLM trained on ~30s windows; long audio must be
-        // split before feeding. `recognize_segments` always yields bounded
-        // chunks: Silero VAD when the model exists, fixed 28s hard-split
-        // otherwise. Never feed a long file whole (OOM).
-        let segments = recognize_segments(&samples);
-        let mut diarized_parts: Vec<String> = Vec::new();
-        let diarizer = SPEAKER_DIARIZER
-            .get_or_init(|| if diarization_model_present() { build_diarizer() } else { None })
-            .as_ref();
-        for seg in &segments {
-            if let Some(d) = diarizer {
-                if let Some(result) = d.process(seg) {
-                    for seg_item in result.sort_by_start_time() {
-                        let speaker_label = format!("[说话人{}]", seg_item.speaker);
-                        let start_sample = (seg_item.start * 16000.0).round() as usize;
-                        let end_sample = ((seg_item.end * 16000.0).round() as usize).min(seg.len());
-                        if start_sample < end_sample
-                            && let Some(text) = transcribe(rec, &seg[start_sample..end_sample])
-                                && !text.trim().is_empty() {
-                                    diarized_parts.push(format!("{speaker_label}{text}"));
-                                }
-                    }
-                } else {
-                    if let Some(text) = transcribe(rec, seg)
-                        && !text.trim().is_empty() {
-                            diarized_parts.push(text);
-                        }
-                }
-            } else {
-                if let Some(text) = transcribe(rec, seg)
-                    && !text.trim().is_empty() {
-                        diarized_parts.push(text);
-                    }
+        // split before feeding. `recognize_slices` always yields bounded
+        // slices: global speaker diarization when its models exist, Silero VAD
+        // next, fixed 28s hard-split otherwise. Never feed a long file whole
+        // (OOM: an 18.7GB RSS blowup was measured on a 34-minute recording).
+        //
+        // Diarization runs **once on the whole waveform** (not per slice):
+        // per-slice clustering restarts its speaker numbering every chunk, so
+        // "说话人0" in chunk 1 and chunk 5 could be different people.
+        let slices = recognize_slices(&samples);
+        let mut parts: Vec<String> = Vec::with_capacity(slices.len());
+        let mut segments: Vec<AudioSegment> = Vec::with_capacity(slices.len());
+        for slice in &slices {
+            let Some(raw) = transcribe(rec, &samples[slice.start..slice.end]) else {
+                continue;
+            };
+            // Sanitize **per segment** so the timeline text and the joined body
+            // stay byte-identical: `sanitize_text` is idempotent, so the outer
+            // pass in `extract_text_with_meta` becomes a no-op for audio.
+            let text = crate::extractor::sanitize_text(&raw);
+            if text.is_empty() {
+                continue;
             }
+            parts.push(text.clone());
+            segments.push(AudioSegment {
+                start_ms: samples_to_ms(slice.start),
+                end_ms: samples_to_ms(slice.end),
+                speaker: slice.speaker,
+                text,
+            });
         }
-        let text = diarized_parts.join("\n");
+        let text = parts.join("\n");
 
         if text.trim().is_empty() {
-            return Ok(format!(
-                "─── 音频文件 ({:.0}s, {}) ──\n[FunASR 推理完成，无识别结果]\n",
-                dur, ext
-            ));
+            return Ok(AudioTranscript {
+                text: format!(
+                    "─── 音频文件 ({:.0}s, {}) ──\n[FunASR 推理完成，无识别结果]\n",
+                    dur, ext
+                ),
+                segments: Vec::new(),
+            });
         }
-        log::info!("[ASR] {:?}: {} chars in {:.1}s", path.file_name(), text.len(), t0.elapsed().as_secs_f64());
-        Ok(format!("─── 音频文件 ({:.0}s) ──\n{}\n", dur, text))
+        log::info!(
+            "[ASR] {:?}: {} chars / {} segments in {:.1}s",
+            path.file_name(),
+            text.len(),
+            segments.len(),
+            t0.elapsed().as_secs_f64()
+        );
+        // 正文保持纯文本（无 `─── 音频文件 ──` 头、无 `[说话人N]`）：
+        // 头部/标签都会进索引，搜「音频文件」就能命中全部音频。
+        Ok(AudioTranscript { text, segments })
     }
 }
 
-/// Split `samples` into bounded chunks (≤30s each) for LLM decoding.
-/// Uses Silero VAD when its model is present; otherwise falls back to a
-/// fixed 28s hard split with 1s overlap at boundaries. Always returns
-/// a non-empty list — never feed long audio whole (OOM).
-fn recognize_segments(samples: &[f32]) -> Vec<Vec<f32>> {
-    if let Some(segments) = vad_segments(samples) {
-        return segments;
+/// 一个待转写的切片（绝对采样点偏移）+ 它的说话人。
+#[derive(Debug, Clone, Copy)]
+struct Slice {
+    start: usize,
+    end: usize,
+    speaker: Option<i32>,
+}
+
+/// 16kHz 采样点 → 毫秒。
+fn samples_to_ms(sample: usize) -> i64 {
+    (sample as f64 * 1000.0 / 16000.0).round() as i64
+}
+
+/// 把整段音频切成有界切片，尽量带上说话人。
+///
+/// 优先级：**全量说话人分离** → Silero VAD → 固定 28s 硬切。
+/// 永远返回非空列表（除非输入为空），绝不会把长音频整段喂给 LLM（会 OOM）。
+fn recognize_slices(samples: &[f32]) -> Vec<Slice> {
+    if samples.is_empty() {
+        return Vec::new();
     }
-    // Fixed hard split: 28s chunks with 1s overlap to avoid cutting words at boundaries.
+    if let Some(slices) = diarized_slices(samples) {
+        return slices;
+    }
+    if let Some(slices) = vad_slices(samples) {
+        return slices;
+    }
+    hard_split_slices(samples)
+}
+
+/// 全量跑一次 diarizer，得到**全局一致**的说话人时间线。
+///
+/// 关键：不能逐 VAD 段调用 `process()` —— 每次调用内部聚类独立，说话人编号
+/// 会按段重置（第 1 段的"说话人0"和第 5 段的"说话人0"可能是两个人）。
+fn diarized_slices(samples: &[f32]) -> Option<Vec<Slice>> {
+    // 先查模型在不在，**再**碰 OnceLock：模型是「依赖中心」里可随时补装的，
+    // 若把"缺失"缓存进 OnceLock，装完模型后必须重启应用才生效。
+    if !diarization_model_present() {
+        return None;
+    }
+    let diarizer = SPEAKER_DIARIZER.get_or_init(build_diarizer).as_ref()?;
+
+    let t0 = std::time::Instant::now();
+    let result = diarizer.process(samples)?;
+    let turns = result.sort_by_start_time();
+    log::info!(
+        "[ASR] diarization: {} speaker turns in {:.1}s ({:.0}s audio)",
+        turns.len(),
+        t0.elapsed().as_secs_f64(),
+        samples.len() as f64 / 16000.0
+    );
+
+    let mut out = Vec::with_capacity(turns.len());
+    for turn in turns {
+        let start = (turn.start.max(0.0) * 16000.0).round() as usize;
+        let end = ((turn.end * 16000.0).round() as usize).min(samples.len());
+        if start >= end {
+            continue;
+        }
+        for (s, e) in split_long(start, end, samples.len()) {
+            out.push(Slice { start: s, end: e, speaker: Some(turn.speaker) });
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// 把 `[start, end)` 再切成 ≤28s 的片段（带 1s 重叠，避免切断词）。
+///
+/// 说话人轮次通常只有几秒，但一段连续发言可能远超 30s —— 那种情况必须再切，
+/// 否则整段喂进 30s 窗口的模型会静默返回空文本。
+fn split_long(start: usize, end: usize, limit: usize) -> Vec<(usize, usize)> {
     const CHUNK: usize = 28 * 16000;
     const OVERLAP: usize = 16000;
-    if samples.len() <= CHUNK {
-        return vec![samples.to_vec()];
+    let end = end.min(limit);
+    if start >= end {
+        return Vec::new();
     }
-    let mut result = Vec::new();
-    let mut start = 0;
-    while start < samples.len() {
-        let end = (start + CHUNK).min(samples.len());
-        result.push(samples[start..end].to_vec());
-        if end == samples.len() {
+    if end - start <= CHUNK {
+        return vec![(start, end)];
+    }
+    let mut out = Vec::new();
+    let mut s = start;
+    while s < end {
+        let e = (s + CHUNK).min(end);
+        out.push((s, e));
+        if e == end {
             break;
         }
-        start = end.saturating_sub(OVERLAP);
+        s = e.saturating_sub(OVERLAP).max(s + 1);
     }
-    result
+    out
 }
 
 fn vad_available() -> bool {
@@ -401,7 +504,7 @@ fn vad_available() -> bool {
         .unwrap_or(false)
 }
 
-fn vad_segments(samples: &[f32]) -> Option<Vec<Vec<f32>>> {
+fn vad_slices(samples: &[f32]) -> Option<Vec<Slice>> {
     if !vad_available() {
         return None;
     }
@@ -422,28 +525,45 @@ fn vad_segments(samples: &[f32]) -> Option<Vec<Vec<f32>>> {
     let vad = sherpa_onnx::VoiceActivityDetector::create(&vad_config, 60.0)?;
 
     let window = 512usize;
-    let mut segments = Vec::new();
+    let mut slices = Vec::new();
     let mut i = 0;
     while i + window <= samples.len() {
         vad.accept_waveform(&samples[i..i + window]);
-        drain_vad(&vad, &mut segments);
+        drain_vad(&vad, &mut slices, i + window);
         i += window;
     }
     if i < samples.len() {
         vad.accept_waveform(&samples[i..]);
+        drain_vad(&vad, &mut slices, samples.len());
     }
     vad.flush();
-    drain_vad(&vad, &mut segments);
-    Some(segments)
+    drain_vad(&vad, &mut slices, samples.len());
+    if slices.is_empty() { None } else { Some(slices) }
 }
 
-fn drain_vad(vad: &sherpa_onnx::VoiceActivityDetector, segments: &mut Vec<Vec<f32>>) {
+/// `SpeechSegment::start()` 是**相对于截至目前喂入的全部输入**的采样点偏移，
+/// 因此可以直接当绝对时间用；这里仍按「已喂入长度 `fed`」做一次边界钳制，
+/// 防止异常值越界到 `samples` 之外。
+fn drain_vad(vad: &sherpa_onnx::VoiceActivityDetector, slices: &mut Vec<Slice>, fed: usize) {
     while !vad.is_empty() {
         if let Some(seg) = vad.front() {
-            segments.push(seg.samples().to_vec());
+            let n = seg.n().max(0) as usize;
+            let start = (seg.start().max(0) as usize).min(fed);
+            let end = start.saturating_add(n).min(fed);
+            if start < end {
+                slices.push(Slice { start, end, speaker: None });
+            }
             vad.pop();
         }
     }
+}
+
+/// 兜底：VAD 与分离模型都不可用时的固定 28s 硬切（1s 重叠）。
+fn hard_split_slices(samples: &[f32]) -> Vec<Slice> {
+    split_long(0, samples.len(), samples.len())
+        .into_iter()
+        .map(|(start, end)| Slice { start, end, speaker: None })
+        .collect()
 }
 
 fn transcribe(rec: &sherpa_onnx::OfflineRecognizer, samples: &[f32]) -> Option<String> {
@@ -463,6 +583,58 @@ impl Extractor for AudioExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn samples_to_ms_matches_16khz() {
+        assert_eq!(samples_to_ms(0), 0);
+        assert_eq!(samples_to_ms(8_000), 500);
+        assert_eq!(samples_to_ms(16_000), 1_000);
+        assert_eq!(samples_to_ms(16_001), 1_000);
+    }
+
+    #[test]
+    fn split_long_keeps_short_turns_whole() {
+        // 5 秒的说话人轮次不该被再切
+        assert_eq!(split_long(0, 5 * 16_000, 5 * 16_000), vec![(0, 5 * 16_000)]);
+    }
+
+    #[test]
+    fn split_long_bounds_every_chunk_to_28s() {
+        let total = 61 * 16_000;
+        let out = split_long(0, total, total);
+        assert!(out.len() >= 3, "61s 应切成 3 段以上: {}", out.len());
+        for (s, e) in &out {
+            assert!(*e > *s);
+            assert!(e - s <= 28 * 16_000, "单段超过 28s: {}", e - s);
+            assert!(*e <= total);
+        }
+        assert_eq!(out.first().map(|x| x.0), Some(0));
+        assert_eq!(out.last().map(|x| x.1), Some(total));
+        // 相邻段有重叠（避免切断词）
+        assert!(out[1].0 < out[0].1);
+    }
+
+    #[test]
+    fn split_long_rejects_empty_range() {
+        assert!(split_long(100, 100, 1000).is_empty());
+        assert!(split_long(200, 100, 1000).is_empty());
+    }
+
+    #[test]
+    fn hard_split_covers_whole_buffer_without_speaker() {
+        let samples = vec![0.0f32; 30 * 16_000];
+        let slices = hard_split_slices(&samples);
+        assert_eq!(slices.len(), 2, "30s 缓冲按 28s 切 → 2 段");
+        assert!(slices.iter().all(|s| s.speaker.is_none()));
+        assert_eq!(slices[0].start, 0);
+        assert_eq!(slices.last().unwrap().end, samples.len());
+        assert_eq!(samples_to_ms(slices[1].start), 27_000, "1s 重叠");
+    }
+
+    #[test]
+    fn recognize_slices_handles_empty_audio() {
+        assert!(recognize_slices(&[]).is_empty());
+    }
 
     #[test]
     fn ffmpeg_detection_finds_system_binary() {
