@@ -212,6 +212,7 @@
 - **Node.js** 20+
 - **Rust** 1.85+
 - **音频识别（可选）**：ffmpeg，音频转写模型（FunASR-Nano ~850MB）在应用「依赖中心」下载（镜像优先）
+- **Linux 额外（Debian/Ubuntu）**：Tauri 构建依赖——`libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`libayatana-appindicator3-dev`、`libssl-dev`、`libsoup-3.0-dev`、`libxdo-dev`、`libgbm-dev`（缺了链接期报 `unable to find library -lgbm`）、`libpipewire-0.3-dev` 与 `clang` / `libclang-dev`（`tauri-plugin-mcp` → `xcap` → `pipewire` 的 `libspa-sys` 需要；缺 clang 时 bindgen 会报 `stdbool.h file not found`）、`build-essential`、`pkg-config`。`./scripts/setup-dev.sh` 会自动检测并安装。
 - **Windows 额外**：VS Build Tools（MSVC + Windows SDK）。`cargo build` 需从 GitHub 拉 `tauri-plugin-mcp`（git 依赖）与 sherpa-onnx 预编译库——国内网络建议先跑 `scripts/setup-dev.ps1`（自动配 cargo/npm 镜像、预下载 sherpa 库），或设代理 `HTTPS_PROXY`
 
 ### 国内网络一键配置（推荐）
@@ -225,7 +226,7 @@
 .\scripts\setup-dev.ps1
 ```
 
-脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；并自动检测安装可选系统依赖 poppler/ffmpeg（macOS 走 Homebrew、Debian/Ubuntu 走 apt、Windows 走 winget；`--skip-system-deps` / `-SkipSystemDeps` 跳过，`--include-tesseract` / `-IncludeTesseract` 加装 tesseract）。Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`；自动补装 Rust 与 VS Build Tools C++ 组件（cargo 构建必需，缺失时触发，UAC 弹窗点「是」即可）。
+脚本会写入 cargo 国内镜像（rsproxy.cn）、项目 `.npmrc`（npmmirror）、让 git 依赖复用系统代理；并自动检测安装可选系统依赖 poppler/ffmpeg（macOS 走 Homebrew、Debian/Ubuntu 走 apt、Windows 走 winget；`--skip-system-deps` / `-SkipSystemDeps` 跳过，`--include-tesseract` / `-IncludeTesseract` 加装 tesseract）。Linux 版还会按 `pkg-config` 探测补齐 Tauri 构建依赖（WebKit/GTK/librsvg/appindicator/ssl/soup/xdo/gbm/pipewire + clang/libclang + build-essential）。Windows 版额外把 sherpa-onnx 预编译库预下载到 `third_party/sherpa-onnx` 并设置 `SHERPA_ONNX_ARCHIVE_DIR`；自动补装 Rust 与 VS Build Tools C++ 组件（cargo 构建必需，缺失时触发，UAC 弹窗点「是」即可）。
 
 ### 开发运行
 
@@ -238,6 +239,12 @@ npm run tauri dev
 ```
 
 > 开发版直接使用仓库内 `src-tauri/models/ppocrv5` 模型，OCR 零下载开箱可用。
+
+> **虚拟机 / 无 GPU 环境（Linux）**：窗口能弹出但内容全白时，是 WebKitGTK 的 DMABUF 渲染器在虚拟显卡（VMware/VirtualBox、软件渲染）下不可用，加环境变量即可：
+> ```bash
+> WEBKIT_DISABLE_DMABUF_RENDERER=1 npm run tauri dev
+> ```
+> （`WEBKIT_DISABLE_COMPOSITING_MODE=1` 同样有效，两者取一。）这是 WebKitGTK 的已知行为，非应用缺陷；有正常 GPU 驱动的机器不需要设置。
 
 ### 构建
 

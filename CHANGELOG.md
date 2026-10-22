@@ -1,3 +1,39 @@
+## 2026-10-22（第五十四轮）：Linux 实机验证修复 —— 前端类型错误归零、门禁改用 `tsc -b`、补齐 Linux 构建依赖
+
+> 背景：在 Ubuntu 24.04 虚拟机（VMware + WebKitGTK）里从零构建并运行本应用。
+> 结论是**能跑**（OCR / 索引 / 中文分词搜索端到端全通），过程中暴露 3 个真实缺陷，本轮修掉。
+
+**前端：`tsc -b` 的 9 个类型错误（跨平台，非 Linux 专有）**
+
+- `src/components/settings/RestoreMappingDialog.tsx`（`56b6489` 引入）：补 `BackupDirInfo` 类型导入；
+  `setRow` 的 `prev[id]` 用 `EMPTY_ROW` 兜底（否则展开出可选属性，与 `Record<string, Row>` 不兼容）；
+  `previewable` 改为类型谓词 `(r?: Row): r is Row`（原写法在 JSX 里收窄不了 `r`）；
+  `hasNesting` 改为先 `map` 成行再用类型谓词 `filter`；`handleApply` 同样用 `EMPTY_ROW` 兜底。
+- **影响面不止"编译不过"**：`npm run build`（= `tsc -b && vite build`）失败 → `npm run tauri build`
+  的 `beforeBuildCommand` 卡在第一步 → **三平台都出不了安装包**。
+- **门禁本身失效**：`AGENTS.md` 原写 `npx tsc --noEmit`，但根 `tsconfig.json` 是 solution 风格
+  （`files: []` + `references`）→ `--noEmit` **编译零个文件、永远 exit 0**，等于没检查（这批错误因此潜伏）。
+  门禁命令改为 `npx tsc -b`（与 `npm run build` 同一条），`AGENTS.md` 两处同步更新并注明原因。
+
+**Linux 构建依赖（`scripts/setup-dev.sh` + `README.md`）**
+
+- 实测会依次炸在三处：`libpipewire-0.3-dev`（`libspa-sys` 构建失败）、`clang` / `libclang-dev`
+  （bindgen 报 `stdbool.h file not found`）、`libgbm-dev`（链接期 `unable to find library -lgbm`）。
+  依赖链：`tauri-plugin-mcp` → `xcap` → `pipewire` → `libspa-sys`。
+- `setup-dev.sh` 的 Linux 分支现在按 `pkg-config` 探测补齐整套 Tauri 构建依赖
+  （WebKit2GTK 4.1 / GTK3 / librsvg / appindicator3 / ssl / soup3 / xdo / gbm / pipewire，
+  外加 clang/libclang 与 build-essential），结尾并提示 git 镜像重写与 `SHERPA_ONNX_ARCHIVE_DIR`
+  （国内网络直连 GitHub 拉不到 sherpa-onnx 预编译库，与 Windows 侧同一机制）。
+- `README.md` 新增「Linux 额外」依赖清单，以及**虚拟机 / 无 GPU 环境**说明：窗口能弹出但内容全白
+  是 WebKitGTK 的 DMABUF 渲染器在虚拟显卡下不可用（非应用缺陷），
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`（或 `WEBKIT_DISABLE_COMPOSITING_MODE=1`）即可。
+
+**说明**
+
+- 应用 Rust 代码零改动（本轮只动前端类型标注、构建脚本与文档）。
+- 仓库换行符**无问题**：`git ls-files --eol` 为 `i/lf w/crlf`（仓库里存的是 LF，仅 Windows 工作区因
+  `core.autocrlf=true` 呈现 CRLF），故**不**新增 `.gitattributes`。
+
 ## 2026-10-19（第五十三轮）：生命周期通知 —— 优雅退出发「正在下线」，下次上线配对补发「已重新上线」
 
 > 需求："飞书中能不能感知程序在线状态？要像 Hermes 那样 —— 退出时提示

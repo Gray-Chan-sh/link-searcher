@@ -87,7 +87,10 @@ if [ "$SKIP_SYSTEM_DEPS" = "1" ]; then
   echo "==> 跳过系统依赖安装（--skip-system-deps）。所需命令："
   case "$OS" in
     Darwin) echo "    brew install poppler ffmpeg${INCLUDE_TESSERACT:+ tesseract tesseract-lang}" ;;
-    Linux)  echo "    sudo apt install -y poppler-utils ffmpeg${INCLUDE_TESSERACT:+ tesseract-ocr}" ;;
+    Linux)  echo "    sudo apt install -y poppler-utils ffmpeg${INCLUDE_TESSERACT:+ tesseract-ocr} \\"
+            echo "      build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \\"
+            echo "      libayatana-appindicator3-dev libssl-dev libsoup-3.0-dev libxdo-dev libgbm-dev \\"
+            echo "      libpipewire-0.3-dev clang libclang-dev" ;;
   esac
 elif [ "$OS" = "Darwin" ]; then
   if ! command -v brew >/dev/null; then
@@ -111,24 +114,45 @@ elif [ "$OS" = "Darwin" ]; then
 elif [ "$OS" = "Linux" ]; then
   # 仅对 Debian/Ubuntu 系自动尝试；其它发行版只提示
   if command -v apt-get >/dev/null 2>&1; then
-    echo "==> 检查 apt 依赖..."
+    echo "==> 检查 apt 依赖（运行时 + Tauri 构建）..."
     need=()
+    # --- 运行时 ---
     command -v pdftoppm >/dev/null 2>&1 || need+=(poppler-utils)
     command -v ffmpeg >/dev/null 2>&1 || need+=(ffmpeg)
     if [ "$INCLUDE_TESSERACT" = "1" ] && ! command -v tesseract >/dev/null 2>&1; then
       need+=(tesseract-ocr)
     fi
+    # --- 构建：C 工具链 ---
+    { command -v cc >/dev/null 2>&1 && command -v make >/dev/null 2>&1; } || need+=(build-essential)
+    command -v pkg-config >/dev/null 2>&1 || need+=(pkg-config)
+    # --- 构建：Tauri / GTK / WebKit 链接期（按 pkg-config 探测，缺什么装什么）---
+    pkg_need() { pkg-config --exists "$1" 2>/dev/null || need+=("$2"); }
+    pkg_need webkit2gtk-4.1 libwebkit2gtk-4.1-dev
+    pkg_need gtk+-3.0 libgtk-3-dev
+    pkg_need librsvg-2.0 librsvg2-dev
+    pkg_need ayatana-appindicator3-0.1 libayatana-appindicator3-dev
+    pkg_need openssl libssl-dev
+    pkg_need libsoup-3.0 libsoup-3.0-dev
+    pkg_need libxdo libxdo-dev
+    # libgbm：缺了链接期报 `unable to find library -lgbm`
+    pkg_need gbm libgbm-dev
+    # libspa-sys（tauri-plugin-mcp → xcap → pipewire）：需要 pipewire 头文件
+    # 以及 bindgen 用的 clang/libclang（缺 clang 时报 `stdbool.h file not found`）
+    pkg_need libpipewire-0.3 libpipewire-0.3-dev
+    command -v clang >/dev/null 2>&1 || need+=(clang)
+    ls /usr/lib/llvm-*/lib/libclang.so* /usr/lib/x86_64-linux-gnu/libclang*.so* >/dev/null 2>&1 || need+=(libclang-dev)
     if [ "${#need[@]}" -gt 0 ]; then
       echo "==> sudo apt-get install -y ${need[*]} ..."
       sudo apt-get update -qq || true
       sudo apt-get install -y "${need[@]}" || echo "    !! apt 安装失败，请手动运行上面的命令"
     else
-      echo "    poppler-utils/ffmpeg 已就绪（tesseract 未勾选或已安装）"
+      echo "    运行时与构建依赖均已就绪（tesseract 未勾选或已安装）"
     fi
   else
     echo "==> 非 apt 发行版，请用系统包管理器安装："
     echo "    poppler-utils、ffmpeg${INCLUDE_TESSERACT:+、tesseract-ocr}"
-    echo "    （含 WebKit/GTK 等 Tauri 构建依赖，见 README）"
+    echo "    以及 Tauri 构建依赖：WebKitGTK 4.1 / GTK3 / librsvg / ayatana-appindicator3 /"
+    echo "    libssl / libsoup3 / libxdo / libgbm / libpipewire-0.3 的开发包，外加 clang（bindgen）"
   fi
 else
   echo "    !! 未知系统 $OS，跳过系统依赖安装"
@@ -140,5 +164,14 @@ echo "==> 完成。首次 cargo build 会从 GitHub 拉 tauri-plugin-mcp 与 she
 echo "    请确保 git 代理可用，或设置："
 echo "    export HTTPS_PROXY=http://127.0.0.1:7890"
 echo ""
+echo "    git 依赖被重置时可改用镜像重写（cargo 已配 git-fetch-with-cli）："
+echo "    git config --global url.\"https://ghfast.top/https://github.com/\".insteadOf \"https://github.com/\""
+echo ""
+echo "    sherpa-onnx 预编译库（Linux 为 sherpa-onnx-v<版本>-linux-x64-static-lib.tar.bz2）"
+echo "    可先手动下载到本地目录，再用 SHERPA_ONNX_ARCHIVE_DIR 指向它，跳过构建期下载。"
+echo ""
 echo "    模型下载默认源：github.com/linksearcher/link-searcher-models（发布版首启自动镜像下载）"
 echo "    如需覆盖：export LINK_SEARCHER_MODELS_GH=yourname/repo LINK_SEARCHER_MODELS_TAG=models-v1"
+echo ""
+echo "    虚拟机 / 无 GPU 环境（Linux）若窗口全白，启动时加环境变量："
+echo "      WEBKIT_DISABLE_DMABUF_RENDERER=1（或 WEBKIT_DISABLE_COMPOSITING_MODE=1）"

@@ -22,7 +22,7 @@
    b. 更新 README.md（涉及功能/架构变化）
    c. 更新 USER_MANUAL.md（涉及用户可见行为变化）
    d. semgrep scan --severity ERROR 零发现
-   e. cargo check / npx tsc 零错误
+   e. cargo check / npx tsc -b 零错误
    f. **跑全部测试目标**（不只是 `--lib`）零失败 —— 见「测试门禁」
   ↓
 6. 提交 & 推送：git commit + git push（CHANGELOG 必须同在此 commit）
@@ -57,7 +57,10 @@ mock E2E **完全不参与编译与运行** —— 测试目标一旦编译不�
 cargo test --manifest-path src-tauri/Cargo.toml --workspace
 
 # 前端
-npx tsc --noEmit
+npx tsc -b          # ⚠️ 必须是 -b（build 模式）：根 tsconfig.json 是 solution 风格
+                    #    （files: [] + references），`tsc --noEmit` 会**编译零个文件**、
+                    #    永远 exit 0 —— 等于没检查。真正的类型检查是 `tsc -b`，
+                    #    也正是 `npm run build`（含 `tsc -b`）用的那条。
 npx vitest run
 ```
 

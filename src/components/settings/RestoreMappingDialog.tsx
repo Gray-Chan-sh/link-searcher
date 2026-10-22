@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useI18n } from '../../i18n'
 import { LoadingSpinner } from '../../icons'
 import { openDirectory } from '../../utils/platform'
-import type { DirActionKind, DirMapping, RemapPreview, RestorePlan } from '../../api/backup'
+import type { BackupDirInfo, DirActionKind, DirMapping, RemapPreview, RestorePlan } from '../../api/backup'
 import { hasNestedRoots, isLowHit } from './restoreMapping'
 
 interface RestoreMappingDialogProps {
@@ -14,6 +14,9 @@ interface RestoreMappingDialogProps {
 
 type Row = { action: DirActionKind | ''; path: string }
 type PreviewState = { kind: 'loading' } | { kind: 'ok'; data: RemapPreview } | { kind: 'error'; message: string }
+
+/** 未选择落位时的初始行（`rows[id]` 理论上总存在，这里只用于消除 `undefined` 分支）。 */
+const EMPTY_ROW: Row = { action: '', path: '' }
 
 /** 恢复前四种落位：保留原路径 / 指定目录 / 停用扫描（保留数据）/ 移除。 */
 const ACTIONS: DirActionKind[] = ['keep', 'remap', 'disable', 'remove']
@@ -35,7 +38,8 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
   const [acked, setAcked] = useState(false)
   const [busy, setBusy] = useState(false)
 
-  const setRow = (id: string, patch: Partial<Row>) => setRows(prev => ({ ...prev, [id]: { ...prev[id], ...patch } }))
+  const setRow = (id: string, patch: Partial<Row>) =>
+    setRows(prev => ({ ...prev, [id]: { ...(prev[id] ?? EMPTY_ROW), ...patch } }))
 
   const runPreview = async (id: string, path: string) => {
     setPreviews(prev => ({ ...prev, [id]: { kind: 'loading' } }))
@@ -70,7 +74,8 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
   }
 
   /** 某行是否处于「有目标路径、可/已预检」的状态（remap 与 keep 都要看命中率）。 */
-  const previewable = (r?: Row) => (r?.action === 'remap' || r?.action === 'keep') && r.path.trim() !== ''
+  const previewable = (r?: Row): r is Row =>
+    !!r && (r.action === 'remap' || r.action === 'keep') && r.path.trim() !== ''
 
   const allDecided = plan.dirs.every(d => rows[d.id]?.action !== '')
   const remapComplete = plan.dirs.every(d => {
@@ -85,8 +90,9 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
   // 归一化后判嵌套（与后端 `validate_mappings` 同一规则）：
   const hasNesting = hasNestedRoots(
     plan.dirs
-      .filter(d => rows[d.id]?.action === 'remap' && rows[d.id].path.trim() !== '')
-      .map(d => rows[d.id].path),
+      .map(d => rows[d.id])
+      .filter((r): r is Row => r?.action === 'remap' && r.path.trim() !== '')
+      .map(r => r.path),
   )
   const hasRisk = hasLowHit || hasNesting
   const canApply = allDecided && remapComplete && (!hasRisk || acked) && !busy
@@ -94,7 +100,7 @@ export function RestoreMappingDialog({ plan, onPreview, onApply, onCancel }: Res
   const handleApply = () => {
     if (!canApply) return
     const mappings: DirMapping[] = plan.dirs.map(d => {
-      const r = rows[d.id]
+      const r = rows[d.id] ?? EMPTY_ROW
       return {
         dirId: d.id,
         action: r.action as DirActionKind,
