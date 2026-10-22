@@ -39,6 +39,16 @@
   FunASR-Nano 是 0.6B int8 模型，能力边界在此。
 - 说话人是**按 VAD 段归属**（段内换人不拆）。
 
+**入口：重新转写全部音频（`IndexStatus` + `commands/index.rs`）**
+
+- 问题：降噪修复只对**新转写**生效；已跑过回填的音频都有时间轴了，而回填按钮按
+  `audio_timeline IS NULL` 筛选 → 它们再也进不了队列。
+- 修复：`backfill_audio_timeline(limit, force, offset)` 增加 `force`（忽略已有时间轴）
+  与 `offset`（force 模式候选集固定，按批顺序推进）；`IndexStatus` 增加 `audio_files`
+  （唯一内容数）；Web `POST /api/index/audio-timeline` 同步。
+- UI：「索引状态 → 维护工具」新增「⟳ 重新转写全部音频（N）」，点击先确认
+  （提示耗时与可停止），运行中与「为音频补时间轴」共用一个可停止的循环与进度条。
+
 ## 2026-10-23（第五十七轮）：真机跑通 FunASR —— 模型缺文件导致全部音频失败、说话人切分改为「VAD 转写 + 时间对齐」、复读兜底
 
 > 背景：用真实模型（`D:\index\models\funasr`）与真实录音（100 秒通话 / 110 秒会议）

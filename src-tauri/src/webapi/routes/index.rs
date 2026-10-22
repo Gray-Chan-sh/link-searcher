@@ -132,6 +132,7 @@ async fn index_status_handler(
     let is_rebuilding = app_state.is_rebuilding.load(Ordering::Relaxed);
     let load = crate::load::current_limits();
     let pending_audio_timeline = crate::commands::index::pending_audio_timeline_count(&conn);
+    let audio_files = crate::commands::index::indexed_audio_count(&conn);
 
     Ok(Json(serde_json::json!({
         "total": total,
@@ -145,6 +146,7 @@ async fn index_status_handler(
         "load_ocr_permits": load.ocr_permits,
         "load_doc_permits": load.doc_permits,
         "pending_audio_timeline": pending_audio_timeline,
+        "audio_files": audio_files,
         "recent_errors": errors,
     })))
 }
@@ -330,17 +332,34 @@ struct LimitBody {
     limit: Option<usize>,
 }
 
-/// `POST /api/index/audio-timeline` —— 分批回填音频时间轴，返回本批报告
-/// （前端循环调用，`remaining == 0` 即完成）。
+/// `POST /api/index/audio-timeline` —— 分批补/重做音频时间轴，返回本批报告
+/// （前端循环调用，`remaining == 0` 即完成）。body: `{ limit?, force?, offset? }`
 async fn audio_timeline_handler(
     State(state): State<ApiState>,
-    axum::Json(body): axum::Json<LimitBody>,
+    axum::Json(body): axum::Json<AudioTimelineBody>,
 ) -> Result<Json<crate::commands::index::AudioTimelineReport>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let report = crate::commands::index::backfill_audio_timeline(app_state, body.limit)
-        .await
-        .map_err(|e| ApiError { error: e })?;
+    let report = crate::commands::index::backfill_audio_timeline(
+        app_state,
+        body.limit,
+        body.force,
+        body.offset,
+    )
+    .await
+    .map_err(|e| ApiError { error: e })?;
     Ok(Json(report))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AudioTimelineBody {
+    #[serde(default)]
+    limit: Option<usize>,
+    /// 全量重转（忽略已有时间轴）
+    #[serde(default)]
+    force: Option<bool>,
+    #[serde(default)]
+    offset: Option<usize>,
 }
 
 async fn reextract_handler(

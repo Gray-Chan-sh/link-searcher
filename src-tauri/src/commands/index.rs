@@ -62,6 +62,8 @@ pub struct IndexStatus {
     pub load_doc_permits: usize,
     /// 待回填时间轴的音频数（同内容只算一次）。0 = 无需回填。
     pub pending_audio_timeline: u64,
+    /// 已索引音频的唯一内容数（"全量重转"的规模）。
+    pub audio_files: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -145,6 +147,7 @@ pub async fn get_index_status(state: State<'_, AppState>) -> Result<IndexStatus,
         briefs: crate::state::task_brief_snapshot(),
         task_progress: crate::state::task_progress_snapshot(),
         pending_audio_timeline: pending_audio_timeline_count(&conn),
+        audio_files: indexed_audio_count(&conn),
     })
 }
 
@@ -1084,33 +1087,62 @@ pub(crate) fn pending_audio_timeline_count(conn: &rusqlite::Connection) -> u64 {
         .max(0) as u64
 }
 
+/// 已索引音频的**唯一内容数**（同 md5 只算一次）——"全量重转"的规模。
+pub(crate) fn indexed_audio_count(conn: &rusqlite::Connection) -> u64 {
+    let sql = format!(
+        "SELECT COUNT(DISTINCT ft.md5)
+         FROM file_tracking ft
+         WHERE ft.status = 'active'
+           AND ft.indexed = 1
+           AND lower(coalesce(ft.file_ext, '')) IN ({AUDIO_EXTS_SQL})
+           AND ft.md5 IS NOT NULL"
+    );
+    conn.query_row(&sql, [], |r| r.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64
+}
+
 #[derive(Serialize, Clone)]
 pub struct AudioTimelineReport {
     pub processed: usize,
     pub ok: usize,
     pub failed: usize,
-    /// 本批结束后仍待回填的音频数（0 = 完成）。
+    /// 本批结束后仍待处理的音频数（0 = 完成）。
     pub remaining: u64,
 }
 
-/// 为**已索引但没有时间轴**的老音频补时间轴（分批，供 UI 循环调用）。
+/// 为音频补/重做时间轴（分批，供 UI 循环调用）。
+///
+/// * `force = false`（默认）：只处理 `audio_timeline IS NULL` 的老音频；
+/// * `force = true`：**不管有没有时间轴**，把全部已索引音频重新转写一遍
+///   —— 用于"识别算法改进后重跑"（如 2026-10-23 的降噪/切分修正）。
 ///
 /// 为什么必须强制重提取：`index_file` 命中 md5 去重就直接复用旧正文，
-/// 旧正文没有时间轴 —— 不跳过去重就永远补不出来（`index_file_forced`）。
+/// 不跳过去重就永远补不出/换不掉转写（`index_file_forced`）。
 ///
-/// 成本 ≈ 音频总时长 ÷ 4~6（ASR 实测倍率）+ 分离模型额外一遍。所以默认一批只做
-/// 3 个、由前端循环驱动并随时可停，而不是一次跑到底。
+/// `offset` 只在 `force` 模式使用：候选集是稳定的全量音频，前端按批累加 offset
+/// 顺序推进；非 force 模式下候选集会随写入而缩小，所以始终取前 `limit` 个。
+///
+/// 成本 ≈ 音频总时长 ÷ 2~4（降噪后 VAD 段更多，实测 552s 音频约 330s）+ 分离一遍。
+/// 默认一批 3 个、由前端循环驱动并随时可停。
 #[tauri::command]
 pub async fn backfill_audio_timeline(
     state: State<'_, AppState>,
     limit: Option<usize>,
+    force: Option<bool>,
+    offset: Option<usize>,
 ) -> Result<AudioTimelineReport, String> {
     let limit = limit.unwrap_or(3).clamp(1, 50);
+    let force = force.unwrap_or(false);
+    let offset = offset.unwrap_or(0);
     let indexer = state.indexer.clone();
     let db_pool = state.db.clone();
     tokio::task::spawn_blocking(move || {
         let _guard = crate::state::TaskGuard::new("audio-timeline");
         let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
+        // force 模式不按时间轴过滤，但要按 md5 分组并按 (mtime, md5) 稳定排序，
+        // 否则 OFFSET 分页会重复/漏处理。
+        let pending_clause = if force { "" } else { "AND ci.audio_timeline IS NULL" };
         let sql = format!(
             "SELECT ft.id, ft.dir_id, ft.path
              FROM file_tracking ft
@@ -1118,15 +1150,15 @@ pub async fn backfill_audio_timeline(
              WHERE ft.status = 'active'
                AND ft.indexed = 1
                AND lower(coalesce(ft.file_ext, '')) IN ({AUDIO_EXTS_SQL})
-               AND ci.audio_timeline IS NULL
+               {pending_clause}
              GROUP BY ft.md5
-             ORDER BY ft.mtime
-             LIMIT ?1"
+             ORDER BY ft.mtime, ft.md5
+             LIMIT ?1 OFFSET ?2"
         );
         let candidates: Vec<(String, String, String)> = {
             let mut stmt = conn.prepare(&sql).map_err(|e| format!("db prepare error: {e}"))?;
             let rows = stmt
-                .query_map(rusqlite::params![limit as i64], |r| {
+                .query_map(rusqlite::params![limit as i64, offset as i64], |r| {
                     Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
                 })
                 .map_err(|e| format!("db query error: {e}"))?;
@@ -1188,11 +1220,23 @@ pub async fn backfill_audio_timeline(
 
         let remaining = db_pool
             .get()
-            .map(|c| pending_audio_timeline_count(&c))
+            .map(|c| {
+                if force {
+                    // 全量重转：候选集固定，按 offset 推算还剩多少
+                    let all = indexed_audio_count(&c) as usize;
+                    all.saturating_sub(offset + total) as u64
+                } else {
+                    pending_audio_timeline_count(&c)
+                }
+            })
             .unwrap_or(0);
         crate::state::push_task_brief(
             "audio-timeline",
-            format!("音频时间轴回填：{ok} 成功 / {failed} 失败，剩余 {remaining}"),
+            if force {
+                format!("音频全量重转：{ok} 成功 / {failed} 失败，剩余 {remaining}")
+            } else {
+                format!("音频时间轴回填：{ok} 成功 / {failed} 失败，剩余 {remaining}")
+            },
         );
         Ok(AudioTimelineReport { processed: total, ok, failed, remaining })
     })
@@ -1598,6 +1642,27 @@ mod tests {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         db::init_db(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn indexed_audio_count_counts_unique_content() {
+        let conn = setup_conn();
+        for (path, md5, indexed) in [
+            ("x/a.mp3", "same-md5", 1),
+            ("x/b.mp3", "same-md5", 1), // 同内容重复文件 → 只算一次
+            ("x/c.wav", "other-md5", 1),
+            ("x/d.pdf", "pdf-md5", 1),  // 非音频
+            ("x/e.mp3", "pending", 0),  // 未索引完
+        ] {
+            tracker::upsert_file(&conn, path, "d1", 0, 1, Some(md5)).unwrap();
+            let fid = tracker::get_file_by_path(&conn, path).unwrap().unwrap().id;
+            conn.execute(
+                "UPDATE file_tracking SET indexed = ?1 WHERE id = ?2",
+                rusqlite::params![indexed, fid],
+            )
+            .unwrap();
+        }
+        assert_eq!(indexed_audio_count(&conn), 2, "只数已索引音频的唯一内容");
     }
 
     #[test]

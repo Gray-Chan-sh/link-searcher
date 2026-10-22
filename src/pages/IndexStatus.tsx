@@ -161,8 +161,13 @@ export default function IndexStatus() {
     }
   }
 
-  /** 分批给老音频补时间轴（每批 3 个，可随时停）。 */
-  const handleAudioTimeline = async () => {
+  /**
+   * 分批处理音频转写（每批 3 个，可随时停）。
+   *
+   * `force = false`：只补没有时间轴的老音频；
+   * `force = true`：全量重转（识别算法改进后重跑），按 offset 顺序推进。
+   */
+  const runAudioTimeline = async (force: boolean) => {
     if (audioTlRunning) {
       audioTlStop.current = true
       return
@@ -172,25 +177,29 @@ export default function IndexStatus() {
     setAudioTlRunning(true)
     let ok = 0
     let failed = 0
-    let remaining = status?.pending_audio_timeline ?? 0
+    let offset = 0
+    let remaining = force ? (status?.audio_files ?? 0) : (status?.pending_audio_timeline ?? 0)
+    const label = force ? '重转' : '补时间轴'
     try {
       while (!audioTlStop.current) {
-        const r = await backfillAudioTimeline(3)
+        const r = await backfillAudioTimeline(3, force, offset)
         ok += r.ok
         failed += r.failed
+        offset += r.processed
         remaining = r.remaining
         setAudioTlMsg(
-          `已处理 ${ok + failed}，剩余 ${remaining}${failed > 0 ? `，${failed} 个失败` : ''}`,
+          `${label}：已处理 ${ok + failed}，剩余 ${remaining}${failed > 0 ? `，${failed} 个失败` : ''}`,
         )
         await refresh()
-        if (r.remaining === 0 || r.processed === 0) break
+        if (r.processed === 0) break
+        if (!force && r.remaining === 0) break
       }
       if (audioTlStop.current) {
         setAudioTlMsg(
           `已停止：${ok} 成功${failed > 0 ? `，${failed} 失败` : ''}，剩余 ${remaining}`,
         )
       } else if (remaining === 0) {
-        setAudioTlMsg(`✓ 完成：${ok} 个音频已生成时间轴${failed > 0 ? `，${failed} 个失败` : ''}`)
+        setAudioTlMsg(`✓ 完成：${ok} 个音频已${label}${failed > 0 ? `，${failed} 个失败` : ''}`)
       }
     } catch (e) {
       setAudioTlMsg(e instanceof Error ? e.message : String(e))
@@ -198,6 +207,30 @@ export default function IndexStatus() {
       setAudioTlRunning(false)
       void refresh()
     }
+  }
+
+  const handleAudioTimeline = () => {
+    if (audioTlRunning) {
+      audioTlStop.current = true
+      return
+    }
+    void runAudioTimeline(false)
+  }
+
+  /** 全量重转：识别算法改进后（如降噪/切分修正）重跑全部音频。 */
+  const handleAudioReTranscribe = async () => {
+    if (audioTlRunning) {
+      audioTlStop.current = true
+      return
+    }
+    const n = status?.audio_files ?? 0
+    const yes = await confirm(
+      `将重新转写全部 ${n} 个音频（忽略已有时间轴），耗时约为总时长的 1/2~1/4，可能数小时。\n` +
+        '期间可随时停止，已完成的文件会立即生效。继续？',
+      '全量重新转写音频',
+    )
+    if (!yes) return
+    await runAudioTimeline(true)
   }
 
   const handleBackfill = async () => {
@@ -616,8 +649,19 @@ export default function IndexStatus() {
                   >
                     {(audioTlRunning || taskActive('audio-timeline')) && <LoadingSpinner className="size-4" />}
                     {audioTlRunning
-                      ? '停止回填'
+                      ? '停止'
                       : `为音频补时间轴（剩余 ${status?.pending_audio_timeline ?? 0}）`}
+                  </button>
+                ) : null}
+                {(status?.audio_files ?? 0) > 0 ? (
+                  <button
+                    onClick={handleAudioReTranscribe}
+                    disabled={!audioTlRunning && (taskActive('audio-timeline') || status?.is_scanning)}
+                    title="忽略已有时间轴，把全部音频重新转写一遍（识别算法改进后使用；耗时较长，可随时停）"
+                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-rose-700 dark:text-rose-300 bg-rose-50 dark:bg-rose-900/20 border border-rose-200 dark:border-rose-800 rounded-lg hover:bg-rose-100 dark:hover:bg-rose-900/40 disabled:opacity-50 transition-colors"
+                  >
+                    {audioTlRunning && <LoadingSpinner className="size-4" />}
+                    ⟳ 重新转写全部音频（{status?.audio_files ?? 0}）
                   </button>
                 ) : null}
                 <button
