@@ -287,33 +287,32 @@ impl AudioExtractor {
             });
         }
 
-        // Decode to 16kHz mono WAV (full length)
+        // Decode to 16kHz mono WAV (full length; no truncation).
         let tmp = crate::scanner::helpers::TempDir::new("ls_audio")?;
         let wav_path = tmp.path().join("audio.wav");
         let ffmpeg = ffmpeg_path()
             .ok_or_else(|| anyhow::anyhow!("ffmpeg not available. Install ffmpeg (brew install ffmpeg)"))?;
-        // Cap decode at 30 minutes so the WAV and sample buffer stay bounded;
-        // poll child with a timeout so a hung decode can't stall the scan.
-        let mut child = crate::process::new(ffmpeg)
-            .args(["-y", "-i"]).arg(path)
-            .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
-            .arg(&wav_path)
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .spawn().context("ffmpeg failed to run")?;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-        let status = loop {
-            match child.try_wait()? {
-                Some(st) => break st,
-                None if std::time::Instant::now() > deadline => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    anyhow::bail!("ffmpeg decode timed out after 300s");
-                }
-                None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        // 先把音频"洗"一遍：高通去低频轰鸣 + FFT 降噪 + 动态归一化。
+        //
+        // 2026-10-23 实测（一段嘈杂仲裁录音，全片底噪 -27dB、无静音段）：
+        // 不加滤镜只识别出 17 段/435 字（大量"PEACE.反益"、"一颗星的星星"之类
+        // 幻觉）；加滤镜后 102 段/3867 字，句子连贯通顺。底噪被压掉后，VAD 与
+        // 说话人分离也不再被噪声淹没（同一段音频分离轮次 107 → 正常量级）。
+        //
+        // 老 ffmpeg（缺 afftdn/dynaudnorm）会让解码直接失败 → 自动回退到不加
+        // 滤镜的原样解码，保证"能跑"优先于"更好"。
+        let decoded = decode_wav(ffmpeg, path, &wav_path, true).and_then(|ok| {
+            if ok && wav_path.exists() {
+                return Ok(());
             }
-        };
-
-        if !status.success() || !wav_path.exists() {
+            log::warn!("[ASR] 降噪解码失败，回退到原样解码（可能缺少 afftdn/dynaudnorm 滤镜）");
+            let _ = std::fs::remove_file(&wav_path);
+            decode_wav(ffmpeg, path, &wav_path, false).map(|_| ())
+        });
+        if let Err(e) = decoded {
+            return Err(e);
+        }
+        if !wav_path.exists() {
             return Err(anyhow::anyhow!("ffmpeg decode failed"));
         }
 
@@ -436,6 +435,46 @@ struct Turn {
 /// 16kHz 采样点 → 毫秒。
 fn samples_to_ms(sample: usize) -> i64 {
     (sample as f64 * 1000.0 / 16000.0).round() as i64
+}
+
+/// ASR 前的音频清洗链（见 `transcribe` 里的实测记录）。
+const DENOISE_FILTER: &str = "highpass=f=80,afftdn=nr=12:nf=-40,dynaudnorm=f=200:g=15";
+
+/// 用 ffmpeg 把音频解码成 16kHz 单声道 WAV；`denoise` 决定是否套 [`DENOISE_FILTER`]。
+///
+/// 返回 `Ok(false)` 表示 ffmpeg 非零退出（调用方据此决定是否回退到不降噪）。
+/// 超时 600s（单文件音轨再长也不该编码超过这个时间），超时直接报错。
+fn decode_wav(
+    ffmpeg: &Path,
+    src: &Path,
+    dst: &Path,
+    denoise: bool,
+) -> Result<bool> {
+    let mut cmd = crate::process::new(ffmpeg);
+    cmd.args(["-y", "-i"]).arg(src);
+    if denoise {
+        cmd.args(["-af", DENOISE_FILTER]);
+    }
+    let mut child = cmd
+        .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
+        .arg(dst)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("ffmpeg failed to run")?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let status = loop {
+        match child.try_wait()? {
+            Some(st) => break st,
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("ffmpeg decode timed out after 600s");
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(200)),
+        }
+    };
+    Ok(status.success())
 }
 
 /// 按切片时长给转写文本设上限（LLM-ASR 复读兜底）。
