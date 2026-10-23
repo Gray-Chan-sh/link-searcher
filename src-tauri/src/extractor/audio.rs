@@ -196,10 +196,14 @@ fn build_diarizer() -> Option<sherpa_onnx::OfflineSpeakerDiarization> {
         },
         clustering: sherpa_onnx::FastClusteringConfig {
             num_clusters: -1,  // auto-detect via threshold
-            threshold: 0.5,
+            // 阈值越大合并越狠。实测（2026-10-23，78 秒双人通话）：
+            // 0.5 → 8 个人；0.85 → 1 个人（全并了）；0.7 → 2 个人（正解）。
+            // 100 秒通话同样在 0.7 收敛到 2 人。故取 0.7。
+            threshold: 0.7,
         },
-        min_duration_on: 0.3,
-        min_duration_off: 0.5,
+        // 0.3 会把半秒的噪声段也当"一句"，既误导聚类也让 ASR 对着碎片幻觉。
+        min_duration_on: 0.5,
+        min_duration_off: 0.7,
     };
     sherpa_onnx::OfflineSpeakerDiarization::create(&config)
 }
@@ -629,8 +633,10 @@ fn vad_slices(samples: &[f32]) -> Option<Vec<Slice>> {
     vad_config.silero_vad = sherpa_onnx::SileroVadModelConfig {
         model: Some(vad_model),
         threshold: 0.5,
-        min_silence_duration: 0.35,
-        min_speech_duration: 0.25,
+        // 0.35/0.25 会让 0.3~0.5 秒的噪声块也变成"一句话"：LLM 对着半秒碎片
+        // 只能幻觉（实测出现 "from the"、"tests tests" 之类）。抬到 0.6/0.5。
+        min_silence_duration: 0.5,
+        min_speech_duration: 0.6,
         window_size: 512,
         max_speech_duration: 30.0,
     };
