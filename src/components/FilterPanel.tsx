@@ -4,19 +4,8 @@ import type { DirConfig, DirTreeNode } from '../api/dirs'
 import { getDirTree } from '../api/dirs'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { useI18n } from '../i18n'
+import { useIsMobile } from '../hooks/useIsMobile'
 import DirTree from './DirTree'
-
-function useIsMobile(breakpoint = 1024) {
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
-  useEffect(() => {
-    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
-    mq.addEventListener('change', handler)
-    setIsMobile(mq.matches)
-    return () => mq.removeEventListener('change', handler)
-  }, [breakpoint])
-  return isMobile
-}
 
 interface FilterPanelProps {
   dirs: DirConfig[]

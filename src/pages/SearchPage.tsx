@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { useSearch } from '../hooks/useSearch'
 import { useDirs } from '../hooks/useDirs'
+import { useIsMobile } from '../hooks/useIsMobile'
 import { useI18n } from '../i18n'
 import SearchBar from '../components/SearchBar'
 import FilterPanel from '../components/FilterPanel'
@@ -14,18 +15,6 @@ import { exportSearchResults, searchFileIdsOnly, refineSearch, type IdWithPath }
 import { openFile, aiCapabilities, type AiCapabilities } from '../api/files'
 import { SearchIcon } from '../icons'
 import { exportFile } from '../utils/platform'
-
-function useIsMobile(breakpoint = 1024) {
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
-  useEffect(() => {
-    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
-    mq.addEventListener('change', handler)
-    setIsMobile(mq.matches)
-    return () => mq.removeEventListener('change', handler)
-  }, [breakpoint])
-  return isMobile
-}
 
 interface RefineStep {
   hits: SearchHit[]

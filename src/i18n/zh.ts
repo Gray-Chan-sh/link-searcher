@@ -386,6 +386,10 @@ const zh: Record<string, string> = {
     truncated_notice: '显示前 50,000 字符，下载完整文件查看全部',
     ocr_applied_notice: '已使用 OCR 从该图片提取文字',
     failed_load_preview: '加载预览失败',
+    preview_font_smaller: '缩小字号',
+    preview_font_larger: '放大字号',
+    preview_font_reset: '恢复默认字号',
+    preview_drag_width: '拖动调整宽度，双击恢复默认',
 
     // Status bar
     ocrd_count: '{done}/{total} 已完成 OCR',

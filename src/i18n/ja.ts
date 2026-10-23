@@ -382,6 +382,10 @@ const ja: Record<string, string> = {
     truncated_notice: '最初の50,000文字を表示。完全な内容はファイルをダウンロードしてください',
     ocr_applied_notice: 'この画像からテキストを抽出するためにOCRが適用されました',
     failed_load_preview: 'プレビューの読み込みに失敗しました',
+    preview_font_smaller: '文字を小さく',
+    preview_font_larger: '文字を大きく',
+    preview_font_reset: '文字サイズを初期値に戻す',
+    preview_drag_width: 'ドラッグで幅を変更、ダブルクリックで初期値に戻す',
 
     // Status bar
     ocrd_count: '{done}/{total} OCR完了',

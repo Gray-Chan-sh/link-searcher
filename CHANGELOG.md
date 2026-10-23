@@ -1,3 +1,51 @@
+## 2026-10-24（第六十二轮）：浏览页与搜索页统一预览面板（字号可调、宽度可拖、长文可滚）
+
+> 背景：用户反馈「浏览页预览字太小 / 固定在右侧不能拖动 / 两页预览功能没统一」。
+> 核实结论：**确实是两套独立实现** —— 浏览页在 `Browse.tsx` 里内联写了约 180 行预览
+> （桌面面板 + 移动弹层 + 自带的复制按钮与图片缩放档位），而 `PreviewPanel.tsx` 只有搜索页在用；
+> 浏览页面板宽度写死 `w-80`，正文再套一层 `max-h-[calc(100vh-16rem)] overflow-y-auto`
+> 形成嵌套滚动；两处正文都是 `text-xs`（12px）。
+
+**改动**
+
+- `components/PreviewPanel.tsx`：升级为**两页共用**的唯一预览组件。
+  - Props 变为 `fileId?` / `path?` / `searchQuery?` / `onClose` / `collapsible?`：
+    有 `fileId` 走 `get_file + get_file_preview`；只有路径（浏览页 `?path=` 引用深链、未索引文件）
+    走既有的 `preview_file_by_path`，并按能力降级隐藏需要 `file_id` 的按钮（摘要/重提取/打开/导出）。
+    **未新增任何后端命令或 HTTP 路由**，浏览器模式不受影响。
+  - **字号四档**（12/14/16/18px，默认 14，行高 1.7）：头部 `A−` / 当前值（点击复位）/ `A+`，
+    `localStorage.ls_preview_font_size` 记忆。
+  - **宽度可拖拽**：左边缘 4px 手柄，范围 `[280, min(900, 60% 视口)]`，双击复位，
+    `localStorage.ls_preview_width` 记忆（默认 420）；拖拽期间只更新本地 state，
+    **松手才落 localStorage**（避免每帧同步写盘）；窗口变窄时自动收回宽度。
+  - **长文**：删除内层 `max-h-96 overflow-y-auto`，全文交由面板自身滚动条；5 万字符截断提示保留。
+  - 展开按钮改为**右侧 overlay**（`min(92vw, 1200px)`），`Esc` 收起（不再是关掉整个面板）。
+  - 图片优先内联 `image_base64`（**修**：原实现只用 asset URL，浏览器模式会拼出
+    `/api/files/C:\...\x.png/preview` 这种错误地址），无 base64 时回退 asset 协议。
+  - 新增字符数显示；原有能力（命中高亮与上下跳转、AI 摘要、重新提取、质量分/flags、
+    OCR 提示、复制路径/全文、导出、在文件夹中显示、打开、移动端全屏）全部保留。
+  - 删除**重复渲染的两套标题栏与拖拽手柄**（此前文件里同一段 JSX 出现两遍，面板顶部实际叠了两个 header）。
+  - 面板根节点加 `preview-panel` class —— GUI 测试计划里 `[class*=preview]` 的选择器
+    （G-60 起）此前其实谁也命中不了，现在能定位到面板。
+- `pages/Browse.tsx`：删除内联预览（桌面面板 + 移动弹层 + `CopyAllButton` + 图片缩放档位）
+  与 `preview/previewLoading/previewError/previewCollapsed/previewZoom` 六个状态，
+  改为 `selectedFile: { fileId?, path }` + `<PreviewPanel collapsible …/>`；
+  表格行/搜索结果/键盘 ↑↓ 都带上 `file_id`；`?path=` 深链先以 path-only 预览，
+  当前页出现对应行时自动补上 `fileId` 恢复完整能力；预览高亮词传全文搜索词 `fts.query`。
+- `pages/SearchPage.tsx`、`components/FilterPanel.tsx`：改用共享 hook（见下），行为不变。
+- 新增 `hooks/useIsMobile.ts`：`Browse` / `SearchPage` / `FilterPanel` / `PreviewPanel`
+  原本各自复制了一份完全相同的实现，统一收口。
+- 新增 `components/preview/panelPrefs.ts` + `__tests__/panelPrefs.test.ts`（字号吸附/步进、
+  宽度 clamp、图片 src 选择）。
+- i18n：`zh/en/ja/ko` 各新增 `preview_font_smaller`、`preview_font_larger`、
+  `preview_font_reset`、`preview_drag_width`。
+- 文档：`docs/04-search.md`（字号/拖拽/长文/展开说明）、`docs/05-browse.md`、`README.md`（功能表与目录树）。
+
+**验证**
+
+- `npx tsc -b`、`npx vitest run`（12 文件 / 106 用例）、`cargo test --workspace`（全目标绿）、
+  `semgrep --severity ERROR`（0 findings）、`npx vite build` 均通过。
+
 ## 2026-10-23（第六十一轮）：ASR 引擎换成 SenseVoice（中文 4.9 倍内容、0 英文幻觉、快 2.6 倍）
 
 > 背景：11 分钟车间噪声录音用 FunASR-Nano 只出 402 个中文字 + 18 个英文幻觉词。

@@ -386,6 +386,10 @@ const en: Record<string, string> = {
     truncated_notice: 'Showing first 50,000 characters, download the full file for complete content',
     ocr_applied_notice: 'OCR was applied to extract text from this image',
     failed_load_preview: 'Failed to load preview',
+    preview_font_smaller: 'Smaller text',
+    preview_font_larger: 'Larger text',
+    preview_font_reset: 'Reset text size',
+    preview_drag_width: 'Drag to resize, double-click to reset',
 
     // Status bar
     ocrd_count: "{done}/{total} OCR'd",

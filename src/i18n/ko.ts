@@ -382,6 +382,10 @@ const ko: Record<string, string> = {
     truncated_notice: '처음 50,000자를 표시합니다. 전체 내용을 보려면 파일을 다운로드하세요',
     ocr_applied_notice: '이 이미지에서 텍스트를 추출하기 위해 OCR이 적용되었습니다',
     failed_load_preview: '미리보기 로드 실패',
+    preview_font_smaller: '글자 작게',
+    preview_font_larger: '글자 크게',
+    preview_font_reset: '글자 크기 초기화',
+    preview_drag_width: '드래그하여 너비 조절, 더블클릭하면 초기화',
 
     // Status bar
     ocrd_count: '{done}/{total} OCR 완료',

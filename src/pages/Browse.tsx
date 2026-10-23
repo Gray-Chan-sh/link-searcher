@@ -1,11 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { createPortal } from 'react-dom'
 import { useSearchParams } from 'react-router-dom'
 import { invoke } from '../api/client'
 import { confirm, saveFile } from '../utils/platform'
 import { toast } from '../utils/toast'
 import { useI18n } from '../i18n'
-import { type FilePreview, openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, exportFileText, type ExportFormat } from '../api/files'
+import { openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, exportFileText, type ExportFormat } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFiles, restoreFiles } from '../api/index'
 import { LoadingSpinner, SearchIcon } from '../icons'
@@ -13,37 +12,8 @@ import { usePersistentState } from '../hooks/usePersistentState'
 import { useSearch as useFtsSearch } from '../hooks/useSearch'
 import SearchBar from '../components/SearchBar'
 import ResultList from '../components/ResultList'
+import PreviewPanel from '../components/PreviewPanel'
 import type { SearchHit } from '../api/search'
-
-function useIsMobile(breakpoint = 1024) {
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < breakpoint)
-  useEffect(() => {
-    const mq = window.matchMedia(`(max-width: ${breakpoint - 1}px)`)
-    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
-    mq.addEventListener('change', handler)
-    setIsMobile(mq.matches)
-    return () => mq.removeEventListener('change', handler)
-  }, [breakpoint])
-  return isMobile
-}
-
-function CopyAllButton({ text, label }: { text: string; label: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1500)
-        }).catch(e => console.warn('复制失败:', e))
-      }}
-      className="shrink-0 px-2 py-0.5 text-[10px] font-medium text-gray-500 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors"
-      title={label}
-    >
-      {copied ? '✓' : label}
-    </button>
-  )
-}
 
 const LS_KEY_FILTER = 'ls_browse_filter'
 const LS_KEY_EXT = 'ls_browse_ext'
@@ -80,12 +50,7 @@ export default function Browse() {
   const [sort, setSort] = usePersistentState<string>(LS_KEY_SORT, params.get('sort') || 'name')
   const [order, setOrder] = usePersistentState<SortOrder>(LS_KEY_ORDER, params.get('order') as SortOrder || 'asc')
   const [loading, setLoading] = useState(false)
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const [preview, setPreview] = useState<FilePreview | null>(null)
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewError, setPreviewError] = useState<string | null>(null)
-  const [previewCollapsed, setPreviewCollapsed] = useState(false)
-  const [previewZoom, setPreviewZoom] = useState(1)
+  const [selectedFile, setSelectedFile] = useState<{ fileId?: string; path: string } | null>(null)
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: FileItem } | null>(null)
 
   /** 导出单文件文本：`.txt` 纯正文 / 音频额外 `.md` 带时间与说话人标签。 */
@@ -117,7 +82,6 @@ export default function Browse() {
   // 全文搜索模式（与 SearchPage 共享 useSearch hook）
   const fts = useFtsSearch()
   const [selectedSearchHit, setSelectedSearchHit] = useState<SearchHit | null>(null)
-  const isMobile = useIsMobile()
   type ColKey = 'filename' | 'path' | 'type' | 'quality' | 'status'
   const [colWidths, setColWidths] = usePersistentState<Record<ColKey, number>>(LS_KEY_COLS, { filename: 192, path: 200, type: 64, quality: 80, status: 112 })
   const resizingRef = useRef<{ col: ColKey; startX: number; startWidth: number } | null>(null)
@@ -296,28 +260,15 @@ return () => clearTimeout(t)
     if (f) setFilter(f as FilterType)
   }, [])
 
-  const previewVersionRef = useRef(0)
-  const selectFile = useCallback(async (path: string) => {
-    const localVersion = ++previewVersionRef.current
-    setSelectedFile(path)
-    setPreviewLoading(true)
-    setPreviewError(null)
-    setPreview(null)
-    try {
-      const result: FilePreview = await invoke('preview_file_by_path', { path })
-      if (previewVersionRef.current !== localVersion) return
-      setPreview(result)
-    } catch (e) {
-      if (previewVersionRef.current !== localVersion) return
-      setPreviewError(typeof e === 'string' ? e : t('failed_load_preview'))
-    }
-    if (previewVersionRef.current !== localVersion) return
-    setPreviewLoading(false)
+  // 预览目标：优先 fileId（元信息/摘要/打开都可用）；引用深链只有路径时降级为 path-only。
+  // 数据加载交给统一组件 PreviewPanel，这里只负责「选中哪个文件」。
+  const selectFile = useCallback((path: string, fileId?: string) => {
+    setSelectedFile(prev => (prev && prev.path === path && prev.fileId === fileId ? prev : { path, fileId }))
   }, [])
   // 搜索结果选中时同步到预览面板
   const handleSearchSelect = useCallback((hit: SearchHit) => {
     setSelectedSearchHit(hit)
-    selectFile(hit.path)
+    selectFile(hit.path, hit.file_id)
   }, [selectFile])
 
   // 键盘导航：↑↓ 移动选中行，Enter 打开预览；Ctrl/Cmd+A 全选当前页
@@ -339,7 +290,7 @@ return () => clearTimeout(t)
         e.preventDefault()
         const next = Math.min(idx + 1, items.length - 1)
         const item = items[next]!
-        selectFile(item.rel_path)
+        selectFile(item.rel_path, item.file_id)
         setSelectedIds(new Set([item.file_id]))
         setLastClickedIdx(next)
         tableRef.current?.querySelector(`tr[data-relpath="${CSS.escape(item.rel_path)}"]`)?.scrollIntoView({ block: 'nearest' })
@@ -347,7 +298,7 @@ return () => clearTimeout(t)
         e.preventDefault()
         const prev = Math.max(idx - 1, 0)
         const item = items[prev]!
-        selectFile(item.rel_path)
+        selectFile(item.rel_path, item.file_id)
         setSelectedIds(new Set([item.file_id]))
         setLastClickedIdx(prev)
         tableRef.current?.querySelector(`tr[data-relpath="${CSS.escape(item.rel_path)}"]`)?.scrollIntoView({ block: 'nearest' })
@@ -370,6 +321,13 @@ return () => clearTimeout(t)
       }
     }
   }, [items, forcedSearch])
+
+  // 深链只有路径时：当前页一旦出现对应行，就补上 fileId，恢复元信息与操作按钮
+  useEffect(() => {
+    if (!selectedFile || selectedFile.fileId) return
+    const hit = items.find(i => i.rel_path === selectedFile.path)
+    if (hit) setSelectedFile({ fileId: hit.file_id, path: hit.rel_path })
+  }, [items, selectedFile])
 
 return (
     <div className="flex h-full">
@@ -579,7 +537,7 @@ return (
                     data-relpath={item.rel_path}
                     onClick={(e) => {
                       if (e.metaKey || e.ctrlKey) {
-                        selectFile(item.rel_path)
+                        selectFile(item.rel_path, item.file_id)
                         setSelectedIds(prev => {
                           const next = new Set(prev)
                           if (next.has(item.file_id)) next.delete(item.file_id)
@@ -593,7 +551,7 @@ return (
                         const range = new Set(items.slice(lo, hi+1).map(i => i.file_id))
                         setSelectedIds(range)
                       } else {
-                        selectFile(item.rel_path)
+                        selectFile(item.rel_path, item.file_id)
                         setSelectedIds(new Set([item.file_id]))
                         setLastClickedIdx(idx)
                       }
@@ -609,7 +567,7 @@ return (
                     className={`border-b border-gray-100 dark:border-gray-800/50 cursor-pointer transition-colors ${
                       selectedIds.has(item.file_id)
                         ? 'bg-blue-50 dark:bg-blue-900/20'
-                        : selectedFile === item.rel_path
+                        : selectedFile?.path === item.rel_path
                         ? 'bg-blue-50 dark:bg-blue-900/20'
                         : 'hover:bg-gray-50 dark:hover:bg-gray-800/50'
                     }`}
@@ -730,168 +688,14 @@ return (
 
       </div>
 
-      {/* Right: Preview */}
-      {!isMobile && !previewCollapsed && (
-        <div className="w-80 shrink-0 overflow-y-auto bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-800">
-          {previewLoading && (
-            <div className="flex items-center justify-center py-16">
-              <LoadingSpinner className="size-5" />
-            </div>
-          )}
-          {previewError && (
-            <div className="p-4 text-sm text-red-600 dark:text-red-400">
-              {previewError}
-            </div>
-          )}
-          {preview && !previewLoading && (
-             <div className="p-4 min-h-full">
-              {selectedFile && (
-                <div className="mb-3 flex items-center justify-between gap-2">
-                  <span className="text-xs font-medium text-gray-700 dark:text-gray-200 truncate" title={selectedFile}>{selectedFile}</span>
-                  {preview.content && (
-                    <CopyAllButton text={preview.content} label={t('copy_all_text')} />
-                  )}
-                  {preview.file_type === 'image' && (
-                    <span className="flex items-center gap-1 shrink-0">
-                      {[0.5, 1, 1.5, 2].map(z => (
-                        <button
-                          key={z}
-                          onClick={() => setPreviewZoom(z)}
-                          className={`px-1.5 py-0.5 text-[10px] rounded border transition-colors ${
-                            previewZoom === z
-                              ? 'bg-blue-500 text-white border-blue-500'
-                              : 'text-gray-500 dark:text-gray-400 border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700'
-                          }`}
-                        >
-                          {z * 100}%
-                        </button>
-                      ))}
-                    </span>
-                  )}
-                </div>
-              )}
-              {preview.file_type === 'image' && preview.image_path && (
-                <div className="mb-3 flex justify-center overflow-hidden">
-                  <img
-                    src={preview.image_base64 ? (() => {
-              const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
-              const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
-              return "data:image/" + mime + ";base64," + preview.image_base64
-            })() : ""}
-                    alt=""
-                    style={{ transform: `scale(${previewZoom})`, transformOrigin: 'top left' }}
-                    className={`max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 transition-transform ${previewZoom > 1 ? 'max-h-none' : 'max-h-64'}`}
-                  />
-                </div>
-              )}
-              {preview.content && (
-                <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed overflow-y-auto max-h-[calc(100vh-16rem)]">
-                  {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
-                </pre>
-              )}
-              {preview.content && preview.content.length > 50000 && (
-                <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
-                  {t('truncated_notice')}
-                </p>
-              )}
-              {!preview.content && preview.file_type !== 'image' && (
-                <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
-              )}
-              {preview.char_count > 0 && (
-                <p className="mt-3 text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
-                  {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
-                </p>
-              )}
-            </div>
-          )}
-          {!preview && !previewLoading && !previewError && selectedFile && (
-            <p className="p-4 text-sm text-gray-400 dark:text-gray-500">{t('loading_preview')}</p>
-          )}
-          {!selectedFile && !previewLoading && (
-            <div className="flex items-center justify-center h-full text-sm text-gray-400 dark:text-gray-500">
-              {t('select_file_preview')}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Preview toggle handle - desktop only */}
-      {!isMobile && (
-        <button
-          onClick={() => setPreviewCollapsed(v => !v)}
-          title={previewCollapsed ? t('show_preview') : t('hide_preview')}
-          className="w-5 shrink-0 self-stretch flex items-center justify-center text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-600 dark:hover:text-gray-300 transition-colors border-l border-gray-200 dark:border-gray-800"
-        >
-          {previewCollapsed ? '◀' : '▶'}
-        </button>
-      )}
-
-      {/* Mobile preview modal */}
-      {isMobile && selectedFile && createPortal(
-        <div className="fixed inset-0 z-50 flex flex-col bg-white dark:bg-gray-900 lg:hidden overflow-y-auto">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 sticky top-0 bg-white dark:bg-gray-900 z-10">
-            <span className="text-sm font-medium text-gray-900 dark:text-gray-100 truncate flex-1 mr-2" title={selectedFile}>
-              {selectedFile}
-            </span>
-            <button
-              onClick={() => setSelectedFile(null)}
-              className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-500"
-            >
-              <svg className="size-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M18 6 6 18" /><path d="m6 6 12 12" />
-              </svg>
-            </button>
-          </div>
-          <div className="p-4 flex-1">
-            {previewLoading && (
-              <div className="flex items-center justify-center py-16">
-                <LoadingSpinner className="size-5" />
-              </div>
-            )}
-            {previewError && (
-              <div className="p-4 text-sm text-red-600 dark:text-red-400">
-                {previewError}
-              </div>
-            )}
-            {preview && !previewLoading && (
-              <div className="space-y-3">
-                {preview.content && (
-                  <div className="flex justify-end">
-                    <CopyAllButton text={preview.content} label={t('copy_all_text')} />
-                  </div>
-                )}
-                {preview.file_type === 'image' && preview.image_path && (
-                  <div className="flex justify-center overflow-hidden">
-                    <img
-                      src={preview.image_base64 ? (() => {
-                        const ext = (preview.image_path!.split(".").pop() || "jpeg").toLowerCase()
-                        const mime = { jpg: "jpeg", jpeg: "jpeg", png: "png", gif: "gif", webp: "webp", bmp: "bmp", tiff: "tiff", tif: "tiff" }[ext] || "jpeg"
-                        return "data:image/" + mime + ";base64," + preview.image_base64
-                      })() : ""}
-                      alt=""
-                      className="max-w-full object-contain rounded-lg border border-gray-200 dark:border-gray-700 max-h-96"
-                    />
-                  </div>
-                )}
-                {preview.content && (
-                  <pre className="text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed bg-gray-50 dark:bg-gray-800/50 p-3 rounded-lg border border-gray-200 dark:border-gray-700">
-                    {preview.content.length > 50000 ? preview.content.slice(0, 50000) + '…' : preview.content}
-                  </pre>
-                )}
-                {!preview.content && preview.file_type !== 'image' && (
-                  <p className="text-sm text-gray-400 dark:text-gray-500">{t('no_preview_available')}</p>
-                )}
-                {preview.char_count > 0 && (
-                  <p className="text-xs text-gray-400 border-t border-gray-200 dark:border-gray-800 pt-2">
-                    {t('characters_count', { count: preview.char_count })} {preview.ocr_used ? '(OCR)' : ''}
-                  </p>
-                )}
-              </div>
-            )}
-          </div>
-        </div>,
-        document.body,
-      )}
+      {/* Right: Preview（与搜索页共用同一个 PreviewPanel） */}
+      <PreviewPanel
+        fileId={selectedFile?.fileId ?? null}
+        path={selectedFile?.fileId ? null : (selectedFile?.path ?? null)}
+        searchQuery={fts.query}
+        onClose={() => setSelectedFile(null)}
+        collapsible
+      />
 
       {contextMenu && (
         <div
