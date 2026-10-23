@@ -23,12 +23,13 @@ Link-Searcher 的所有数据存储在本地：
 | `chat_history.json` | AI 聊天记录（会话与消息） |
 | `app.log` | 应用运行日志 |
 | `backups/` | 自动备份存储目录 |
-| `models/funasr/` | FunASR 语音识别模型 |
+| `models/sensevoice/` | SenseVoice 语音识别模型 |
+| `models/asr/` | VAD + 说话人分离辅助模型（可选） |
 
 > 应用设置（`config.json`，含 API Key 等）位于配置目录而非数据目录：macOS/Linux 为
 > `~/.config/.link-searcher/`，Windows 为 `%APPDATA%\.link-searcher\`。
 >
-> FunASR 模型只需下载一次，升级重装后仍在。开发版（`npm run tauri dev`）优先从项目目录读取，打包版只认数据目录。
+> 语音模型只需下载一次，升级重装后仍在。开发版（`npm run tauri dev`）优先从项目目录读取，打包版只认数据目录。
 
 ## 步骤 2：手动备份
 

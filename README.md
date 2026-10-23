@@ -53,7 +53,7 @@
 | 代码 | `.py` `.rs` `.ts` `.js` `.html` `.css` `.sql` `.sh` | 作为文本处理 |
 | 未知 | 任意 | 纯文本回退尝试 |
 | 压缩包 | `.zip` `.tar` `.tar.gz` `.tgz` `.tar.bz2` `.tbz2` `.tar.xz` `.txz` `.gz` `.bz2` `.xz` | 枚举条目，文本直接读，Office/PDF/图片走提取管线 |
-| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | FunASR-Nano 语音识别 + pyannote 分段 + CAM++ 说话人分离（输出段级时间戳与说话人，见下） |
+| 音频 | `.mp3` `.wav` `.m4a` `.aac` `.flac` `.ogg` `.opus` `.wma` | SenseVoice 语音识别 + pyannote 分段 + CAM++ 说话人分离（输出段级时间戳与说话人，见下） |
 
 ### 音频输出：纯文本 / 带标签
 
@@ -68,8 +68,12 @@
 「带标签」；**老音频可在「索引状态 → 维护工具 → 为音频补时间轴」分批回填**（需重新转写，
 单个文件可能要几分钟，可随时停止）。
 
-时间戳是**段级**（VAD / 说话人轮次边界，500ms 量级），不是逐字对齐 —— FunASR-Nano 走 LLM
-解码，sherpa-onnx 对它不提供 token 级时间戳。
+时间戳是**段级**（VAD / 说话人轮次边界，500ms 量级），不是逐字对齐 —— ASR 模型走整段解码，
+sherpa-onnx 不提供 token 级时间戳。
+
+> **ASR 引擎**：**SenseVoice**（228MB，中文/粤语更准、抗噪）是**唯一**引擎 ——
+> 2026-10-23 实测同一素材上 FunASR-Nano 的中文内容只有它的 1/4.9 且带英文幻觉，
+> 故整体切换、不再保留 Nano 回退。`LINK_SEARCHER_ASR_MODEL` 目前只接受 `sense_voice`。
 
 ### OCR（文字识别）
 
@@ -179,13 +183,13 @@
 | 重排（cross-encoder） | ✅ 本地 | ✅ 远程 `/v1/rerank` | 同上，provider 模式 |
 | LLM（摘要 / RAG 问答 / 聊天） | ❌ | ✅ OpenAI 兼容 | 默认即外接；用本地 Ollama（127.0.0.1）则不出本机 |
 | OCR（图像 / 扫描件） | ✅ Windows OCR / Apple Vision / PaddleOCR / Tesseract | ⚠️ 无内建远程 | 接云 OCR 需自行开发，且要上传原文，**隐私代价大** |
-| 语音识别（ASR） | ✅ FunASR-Nano（本地） | ⚠️ 无内建远程 | 可接云 STT，同上 |
+| 语音识别（ASR） | ✅ SenseVoice（本地） | ⚠️ 无内建远程 | 可接云 STT，同上 |
 
 > 结论：**"模型推理"可以外接（嵌入/重排/LLM 已支持），"文件与索引管线"保持本地**。外接更推荐指向**自己的局域网 / 自建 GPU 机器**，而非公网第三方——既提速又不外泄。
 
 ### 本地推理只用 CPU（设计取舍）
 
-- 本地嵌入走 **tract-onnx（纯 Rust、CPU-only）**；PaddleOCR / FunASR 同样默认 CPU。**没有 GPU 后端**。
+- 本地嵌入走 **tract-onnx（纯 Rust、CPU-only）**；PaddleOCR / SenseVoice 同样默认 CPU。**没有 GPU 后端**。
 - 这是**取舍而非缺陷**：换来实现单文件分发、不依赖 CUDA/DirectML 运行时、无驱动矩阵、完全离线。
 - 代价是慢：tract 推理基本单核，因此本应用用「**并行副本**」压榨多核（设置页「嵌入并行度」，每个副本约 1GB 内存）。
 - 想要 GPU：把嵌入/重排/LLM **外接**到一台带独显的机器（或云）。本机集显收益有限（与 CPU 共享内存带宽）；本地 OCR/ASR 目前无 GPU 路径。
@@ -227,7 +231,7 @@
 
 - **Node.js** 20+
 - **Rust** 1.85+
-- **音频识别（可选）**：ffmpeg，音频转写模型（FunASR-Nano ~850MB）在应用「依赖中心」下载（镜像优先）；说话人标注另需「说话人分离模型」（~35MB，可选项）
+- **音频识别（可选）**：ffmpeg，音频转写模型在应用「依赖中心」下载（镜像优先）：**SenseVoice ~228MB**（唯一的 ASR 模型）；说话人标注另需「说话人分离模型」（~35MB，可选项）
 - **Linux 额外（Debian/Ubuntu）**：Tauri 构建依赖——`libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`libayatana-appindicator3-dev`、`libssl-dev`、`libsoup-3.0-dev`、`libxdo-dev`、`libgbm-dev`（缺了链接期报 `unable to find library -lgbm`）、`libpipewire-0.3-dev` 与 `clang` / `libclang-dev`（`tauri-plugin-mcp` → `xcap` → `pipewire` 的 `libspa-sys` 需要；缺 clang 时 bindgen 会报 `stdbool.h file not found`）、`build-essential`、`pkg-config`。`./scripts/setup-dev.sh` 会自动检测并安装。
 - **Windows 额外**：VS Build Tools（MSVC + Windows SDK）。`cargo build` 需从 GitHub 拉 `tauri-plugin-mcp`（git 依赖）与 sherpa-onnx 预编译库——国内网络建议先跑 `scripts/setup-dev.ps1`（自动配 cargo/npm 镜像、预下载 sherpa 库），或设代理 `HTTPS_PROXY`
 
@@ -279,7 +283,7 @@ npm run tauri build
 > ```
 > `.deb` 不需要这些工具，不受影响。
 
-> **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE-large（~1.2GB）/FunASR（~850MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等）：PaddleOCR / FunASR 走 GitHub Releases 加速镜像链（ghfast.top → gh-proxy.com → GitHub 直连兜底），BGE-large 走 hf-mirror.com（ModelScope 兜底）。可跳过、可稍后在设置页「依赖中心」补装。
+> **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE-large（~1.2GB）/SenseVoice（~228MB）/说话人分离（~35MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等）：PaddleOCR 与说话人分离模型走 GitHub Releases 加速镜像链（ghfast.top → gh-proxy.com → GitHub 直连兜底），SenseVoice 走 hf-mirror.com，BGE-large 走 hf-mirror.com（ModelScope 兜底）。可跳过、可稍后在设置页「依赖中心」补装。
 
 ---
 
@@ -294,7 +298,7 @@ npm run tauri build
 | 中文分词 | jieba-rs |
 | OCR | PaddleOCR PP-OCRv5 + tract（纯 Rust ONNX 推理） |
 | 文本提取 | lopdf / calamine / anydoc / rwml（无 LibreOffice 依赖） |
-| 语音识别 | sherpa-onnx（FunASR-Nano ONNX） |
+| 语音识别 | sherpa-onnx（SenseVoice ONNX int8） |
 | 文件监控 | notify + notify-debouncer-full（300ms 防抖） |
 | 并行处理 | Rayon |
 | 图片处理 | image-rs + imageproc |
@@ -326,7 +330,7 @@ link-searcher/
 │   │   ├── lark_setup.rs      # 飞书接入自检与一键绑定（lark-cli config init）
 │   │   ├── indexer.rs         # 索引服务（batch_index、流式 MD5、自动 commit）
 │   │   ├── ai/                # 本地嵌入推理（local_embed）
-│   │   ├── deps/              # 运行依赖模型目录/下载（PaddleOCR / BGE / FunASR）
+│   │   ├── deps/              # 运行依赖模型目录/下载（PaddleOCR / BGE / SenseVoice / 说话人分离）
 │   │   ├── logs/              # 日志 + 扫描会话日志
 │   │   ├── search/            # Tantivy 搜索引擎
 │   │   │   ├── mod.rs         # IndexManager（reader 缓存）
@@ -374,7 +378,6 @@ link-searcher/
 │   │   │   ├── ai/            # cite（引用）、session（会话）、rewrite（改写）、retrieval（检索融合）、prompt（提示组装）
 │   │   │   ├── clarify.rs     # 指代消解（State / Grounding / Resolver）
 │   │   │   ├── bge.rs         # BGE 嵌入模型安装
-│   │   │   ├── funasr.rs      # FunASR 语音模型安装
 │   │   │   ├── lark.rs        # 飞书集成命令层（策略读写/配对/自检，与 WebAPI 共用实现）
 │   │   │   ├── sessions/      # 跨端会话协调（in_flight 取消注册表、lark 绑定与会话映射）
 │   │   │   ├── logs.rs        # 日志命令

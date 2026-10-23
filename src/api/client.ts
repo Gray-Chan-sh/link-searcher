@@ -291,7 +291,6 @@ const MAPPINGS: Record<string, Mapping> = {
   // ── Model installers ──
   check_bge_installed: { method: 'GET', path: '/api/ai/install/bge/status' },
   install_bge: (a) => ({ method: 'POST', path: '/api/ai/install/bge', body: a }),
-  install_funasr: { method: 'POST', path: '/api/ai/install/funasr' },
 
   // ── Lark (飞书集成) ──
   get_lark_config: { method: 'GET', path: '/api/integrations/lark' },

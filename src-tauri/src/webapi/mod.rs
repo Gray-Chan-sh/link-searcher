@@ -38,7 +38,6 @@ const BRIDGED_EVENTS: &[&str] = &[
     "ai-done",
     "migration-progress",
     "migration-warning",
-    "funasr-install-done",
     "bge-install-done",
     "restore-completed",
     "dep-progress",

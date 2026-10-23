@@ -20,7 +20,7 @@ pub const FORMAT_TAGGED: &str = "tagged";
 /// 一条转写片段：时间范围（毫秒，相对音频起点）+ 说话人 + 文本。
 ///
 /// 时间精度是**段级**（VAD / diarization 边界，通常 500ms 量级），不是逐字对齐
-/// —— FunASR-Nano 走 LLM 解码，sherpa-onnx 对它不提供 token 级时间戳。
+/// —— 时间戳来自切片边界，sherpa-onnx 不提供 token 级时间戳。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioSegment {
     pub start_ms: i64,
@@ -98,10 +98,11 @@ pub fn has_timeline(segments: &[AudioSegment]) -> bool {
     segments.iter().any(|s| !s.text.trim().is_empty())
 }
 
-/// 截断 LLM-ASR 的**复读退化**（"都都都都…"、"your thoughts on your thoughts…"）。
+/// 截断 ASR 的**复读退化**（"都都都都…"、"your thoughts on your thoughts…"）。
 ///
-/// FunASR-Nano 是 0.6B 的 LLM 解码器，遇到噪声/短片段时会陷入重复循环，一段
-/// 7 秒的语音能吐出 2000 字（2026-10-23 实测）。
+/// 残留自 FunASR-Nano 时代（0.6B LLM 解码器，遇到噪声/短片段会陷入重复循环，
+/// 一段 7 秒的语音能吐出 2000 字）。SenseVoice 基本不复读，但这条纯文本兜底
+/// 很便宜，留着防回归。
 ///
 /// 判定用**主导 n-gram**而不是严格周期：真实复读会漂移（实测
 /// `suorosusuorosusuoro…`，多一个 `s` 就破掉严格周期性）。规则：

@@ -298,7 +298,7 @@ lark-cli event consume im.message.receive_v1 --as bot
 
 ```
 scan-progress / scan-completed / ai-chunk / ai-progress / ai-done
-migration-progress / migration-warning / funasr-install-done / bge-install-done
+migration-progress / migration-warning / bge-install-done
 restore-completed / dep-progress / dep-install-done
 config-changed
 ```

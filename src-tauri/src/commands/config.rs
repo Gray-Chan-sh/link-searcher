@@ -675,11 +675,11 @@ mod tests {
         let src = base.join("old");
         let dst = base.join("tmp");
 
-        // 本地模型（BGE / FunASR）与聊天历史都必须迁移。
+        // 本地模型（BGE / SenseVoice）与聊天历史都必须迁移。
         std::fs::create_dir_all(src.join("models").join("bge-small-zh-v1.5")).unwrap();
         std::fs::write(src.join("models").join("bge-small-zh-v1.5").join("model.onnx"), b"onnx").unwrap();
-        std::fs::create_dir_all(src.join("models").join("funasr")).unwrap();
-        std::fs::write(src.join("models").join("funasr").join("llm.int8.onnx"), b"asr").unwrap();
+        std::fs::create_dir_all(src.join("models").join("sensevoice")).unwrap();
+        std::fs::write(src.join("models").join("sensevoice").join("model.int8.onnx"), b"asr").unwrap();
         std::fs::write(src.join("chat_history.json"), b"[]").unwrap();
         std::fs::write(src.join("app.log"), b"log").unwrap();
         // DB 与旁路文件、可再生目录应被跳过。
@@ -695,7 +695,7 @@ mod tests {
         copy_tree(&src, &dst, true, total, &mut copied, &emit).unwrap();
 
         assert!(dst.join("models/bge-small-zh-v1.5/model.onnx").is_file(), "BGE model must migrate");
-        assert!(dst.join("models/funasr/llm.int8.onnx").is_file(), "FunASR model must migrate");
+        assert!(dst.join("models/sensevoice/model.int8.onnx").is_file(), "ASR model must migrate");
         assert!(dst.join("chat_history.json").is_file(), "chat history must migrate");
         assert!(dst.join("app.log").is_file(), "app.log must migrate");
         assert!(!dst.join("data.db-wal").exists(), "WAL sidecar must be skipped");

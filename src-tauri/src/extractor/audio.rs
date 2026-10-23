@@ -50,27 +50,27 @@ pub fn ffmpeg_binary() -> Option<PathBuf> {
     ffmpeg_path().map(|p| p.to_path_buf())
 }
 
-/// FunASR-Nano ONNX model files that must be present in the model dir.
-/// Layout matches `sherpa-onnx-funasr-nano-int8-2025-12-30` archive.
-const MODEL_SUBDIR: &str = "models/funasr";
-const MODEL_ARCHIVE_URL: &str =
-    "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-funasr-nano-int8-2025-12-30.tar.bz2";
-const REQUIRED_FILES: [&str; 6] = [
-    "encoder_adaptor.int8.onnx",
-    "llm.int8.onnx",
-    "embedding.int8.onnx",
-    "Qwen3-0.6B/tokenizer.json",
-    // sherpa-onnx 的 FunASR-Nano tokenizer 同时需要 vocab.json / merges.txt：
-    // 缺了它们 recognizer 会**初始化失败**（`vocab.json does not exist`），
-    // 于是整篇音频只剩一句"ASR 初始化失败"占位文本。2026-10-23 实测：
-    // 依赖中心旧版本只下了 tokenizer.json，用户库里 86 个音频全部因此失败。
-    "Qwen3-0.6B/vocab.json",
-    "Qwen3-0.6B/merges.txt",
-];
+/// SenseVoice ONNX 模型（中文/粤语/英/日/韩，非自回归）—— **唯一的 ASR 引擎**。
+///
+/// 2026-10-23 实测（同一份 11 分钟车间噪声录音）：
+/// FunASR-Nano 402 中文字 + 18 个英文幻觉词；SenseVoice 1966 中文字 + 0 幻觉，
+/// 且快 2.6 倍（126s vs 332s）。故整体切换到 SenseVoice，不再保留 Nano 回退。
+const SENSEVOICE_SUBDIR: &str = "models/sensevoice";
+const SENSEVOICE_FILES: [&str; 2] = ["model.int8.onnx", "tokens.txt"];
+
+/// ASR 辅助模型目录名（`<models>/asr`）：Silero VAD + 说话人分离，
+/// 独立于 ASR 主体，换引擎不影响标注。
+///
+/// 旧版本把它们放在 `<models>/funasr/`（与已废弃的 FunASR-Nano 主模型同目录），
+/// 该布局仍作为兜底被搜索，老用户不必重装分离模型。
+const ASR_AUX_DIR: &str = "asr";
+const LEGACY_AUX_DIR: &str = "funasr";
 
 /// Speaker diarization model files (downloaded separately).
 const SEGMENTATION_MODEL_FILE: &str = "seg.onnx";
 const EMBEDDING_MODEL_FILE: &str = "emb.onnx";
+/// Silero VAD：长音频切段（缺了就退化为 28s 硬切）。
+const VAD_MODEL_FILE: &str = "silero_vad.onnx";
 
 /// Speaker diarization pipeline: segmentation + embedding extraction + clustering.
 ///
@@ -79,47 +79,49 @@ const EMBEDDING_MODEL_FILE: &str = "emb.onnx";
 /// dependency center takes effect without an app restart.
 static SPEAKER_DIARIZER: OnceLock<Option<sherpa_onnx::OfflineSpeakerDiarization>> = OnceLock::new();
 
-/// Resolve the FunASR model directory across dev and bundled runs.
-///
-/// Dev: `src-tauri/models/funasr`. Bundled: next to executable / data dir.
-/// The model dir contains the sherpa-onnx-int8 archive contents (no venv).
-fn funasr_candidates() -> Vec<PathBuf> {
+/// 所有可能存放模型的 `models/` 根目录（dev 检出 / 打包目录 / 数据目录）。
+fn model_roots() -> Vec<PathBuf> {
     let mut v = Vec::new();
-    if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
-        v.push(PathBuf::from(d));
-    }
     if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent() {
-            // Dev-machine builds: walk up from the .app to the checkout.
-            let mut dir = Some(parent);
-            while let Some(d) = dir {
-                let repo = d.join("src-tauri").join(MODEL_SUBDIR);
-                if model_present(&repo) {
-                    v.push(repo);
-                    break;
-                }
-                dir = d.parent();
+        && let Some(parent) = exe.parent()
+    {
+        // Dev-machine builds: walk up from the .app to the checkout.
+        let mut dir = Some(parent);
+        while let Some(d) = dir {
+            let repo = d.join("src-tauri").join("models");
+            if repo.is_dir() {
+                v.push(repo);
+                break;
             }
-            v.push(parent.join(MODEL_SUBDIR));
+            dir = d.parent();
         }
-    if let Ok(cwd) = std::env::current_dir() {
-        v.push(cwd.join(MODEL_SUBDIR));
+        v.push(parent.join("models"));
     }
-    v.push(crate::config::load_config().data_dir.join(MODEL_SUBDIR));
+    if let Ok(cwd) = std::env::current_dir() {
+        v.push(cwd.join("models"));
+    }
+    v.push(crate::config::load_config().data_dir.join("models"));
     v
 }
 
-fn model_present(dir: &Path) -> bool {
-    REQUIRED_FILES
-        .iter()
-        .all(|f| dir.join(f).is_file())
+fn sensevoice_candidates() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(d) = std::env::var("LINK_SEARCHER_SENSEVOICE_DIR") {
+        v.push(PathBuf::from(d));
+    }
+    v.extend(model_roots().into_iter().map(|r| r.join("sensevoice")));
+    v
+}
+
+fn has_files(dir: &Path, files: &[&str]) -> bool {
+    files.iter().all(|f| dir.join(f).is_file())
 }
 
 /// Check a candidate dir AND its immediate subdirectories for required files.
-/// The installer keeps files in `sherpa-onnx-funasr-nano-int8-2025-12-30/`
-/// while dev/bundled copies may be flat.
-fn find_model_dir(candidate: &Path) -> Option<PathBuf> {
-    if model_present(candidate) {
+/// The installer keeps files in `sherpa-onnx-*/` while dev/bundled copies may
+/// be flat.
+fn find_files_dir(candidate: &Path, files: &[&str]) -> Option<PathBuf> {
+    if has_files(candidate, files) {
         return Some(candidate.to_path_buf());
     }
     // Check immediate subdirectories (installed layout keeps files in subdir).
@@ -127,7 +129,7 @@ fn find_model_dir(candidate: &Path) -> Option<PathBuf> {
         for e in entries.flatten() {
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 let p = e.path();
-                if model_present(&p) {
+                if has_files(&p, files) {
                     return Some(p);
                 }
             }
@@ -136,24 +138,43 @@ fn find_model_dir(candidate: &Path) -> Option<PathBuf> {
     None
 }
 
-fn funasr_dir() -> Option<PathBuf> {
-    funasr_candidates()
+fn sensevoice_dir() -> Option<PathBuf> {
+    sensevoice_candidates()
         .into_iter()
-        .find_map(|d| find_model_dir(&d))
+        .find_map(|d| find_files_dir(&d, &SENSEVOICE_FILES))
 }
 
-pub fn funasr_model_ready(data_dir: &Path) -> bool {
-    let dir = data_dir.join(MODEL_SUBDIR);
-    find_model_dir(&dir).is_some()
+pub fn sensevoice_model_ready(data_dir: &Path) -> bool {
+    find_files_dir(&data_dir.join(SENSEVOICE_SUBDIR), &SENSEVOICE_FILES).is_some()
 }
 
-/// URL used by the installer (`download_funasr_model`).
-pub fn model_download_url() -> &'static str {
-    MODEL_ARCHIVE_URL
+/// ASR 辅助目录候选（新 `models/asr` 优先，旧 `models/funasr` 兜底）。
+fn aux_dirs() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Ok(d) = std::env::var("LINK_SEARCHER_ASR_AUX_DIR") {
+        v.push(PathBuf::from(d));
+    }
+    // 兼容旧变量：分离模型/VAD 曾与 FunASR 主模型同目录
+    if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+        v.push(PathBuf::from(d));
+    }
+    for root in model_roots() {
+        v.push(root.join(ASR_AUX_DIR));
+        v.push(root.join(LEGACY_AUX_DIR));
+    }
+    v
 }
 
-/// Static shared recognizer. `OfflineRecognizer` creation loads ~950M of
-/// int8 weights; reusing one instance across files avoids reloading per file.
+/// 在辅助目录（含一层子目录）里找单个文件。
+fn aux_file(name: &str) -> Option<PathBuf> {
+    aux_dirs()
+        .into_iter()
+        .find_map(|d| find_files_dir(&d, &[name]))
+        .map(|d| d.join(name))
+}
+
+/// Static shared recognizer. Loading the 228MB int8 model takes a couple of
+/// seconds; reusing one instance across files avoids reloading per file.
 static RECOGNIZER: OnceLock<Option<sherpa_onnx::OfflineRecognizer>> = OnceLock::new();
 
 fn recognizer() -> Option<&'static sherpa_onnx::OfflineRecognizer> {
@@ -163,8 +184,28 @@ fn recognizer() -> Option<&'static sherpa_onnx::OfflineRecognizer> {
 }
 
 /// Speaker diarization model directory.
+///
+/// 与 ASR 主模型**解耦**：新布局 `models/asr/diarization/`，旧布局
+/// `models/funasr/models/diarization/` 继续兼容（老用户不必重装 35MB）。
 fn diarization_dir() -> Option<PathBuf> {
-    funasr_dir().map(|d| d.join("models").join("diarization"))
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(d) = std::env::var("LINK_SEARCHER_ASR_AUX_DIR") {
+        dirs.push(PathBuf::from(d).join("diarization"));
+    }
+    if let Ok(d) = std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+        dirs.push(PathBuf::from(d).join("models").join("diarization"));
+    }
+    for root in model_roots() {
+        dirs.push(root.join(ASR_AUX_DIR).join("diarization"));
+        dirs.push(
+            root.join(LEGACY_AUX_DIR)
+                .join("models")
+                .join("diarization"),
+        );
+    }
+    dirs.into_iter().find(|d| {
+        d.join(SEGMENTATION_MODEL_FILE).is_file() && d.join(EMBEDDING_MODEL_FILE).is_file()
+    })
 }
 
 fn diarization_model_present() -> bool {
@@ -208,36 +249,44 @@ fn build_diarizer() -> Option<sherpa_onnx::OfflineSpeakerDiarization> {
     sherpa_onnx::OfflineSpeakerDiarization::create(&config)
 }
 
+/// 构建 ASR 识别器（SenseVoice，唯一引擎）。
+///
+/// 2026-10-23 起不再有 FunASR-Nano 回退：同一素材上 Nano 的中文内容只有
+/// SenseVoice 的 1/4.9 且带英文幻觉，留着它只会"静默产出更差的结果"。
+/// `LINK_SEARCHER_ASR_MODEL` 目前只接受 `sense_voice`（留给以后接第二引擎）。
 fn build_recognizer() -> Result<sherpa_onnx::OfflineRecognizer> {
-    let dir = funasr_dir().ok_or_else(|| anyhow::anyhow!("FunASR model not found"))?;
-    let f = |name: &str| dir.join(name).to_string_lossy().to_string();
+    if let Ok(v) = std::env::var("LINK_SEARCHER_ASR_MODEL") {
+        if v != "sense_voice" {
+            anyhow::bail!("unsupported LINK_SEARCHER_ASR_MODEL={v}（目前只支持 sense_voice）");
+        }
+    }
+    let dir = sensevoice_dir().ok_or_else(|| anyhow::anyhow!("SenseVoice model not found"))?;
+    build_sense_voice(&dir)
+}
 
+/// SenseVoice（中文/粤语/英/日/韩）—— 非自回归，抗噪、自带标点与 ITN。
+///
+/// `LINK_SEARCHER_ASR_LANGUAGE` 可改语言提示，默认 `zh`。
+fn build_sense_voice(dir: &Path) -> Result<sherpa_onnx::OfflineRecognizer> {
+    let f = |name: &str| dir.join(name).to_string_lossy().to_string();
     let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
     config.model_config.num_threads = 4;
-    config.model_config.funasr_nano = sherpa_onnx::OfflineFunASRNanoModelConfig {
-        encoder_adaptor: Some(f("encoder_adaptor.int8.onnx")),
-        llm: Some(f("llm.int8.onnx")),
-        embedding: Some(f("embedding.int8.onnx")),
-        tokenizer: Some(f("Qwen3-0.6B")),
-        system_prompt: Some("You are a helpful assistant.".into()),
-        user_prompt: Some("语音转写：".into()),
-        max_new_tokens: 1024,
-        temperature: 1e-06,
-        top_p: 0.8,
-        seed: 42,
-        language: None,
-        itn: 0,
-        hotwords: None,
-        ..Default::default()
+    config.model_config.tokens = Some(f("tokens.txt"));
+    config.model_config.sense_voice = sherpa_onnx::OfflineSenseVoiceModelConfig {
+        model: Some(f("model.int8.onnx")),
+        language: Some(
+            std::env::var("LINK_SEARCHER_ASR_LANGUAGE").unwrap_or_else(|_| "zh".to_string()),
+        ),
+        use_itn: true,
     };
+    config.model_config.model_type = Some("sense_voice".into());
     config.decoding_method = Some("greedy_search".into());
-    config.model_config.model_type = Some("funasr_nano".into());
 
-    log::info!("[ASR] loading FunASR-Nano model (warm, ~1-2s)");
+    log::info!("[ASR] loading SenseVoice model from {}", dir.display());
     let t0 = std::time::Instant::now();
     let rec = sherpa_onnx::OfflineRecognizer::create(&config)
-        .ok_or_else(|| anyhow::anyhow!("sherpa-onnx failed to init FunASR-Nano recognizer"))?;
-    log::info!("[ASR] recognizer ready in {:.1}s", t0.elapsed().as_secs_f64());
+        .ok_or_else(|| anyhow::anyhow!("sherpa-onnx failed to init SenseVoice recognizer"))?;
+    log::info!("[ASR] SenseVoice ready in {:.1}s", t0.elapsed().as_secs_f64());
     Ok(rec)
 }
 
@@ -274,15 +323,15 @@ impl AudioExtractor {
         let meta = std::fs::metadata(path).context("audio stat")?;
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("?");
 
-        if funasr_dir().is_none() {
-            let probed = funasr_candidates()
+        if sensevoice_dir().is_none() {
+            let probed = sensevoice_candidates()
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
                 .join("\n  ");
             return Ok(AudioTranscript {
                 text: format!(
-                    "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未就绪]\n已探测:\n  {}\n请在「设置 → 依赖中心」安装/修复 FunASR 模型（约 850MB）；\n若曾下载过，点一次「立即安装」即可补齐缺失文件（Qwen3-0.6B 下需 tokenizer.json + vocab.json + merges.txt）\n",
+                    "─── 音频文件 ({}, {:.1}MB) ──\n[ASR 模型未就绪]\n已探测:\n  {}\n请在「设置 → 依赖中心」安装「SenseVoice 语音转写模型」（约 228MB，中文识别明显更准）\n",
                     ext,
                     meta.len() as f64 / 1_048_576.0,
                     probed,
@@ -359,11 +408,9 @@ impl AudioExtractor {
         );
 
         let t0 = std::time::Instant::now();
-        // FunASR-Nano is an LLM trained on ~30s windows; long audio must be
-        // split before feeding. `recognize_slices` always yields bounded
-        // slices: global speaker diarization when its models exist, Silero VAD
-        // next, fixed 28s hard-split otherwise. Never feed a long file whole
-        // (OOM: an 18.7GB RSS blowup was measured on a 34-minute recording).
+        // 长音频必须切段再喂（模型有固定输入窗口，整段喂会内存失控：
+        // 34 分钟录音实测 RSS 18.7GB 被系统杀掉）。`recognize_slices` 总是给出
+        // 有界切片：有 Silero VAD 走 VAD（≤30s），否则 28s 硬切（1s 重叠）。
         //
         // Diarization runs **once on the whole waveform** (not per slice):
         // per-slice clustering restarts its speaker numbering every chunk, so
@@ -401,7 +448,7 @@ impl AudioExtractor {
         if text.trim().is_empty() {
             return Ok(AudioTranscript {
                 text: format!(
-                    "─── 音频文件 ({:.0}s, {}) ──\n[FunASR 推理完成，无识别结果]\n",
+                    "─── 音频文件 ({:.0}s, {}) ──\n[语音识别完成，无识别结果]\n",
                     dur, ext
                 ),
                 segments: Vec::new(),
@@ -516,10 +563,11 @@ fn cap_by_duration(text: &str, sample_count: usize) -> String {
 /// **转写切片**沿用既有证明可用的口径：Silero VAD（≤30s）→ 固定 28s 硬切。
 /// 说话人**不参与切分**，只按时间重叠给每个切片打「主导说话人」。
 ///
-/// 为什么不用说话人轮次当转写切片（2026-10-23 实测）：FunASR-Nano 是 0.6B 的
-/// LLM，喂 1~2 秒的短轮次会大量幻觉/复读 —— 同一段 100 秒通话，按轮次切出 34 段
+/// 为什么不用说话人轮次当转写切片（FunASR-Nano 时代实测，2026-10-23）：0.6B LLM
+/// 喂 1~2 秒的短轮次会大量幻觉/复读 —— 同一段 100 秒通话，按轮次切出 34 段
 /// 得到 6284 字（其中一段 7 秒吐了 2082 字 "your thoughts on your thoughts…"），
-/// 而按 VAD 切只有 4 段 417 字。所以：**切分用 VAD，说话人靠时间对齐**。
+/// 而按 VAD 切只有 4 段 417 字。SenseVoice 对短片段更稳，但 VAD 口径已充分验证，
+/// 且短切片会切断句子、让行文碎裂，所以：**切分用 VAD，说话人靠时间对齐**。
 fn recognize_slices(samples: &[f32]) -> Vec<Slice> {
     if samples.is_empty() {
         return Vec::new();
@@ -622,18 +670,9 @@ fn split_long(start: usize, end: usize, limit: usize) -> Vec<(usize, usize)> {
     out
 }
 
-fn vad_available() -> bool {
-    funasr_dir()
-        .map(|d| d.join("silero_vad.onnx").is_file())
-        .unwrap_or(false)
-}
-
 fn vad_slices(samples: &[f32]) -> Option<Vec<Slice>> {
-    if !vad_available() {
-        return None;
-    }
-    let dir = funasr_dir()?;
-    let vad_model = dir.join("silero_vad.onnx").to_string_lossy().to_string();
+    let vad_path = aux_file(VAD_MODEL_FILE)?;
+    let vad_model = vad_path.to_string_lossy().to_string();
 
     let mut vad_config = sherpa_onnx::VadModelConfig::default();
     vad_config.sample_rate = 16000;
@@ -803,23 +842,42 @@ mod tests {
         // contract; the chain must simply not panic when ffmpeg is missing.
     }
 
+    /// SenseVoice 的两种布局都要认：扁平（依赖中心直下）/ 归档子目录。
     #[test]
-    fn diarization_models_resolve_from_funasr_dir() {
-        // 说话人分离模型必须能从 funasr_dir()/models/diarization 找到。
-        // CI / 未下载模型的环境：funasr_dir 为空时软跳过（下方对模型缺失同样 soft-fail）。
-        let Some(_funasr) = funasr_dir() else {
-            eprintln!("FunASR model dir not found — skipping (CI env)");
+    fn find_files_dir_accepts_flat_and_nested_layout() {
+        let root = std::env::temp_dir().join(format!("ls_sv_{}", uuid::Uuid::new_v4()));
+        let flat = root.join("flat");
+        let nested = root.join("nested").join("sherpa-onnx-sense-voice");
+        std::fs::create_dir_all(&flat).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        for d in [&flat, &nested] {
+            for f in SENSEVOICE_FILES {
+                std::fs::write(d.join(f), b"x").unwrap();
+            }
+        }
+        assert_eq!(find_files_dir(&flat, &SENSEVOICE_FILES), Some(flat.clone()));
+        assert_eq!(
+            find_files_dir(&root.join("nested"), &SENSEVOICE_FILES),
+            Some(nested.clone())
+        );
+        // 缺 tokens.txt 就不算就绪（半装状态必须能被依赖中心修复）
+        std::fs::remove_file(nested.join("tokens.txt")).unwrap();
+        assert_eq!(find_files_dir(&root.join("nested"), &SENSEVOICE_FILES), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn diarization_models_resolve_from_aux_dir() {
+        // 说话人分离模型必须能从 `models/asr/diarization/`（新布局）或
+        // `models/funasr/models/diarization/`（旧布局）找到。
+        // CI / 未下载模型的环境：软跳过（下方对模型缺失同样 soft-fail）。
+        let Some(diar) = diarization_dir() else {
+            eprintln!("diarization models not found — skipping (CI env)");
             return;
         };
-        let diar = diarization_dir().expect("diarization_dir must resolve once funasr_dir exists");
         let seg = diar.join(SEGMENTATION_MODEL_FILE);
         let emb = diar.join(EMBEDDING_MODEL_FILE);
-        if !seg.is_file() || !emb.is_file() {
-            eprintln!("MISSING diarization models — expected at {diar:?}");
-            eprintln!("  seg: {}", seg.display());
-            eprintln!("  emb: {}", emb.display());
-            return; // soft-fail: models may not be downloaded in CI
-        }
+        assert!(seg.is_file() && emb.is_file(), "diarization_dir 必须只返回含两个模型的目录");
         assert!(diarization_model_present(), "diarization_model_present should be true");
         assert!(build_diarizer().is_some(), "diarizer should initialize");
     }

@@ -39,7 +39,6 @@ use crate::commands::performance::{detect_hardware, auto_optimize, get_performan
 use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
 use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::rerank::check_rerank_installed;
-use crate::commands::funasr::install_funasr;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
 use crate::deps::commands::{cancel_dep_install, dep_install_status, get_setup_status, install_dep};
 use crate::scanner::watcher::FileWatcher;
@@ -212,7 +211,6 @@ get_dir_children,
             auto_optimize,
             get_performance_profile,
             set_performance_tier,
-            install_funasr,
             install_bge,
             check_bge_installed,
             check_rerank_installed,
@@ -551,14 +549,14 @@ get_dir_children,
 
                 let pdf_ok = pdf::is_pdftoppm_available();
 
-                let funasr_ok = crate::extractor::audio::funasr_model_ready(&data_dir);
+                let asr_ok = crate::extractor::audio::sensevoice_model_ready(&data_dir);
                 let ffmpeg_ok = crate::extractor::audio::ffmpeg_available();
 
                 log::info!(
-                    "[STARTUP] deps: OCR={} pdf={} FunASR={} ffmpeg={}",
+                    "[STARTUP] deps: OCR={} pdf={} ASR={} ffmpeg={}",
                     if ocr_ok { "ok" } else { "fail" },
                     if pdf_ok { "ok" } else { "n/a" },
-                    if funasr_ok { "ok" } else { "no" },
+                    if asr_ok { "ok" } else { "no" },
                     if ffmpeg_ok { "ok" } else { "no" },
                 );
 
@@ -566,8 +564,8 @@ get_dir_children,
                         log::info!("[STARTUP] ffmpeg not found");
                     }
 
-                    if !funasr_ok {
-                        log::info!("[STARTUP] FunASR model not downloaded");
+                    if !asr_ok {
+                        log::info!("[STARTUP] ASR model not downloaded (SenseVoice)");
                     }
 
                 if !ocr_ok {

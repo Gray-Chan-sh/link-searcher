@@ -383,9 +383,9 @@ fn download_one(
     Err(DownloadError("下载失败".to_string()))
 }
 
-/// `<name>.part` 兄弟路径。模型下载（BGE / FunASR）也复用同一命名约定：
+/// `<name>.part` 兄弟路径。模型下载（BGE 等）也复用同一命名约定：
 /// 先写 `.part`、成功后原子改名 —— 中途被杀/断网留下的半成品永远不会被当成
-/// 完整文件。见 `commands::bge::download` / `commands::funasr::download`。
+/// 完整文件。见 `commands::bge::download`。
 pub(crate) fn part_path_for(path: &Path) -> PathBuf {
     let mut os = path.as_os_str().to_owned();
     os.push(".part");

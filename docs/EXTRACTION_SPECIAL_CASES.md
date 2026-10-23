@@ -37,7 +37,7 @@
 | 5 | Office 现代 | `docx docm ppt pptx pptm ppsm ppsx pps pot odt ods odp rtf epub` | `anydoc::to_markdown` | `office/mod.rs` |
 | 6 | 图片 | `png jpg jpeg gif bmp webp tiff tif` | OCR 引擎调度 | `mod.rs` -> `ocr.rs` |
 | 7 | 压缩包 | `zip tar tgz tbz2 txz gz bz2 xz` | 逐条目重新提取 | `archive.rs` |
-| 8 | 音频 | `mp3 wav m4a aac flac ogg opus wma` | FunASR + VAD + 说话人分离 | `audio.rs` |
+| 8 | 音频 | `mp3 wav m4a aac flac ogg opus wma` | SenseVoice + VAD + 说话人分离 | `audio.rs` |
 | 9 | 未知回退 | 任意 | 读前 10MB 作 UTF-8，二进制则拒绝 | `mod.rs` |
 
 注意：`image.rs` 仅含测试代码，生产环境的图片 OCR 路由在 `mod.rs` 第 94-110 行直接调用
@@ -177,7 +177,7 @@ PDF 分支按问题来源分 7 组。2026-09-23 起 `pdf.rs` 拆为 `pdf/quality
 | ffmpeg 解码超时 | 600s 超时杀进程 | `transcribe` |
 | ffmpeg 解码失败 | 返回错误"ffmpeg decode failed" | `transcribe` |
 | recognizer 初始化失败 | 返回占位文本"ASR 初始化失败" | `transcribe` |
-| 空转写结果 | 返回占位文本"FunASR 推理完成，无识别结果" | `transcribe` |
+| 空转写结果 | 返回占位文本"语音识别完成，无识别结果" | `transcribe` |
 | Silero VAD 分段 | `vad_slices` 用 `SpeechSegment::start()` 保留绝对时间偏移 | `vad_slices` |
 | 固定 28s 硬切 | VAD 不可用时 28s 分段 + 1s 重叠 | `hard_split_slices` |
 | 说话人分离 | **整段**跑一次 `SPEAKER_DIARIZER`，得到全局一致的说话人时间线 | `diarized_slices` |

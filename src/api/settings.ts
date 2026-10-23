@@ -57,15 +57,6 @@ export async function getVersion(): Promise<{ hash: string; time: string }> {
     return client.invoke<{ hash: string; time: string }>('get_version')
 }
 
-export interface FunasrInstallResult {
-    success: boolean
-    message: string
-}
-
-export async function installFunasr(): Promise<void> {
-    return client.invoke('install_funasr')
-}
-
 export interface BgeStatus {
     installed: boolean
     model_dir: string

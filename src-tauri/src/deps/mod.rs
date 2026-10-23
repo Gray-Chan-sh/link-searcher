@@ -27,7 +27,7 @@ use crate::state::AppState;
 /// can install. `available` means "ready to use right now on this machine".
 #[derive(Debug, Clone, Serialize)]
 pub struct DepStatus {
-    /// Stable id: `paddleocr` / `bge-large` / `funasr` / `ffmpeg` / `poppler` / `tesseract`.
+    /// Stable id: `paddleocr` / `bge-large` / `sensevoice` / `asr-diarization` / `ffmpeg` / `poppler` / `lark-cli`.
     pub id: String,
     pub name: String,
     pub available: bool,

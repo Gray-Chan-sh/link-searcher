@@ -1,3 +1,54 @@
+## 2026-10-23（第六十一轮）：ASR 引擎换成 SenseVoice（中文 4.9 倍内容、0 英文幻觉、快 2.6 倍）
+
+> 背景：11 分钟车间噪声录音用 FunASR-Nano 只出 402 个中文字 + 18 个英文幻觉词。
+> 同一个文件换成 SenseVoice（阿里，非自回归，中文/粤语专用）实测差距悬殊。
+
+**同一文件对照（653 秒，11 分钟）**
+
+| 指标 | FunASR-Nano | **SenseVoice** |
+|---|---|---|
+| 段数 | 38 | 45 |
+| 总字数 | 611 | **2299** |
+| **中文字数** | 402 | **1966（4.9×）** |
+| 英文幻觉词 | 18 | **0** |
+| 说话人 | 9 | 9（分离模块未变） |
+| 耗时 | 332s | **126s** |
+
+干净 78 秒通话也无退化：中文 142 → 241 字、幻觉（`task force.`）消失、22.3s → 12.4s。
+
+**改动**
+
+- `extractor/audio.rs`：
+  - 新增 `sensevoice_dir()`（`models/sensevoice/{model.int8.onnx,tokens.txt}`，含归档子目录布局）
+    与 `build_sense_voice()`（`language=zh`、`use_itn=true`）；
+  - **整体切换为 SenseVoice，删除 FunASR-Nano**：`build_recognizer()` 只有 SenseVoice 一条路径，
+    不再有 855MB 依赖条目、不再有 tar.bz2 安装器（`commands/funasr.rs` 删除，
+    `install_funasr` 命令与前端 `installFunasr` 一并下线）；`LINK_SEARCHER_ASR_MODEL`
+    只接受 `sense_voice`，`LINK_SEARCHER_ASR_LANGUAGE` 改语言提示；
+  - 模型目录解析抽成 `model_roots()` + `find_files_dir()`（供 ASR 与辅助模型共用）；
+  - **VAD / 说话人分离迁到 `models/asr/`**（与 ASR 主体解耦：换引擎/只装 SenseVoice 都照常标注），
+    旧 `models/funasr/models/diarization/` 与旧目录下的 `silero_vad.onnx` **仍兼容搜索**，
+    老用户不必重装 35MB；新装机器由依赖中心的 `asr-diarization` 条目一次装齐 3 个文件；
+  - 「模型未就绪」提示只列 SenseVoice 路径；空结果占位文案改为 `[语音识别完成，无识别结果]`。
+- `deps/catalog.rs`：新增 `sensevoice` 条目（228MB，`recommended: true`，hf-mirror 直取单文件，
+  SHA-256 锁定）；删除 `funasr` 条目；`funasr-diarization` → `asr-diarization`
+  （`install_dir` = `models/asr`）。该条目同时补上 `silero_vad.onnx`（628KB，sha256
+  `9e2449e1…1fd6`）—— 此前 VAD 只靠 `install_funasr` 单独下载，安装器删除后若不补，
+  全新安装的机器拿不到 VAD、长音频会退化成 28s 硬切。现共 3 个文件
+  （`silero_vad.onnx` + `diarization/{seg,emb}.onnx`）。
+- `lib.rs` / `commands/tesseract.rs`：启动与依赖状态改用 `sensevoice_model_ready()`。
+- `build.rs`：`HAS_ASR_MODELS` 改查 `models/sensevoice/{model.int8.onnx,tokens.txt}`。
+- 测试：`find_files_dir_accepts_flat_and_nested_layout`、`diarization_models_resolve_from_aux_dir`、
+  `sensevoice_lands_in_own_dir`、`asr_aux_models_land_in_asr_dir`；`funasr_smoke.rs`
+  改名 `sensevoice_smoke.rs` 并改用 `LINK_SEARCHER_SENSEVOICE_DIR`。
+
+**注意**
+
+- 老音频不会自动换引擎：需在索引状态页点「⟳ 重新转写全部音频」才会用 SenseVoice 重跑
+  （本机已把模型装到 `D:\index\models\sensevoice`，重启即生效）。
+- 时间轴、说话人、纯文本/带标签导出链路**零改动**（只换"每段文本"的来源）。
+- 依赖中心不再有 855MB 条目；本机旧的 `models/funasr/` 主模型文件可删（辅助模型需保留）。
+
 ## 2026-10-23（第六十轮）：arnndn（RNNoise）对照实验 —— 该文件上不如现有 afftdn，不启用
 
 > 背景：11 分钟车间噪声录音（`20160622 170511.m4a`）用现有清洗链只出 ~400 个中文字。

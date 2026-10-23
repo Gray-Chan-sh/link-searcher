@@ -209,8 +209,8 @@ pub fn all() -> Vec<DepDef> {
         bge_small(),
     ];
     defs.extend(rerank_defs());
-    defs.push(funasr());
-    defs.push(funasr_diarization());
+    defs.push(sensevoice());
+    defs.push(asr_diarization());
     defs.push(ffmpeg());
     defs.push(poppler());
     defs.push(lark_cli());
@@ -393,38 +393,36 @@ fn rerank_sources(repo: &str) -> Vec<Source> {
     ]
 }
 
-/// FunASR-Nano (sherpa-onnx int8) — offline audio transcription (~855MB).
+/// SenseVoice（中文/粤语/英/日/韩，~228MB int8）—— **唯一的 ASR 引擎**。
 ///
-/// `Qwen3-0.6B` 需要 **三个**文件：`tokenizer.json`（HF tokenizers）+ `vocab.json`
-/// + `merges.txt`（sherpa-onnx 自己读词表/合并规则）。早期只发布了 tokenizer.json，
-/// 导致 recognizer 初始化失败（`vocab.json does not exist`）—— 缺失的两个从
-/// 上游 Qwen3-0.6B 取，作为独立 FileSpec 锁 SHA-256。
-fn funasr() -> DepDef {
+/// 2026-10-23 实测（11 分钟车间噪声录音）：SenseVoice 1966 中文字 / 0 英文幻觉 /
+/// 126s；FunASR-Nano 402 中文字 / 18 个英文幻觉词 / 332s。故整体切换，
+/// FunASR-Nano 条目（855MB）已移除（见 `extractor::audio::build_recognizer`）。
+///
+/// 直取 hf-mirror 单文件（GitHub 只有 1GB 的 tar.bz2，没必要解压）。
+/// 布局对齐 `extractor::audio::sensevoice_dir()`：`models/sensevoice/`。
+fn sensevoice() -> DepDef {
     DepDef {
-        id: "funasr",
-        name: "FunASR 语音转写模型",
+        id: "sensevoice",
+        name: "SenseVoice 语音转写模型（中文更准）",
         recommended: true,
-        size_bytes: 855 * 1024 * 1024,
-        hint: "音频转文字（约 855MB）",
+        size_bytes: 229 * 1024 * 1024,
+        hint: "中文/粤语识别明显优于 FunASR-Nano，且更快（约 228MB；装了自动优先使用）",
         files: &[
-            FileSpec { remote: "funasr-encoder_adaptor.int8.onnx", local: "encoder_adaptor.int8.onnx", sha256: "f36dea2e30fbc33b5db1d7a7265cc976c5e5586c77b042d5adb1ad27c72db422" },
-            FileSpec { remote: "funasr-llm.int8.onnx", local: "llm.int8.onnx", sha256: "dfbf9aa3be41bccc257587f151e15c63fbe1b549f2b517f5ccd5bdce3bf4322a" },
-            FileSpec { remote: "funasr-embedding.int8.onnx", local: "embedding.int8.onnx", sha256: "95e61cd0c9c3b9543339a4cf973c95c116815e745ccc1e0285cbd81f76d18644" },
-            FileSpec { remote: "funasr-tokenizer.json", local: "Qwen3-0.6B/tokenizer.json", sha256: "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4" },
             FileSpec {
-                remote: "https://hf-mirror.com/Qwen/Qwen3-0.6B/resolve/main/vocab.json",
-                local: "Qwen3-0.6B/vocab.json",
-                sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                remote: "model.int8.onnx",
+                local: "model.int8.onnx",
+                sha256: "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51",
             },
             FileSpec {
-                remote: "https://hf-mirror.com/Qwen/Qwen3-0.6B/resolve/main/merges.txt",
-                local: "Qwen3-0.6B/merges.txt",
-                sha256: "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5",
+                remote: "tokens.txt",
+                local: "tokens.txt",
+                sha256: "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc",
             },
         ],
         sources: vec![Source {
-            label: "GitHub Releases",
-            base_url: gh_base(),
+            label: "HF Mirror",
+            base_url: "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main".into(),
         }],
         system_package: None,
     }
@@ -432,31 +430,39 @@ fn funasr() -> DepDef {
 
 /// 说话人分离模型（pyannote 分段 + CAM++ 中文嵌入，共 ~34MB）。
 ///
-/// 与 `funasr` **分开一个条目**：主模型（~850MB）是必装项，这两个是可选项。
-/// 合成一条会让"分离模型源不可达"直接判整次 FunASR 安装失败 —— 用户连转写
+/// 与 ASR 主模型**分开一个条目**：主模型（~228MB）是必装项，这个是可选项。
+/// 合成一条会让"分离模型源不可达"直接判整次 ASR 安装失败 —— 用户连转写
 /// 都没有了。分开装则最坏情况只是没有说话人标签（时间戳仍由 VAD 提供）。
 ///
-/// 布局对齐 `extractor::audio::diarization_dir()`：`models/funasr/models/diarization/`。
-/// 两个文件来自**不同的上游仓库**，所以 `remote` 用绝对 URL（见
+/// 布局对齐 `extractor::audio::aux_file()` / `diarization_dir()`：
+/// `<data>/models/asr/silero_vad.onnx` + `<data>/models/asr/diarization/{seg,emb}.onnx`。
+/// 旧版本把它放在 `models/funasr/models/diarization/`，代码仍兼容搜索 —— 老用户
+/// 不必重装。三个文件来自**不同的上游仓库**，所以 `remote` 用绝对 URL（见
 /// `deps::download::effective_urls`）。
-fn funasr_diarization() -> DepDef {
+fn asr_diarization() -> DepDef {
     DepDef {
-        id: "funasr-diarization",
+        id: "asr-diarization",
         name: "说话人分离模型（音频标注说话人）",
         recommended: false,
         size_bytes: 35 * 1024 * 1024,
         hint: "为音频转写标注「说话人N」（约 35MB；不装则只有时间戳）",
         files: &[
+            // Silero VAD（长音频切段；缺了退化成 28s 硬切）
+            FileSpec {
+                remote: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+                local: "silero_vad.onnx",
+                sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+            },
             // pyannote segmentation 3.0（hf-mirror 单文件；GitHub 只有 tar.bz2）
             FileSpec {
                 remote: "https://hf-mirror.com/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-                local: "models/diarization/seg.onnx",
+                local: "diarization/seg.onnx",
                 sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
             },
             // 3D-Speaker CAM++ 中文说话人嵌入
             FileSpec {
                 remote: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
-                local: "models/diarization/emb.onnx",
+                local: "diarization/emb.onnx",
                 sha256: "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
             },
         ],
@@ -530,10 +536,9 @@ pub fn install_dir(def: &DepDef, data_dir: &Path) -> std::path::PathBuf {
         "bge-large" => "bge-large-zh-v1.5",
         "bge-base" => "bge-base-zh-v1.5",
         "bge-small" => "bge-small-zh-v1.5",
-        "funasr" => "funasr",
-        // 与主模型共用目录：`local` 里再嵌 `models/diarization/`，
-        // 最终落在 `data/models/funasr/models/diarization/{seg,emb}.onnx`。
-        "funasr-diarization" => "funasr",
+        // ASR 辅助模型独立目录：`local` 里嵌 `diarization/`，
+        // 最终落在 `data/models/asr/diarization/{seg,emb}.onnx`。
+        "asr-diarization" => "asr",
         other => other,
     };
     data_dir.join("models").join(sub)
@@ -730,9 +735,8 @@ mod tests {
                 "bge-large" => "bge-large-zh-v1.5",
                 "bge-base" => "bge-base-zh-v1.5",
                 "bge-small" => "bge-small-zh-v1.5",
-                "funasr" => "funasr",
-                // 分离模型故意与主模型共用目录（见 funasr_diarization 文档）
-                "funasr-diarization" => "funasr",
+                // 分离模型独立目录（见 asr_diarization 文档）
+                "asr-diarization" => "asr",
                 other => other,
             };
             assert_eq!(dir, data.join("models").join(expected), "layout for {}", def.id);
@@ -755,41 +759,46 @@ mod tests {
         unsafe { std::env::remove_var("LINK_SEARCHER_MODELS_TAG") };
     }
 
+    /// 辅助模型必须装进 `models/asr/`：`silero_vad.onnx` 在根，
+    /// 分离模型在 `diarization/` 下 —— 正是 `extractor::audio::aux_file()` /
+    /// `diarization_dir()` 的搜索口径（旧 `models/funasr/...` 仍兼容）。
     #[test]
-    fn funasr_tokenizer_nested_local_path() {
-        let _g = env_lock();
-        // The FunASR tokenizer must land under Qwen3-0.6B/ so the extractor
-        // finds it at data/models/funasr/Qwen3-0.6B/tokenizer.json.
-        let def = all().into_iter().find(|d| d.id == "funasr").unwrap();
-        let tok = def.files.iter().find(|f| f.local.contains("tokenizer.json")).unwrap();
-        assert_eq!(tok.local, "Qwen3-0.6B/tokenizer.json");
-        let data = PathBuf::from("/tmp/ls_data");
-        let dest = install_dir(&def, &data).join(tok.local);
-        assert_eq!(dest, data.join("models/funasr/Qwen3-0.6B/tokenizer.json"));
-    }
-
-    /// 分离模型必须装进 FunASR 目录**内部**：`extractor::audio::diarization_dir()`
-    /// 只会去 `<funasr_dir>/models/diarization/` 找 seg.onnx / emb.onnx。
-    #[test]
-    fn funasr_diarization_lands_inside_funasr_dir() {
-        let def = all().into_iter().find(|d| d.id == "funasr-diarization").unwrap();
-        assert!(!def.recommended, "分离模型是可选项，不能阻塞首启向导");
-        assert_eq!(def.files.len(), 2);
+    fn asr_aux_models_land_in_asr_dir() {
+        let def = all().into_iter().find(|d| d.id == "asr-diarization").unwrap();
+        assert!(!def.recommended, "辅助模型是可选项，不能阻塞首启向导");
+        assert_eq!(def.files.len(), 3, "VAD + 分段 + 嵌入");
         let data = PathBuf::from("/tmp/ls_data");
         let dir = install_dir(&def, &data);
-        assert_eq!(dir, data.join("models/funasr"));
+        assert_eq!(dir, data.join("models/asr"));
         for f in def.files {
-            let dest = dir.join(f.local);
-            assert_eq!(
-                dest.parent().unwrap(),
-                data.join("models/funasr/models/diarization"),
-                "{} 装错位置",
-                f.local
-            );
+            let parent = dir.join(f.local).parent().unwrap().to_path_buf();
+            let expected = if f.local.starts_with("diarization/") {
+                data.join("models/asr/diarization")
+            } else {
+                data.join("models/asr")
+            };
+            assert_eq!(parent, expected, "{} 装错位置", f.local);
             assert_eq!(f.sha256.len(), 64, "{} 必须锁定 sha256", f.local);
         }
-        // 两个文件来自不同上游仓库 → 必须是绝对 URL（单一 base_url 拼不出来）
+        // 三个文件来自不同上游仓库 → 必须是绝对 URL（单一 base_url 拼不出来）
         assert!(def.sources.is_empty());
         assert!(def.files.iter().all(|f| f.remote.starts_with("https://")));
+    }
+
+    /// SenseVoice 必须落在 `models/sensevoice/`（`extractor::audio::sensevoice_dir()`
+    /// 只在那里找 `model.int8.onnx` + `tokens.txt`）。
+    #[test]
+    fn sensevoice_lands_in_own_dir() {
+        let def = all().into_iter().find(|d| d.id == "sensevoice").unwrap();
+        assert_eq!(def.files.len(), 2);
+        assert!(def.recommended);
+        let data = PathBuf::from("/tmp/ls_data");
+        let dir = install_dir(&def, &data);
+        assert_eq!(dir, data.join("models/sensevoice"));
+        for f in def.files {
+            assert_eq!(dir.join(f.local).parent().unwrap(), dir, "{} 装错位置", f.local);
+            assert_eq!(f.sha256.len(), 64, "{} 必须锁定 sha256", f.local);
+        }
+        assert_eq!(def.sources.len(), 1, "单文件直取 hf-mirror，不必解压 1GB 归档");
     }
 }

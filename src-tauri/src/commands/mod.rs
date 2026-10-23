@@ -5,7 +5,6 @@ pub mod clarify;
 pub mod config;
 pub mod dirs;
 pub mod files;
-pub mod funasr;
 pub mod helpers;
 pub mod index;
 pub mod lark;

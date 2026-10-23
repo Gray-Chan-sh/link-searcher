@@ -1,26 +1,19 @@
-//! End-to-end smoke test for FunASR-Nano via sherpa-onnx.
+//! End-to-end smoke test for SenseVoice（唯一的 ASR 引擎）via sherpa-onnx.
 //!
-//! Uses the real model files from `LINK_SEARCHER_FUNASR_DIR` (or the default
-//! `src-tauri/models/funasr`) and a test audio file from
-//! `LINK_SEARCHER_TEST_MP3` / `LINK_SEARCHER_TEST_LONG_MP3`. Skips cleanly when
-//! either is absent, so CI without the ~950MB model download stays green.
+//! Uses the real model files from `LINK_SEARCHER_SENSEVOICE_DIR` (or the default
+//! `src-tauri/models/sensevoice`) and test audio from `LINK_SEARCHER_TEST_MP3` /
+//! `LINK_SEARCHER_TEST_LONG_MP3`. Skips cleanly when either is absent, so CI
+//! without the ~228MB model download stays green.
 use std::path::PathBuf;
 
-/// Model dir: `LINK_SEARCHER_FUNASR_DIR` wins (lets you point the test at an
-/// installed data dir instead of copying ~1GB into the checkout).
+/// Model dir: `LINK_SEARCHER_SENSEVOICE_DIR` wins (lets you point the test at
+/// an installed data dir instead of copying ~228MB into the checkout).
 fn model_dir() -> Option<PathBuf> {
-    let dir = match std::env::var("LINK_SEARCHER_FUNASR_DIR") {
+    let dir = match std::env::var("LINK_SEARCHER_SENSEVOICE_DIR") {
         Ok(p) => PathBuf::from(p),
-        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/funasr"),
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("models/sensevoice"),
     };
-    let required = [
-        "encoder_adaptor.int8.onnx",
-        "llm.int8.onnx",
-        "embedding.int8.onnx",
-        "Qwen3-0.6B/tokenizer.json",
-        "Qwen3-0.6B/vocab.json",
-        "Qwen3-0.6B/merges.txt",
-    ];
+    let required = ["model.int8.onnx", "tokens.txt"];
     if required.iter().all(|f| dir.join(f).is_file()) {
         Some(dir)
     } else {
@@ -33,9 +26,9 @@ fn model_present() -> bool {
 }
 
 #[test]
-fn funasr_nano_transcribes_smoke() {
+fn sense_voice_transcribes_smoke() {
     if !model_present() {
-        eprintln!("SKIP: FunASR model not downloaded at src-tauri/models/funasr");
+        eprintln!("SKIP: SenseVoice model not downloaded at src-tauri/models/sensevoice");
         return;
     }
     let wav = match std::env::var("LINK_SEARCHER_TEST_WAV") {
@@ -50,19 +43,13 @@ fn funasr_nano_transcribes_smoke() {
     let p = |name: &str| model_dir.join(name).to_string_lossy().to_string();
     let mut config = sherpa_onnx::OfflineRecognizerConfig::default();
     config.model_config.num_threads = 4;
-    config.model_config.funasr_nano = sherpa_onnx::OfflineFunASRNanoModelConfig {
-        encoder_adaptor: Some(p("encoder_adaptor.int8.onnx")),
-        llm: Some(p("llm.int8.onnx")),
-        embedding: Some(p("embedding.int8.onnx")),
-        tokenizer: Some(p("Qwen3-0.6B")),
-        system_prompt: Some("You are a helpful assistant.".into()),
-        user_prompt: Some("语音转写：".into()),
-        max_new_tokens: 512,
-        temperature: 1e-06,
-        top_p: 0.8,
-        seed: 42,
-        ..Default::default()
+    config.model_config.tokens = Some(p("tokens.txt"));
+    config.model_config.sense_voice = sherpa_onnx::OfflineSenseVoiceModelConfig {
+        model: Some(p("model.int8.onnx")),
+        language: Some("zh".into()),
+        use_itn: true,
     };
+    config.model_config.model_type = Some("sense_voice".into());
     config.decoding_method = Some("greedy_search".into());
 
     let rec = sherpa_onnx::OfflineRecognizer::create(&config)
@@ -83,7 +70,7 @@ fn funasr_nano_transcribes_smoke() {
 #[test]
 fn audio_extractor_full_pipeline() {
     if !model_present() {
-        eprintln!("SKIP: FunASR model not downloaded at src-tauri/models/funasr");
+        eprintln!("SKIP: SenseVoice model not downloaded at src-tauri/models/sensevoice");
         return;
     }
     let mp3 = match std::env::var("LINK_SEARCHER_TEST_MP3") {
@@ -122,7 +109,7 @@ fn audio_extractor_full_pipeline() {
             &transcript.segments,
         );
         assert!(
-            tagged.starts_with("[00:00:") || tagged.starts_with("[00:00:0"),
+            tagged.starts_with("[00:00:"),
             "带标签输出的首行应形如 [HH:MM:SS] …，got: {}",
             &tagged[..tagged.len().min(80)]
         );
@@ -168,7 +155,7 @@ fn audio_extractor_full_pipeline() {
 #[test]
 fn audio_extractor_long_audio() {
     if !model_present() {
-        eprintln!("SKIP: FunASR model not downloaded at src-tauri/models/funasr");
+        eprintln!("SKIP: SenseVoice model not downloaded at src-tauri/models/sensevoice");
         return;
     }
     let mp3 = match std::env::var("LINK_SEARCHER_TEST_LONG_MP3") {

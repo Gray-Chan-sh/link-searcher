@@ -139,10 +139,10 @@ pub fn check_dependencies(state: State<'_, AppState>) -> Result<Vec<DependencySt
             install_guide: "macOS: brew install ffmpeg\nWindows: winget install -e --id Gyan.FFmpeg\nLinux: sudo apt install ffmpeg".into(),
         },
         DependencyStatus {
-            name: "FunASR (音频转写)".into(),
-            command: "data_dir/models/funasr (sherpa-onnx int8 models)".into(),
-            available: crate::extractor::audio::funasr_model_ready(&state.data_dir),
-            install_guide: "在「依赖中心」点击下载 FunASR 模型（约 850MB）".into(),
+            name: "ASR 语音转写（SenseVoice）".into(),
+            command: "data_dir/models/sensevoice (sherpa-onnx int8)".into(),
+            available: crate::extractor::audio::sensevoice_model_ready(&state.data_dir),
+            install_guide: "在「依赖中心」下载 SenseVoice 语音转写模型（约 228MB）".into(),
         },
     ])
 }

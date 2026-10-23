@@ -137,19 +137,13 @@ fn main() {
     println!("cargo:rustc-env=FFMPEG_BIN_DIR=ffmpeg-bin");
 
     // Create model directories
-    let _ = std::fs::create_dir_all("models/funasr");
+    let _ = std::fs::create_dir_all("models/sensevoice");
+    let _ = std::fs::create_dir_all("models/asr");
 
-    // Check for optional FunASR models (sherpa-onnx int8 layout)
-    let has_asr = [
-        "models/funasr/encoder_adaptor.int8.onnx",
-        "models/funasr/llm.int8.onnx",
-        "models/funasr/embedding.int8.onnx",
-        "models/funasr/Qwen3-0.6B/tokenizer.json",
-        "models/funasr/Qwen3-0.6B/vocab.json",
-        "models/funasr/Qwen3-0.6B/merges.txt",
-    ]
-    .iter()
-    .all(|p| std::path::Path::new(p).is_file());
+    // Check for the SenseVoice ASR model (唯一的 ASR 引擎, sherpa-onnx int8 layout)
+    let has_asr = ["models/sensevoice/model.int8.onnx", "models/sensevoice/tokens.txt"]
+        .iter()
+        .all(|p| std::path::Path::new(p).is_file());
     println!("cargo:rustc-env=HAS_ASR_MODELS={}", if has_asr { "1" } else { "0" });
 
     tauri_build::build()

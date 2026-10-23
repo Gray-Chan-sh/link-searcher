@@ -30,7 +30,6 @@ export function translateErr(msg: string, t: (key: string, params?: Record<strin
     '此目录与数据目录存在交叠，不允许监控': 'err_dir_overlaps_data',
     '此目录位于数据目录内，不允许监控': 'err_dir_inside_data',
     '此目录包含数据目录，不允许监控': 'err_dir_contains_data',
-    'FunASR 模型下载已在后台进行中': 'err_funasr_downloading',
     '未在与当前范围匹配的文档中找到依据': 'err_strict_no_evidence',
     'file not found': 'err_file_not_found',
     '对话不能为空': 'err_empty_conversation',

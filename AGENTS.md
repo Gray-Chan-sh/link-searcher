@@ -81,7 +81,7 @@ npx vitest run
 | `focus_mode_test` / `merge_scope_test` / `test_pagination` | 4 / 4 / 2 | <0.1s | 纯逻辑 |
 | `doc_rs_poc` / `doc_rs_poc_fallback` | 1 + 1 | 0.00s | POC 证据 |
 | `test_pdf_inspector_ab` | 2（+1 ignored） | 0.02s | A/B 对比 |
-| `funasr_smoke` | 3 | 0.00s | **缺 env/模型时防御性早退** |
+| `sensevoice_smoke` | 3 | 0.00s | **缺 env/模型时防御性早退** |
 | `ocr_eval` | 1 | 0.23s | **缺 fixtures 时早退** |
 | `test_pdf_ocr` | 2 | 0.00s | **缺样例时早退**（含硬编码 macOS 路径） |
 | `remote_embed_adaptive_bench` | 0（1 ignored） | 0.00s | 手动基准，需 `--ignored` + 网络 |
