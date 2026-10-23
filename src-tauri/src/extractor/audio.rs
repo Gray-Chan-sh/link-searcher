@@ -444,6 +444,14 @@ fn samples_to_ms(sample: usize) -> i64 {
 /// ASR 前的音频清洗链（见 `transcribe` 里的实测记录）。
 const DENOISE_FILTER: &str = "highpass=f=80,afftdn=nr=12:nf=-40,dynaudnorm=f=200:g=15";
 
+/// 实际生效的清洗链。
+///
+/// `LINK_SEARCHER_ASR_FILTER` 可整体覆盖（扫参/对照实验用，例如换成 `arnndn`）；
+/// 未设置时用 [`DENOISE_FILTER`]。
+fn denoise_filter() -> String {
+    std::env::var("LINK_SEARCHER_ASR_FILTER").unwrap_or_else(|_| DENOISE_FILTER.to_string())
+}
+
 /// 用 ffmpeg 把音频解码成 16kHz 单声道 WAV；`denoise` 决定是否套 [`DENOISE_FILTER`]。
 ///
 /// 返回 `Ok(false)` 表示 ffmpeg 非零退出（调用方据此决定是否回退到不降噪）。
@@ -457,7 +465,7 @@ fn decode_wav(
     let mut cmd = crate::process::new(ffmpeg);
     cmd.args(["-y", "-i"]).arg(src);
     if denoise {
-        cmd.args(["-af", DENOISE_FILTER]);
+        cmd.args(["-af", &denoise_filter()]);
     }
     let mut child = cmd
         .args(["-ar", "16000", "-ac", "1", "-sample_fmt", "s16"])
