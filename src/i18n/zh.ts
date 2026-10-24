@@ -390,6 +390,8 @@ const zh: Record<string, string> = {
     preview_font_larger: '放大字号',
     preview_font_reset: '恢复默认字号',
     preview_drag_width: '拖动调整宽度，双击恢复默认',
+    preview_view_rendered: '渲染',
+    preview_view_raw: '原文',
 
     // Status bar
     ocrd_count: '{done}/{total} 已完成 OCR',

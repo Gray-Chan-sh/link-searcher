@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   clampPreviewWidth,
   imageSrc,
+  isMarkdownSource,
   normalizeFontSize,
   stepFontSize,
   DEFAULT_PREVIEW_FONT_SIZE,
@@ -81,5 +82,24 @@ describe('imageSrc', () => {
 
   it('returns empty when neither is present', () => {
     expect(imageSrc({ image_base64: null, image_path: null }, toAsset)).toBe('')
+  })
+})
+
+describe('isMarkdownSource', () => {
+  it('recognizes the extensions anydoc converts to Markdown', () => {
+    for (const ext of ['docx', 'DOCM', 'pptx', 'odt', 'ods', 'odp', 'rtf', 'epub', 'csv', 'md', 'markdown']) {
+      expect(isMarkdownSource(ext)).toBe(true)
+    }
+  })
+
+  it('accepts a leading dot and whitespace', () => {
+    expect(isMarkdownSource('.docx')).toBe(true)
+    expect(isMarkdownSource(' md ')).toBe(true)
+  })
+
+  it('leaves plain-text extractors alone', () => {
+    for (const ext of ['pdf', 'txt', 'doc', 'xls', 'xlsx', 'mp3', 'png', '', null, undefined]) {
+      expect(isMarkdownSource(ext)).toBe(false)
+    }
   })
 })

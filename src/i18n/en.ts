@@ -390,6 +390,8 @@ const en: Record<string, string> = {
     preview_font_larger: 'Larger text',
     preview_font_reset: 'Reset text size',
     preview_drag_width: 'Drag to resize, double-click to reset',
+    preview_view_rendered: 'Rendered',
+    preview_view_raw: 'Raw',
 
     // Status bar
     ocrd_count: "{done}/{total} OCR'd",

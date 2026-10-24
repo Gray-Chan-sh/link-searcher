@@ -62,3 +62,21 @@ export function imageSrc(preview: { image_base64: string | null; image_path: str
   }
   return preview.image_path ? toAssetUrl(preview.image_path) : ''
 }
+
+/**
+ * 哪些扩展名的正文是 **Markdown**。
+ *
+ * 后端路由（`extractor/office/mod.rs`）：`.docx/.docm/.pptx/.../.odt/.ods/.odp/.rtf/.epub/.csv`
+ * 走 `anydoc::to_markdown`；`.md/.markdown` 本身就是 Markdown。其余（pdf/txt/doc/xls/音频/图片）
+ * 是纯文本，不做渲染。
+ */
+const MARKDOWN_EXTS = new Set([
+  'docx', 'docm', 'pptx', 'pptm', 'ppsx', 'ppsm', 'pps', 'pot',
+  'odt', 'ods', 'odp', 'rtf', 'epub', 'csv', 'md', 'markdown',
+])
+
+/** 按扩展名判断正文是否为 Markdown（大小写、前导点都容忍）。 */
+export function isMarkdownSource(ext: string | null | undefined): boolean {
+  if (!ext) return false
+  return MARKDOWN_EXTS.has(ext.trim().toLowerCase().replace(/^\./, ''))
+}

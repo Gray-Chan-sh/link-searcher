@@ -1,4 +1,52 @@
+## 2026-10-24（第六十三轮）：预览支持 Markdown 渲染，片段/证据去掉 Markdown 标记
+
+> 背景：Office 正文是 `anydoc::to_markdown` 的产物（`extractor/office/mod.rs:85`），
+> 而预览 `preview_content()` 逐字节原样返回、前端用 `<pre>` 显示 → docx 里满屏 `**加粗**`。
+> 实测本机 4,911 篇 Markdown 来源文档（1,971 万字），标记字符 589,603 个
+> = 这些文档正文的 **3.0%**、全库的 **0.44%**；含加粗 3,765 篇 / 表格 1,415 篇 / 标题 1,290 篇。
+> 判定：内容层没被污染（质量分只统计 CJK/字母，密度按总字符算），伤害集中在"给人看的那层"，
+> 因此**不重提取、不改库里的正文**（Markdown 保留了 anydoc 带来的标题/表格结构，RAG 仍受益）。
+
+**改动**
+
+- `components/PreviewPanel.tsx`：新增「**渲染 / 原文**」切换（仅 Markdown 来源、有正文时显示，默认渲染）。
+  - 渲染走 `react-markdown + remark-gfm + remark-cjk-friendly` + `prose prose-sm dark:prose-invert`
+    （与 AI 聊天一致）；字号 `A−/A+` 对两种模式都生效（`prose` 的标题用 em，随根字号缩放）。
+  - 渲染态保留搜索高亮：`highlightChildren()` 递归穿过 `p/li/td/th/h1..h6/blockquote` 的纯文本节点包 `<mark>`；
+    命中数改为数**渲染后实际插入的 mark**（跨 `**` 边界的匹配渲染后不存在，用原文 substring 计数会虚高）。
+  - 表格套 `overflow-x-auto`（宽表不撑破面板）；图片渲染为 `[图片：alt]` 占位、链接渲染为不可点文本
+    （防止点链接把 Tauri WebView 导航走）；`原文` 仍是逐字节 `<pre>`，可复制/核对。
+- `components/preview/markdown.tsx`（新增）：把「渲染配置」抽成纯函数 ——
+  `highlightText` / `highlightChildren`（在已解析的元素树里插 `<mark>`）/
+  `createMarkdownComponents`（文本类元素高亮、表格横向滚动、图片占位、链接不可点）+
+  `MD_REMARK_PLUGINS`（remark-gfm + remark-cjk-friendly，与 AI 聊天一致）。
+- `components/preview/panelPrefs.ts`：新增 `isMarkdownSource(ext)` —— 与后端路由一致的扩展名集合
+  （docx/docm/pptx/pptm/ppsx/ppsm/pps/pot/odt/ods/odp/rtf/epub/csv/md/markdown）；
+  `pdf/txt/doc/xls/音频/图片` 保持纯文本预览。
+- `commands/search.rs`：新增 `strip_md_inline()`（去 `**`/`__`/行首标题·引用·列表符号/`[文字](url)`→文字/
+  行内反引号/表格竖线与分隔行，**保留 `<em>` 高亮标签**），并套在 `semantic_snippet` 出口
+  → 搜索结果片段（含飞书机器人的搜索结果）不再露出 `**`。
+- `commands/ai/prompt.rs`：同样套在 `cited_excerpt` 与 smart_search 的 200 字 `snippet` 上
+  → AI 引用卡片 / 飞书回答里的证据片段也干净了（注入 LLM 的 2000 字正文仍是原样 Markdown，
+  标题和表格结构对模型有用，不剥）。
+- i18n：`zh/en/ja/ko` 各加 `preview_view_rendered` / `preview_view_raw`。
+- 测试：Rust `snippet_tests` 新增 4 条（标记剥离、链接/表格、纯文本与 `<em>` 不被破坏、
+  片段里无 `**`）；前端新增 `markdown.test.tsx` 10 条（SSR 断言：加粗/标题/表格成结构、
+  搜索词在排版里仍高亮、链接不可点、图片占位）+ `panelPrefs` 的 `isMarkdownSource` 3 条。
+
+**已知限制**
+
+- PDF 走 `anydoc` 兜底（少数字体异常的 PDF）时产物也是 Markdown，但扩展名是 `.pdf`，
+  按扩展名判定不会渲染 → 仍显示原文。若后续需要，可在提取时把"实际产出格式"落库（需 schema 变更）。
+- 复制全文 / `.txt` 导出仍按用户要求保持"与库中逐字节相同"（含 Markdown 源码）。
+
+**验证**
+
+- `npx tsc -b`、`npx vitest run`（13 文件 / 119 用例）、`cargo test --workspace` 全绿、
+  `semgrep --severity ERROR` 0 findings、`npx vite build` 通过。
+
 ## 2026-10-24（第六十二轮）：浏览页与搜索页统一预览面板（字号可调、宽度可拖、长文可滚）
+
 
 > 背景：用户反馈「浏览页预览字太小 / 固定在右侧不能拖动 / 两页预览功能没统一」。
 > 核实结论：**确实是两套独立实现** —— 浏览页在 `Browse.tsx` 里内联写了约 180 行预览

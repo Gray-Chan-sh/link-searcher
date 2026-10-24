@@ -386,6 +386,8 @@ const ja: Record<string, string> = {
     preview_font_larger: '文字を大きく',
     preview_font_reset: '文字サイズを初期値に戻す',
     preview_drag_width: 'ドラッグで幅を変更、ダブルクリックで初期値に戻す',
+    preview_view_rendered: 'レンダリング',
+    preview_view_raw: '原文',
 
     // Status bar
     ocrd_count: '{done}/{total} OCR完了',

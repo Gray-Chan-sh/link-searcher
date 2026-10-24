@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import ReactMarkdown from 'react-markdown'
 import { resolveAssetUrlSync as resolveAssetUrl, exportFile } from '../utils/platform'
 import { getFile, getFilePreview, openFile, revealInFolder, summarizeFile, aiCapabilities, exportFileText, type FileDetail, type FilePreview, type SummaryResult, type AiCapabilities, type ExportFormat } from '../api/files'
 import { reExtractFile } from '../api/index'
@@ -17,9 +18,11 @@ import {
   LS_PREVIEW_WIDTH,
   clampPreviewWidth,
   imageSrc,
+  isMarkdownSource,
   normalizeFontSize,
   stepFontSize,
 } from './preview/panelPrefs'
+import { MD_REMARK_PLUGINS, createMarkdownComponents, highlightText } from './preview/markdown'
 
 /** 正文最多渲染的字符数：再多就没法高亮/滚动得动，超出部分提示下载全文。 */
 const TEXT_LIMIT = 50000
@@ -37,23 +40,6 @@ export interface PreviewPanelProps {
   onClose: () => void
   /** 浏览页：右侧常驻面板 + 折叠条（折叠后仍能点开）。 */
   collapsible?: boolean
-}
-
-function highlightText(text: string, query: string): React.ReactNode[] {
-  if (!query.trim()) return [text]
-  const terms = query.split(/\s+/).filter(t => t.length > 0).slice(0, 20)
-  if (terms.length === 0) return [text]
-  const termSet = new Set(terms.map(t => t.toLowerCase()))
-  // ReDoS risk assessed: terms are escaped + capped at 20, input is user-controlled search box.
-  // No untrusted regex injection possible; safe to use dynamic RegExp.
-  const escaped = terms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-  const regex = new RegExp(`(${escaped.join('|')})`, 'gi')
-  const parts = text.split(regex)
-  return parts.map((part, i) =>
-    part.length > 0 && termSet.has(part.toLowerCase())
-      ? <mark key={i} className="bg-yellow-200 dark:bg-yellow-700/50 rounded px-0.5">{part}</mark>
-      : part,
-  )
 }
 
 function countMatches(text: string, query: string): number {
@@ -81,6 +67,13 @@ function parseQualityFlags(raw: string): string[] {
   } catch {
     return []
   }
+}
+
+/** 路径里取扩展名（用于判断正文是不是 Markdown）。 */
+function extOf(p: string): string {
+  const name = p.split(/[\\/]/).filter(Boolean).pop() ?? p
+  const idx = name.lastIndexOf('.')
+  return idx > 0 ? name.slice(idx + 1).toLowerCase() : ''
 }
 
 function basename(p: string): string {
@@ -115,6 +108,10 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
   const [qualityLoading, setQualityLoading] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
+  /** Markdown 正文的展示方式：渲染后的排版 / 原始 Markdown 源码。 */
+  const [viewMode, setViewMode] = useState<'rendered' | 'raw'>('rendered')
+  /** 渲染模式下实际插入的 <mark> 数（跨格式边界的命中会少于原文计数）。 */
+  const [renderedMatchCount, setRenderedMatchCount] = useState(0)
   const contentRef = useRef<HTMLDivElement>(null)
   /** 拖拽中的宽度（只在放开鼠标时落 localStorage，避免每帧同步写盘） */
   const dragWidthRef = useRef<number | null>(null)
@@ -190,6 +187,20 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
   const truncated = textContent.length > TEXT_LIMIT
   const shownText = truncated ? textContent.slice(0, TEXT_LIMIT) : textContent
   const displayName = meta?.file_name ?? (path ? basename(path) : t('preview'))
+  /** 正文是 anydoc 产出的 Markdown（docx/pptx/odt/…/md）时才提供「渲染 / 原文」切换。 */
+  const markdownSource = isMarkdownSource(meta?.file_ext ?? (path ? extOf(path) : ''))
+  const showRendered = markdownSource && viewMode === 'rendered' && Boolean(textContent)
+  const visibleMatchCount = showRendered ? renderedMatchCount : matchCount
+
+  // 渲染模式下命中数要数"实际插入的 mark"：跨格式边界（如 **加粗** 中间）的匹配
+  // 在渲染后不存在，直接用原文的 substring 计数会虚高。
+  useEffect(() => {
+    if (!showRendered) {
+      setRenderedMatchCount(0)
+      return
+    }
+    setRenderedMatchCount(contentRef.current?.querySelectorAll('mark').length ?? 0)
+  }, [showRendered, shownText, searchQuery])
 
   const handleSummarize = useCallback(async () => {
     if (!meta || summaryLoading) return
@@ -291,7 +302,7 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
   }, [meta, path, t])
 
   const scrollToMatch = useCallback((dir: 'prev' | 'next') => {
-    if (!contentRef.current || matchCount === 0) return
+    if (!contentRef.current || visibleMatchCount === 0) return
     const marks = contentRef.current.querySelectorAll('mark')
     if (marks.length === 0) return
 
@@ -303,7 +314,20 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
     }
     setMatchIndex(nextIdx)
     marks[nextIdx]!.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }, [matchCount, matchIndex])
+  }, [visibleMatchCount, matchIndex])
+
+  const mdComponents = useMemo(() => createMarkdownComponents(searchQuery), [searchQuery])
+
+  // 大文档（5 万字符）的 Markdown 解析不便宜：只在正文/查询变化时重建，
+  // 改字号/拖宽度只触发样式更新，不重新解析。
+  const renderedBody = useMemo(
+    () => (
+      <ReactMarkdown remarkPlugins={MD_REMARK_PLUGINS} components={mdComponents}>
+        {shownText}
+      </ReactMarkdown>
+    ),
+    [shownText, mdComponents],
+  )
 
   const body = (
     <>
@@ -313,6 +337,33 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
           {displayName}
         </h3>
         <div className="flex items-center gap-1 shrink-0">
+          {/* Markdown 正文：渲染排版 / 原始源码 */}
+          {hasTarget && markdownSource && textContent && (
+            <div className="flex items-center rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden text-[11px] leading-none select-none">
+              <button
+                onClick={() => setViewMode('rendered')}
+                title={t('preview_view_rendered')}
+                className={`px-1.5 py-1 transition-colors ${
+                  viewMode === 'rendered'
+                    ? 'bg-blue-500 text-white'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                {t('preview_view_rendered')}
+              </button>
+              <button
+                onClick={() => setViewMode('raw')}
+                title={t('preview_view_raw')}
+                className={`px-1.5 py-1 border-l border-gray-200 dark:border-gray-700 transition-colors ${
+                  viewMode === 'raw'
+                    ? 'bg-blue-500 text-white'
+                    : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'
+                }`}
+              >
+                {t('preview_view_raw')}
+              </button>
+            </div>
+          )}
           {/* 字号：A− / 当前值（点击复位）/ A+ */}
           {hasTarget && (
             <div className="flex items-center rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden text-[11px] leading-none select-none">
@@ -475,14 +526,21 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
                   </div>
                 )}
 
-                {textContent && (
+                {textContent && (showRendered ? (
+                  <div
+                    className="prose prose-sm dark:prose-invert max-w-none px-4 py-3 text-gray-800 dark:text-gray-200"
+                    style={{ fontSize: activeFontSize }}
+                  >
+                    {renderedBody}
+                  </div>
+                ) : (
                   <pre
                     className="px-4 py-3 text-gray-800 dark:text-gray-200 whitespace-pre-wrap break-words font-mono"
                     style={{ fontSize: activeFontSize, lineHeight: 1.7 }}
                   >
                     {highlightText(shownText, searchQuery)}
                   </pre>
-                )}
+                ))}
 
                 {truncated && (
                   <div className="px-4 pb-3 text-xs text-amber-600 dark:text-amber-400">
@@ -555,7 +613,7 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
           </div>
 
           {/* Match navigation */}
-          {matchCount > 0 && (
+          {visibleMatchCount > 0 && (
             <div className="flex items-center justify-center gap-3 px-4 py-2 border-t border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-800/50 shrink-0">
               <button
                 onClick={() => scrollToMatch('prev')}
@@ -567,7 +625,7 @@ export default function PreviewPanel({ fileId, path, searchQuery = '', onClose, 
                 </svg>
               </button>
               <span className="text-xs text-gray-500 dark:text-gray-400 tabular-nums">
-                {matchIndex + 1} / {matchCount}
+                {Math.min(matchIndex, visibleMatchCount - 1) + 1} / {visibleMatchCount}
               </span>
               <button
                 onClick={() => scrollToMatch('next')}

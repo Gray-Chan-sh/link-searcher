@@ -386,6 +386,8 @@ const ko: Record<string, string> = {
     preview_font_larger: '글자 크게',
     preview_font_reset: '글자 크기 초기화',
     preview_drag_width: '드래그하여 너비 조절, 더블클릭하면 초기화',
+    preview_view_rendered: '렌더링',
+    preview_view_raw: '원문',
 
     // Status bar
     ocrd_count: '{done}/{total} OCR 완료',

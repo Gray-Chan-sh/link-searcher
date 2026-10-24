@@ -141,7 +141,7 @@ sherpa-onnx 不提供 token 级时间戳。
 | **搜索页** | 搜索框 + 筛选面板 + 结果列表 + 预览面板（三栏布局） |
 | **浏览页** | 表格视图，支持按索引状态筛选（全部/已索引/未索引/失败）、质量筛选、类型/搜索/排序（含按质量排序）、Cmd/Ctrl+单击或 Shift 区间多选、右键菜单（打开 / Finder 中显示 / 批量手动索引）、列宽拖拽 |
 | **筛选面板** | 目录树筛选 + 文件扩展名筛选，支持持久化到 localStorage |
-| **预览面板** | **搜索页与浏览页共用同一组件**；字号四档（12/14/16/18，记忆）、宽度可拖拽（双击复位，记忆）、展开为右侧大窗、正文单一滚动区（长文可滚到底）、PDF 标识、OCR 文字、图片缩放、文本截断（5 万字符）、质量评分区块（含一键重新提取） |
+| **预览面板** | **搜索页与浏览页共用同一组件**；字号四档（12/14/16/18，记忆）、宽度可拖拽（双击复位，记忆）、展开为右侧大窗、正文单一滚动区（长文可滚到底）、**Office/`.md` 正文可切「渲染/原文」（默认渲染 Markdown：标题/加粗/表格）**、PDF 标识、OCR 文字、图片缩放、文本截断（5 万字符）、质量评分区块（含一键重新提取） |
 | **键盘导航** | ↑↓ 选择结果，Enter 打开预览；焦点在搜索框时 Enter 提交搜索 |
 | **分页** | 自适应表格高度动态分页，自动回第 1 页 |
 | **No Results 引导** | 提供清空筛选、打开索引页等快捷操作 |
@@ -395,7 +395,7 @@ link-searcher/
 ├── src/                       # React 前端
 │   ├── api/                   # IPC 调用封装（search / settings / files / dirs / config / index / logs / backup / client）
 │   ├── components/            # 通用组件（SearchBar / FilterPanel / PreviewPanel / ChatPanel / StatusBar / ResultList / SetupWizard …）
-│   │   ├── preview/           # 预览面板的纯逻辑（字号档位 / 宽度 clamp / 图片 src，含单测）
+│   │   ├── preview/           # 预览面板的纯逻辑（字号/宽度、Markdown 渲染与高亮、图片 src，含单测）
 │   │   └── settings/          # 设置页各标签页（General / Index / Deps / Docs / Ai / Backup / Performance / System）
 │   ├── pages/                 # 页面（Search / Browse / DirManager / IndexStatus / Quality / LogViewer / Settings / FileTypes / AiChat）
 │   ├── hooks/                 # 自定义 Hook（useSearch / useDirs / useIndexStatus / useSettings* / usePersistentState / useIsMobile / useSetup）

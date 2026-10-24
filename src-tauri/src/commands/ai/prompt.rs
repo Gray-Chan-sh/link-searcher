@@ -60,7 +60,7 @@ pub(super) fn prepare_smart_prompt(
             ev.push(EvidenceItem {
                 file_id: hit.file_id.clone(),
                 path: rec.path.clone(),
-                snippet: truncate_text(text, 200),
+                snippet: crate::commands::search::strip_md_inline(&truncate_text(text, 200)),
                 bm25_score: hit.bm25_score,
                 semantic_score: hit.semantic_score,
                 rrf_score: hit.rrf_score,
@@ -1420,6 +1420,12 @@ pub(crate) const DOC_TYPE_NOUNS: &[&str] = &[
 /// terms, so the hover card / Markdown export show the referenced text rather
 /// than the file head. Falls back to the head when no term matches.
 pub(super) fn cited_excerpt(text: &str, terms: &[String], max_chars: usize) -> String {
+    // 证据片段是给用户看的（聊天引用卡片 / 飞书回答）：Office 正文是 anydoc 产出的
+    // Markdown，这里统一剥掉展示标记，免得引用里出现 `**加粗**`、`|表格|`。
+    crate::commands::search::strip_md_inline(&cited_excerpt_raw(text, terms, max_chars))
+}
+
+fn cited_excerpt_raw(text: &str, terms: &[String], max_chars: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     if terms.is_empty() || chars.len() <= max_chars {
         return truncate_text(text, max_chars);

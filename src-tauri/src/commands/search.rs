@@ -571,12 +571,122 @@ fn build_semantic_hit(
     })
 }
 
+/// 去掉 Markdown 的**展示层**标记：用于搜索结果片段 / AI 引用片段这类短文本，
+/// **不改库里的正文**（正文里的 Markdown 是 anydoc 的结构产物，RAG 还需要它）。
+///
+/// 只处理确定是语法的形态，避免误伤正文：
+/// - 成对的 `**` / `__`（加粗）、行内反引号
+/// - 行首 `#{1,6} `（标题）、`>`（引用）、`- ` / `* ` / `+ `（列表）
+/// - `[文字](url)` → `文字`，`![alt](url)` → `alt`
+/// - 表格的 `|` 与 `|---|---|` 分隔行
+///
+/// `<em>` / `</em>`（片段高亮）原样保留。
+pub(crate) fn strip_md_inline(input: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for raw_line in input.split('\n') {
+        let mut body = raw_line.trim_start();
+        if body.starts_with('#') {
+            body = body.trim_start_matches('#').trim_start();
+        } else if let Some(rest) = body.strip_prefix('>') {
+            body = rest.trim_start();
+        } else if let Some(rest) = body
+            .strip_prefix("- ")
+            .or_else(|| body.strip_prefix("* "))
+            .or_else(|| body.strip_prefix("+ "))
+        {
+            body = rest;
+        }
+        if is_md_table_rule(body) {
+            continue;
+        }
+        let no_links = strip_md_links(body);
+        let no_marks = no_links
+            .replace("**", "")
+            .replace("__", "")
+            .replace('`', "")
+            .replace('|', " ");
+        let squeezed = squeeze_ascii_spaces(&no_marks);
+        let trimmed = squeezed.trim();
+        if !trimmed.is_empty() {
+            lines.push(trimmed.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
+/// 表格分隔行（`|---|---|`、`:--:` 等）——整行只有竖线/减号/冒号/空白。
+fn is_md_table_rule(line: &str) -> bool {
+    let mut has_dash = false;
+    for c in line.chars() {
+        match c {
+            '-' => has_dash = true,
+            '|' | ':' | ' ' | '\t' => {}
+            _ => return false,
+        }
+    }
+    has_dash
+}
+
+/// `[文字](url)` → `文字`；`![alt](url)` → `alt`。括号不配对时原样保留。
+fn strip_md_links(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '[' {
+            if let Some(close_rel) = chars[i + 1..].iter().position(|&c| c == ']') {
+                let close = i + 1 + close_rel;
+                if chars.get(close + 1) == Some(&'(') {
+                    if let Some(paren_rel) = chars[close + 2..].iter().position(|&c| c == ')') {
+                        let paren = close + 2 + paren_rel;
+                        // 图片语法 `![alt](url)`：去掉前面的 `!`
+                        if out.ends_with('!') {
+                            out.pop();
+                        }
+                        out.extend(chars[i + 1..close].iter());
+                        i = paren + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// 连续 ASCII 空格/制表符压成一个空格（不动换行与全角空格）。
+fn squeeze_ascii_spaces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for c in s.chars() {
+        if c == ' ' || c == '\t' {
+            if !prev_space {
+                out.push(' ');
+            }
+            prev_space = true;
+        } else {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    out
+}
+
 /// Build a human-readable snippet around the region where the document
 /// best overlaps the query, so a semantic-only hit shows *why* it matched.
 /// Uses character-level prefix matching (fast, no document tokenisation)
 /// and limits the captured word to avoid whole-paragraph highlighting.
 /// Falls back to the document opening when nothing overlaps.
+///
+/// 输出前统一剥掉 Markdown 展示标记：Office 文档的正文是 anydoc 产出的
+/// Markdown（`**加粗**`、`|表格|`），直接展示会让用户在列表里看到 `**`。
 fn semantic_snippet(content: &str, query: &str) -> String {
+    strip_md_inline(&semantic_snippet_raw(content, query))
+}
+
+fn semantic_snippet_raw(content: &str, query: &str) -> String {
     let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
     let terms: Vec<String> = jieba
         .cut(query, false)
@@ -1120,7 +1230,7 @@ pub async fn refine_search(
 #[cfg(test)]
 mod snippet_tests {
 
-    use super::{head_snippet, semantic_snippet};
+    use super::{head_snippet, semantic_snippet, strip_md_inline};
 
     #[test]
     fn highlights_first_matching_term() {
@@ -1171,6 +1281,46 @@ mod snippet_tests {
             "物业费纠纷",
         );
         assert!(s.contains("<em>"), "应高亮重叠词: {s}");
+    }
+
+    #[test]
+    fn markdown_markers_are_stripped_from_snippets() {
+        // Office 正文是 anydoc 产出的 Markdown：片段里不该露出 `**` / `|` / `#`。
+        let s = semantic_snippet(
+            "**坚持政府引导、规划先行。**建立健全政府引导、部门协同的工作机制。",
+            "政府引导",
+        );
+        assert!(s.contains("<em>"), "应保留高亮: {s}");
+        assert!(!s.contains("**"), "片段里不应出现加粗标记: {s}");
+    }
+
+    #[test]
+    fn strip_md_inline_handles_common_markers() {
+        assert_eq!(strip_md_inline("**加粗**文本"), "加粗文本");
+        assert_eq!(strip_md_inline("## 二级标题"), "二级标题");
+        assert_eq!(strip_md_inline("> 引用内容"), "引用内容");
+        assert_eq!(strip_md_inline("- 列表项"), "列表项");
+        assert_eq!(strip_md_inline("`inline code` 与 __下划线加粗__"), "inline code 与 下划线加粗");
+    }
+
+    #[test]
+    fn strip_md_inline_handles_links_and_tables() {
+        assert_eq!(
+            strip_md_inline("详见[土地管理法](https://example.com/a?b=1)第五条"),
+            "详见土地管理法第五条"
+        );
+        assert_eq!(strip_md_inline("![示意图](img.png) 图注"), "示意图 图注");
+        assert_eq!(strip_md_inline("| 项目 | 金额 |"), "项目 金额");
+        assert_eq!(strip_md_inline("|---|---|"), "");
+    }
+
+    #[test]
+    fn strip_md_inline_keeps_plain_text_and_highlight_tags() {
+        // 纯文本（含普通括号、下划线、星号作乘号）不应被改坏。
+        let plain = "本案系物业服务合同纠纷（2023）皖0102民初123号，按3*4计算。";
+        assert_eq!(strip_md_inline(plain), plain);
+        // 片段高亮标签必须保留（前端按 <em> 渲染）。
+        assert_eq!(strip_md_inline("<em>物业费</em>**纠纷**"), "<em>物业费</em>纠纷");
     }
 
     #[test]
