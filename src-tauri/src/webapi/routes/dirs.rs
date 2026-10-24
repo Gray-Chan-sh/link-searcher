@@ -148,6 +148,9 @@ async fn dir_tree_handler(
 struct DirChildrenQuery {
     #[serde(rename = "parentPath")]
     parent_path: String,
+    /// 只要子目录（资源管理器导航树用）——省略保持旧行为（文件+目录）。
+    #[serde(rename = "dirsOnly", default)]
+    dirs_only: Option<bool>,
 }
 
 async fn dir_children_handler(
@@ -160,7 +163,7 @@ async fn dir_children_handler(
         let conn = app_state.db.get().map_err(|e| ApiError { error: e.to_string() })?;
         super::ensure_within_registered_roots(&conn, &query.parent_path)?;
     }
-    let children = crate::commands::dirs::get_dir_children(app_state, query.parent_path)
+    let children = crate::commands::dirs::get_dir_children(app_state, query.parent_path, query.dirs_only)
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(children))
 }

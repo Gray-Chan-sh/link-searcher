@@ -383,6 +383,40 @@ export interface FileItem {
   char_count: number
 }
 
+/**
+ * 文件夹视图的一条目录项（真实文件系统）。
+ *
+ * `file_id`/`status`/`quality_score` 来自库里的追踪记录，未索引（或不在库里）时为 null。
+ */
+export interface DirEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  /** 是否为可提取格式（目录恒为 true）。 */
+  is_supported: boolean
+  file_size: number
+  mtime: number
+  /** 0=pending, 1=indexed, 2=failed, 3=extracted-待写索引 */
+  indexed: number
+  error_msg: string | null
+  file_id: string | null
+  status: string | null
+  quality_score: number | null
+}
+
+/** 列出某个文件夹的真实内容（目录在前，按名字排序）。 */
+export async function listDirEntries(path: string): Promise<DirEntry[]> {
+  return client.invoke<DirEntry[]>('list_dir_entries', { path })
+}
+
+/**
+ * 库里的相对路径 → 绝对路径（文件夹视图处理引用深链 `?path=`）。
+ * 多资料库时只有 DB 记录知道文件归属哪个根，所以这里必须走后端。
+ */
+export async function resolveFilePath(relPath: string): Promise<string | null> {
+  return client.invoke<string | null>('resolve_file_path', { path: relPath })
+}
+
 export interface FileListResponse {
   items: FileItem[]
   total: number

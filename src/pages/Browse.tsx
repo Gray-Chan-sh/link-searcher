@@ -4,15 +4,17 @@ import { invoke } from '../api/client'
 import { confirm, saveFile } from '../utils/platform'
 import { toast } from '../utils/toast'
 import { useI18n } from '../i18n'
-import { openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, exportFileText, type ExportFormat } from '../api/files'
+import { openFile, revealInFolder, askDocuments, aiCapabilities, type AiCapabilities, exportFileText, type ExportFormat, type DirEntry } from '../api/files'
 import { type FileItem, type FilterType, type SortKey, type SortOrder, listFilesDb, getBrowseFileTypes } from '../api/files'
 import { reindexFiles, restoreFiles } from '../api/index'
 import { LoadingSpinner, SearchIcon } from '../icons'
 import { usePersistentState } from '../hooks/usePersistentState'
+import { useDirs } from '../hooks/useDirs'
 import { useSearch as useFtsSearch } from '../hooks/useSearch'
 import SearchBar from '../components/SearchBar'
 import ResultList from '../components/ResultList'
 import PreviewPanel from '../components/PreviewPanel'
+import FolderView from '../components/browse/FolderView'
 import type { SearchHit } from '../api/search'
 
 const LS_KEY_FILTER = 'ls_browse_filter'
@@ -21,6 +23,7 @@ const LS_KEY_SEARCH = 'ls_browse_search'
 const LS_KEY_SORT = 'ls_browse_sort'
 const LS_KEY_ORDER = 'ls_browse_order'
 const LS_KEY_COLS = 'ls_browse_cols'
+const LS_KEY_VIEW = 'ls_browse_view'
 
 function statusBadge(indexed: number, error_msg: string | null | undefined, t: (k: string) => string, status?: string) {
   if (status === 'deleted') return <span className="inline-flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400" title={t('deleted_hint')}>🗑 {t('deleted')}</span>
@@ -38,6 +41,26 @@ export default function Browse() {
   const [params, setParams] = useSearchParams()
   // 深链路径：挂载时若包含 ?path=，作为优先搜索词（不污染持久化的 search）
   const [forcedSearch, setForcedSearch] = useState<string | null>(() => params.get('path'))
+  /** 深链里库存的相对路径（文件夹视图据此打开父目录并选中文件）。 */
+  const [deepLinkPath] = useState<string | null>(() => params.get('path'))
+  const { dirs } = useDirs()
+  /**
+   * 浏览页的两种镜头：
+   * - `folder`：真实文件系统（资源管理器风格，能看见未索引文件/空目录）
+   * - `list`：数据库平铺表格（跨目录状态/质量筛选与批量操作）
+   * 索引状态卡片的 `?filter=` 深链落在 `list`，`?path=` 深链落在 `folder`。
+   */
+  const [viewMode, setViewMode] = usePersistentState<'folder' | 'list'>(
+    LS_KEY_VIEW,
+    params.get('filter') ? 'list' : 'folder',
+  )
+  const initialViewApplied = useRef(false)
+  useEffect(() => {
+    if (initialViewApplied.current) return
+    initialViewApplied.current = true
+    if (params.get('filter')) setViewMode('list')
+    else if (params.get('path')) setViewMode('folder')
+  }, [params, setViewMode])
   const [items, setItems] = useState<FileItem[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
@@ -265,16 +288,25 @@ return () => clearTimeout(t)
   const selectFile = useCallback((path: string, fileId?: string) => {
     setSelectedFile(prev => (prev && prev.path === path && prev.fileId === fileId ? prev : { path, fileId }))
   }, [])
+  /** 文件夹视图单击某一行 → 更新右侧预览（索引过的带 fileId，未索引的走路径预览）。 */
+  const handleFolderSelect = useCallback((entry: DirEntry) => {
+    // 只有"已索引"才用 id 走库内正文；pending/提取中的文件库里还没有正文，走路径直读磁盘。
+    setSelectedFile({
+      fileId: entry.indexed === 1 ? (entry.file_id ?? undefined) : undefined,
+      path: entry.path,
+    })
+  }, [])
   // 搜索结果选中时同步到预览面板
   const handleSearchSelect = useCallback((hit: SearchHit) => {
     setSelectedSearchHit(hit)
     selectFile(hit.path, hit.file_id)
   }, [selectFile])
 
-  // 键盘导航：↑↓ 移动选中行，Enter 打开预览；Ctrl/Cmd+A 全选当前页
-  // 键盘导航：↑↓ 移动选中行；Ctrl/Cmd+A 全选当前页
+  // 键盘导航：↑↓ 移动选中行；Ctrl/Cmd+A 全选当前页（仅"列表"视图，
+  // 文件夹视图有自己的焦点与键盘处理，两套不要抢同一批按键）
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (viewMode !== 'list') return
       const isSearch = document.activeElement?.closest('[data-search-input]') || document.activeElement?.tagName === 'INPUT'
       if (isSearch) return
       if (items.length === 0) return
@@ -306,12 +338,13 @@ return () => clearTimeout(t)
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [items, selectedIds, lastClickedIdx, selectFile])
+  }, [items, selectedIds, lastClickedIdx, selectFile, viewMode])
   useEffect(() => {
-    if (forcedSearch) {
+    // 文件夹视图自己会按深链打开父目录并选中文件，这里只服务“列表”视图
+    if (forcedSearch && viewMode === 'list') {
       selectFile(forcedSearch)
     }
-  }, [selectFile, forcedSearch])
+  }, [selectFile, forcedSearch, viewMode])
 
   useEffect(() => {
     if (forcedSearch && items.length > 0) {
@@ -331,8 +364,39 @@ return () => clearTimeout(t)
 
 return (
     <div className="flex h-full">
-      {/* Left: Table / Search Results */}
+      {/* Left: Folder view / Table / Search Results */}
       <div className="flex-1 flex flex-col min-w-0 border-r border-gray-200 dark:border-gray-800">
+        {/* 视图切换：文件夹（资源管理器）/ 列表（数据库平铺） */}
+        <div className="flex items-center gap-2 px-3 py-1.5 border-b border-gray-200 dark:border-gray-800 shrink-0">
+          <div className="flex rounded-md border border-gray-200 dark:border-gray-700 overflow-hidden text-xs select-none">
+            <button
+              onClick={() => setViewMode('folder')}
+              className={`px-2.5 py-1 transition-colors ${viewMode === 'folder' ? 'bg-blue-500 text-white' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+            >
+              {t('folder_view')}
+            </button>
+            <button
+              onClick={() => setViewMode('list')}
+              className={`px-2.5 py-1 border-l border-gray-200 dark:border-gray-700 transition-colors ${viewMode === 'list' ? 'bg-blue-500 text-white' : 'text-gray-500 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+            >
+              {t('list_view')}
+            </button>
+          </div>
+          <span className="text-[11px] text-gray-400 dark:text-gray-500 truncate">
+            {viewMode === 'folder' ? t('folder_view_hint') : t('list_view_hint')}
+          </span>
+        </div>
+
+        {viewMode === 'folder' ? (
+          <FolderView
+            roots={dirs}
+            deepLinkPath={deepLinkPath}
+            selectedPath={selectedFile?.path ?? null}
+            onSelectEntry={handleFolderSelect}
+            onNotice={msg => toast(msg)}
+          />
+        ) : (
+          <>
         {/* Toolbar: browse mode + search bar */}
         <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center gap-3 flex-wrap">
           <div className="flex-1 flex items-center gap-3">
@@ -685,6 +749,8 @@ return (
           </button>
         </div>
           </>)}
+        </>
+        )}
 
       </div>
 

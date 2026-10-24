@@ -476,8 +476,16 @@ pub(crate) fn indexed_key(dir_root: Option<&str>, abs: &std::path::Path) -> Stri
 
 /// 懒加载：返回 `parent_path` 目录的单层子项（文件+目录，隐藏已过滤）。
 /// 同时返回每文件的 indexed 状态（从 file_tracking 表查询）。
+///
+/// `dirs_only = true`：只返回子目录，且**跳过**"把全库已索引路径读进内存"那一步
+/// —— 资源管理器的导航树只需要目录，没必要为每次展开扫 1.9 万条路径。
 #[tauri::command]
-pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Result<Vec<DirTreeNode>, String> {
+pub fn get_dir_children(
+    state: State<'_, AppState>,
+    parent_path: String,
+    dirs_only: Option<bool>,
+) -> Result<Vec<DirTreeNode>, String> {
+    let dirs_only = dirs_only.unwrap_or(false);
     let mut children = Vec::new();
 
     // file_tracking.path 存的是相对监控根的路径（启动时已 migrate_paths_to_relative），
@@ -492,7 +500,7 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
     let mut indexed_set: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut indexed_known = false;
     let mut dir_root: Option<String> = None;
-    if let Ok(conn) = state.db.get() {
+    if !dirs_only && let Ok(conn) = state.db.get() {
         if let Ok(dirs) = crate::db::dir_config::list_dirs(&conn) {
             dir_root = dirs
                 .iter()
@@ -522,8 +530,11 @@ pub fn get_dir_children(state: State<'_, AppState>, parent_path: String) -> Resu
                 if name.starts_with('.') { continue; }
                 let abs = entry.path();
                 let path = abs.to_string_lossy().to_string();
-                let key = indexed_key(dir_root.as_deref(), &abs);
                 let is_file = !ft.is_dir();
+                if dirs_only && is_file {
+                    continue;
+                }
+                let key = indexed_key(dir_root.as_deref(), &abs);
                 let is_indexed = is_file && indexed_known && indexed_set.contains(&key);
                 let status = if is_file && indexed_known {
                     Some(if is_indexed { "indexed" } else { "unindexed" }.to_string())

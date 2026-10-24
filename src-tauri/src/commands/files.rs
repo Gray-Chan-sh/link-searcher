@@ -536,7 +536,7 @@ fn reveal_in_file_manager(path: &std::path::Path) -> std::io::Result<()> {
     opener::open(parent).map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct DirEntry {
     pub name: String,
     pub path: String,
@@ -546,20 +546,76 @@ pub struct DirEntry {
     pub mtime: i64,
     pub indexed: i64,
     pub error_msg: Option<String>,
+    /// 已索引文件在 `file_tracking` 里的 id（未索引为 None）—— 供预览/批量操作直接使用。
+    pub file_id: Option<String>,
+    /// 追踪状态：`active` / `deleted`（不在库里的文件为 None）。
+    pub status: Option<String>,
+    /// 防重复取正文质量分（未索引为 None）。
+    pub quality_score: Option<f64>,
 }
 
 /// List files and directories at a given filesystem path.
+///
+/// 文件夹视图（资源管理器风格）的数据源。**索引状态一次批量查出**：早先实现为
+/// "每个条目查一次 `get_file_by_path`"，一个 1,123 个文件的目录就是 1,000+ 次查询
+/// （2026-10-24 实测本机最大单目录 1,123 条）。
 #[tauri::command]
 pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Result<Vec<DirEntry>, String> {
-    let dir = std::path::Path::new(&path);
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    list_dir_entries_impl(&conn, &path)
+}
+
+pub(crate) fn list_dir_entries_impl(
+    conn: &rusqlite::Connection,
+    path: &str,
+) -> Result<Vec<DirEntry>, String> {
+    let dir = std::path::Path::new(path);
     if !dir.is_dir() {
         return Err("not a directory".to_string());
     }
 
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-
-    let dir_configs = db::dir_config::list_dirs(&conn)
+    let dir_configs = db::dir_config::list_dirs(conn)
         .map_err(|e| format!("failed to load dir config: {e}"))?;
+
+    // 找出当前目录所属的资料库根（多个根嵌套时取最长的），并算出相对目录前缀。
+    // 桌面端允许浏览根目录之外的路径（添加目录的场景），那种情况下不做索引状态关联。
+    let mut owner: Option<(&db::dir_config::DirConfig, String)> = None;
+    for cfg in &dir_configs {
+        if let Ok(rel) = crate::scanner::helpers::to_relative(&cfg.path, dir)
+            && owner.as_ref().is_none_or(|(prev, _)| cfg.path.len() > prev.path.len())
+        {
+            owner = Some((cfg, rel));
+        }
+    }
+
+    // 一次 SQL 取"当前目录的直接子文件"的索引状态/质量分/主键。
+    // 直接子文件 = 前缀匹配且前缀之后不再有 `/`（用 NOT LIKE 排除更深层）。
+    let mut by_rel: std::collections::HashMap<String, TrackerRow> = std::collections::HashMap::new();
+    if let Some((cfg, rel_dir)) = owner.as_ref() {
+        let like_prefix = if rel_dir.is_empty() { String::new() } else { format!("{rel_dir}/") };
+        let like_children = format!("{like_prefix}%");
+        let like_deeper = format!("{like_prefix}%/%");
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT ft.path, ft.id, ft.indexed, ft.error_msg, ft.status, ci.quality_score \
+             FROM file_tracking ft LEFT JOIN content_index ci ON ci.md5 = ft.md5 \
+             WHERE ft.dir_id = ?1 AND ft.path LIKE ?2 AND ft.path NOT LIKE ?3",
+        ) {
+            if let Ok(rows) = stmt.query_map(rusqlite::params![cfg.id, like_children, like_deeper], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, Option<f64>>(5)?,
+                ))
+            }) {
+                for (rel, id, indexed, error_msg, status, quality) in rows.flatten() {
+                    by_rel.insert(rel, TrackerRow { id, indexed, error_msg, status, quality });
+                }
+            }
+        }
+    }
 
     let mut entries = Vec::new();
     let read_dir = std::fs::read_dir(dir).map_err(|e| format!("failed to read dir: {e}"))?;
@@ -587,25 +643,22 @@ pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Resul
 
         let mut indexed = 0;
         let mut error_msg: Option<String> = None;
+        let mut file_id: Option<String> = None;
+        let mut status: Option<String> = None;
+        let mut quality_score: Option<f64> = None;
 
-        if !is_dir {
-            for config in &dir_configs {
-                if let Ok(rel_path) = crate::scanner::helpers::to_relative(&config.path, &entry_path_raw) {
-                    match db::tracker::get_file_by_path(&conn, &rel_path) {
-                        Ok(Some(file)) if file.status == "deleted" => {
-                            continue;
-                        }
-                        Ok(Some(file)) => {
-                            indexed = file.indexed;
-                            error_msg = file.error_msg;
-                        }
-                        _ => {
-                            indexed = 0;
-                        }
-                    }
-                    break;
-                }
-            }
+        if !is_dir && let Some((cfg, _)) = owner.as_ref()
+            && let Ok(rel_path) = crate::scanner::helpers::to_relative(&cfg.path, &entry_path_raw)
+            && let Some(row) = by_rel.remove(&rel_path)
+            && row.status != "deleted"
+        {
+            // `deleted` 的追踪行在这里按"未索引"处理（文件明明还在磁盘上，是遗留记录）：
+            // 恢复操作留在"列表"视图里做，免得浏览时把存在的文件标成已删除。
+            indexed = row.indexed;
+            error_msg = row.error_msg;
+            file_id = Some(row.id);
+            status = Some(row.status);
+            quality_score = row.quality;
         }
 
         entries.push(DirEntry {
@@ -617,6 +670,9 @@ pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Resul
             mtime,
             indexed,
             error_msg,
+            file_id,
+            status,
+            quality_score,
         });
     }
 
@@ -631,10 +687,38 @@ pub async fn list_dir_entries(state: State<'_, AppState>, path: String) -> Resul
     Ok(entries)
 }
 
+/// `list_dir_entries_impl` 批量查询出来的一行追踪状态。
+struct TrackerRow {
+    id: String,
+    indexed: i64,
+    error_msg: Option<String>,
+    status: String,
+    quality: Option<f64>,
+}
+
+/// 把库里存的**相对路径**解析成绝对路径（文件夹视图处理引用深链 `?path=` 用）。
+///
+/// 多个资料库时相对路径本身不足以定位文件（DB 的 `path` 全局唯一、但用户看到的
+/// 是"相对哪个根"）—— 只有 `file_tracking.dir_id` 知道归属，所以必须查库。
+#[tauri::command]
+pub async fn resolve_file_path(state: State<'_, AppState>, path: String) -> Result<Option<String>, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let Some(rec) = db::tracker::get_file_by_path(&conn, &path).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let Some(dir) = db::dir_config::get_dir(&conn, &rec.dir_id).map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        crate::scanner::helpers::to_absolute(&dir.path, &rec.path)
+            .to_string_lossy()
+            .into_owned(),
+    ))
+}
+
 /// Preview a file by its filesystem path (looks up DB if indexed, falls back to direct read).
 #[tauri::command]
-pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> Result<FilePreview, String> {
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+pub async fn preview_file_by_path(state: State<'_, AppState>, path: String) -> Result<FilePreview, String> {    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
     if let Ok(Some(file)) = db::tracker::get_file_by_path(&conn, &path) {
         drop(conn);
 
@@ -1099,5 +1183,69 @@ mod tests {
         assert_eq!(resp.items.len(), 4);
         let resp_ext = query_file_list(&conn, None, Some("pdf"), None, None, None, 1, 50, None, None).unwrap();
         assert_eq!(resp_ext.items.len(), 4);
+    }
+
+    /// 资源管理器文件夹视图：一次批量查询就要把"当前目录直接子文件"的
+    /// id/索引状态/质量分带上，且不能把更深层的文件张冠李戴。
+    #[test]
+    fn list_dir_entries_batches_index_state_for_direct_children_only() {
+        let conn = setup();
+        let tmp = TempDir::new("ls_dir_entries").unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.docx"), b"x").unwrap();
+        std::fs::write(root.join("sub/b.docx"), b"x").unwrap();
+        std::fs::write(root.join("plain.txt"), b"x").unwrap();
+
+        let cfg = db::dir_config::add_dir(&conn, &root.to_string_lossy(), None, None, None, None, true).unwrap();
+
+        // a.docx 已索引（带质量分）；sub/b.docx 已索引（不该出现在根目录的关联里）
+        let a_id = insert_indexed(&conn, &cfg, "a.docx", "md5a");
+        insert_indexed(&conn, &cfg, "sub/b.docx", "md5b");
+        insert_content(&conn, "md5a", Some(0.92), "[]");
+        // plain.txt 在库里被标成 deleted（磁盘上还在）→ 浏览时按未索引处理
+        db::tracker::upsert_file(&conn, "plain.txt", &cfg.id, 1, 10, Some("md5c")).unwrap();
+        conn.execute("UPDATE file_tracking SET status='deleted' WHERE path='plain.txt'", []).unwrap();
+
+        let entries = list_dir_entries_impl(&conn, &root.to_string_lossy()).unwrap();
+        assert_eq!(entries.len(), 3, "sub + a.docx + plain.txt: {entries:?}");
+        assert_eq!(entries[0].name, "sub", "目录必须排在最前");
+        assert!(entries[0].is_dir && entries[0].file_id.is_none());
+
+        let a = entries.iter().find(|e| e.name == "a.docx").unwrap();
+        assert_eq!(a.indexed, 1);
+        assert_eq!(a.file_id.as_deref(), Some(a_id.as_str()));
+        assert_eq!(a.status.as_deref(), Some("active"));
+        assert!((a.quality_score.unwrap() - 0.92).abs() < 0.01, "质量分应随批量查询带出");
+
+        let plain = entries.iter().find(|e| e.name == "plain.txt").unwrap();
+        assert_eq!(plain.indexed, 0, "deleted 记录按未索引处理");
+        assert!(plain.file_id.is_none());
+
+        // 子目录里才看得到 b.docx 的关联
+        let sub = list_dir_entries_impl(&conn, &root.join("sub").to_string_lossy()).unwrap();
+        let b = sub.iter().find(|e| e.name == "b.docx").unwrap();
+        assert_eq!(b.indexed, 1);
+        assert!(b.file_id.is_some());
+    }
+
+    /// 目录不存在时给可读错误（前端据此显示"返回上一级"）。
+    #[test]
+    fn list_dir_entries_rejects_non_directory() {
+        let conn = setup();
+        let err = list_dir_entries_impl(&conn, "D:/definitely/not/a/dir").unwrap_err();
+        assert_eq!(err, "not a directory");
+    }
+
+    fn insert_indexed(
+        conn: &rusqlite::Connection,
+        cfg: &db::dir_config::DirConfig,
+        rel: &str,
+        md5: &str,
+    ) -> String {
+        db::tracker::upsert_file(conn, rel, &cfg.id, 1000, 10, Some(md5)).unwrap();
+        let id = db::tracker::get_file_by_path(conn, rel).unwrap().unwrap().id;
+        db::tracker::update_indexed(conn, &id, Some(md5)).unwrap();
+        id
     }
 }

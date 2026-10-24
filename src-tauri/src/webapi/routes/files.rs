@@ -33,6 +33,7 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/api/files", get(files_handler))
         .route("/api/files/preview-by-path", get(preview_by_path_handler))
+        .route("/api/files/resolve-path", get(resolve_path_handler))
         .route("/api/files/{id}", get(get_file_handler))
         .route("/api/files/{id}/abs-path", get(abs_path_handler))
         .route("/api/files/{id}/preview", get(file_preview_handler))
@@ -71,6 +72,18 @@ fn path_to_ext(path: &str) -> String {
 #[derive(Deserialize)]
 pub struct PreviewByPathQuery {
     pub path: String,
+}
+
+/// 相对路径 → 绝对路径（文件夹视图解析引用深链）。返回 `{ "path": "…" | null }`。
+async fn resolve_path_handler(
+    State(state): State<ApiState>,
+    Query(params): Query<PreviewByPathQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let resolved = crate::commands::files::resolve_file_path(app_state, params.path)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "path": resolved })))
 }
 
 async fn preview_by_path_handler(

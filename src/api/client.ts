@@ -90,6 +90,11 @@ const MAPPINGS: Record<string, Mapping> = {
   get_file_preview: (a) => ({ method: 'GET', path: `/api/files/${a.id}/preview` }),
   export_file_text: (a) => ({ method: 'GET', path: `/api/files/${a.id}/export`, query: { format: a.format } }),
   preview_file_by_path: { method: 'GET', path: '/api/files/preview-by-path' },
+  // 服务端返回 `{ path: string|null }`；Tauri 命令直接返回字符串或 null。
+  resolve_file_path: {
+    method: 'GET', path: '/api/files/resolve-path',
+    transform: (data) => (data as Record<string, unknown> | null)?.path ?? null,
+  },
   download_files: { method: 'POST', path: '/api/files/download' },
   open_file: { method: 'POST', path: '/api/files/open' },
   reveal_in_folder: { method: 'POST', path: '/api/files/reveal' },

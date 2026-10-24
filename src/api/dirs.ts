@@ -67,7 +67,7 @@ export async function getDirTree(dirId: string, includeFiles?: boolean): Promise
   return normNode(await client.invoke<DirTreeNode>('get_dir_tree', { dirId, includeFiles: includeFiles ?? false }))
 }
 
-export async function getDirChildren(parentPath: string): Promise<DirTreeNode[]> {
-  const items = await client.invoke<DirTreeNode[]>('get_dir_children', { parentPath })
+export async function getDirChildren(parentPath: string, dirsOnly?: boolean): Promise<DirTreeNode[]> {
+  const items = await client.invoke<DirTreeNode[]>('get_dir_children', { parentPath, dirsOnly: dirsOnly ?? false })
   return items.map(normNode)
 }
