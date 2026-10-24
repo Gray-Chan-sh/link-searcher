@@ -1,4 +1,32 @@
+## 2026-10-24（第六十四轮）：修好"关键词命中的摘要片段是空白"
+
+> 背景：结果列表每条本该有内容摘要，但关键词（BM25）命中的那一行实际是**空的**。
+> 根因：tantivy 索引里 `content` 字段是 `stored: false`（`search/schema.rs:60`，为了省索引体积），
+> 而 `SnippetGenerator` 只能从 **stored** 字段取文本（`search/searcher.rs:299`）
+> → `snippet_from_doc` 返回空串。实测 `D:\index\.ls-index\meta.json` 里 `content` 确为 `stored:false`。
+> 语义/融合命中不受影响，因为它们由 `semantic_snippet` 现算。
+
+**改动**
+
+- `commands/search.rs`：新增 `enrich_missing_snippets()`，在 `search_with_semantic` 收尾（语义融合之后）
+  只给**空片段**的命中补摘要 —— 按 `file_id` 一次点查 `file_tracking ⨝ content_index`，
+  用与语义命中完全相同的 `semantic_snippet`（`<em>` 高亮 + Markdown 标记剥离）生成。
+  **不需要重建索引**。
+  - 成本控制：单页最多读 4MB 正文；超大文档（长音频转写等）宁可保持空片段，
+    也不为摘要把整页全文读进内存。
+  - 关键词/语义两条路径的摘要现在口径一致（都以首个命中词为窗口）。
+- 覆盖范围：桌面搜索、浏览页的全文搜索、Web API `/api/search`、飞书机器人的搜索结果
+  —— 它们都走 `search_with_semantic`。
+- 测试：`snippet_enrich_tests` 3 条 —— 空片段被补齐且不含 Markdown 标记、
+  已有片段不被覆盖、文件/正文不存在时保持空。
+
+**验证**
+
+- `cargo test --workspace` 全绿（新增 3 条）、`npx tsc -b` / `npx vitest run`（13 文件 / 119 用例）、
+  `semgrep --severity ERROR` 0 findings、`npx vite build` 通过。
+
 ## 2026-10-24（第六十三轮）：预览支持 Markdown 渲染，片段/证据去掉 Markdown 标记
+
 
 > 背景：Office 正文是 `anydoc::to_markdown` 的产物（`extractor/office/mod.rs:85`），
 > 而预览 `preview_content()` 逐字节原样返回、前端用 `<pre>` 显示 → docx 里满屏 `**加粗**`。

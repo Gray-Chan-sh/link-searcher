@@ -309,7 +309,59 @@ pub fn search_with_semantic(
         }
     }
 
+    // 关键词命中的片段不在索引里（tantivy 的 content 字段未 stored）→ 按需从 DB 补。
+    // 放在语义融合之后：融合出来的语义命中已经自带片段，这里只填空的。
+    match state.db.get() {
+        Ok(conn) => enrich_missing_snippets(&conn, &params.query, &mut response.hits),
+        Err(e) => log::warn!("[SEARCH] snippet enrich skipped: {e}"),
+    }
+
     Ok(response)
+}
+
+/// 关键词命中的摘要片段补齐。
+///
+/// tantivy 索引里的 `content` 字段**不 stored**（省索引体积），而 `SnippetGenerator`
+/// 只能从 stored 字段取文本 → BM25 命中的 `snippet` 一直是空的（结果列表那行空白）。
+/// 这里按 `file_id` 从 DB 取正文，用与语义命中相同的 `semantic_snippet` 生成片段
+/// （含 `<em>` 高亮，且已剥掉 Markdown 展示标记），**不需要重建索引**。
+///
+/// 成本控制：只补空片段；单页最多读 [`SNIPPET_TEXT_BUDGET`] 字节正文，
+/// 超大文档（长音频转写等）宁可保持空片段，也不为摘要把整页全文读进内存。
+fn enrich_missing_snippets(conn: &rusqlite::Connection, query: &str, hits: &mut [SearchHit]) {
+    const SNIPPET_TEXT_BUDGET: usize = 4 * 1024 * 1024;
+    if query.trim().is_empty() {
+        return;
+    }
+    let Ok(mut stmt) = conn.prepare_cached(
+        "SELECT ci.text_content FROM file_tracking ft \
+         JOIN content_index ci ON ci.md5 = ft.md5 WHERE ft.id = ?1",
+    ) else {
+        log::warn!("[SEARCH] snippet enrich: prepare failed");
+        return;
+    };
+
+    let mut budget = SNIPPET_TEXT_BUDGET;
+    for hit in hits.iter_mut() {
+        if !hit.snippet.is_empty() {
+            continue;
+        }
+        if budget == 0 {
+            break;
+        }
+        match stmt.query_row(rusqlite::params![hit.file_id], |r| r.get::<_, String>(0)) {
+            Ok(text) => {
+                if text.len() > budget {
+                    budget = 0;
+                    continue;
+                }
+                budget = budget.saturating_sub(text.len());
+                hit.snippet = semantic_snippet(&text, query);
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {}
+            Err(e) => log::warn!("[SEARCH] snippet enrich failed for {}: {e}", hit.file_id),
+        }
+    }
 }
 
 /// 语义融合的准入（纯函数，便于单测）：三个条件缺一不可 ——
@@ -1432,6 +1484,67 @@ mod semantic_gate_tests {
         }
         assert!(entries.len() <= 8, "容量上限：{}", entries.len());
         assert!(entries.iter().any(|e| e.key == "k11"), "新条目应在");
+    }
+}
+
+#[cfg(test)]
+mod snippet_enrich_tests {
+    use super::{enrich_missing_snippets, SearchHit};
+    use crate::db::{run_migrations, tracker};
+
+    fn setup() -> (rusqlite::Connection, String) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        run_migrations(&conn).unwrap();
+        crate::db::dir_config::add_dir(&conn, "/docs", None, None, None, None, true).unwrap();
+        let dir = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
+        (conn, dir.id)
+    }
+
+    fn fake_hit(file_id: &str, snippet: &str) -> SearchHit {
+        SearchHit {
+            file_id: file_id.to_string(),
+            file_name: "a.docx".to_string(),
+            file_ext: "docx".to_string(),
+            path: "a.docx".to_string(),
+            snippet: snippet.to_string(),
+            score: 1.0,
+            mtime: 0,
+            file_size: 10,
+            duplicate_count: 0,
+            duplicate_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn fills_empty_snippets_and_strips_markdown() {
+        let (conn, dir_id) = setup();
+        let id = tracker::upsert_file(&conn, "a.docx", &dir_id, 1, 10, Some("md5a")).unwrap();
+        tracker::store_content(&conn, "md5a", "**关于土地管理法**的实施意见正文", false, None).unwrap();
+
+        let mut hits = vec![fake_hit(&id, "")];
+        enrich_missing_snippets(&conn, "土地管理法", &mut hits);
+
+        assert!(hits[0].snippet.contains("<em>"), "应高亮命中词: {}", hits[0].snippet);
+        assert!(!hits[0].snippet.contains("**"), "片段不应带 Markdown 标记: {}", hits[0].snippet);
+    }
+
+    #[test]
+    fn keeps_existing_snippets_untouched() {
+        let (conn, dir_id) = setup();
+        let id = tracker::upsert_file(&conn, "b.pdf", &dir_id, 1, 10, Some("md5b")).unwrap();
+        tracker::store_content(&conn, "md5b", "物业费纠纷的判决书", false, None).unwrap();
+
+        let mut hits = vec![fake_hit(&id, "已有片段")];
+        enrich_missing_snippets(&conn, "物业费", &mut hits);
+        assert_eq!(hits[0].snippet, "已有片段");
+    }
+
+    #[test]
+    fn missing_content_or_file_leaves_snippet_empty() {
+        let (conn, _dir_id) = setup();
+        let mut hits = vec![fake_hit("no-such-file", "")];
+        enrich_missing_snippets(&conn, "物业费", &mut hits);
+        assert_eq!(hits[0].snippet, "");
     }
 }
 
