@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { DirEntry } from '../../api/files.ts'
 import {
   breadcrumbs,
+  canGoUp,
   cleanPath,
   entryExt,
   entryStatus,
@@ -30,6 +31,7 @@ function entry(partial: Partial<DirEntry> & { name: string }): DirEntry {
     file_id: partial.file_id ?? null,
     status: partial.status ?? null,
     quality_score: partial.quality_score ?? null,
+    indexed_at: partial.indexed_at ?? null,
   }
 }
 
@@ -85,6 +87,16 @@ describe('path helpers', () => {
     expect(rootFor('D:/docs/sub/a.docx', ['D:/docs', 'D:/docs/sub'])).toBe('D:/docs/sub')
     expect(rootFor('E:/other/a.docx', ['D:/docs'])).toBeNull()
   })
+
+  it('never allows going above the library root', () => {
+    // 在根上：不能再往上（这正是会把 D:\ 暴露出来的入口）
+    expect(canGoUp('D:/docs', 'D:/docs')).toBe(false)
+    expect(canGoUp('D:/', 'D:/docs')).toBe(false)
+    // 根之内：可以
+    expect(canGoUp('D:/docs/sub', 'D:/docs')).toBe(true)
+    // 盘符根作为资料库时，上一级同样止步于根
+    expect(canGoUp('D:/', 'D:/')).toBe(false)
+  })
 })
 
 describe('sortEntries', () => {
@@ -113,6 +125,15 @@ describe('sortEntries', () => {
       entry({ name: 'todo', indexed: 0 }),
     ]
     expect(sortEntries(files, 'status', 'asc').map(e => e.name)).toEqual(['bad', 'ok', 'todo'])
+  })
+
+  it('sorts by last indexed time, never-indexed last', () => {
+    const files = [
+      entry({ name: 'old', indexed_at: 1_700_000_000 }),
+      entry({ name: 'new', indexed_at: 1_800_000_000 }),
+      entry({ name: 'none', indexed_at: null }),
+    ]
+    expect(sortEntries(files, 'indexed_at', 'desc').map(e => e.name)).toEqual(['new', 'old', 'none'])
   })
 
   it('sorts by quality, unscored last', () => {

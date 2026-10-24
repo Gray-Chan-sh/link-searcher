@@ -116,7 +116,14 @@ export function rootFor(path: string, roots: string[]): string | null {
   return hits.reduce((best, cur) => (cleanPath(cur).length > cleanPath(best).length ? cur : best))
 }
 
-export type DirSortKey = 'name' | 'mtime' | 'type' | 'size' | 'status' | 'quality'
+/** 当前目录能否上移一级：到资料库根就停住，**绝不允许越出根目录**。 */
+export function canGoUp(currentPath: string, rootPath: string): boolean {
+  if (!rootPath) return false
+  const parent = parentPath(currentPath)
+  return !isSamePath(parent, currentPath) && isWithinRoot(parent, rootPath)
+}
+
+export type DirSortKey = 'name' | 'mtime' | 'indexed_at' | 'type' | 'size' | 'status' | 'quality'
 export type SortOrder = 'asc' | 'desc'
 
 /** 扩展名（文件夹返回空串）。 */
@@ -147,6 +154,11 @@ export function sortEntries(entries: DirEntry[], key: DirSortKey, order: SortOrd
     switch (key) {
       case 'mtime':
         return (a.mtime - b.mtime) * dir
+      case 'indexed_at': {
+        const ia = a.indexed_at ?? -1
+        const ib = b.indexed_at ?? -1
+        return (ia - ib) * dir || a.name.localeCompare(b.name)
+      }
       case 'size':
         return (a.file_size - b.file_size) * dir
       case 'type':
@@ -184,10 +196,12 @@ export function entryTypeLabel(entry: DirEntry): string {
 }
 
 /** 已索引状态徽标文案（组件里再翻成 i18n）。 */
-export type EntryStatus = 'indexed' | 'extracting' | 'failed' | 'pending' | 'unsupported' | 'folder'
+export type EntryStatus = 'indexed' | 'extracting' | 'failed' | 'pending' | 'unsupported' | 'folder' | 'deleted'
 
 export function entryStatus(entry: DirEntry): EntryStatus {
   if (entry.is_dir) return 'folder'
+  // 文件还在磁盘上、库记录是软删除（遗留状态）→ 允许恢复
+  if (entry.status === 'deleted') return 'deleted'
   if (!entry.is_supported) return 'unsupported'
   if (entry.indexed === 1) return 'indexed'
   if (entry.indexed === 3) return 'extracting'

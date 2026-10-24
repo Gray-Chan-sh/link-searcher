@@ -197,6 +197,8 @@ const en: Record<string, string> = {
     folder_type_label: 'Folder',
     file_type_label: 'File',
     file_not_indexed_yet: 'Not indexed yet — preview only',
+    path_outside_library: 'Cannot open a folder outside the library',
+    last_indexed: 'Last indexed',
     select_library: 'Library',
     folder_load_failed: 'Failed to read folder',
     open: 'Open',

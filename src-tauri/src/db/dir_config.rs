@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use std::path::Component;
 use uuid::Uuid;
 
 /// A directory configuration record.
@@ -73,6 +74,55 @@ Ok(DirConfig {
         created_at: now,
         updated_at: now,
     })
+}
+
+/// 路径是否落在**某个已注册资料库根**之内（含根本身）。
+///
+/// 这是文件夹视图的硬边界：**不允许浏览资料库之外的任何目录**。桌面端与 Web 端
+/// 都要过这一关（此前桌面端为了"添加目录时能浏览任意位置"没校验，结果浏览页
+/// 点「上一级」可以从资料库根一路走到 `D:\`）。
+///
+/// 判定前先 `canonicalize`（解析符号链接与 `..`），失败时退回字面路径；
+/// 统一成 DB 的正斜杠形式，Windows 下大小写不敏感。
+pub fn path_within_registered_roots(conn: &Connection, requested: &str) -> Result<bool> {
+    if requested.trim().is_empty() {
+        return Ok(false);
+    }
+    // 显式拒绝父目录段（canonicalize 之前就挡掉，避免半解析状态）
+    if std::path::Path::new(requested)
+        .components()
+        .any(|c| matches!(c, Component::ParentDir))
+    {
+        return Ok(false);
+    }
+    let roots = list_dirs(conn)?;
+    let want = comparable_path(requested);
+    Ok(roots.iter().any(|d| {
+        let root = comparable_path(&d.path);
+        if root.is_empty() {
+            return false;
+        }
+        if want == root {
+            return true;
+        }
+        if want.starts_with(&root) {
+            // 根以 `/` 结尾（盘符根 `D:/`）时上面的 starts_with 已足够；
+            // 否则要求下一个字符是路径分隔符（防止 `D:/docs2` 命中 `D:/docs`）。
+            return root.ends_with('/') || want.as_bytes().get(root.len()) == Some(&b'/');
+        }
+        false
+    }))
+}
+
+/// 归一化用于"是否在根内"比较的路径：优先 canonicalize（解析符号链接），
+/// 失败则用字面路径；统一正斜杠，Windows 下小写。
+fn comparable_path(p: &str) -> String {
+    let raw = std::fs::canonicalize(p)
+        .ok()
+        .map(|c| c.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.to_string());
+    let n = crate::scanner::helpers::normalize_os_path(&raw);
+    if cfg!(windows) { n.to_lowercase() } else { n }
 }
 
 /// Remove a directory configuration by id.

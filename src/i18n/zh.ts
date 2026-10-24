@@ -197,6 +197,8 @@ const zh: Record<string, string> = {
     folder_type_label: '文件夹',
     file_type_label: '文件',
     file_not_indexed_yet: '文件尚未索引，暂时只能预览',
+    path_outside_library: '不能访问资料库以外的目录',
+    last_indexed: '最后索引时间',
     select_library: '资料库',
     folder_load_failed: '读取文件夹失败',
     open: '打开',

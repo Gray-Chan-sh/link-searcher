@@ -402,6 +402,8 @@ export interface DirEntry {
   file_id: string | null
   status: string | null
   quality_score: number | null
+  /** 最后索引时间（秒级时间戳；仅已索引文件有值）。 */
+  indexed_at: number | null
 }
 
 /** 列出某个文件夹的真实内容（目录在前，按名字排序）。 */

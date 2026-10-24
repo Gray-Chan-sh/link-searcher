@@ -488,6 +488,16 @@ pub fn get_dir_children(
     let dirs_only = dirs_only.unwrap_or(false);
     let mut children = Vec::new();
 
+    // 与文件夹视图同一道硬边界：不允许列举资料库之外的目录
+    {
+        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        if !crate::db::dir_config::path_within_registered_roots(&conn, &parent_path)
+            .map_err(|e| format!("db error: {e}"))?
+        {
+            return Err("路径不在已添加的资料库范围内".to_string());
+        }
+    }
+
     // file_tracking.path 存的是相对监控根的路径（启动时已 migrate_paths_to_relative），
     // 而 read_dir 给出的是绝对路径——两者必须统一坐标系，否则 indexed 判定
     // 永远为 false，文件树里全部文件显示"未索引"。

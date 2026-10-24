@@ -7,6 +7,7 @@ import { fileTypeIcon } from '../../utils/fileIcon'
 import { formatSize, formatTime } from '../../utils/format'
 import {
   breadcrumbs,
+  canGoUp,
   cleanPath,
   entryStatus,
   entryTypeLabel,
@@ -63,6 +64,8 @@ function StatusCell({ entry }: { entry: DirEntry }) {
       return <span className={`${base} text-yellow-600 dark:text-yellow-400`}>◐ {t('indexing')}</span>
     case 'failed':
       return <span className={`${base} text-red-600 dark:text-red-400`} title={entry.error_msg ?? undefined}>✗ {t('failed')}</span>
+    case 'deleted':
+      return <span className={`${base} text-gray-500 dark:text-gray-400`}>🗑 {t('deleted')}</span>
     case 'unsupported':
       return <span className={`${base} text-gray-400 dark:text-gray-500`}>{t('unsupported')}</span>
     default:
@@ -113,9 +116,13 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
 
   const rootPaths = useMemo(() => roots.map(r => r.path), [roots])
 
-  /** 进入某个目录（新历史条目）。 */
+  /** 进入某个目录（新历史条目）。**绝不允许越出资料库根**（后端也会拒绝，双保险）。 */
   const navigate = useCallback((path: string, replace = false) => {
     const target = cleanPath(path)
+    if (rootPaths.length > 0 && !rootFor(target, rootPaths)) {
+      onNotice?.(t('path_outside_library'))
+      return
+    }
     setNav(prev => {
       const cur = prev.stack[prev.index]
       if (cur && isSamePath(cur, target)) return prev
@@ -130,7 +137,7 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
     setFocusedPath(null)
     setFilter('')
     anchorIndexRef.current = null
-  }, [])
+  }, [rootPaths, onNotice, t])
 
   // 首次进入：深链 > 上次目录 > 第一个资料库
   useEffect(() => {
@@ -258,9 +265,10 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
     if (currentPath) tableRef.current?.focus({ preventScroll: true })
   }, [currentPath])
   const goUp = useCallback(() => {
-    const parent = parentPath(currentPath)
-    if (!isSamePath(parent, currentPath)) navigate(parent)
-  }, [currentPath, navigate])
+    // 到资料库根就停住：不加这个判断会走到 `D:/`，等于把整块磁盘暴露出来
+    if (!canGoUp(currentPath, rootPath ?? '')) return
+    navigate(parentPath(currentPath))
+  }, [currentPath, rootPath, navigate])
   const goBack = useCallback(() => setNav(p => (p.index > 0 ? { ...p, index: p.index - 1 } : p)), [])
   const goForward = useCallback(
     () => setNav(p => (p.index < p.stack.length - 1 ? { ...p, index: p.index + 1 } : p)),
@@ -318,7 +326,7 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
 
   const canBack = nav.index > 0
   const canForward = nav.index >= 0 && nav.index < nav.stack.length - 1
-  const canUp = currentPath !== '' && !isSamePath(parentPath(currentPath), currentPath)
+  const canUp = canGoUp(currentPath, rootPath ?? '')
   const selectedEntries = useMemo(
     () => visibleEntries.filter(e => selection.has(e.path)),
     [visibleEntries, selection],
@@ -445,19 +453,22 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
           <table className="w-full text-xs select-none table-fixed">
             <thead className="sticky top-0 bg-gray-50 dark:bg-gray-900/90 backdrop-blur z-10">
               <tr className="border-b border-gray-200 dark:border-gray-800 text-left text-gray-500 dark:text-gray-400">
-                <th className="px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '38%' }} onClick={() => toggleSort('name')}>
+                <th className="px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '32%' }} onClick={() => toggleSort('name')}>
                   {t('filename')}{sortIndicator('name')}
                 </th>
-                <th className="hidden md:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '20%' }} onClick={() => toggleSort('mtime')}>
+                <th className="hidden lg:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '14%' }} onClick={() => toggleSort('mtime')}>
                   {t('modified')}{sortIndicator('mtime')}
                 </th>
-                <th className="hidden lg:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '10%' }} onClick={() => toggleSort('type')}>
+                <th className="hidden md:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '14%' }} onClick={() => toggleSort('indexed_at')}>
+                  {t('last_indexed')}{sortIndicator('indexed_at')}
+                </th>
+                <th className="hidden xl:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '8%' }} onClick={() => toggleSort('type')}>
                   {t('type')}{sortIndicator('type')}
                 </th>
-                <th className="px-2 py-1.5 font-medium text-right cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '10%' }} onClick={() => toggleSort('size')}>
+                <th className="px-2 py-1.5 font-medium text-right cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '8%' }} onClick={() => toggleSort('size')}>
                   {t('size')}{sortIndicator('size')}
                 </th>
-                <th className="px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '14%' }} onClick={() => toggleSort('status')}>
+                <th className="px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '16%' }} onClick={() => toggleSort('status')}>
                   {t('status')}{sortIndicator('status')}
                 </th>
                 <th className="hidden md:table-cell px-2 py-1.5 font-medium cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800" style={{ width: '8%' }} onClick={() => toggleSort('quality')}>
@@ -497,10 +508,13 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
                         </span>
                       </div>
                     </td>
-                    <td className="hidden md:table-cell px-2 py-1 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                    <td className="hidden lg:table-cell px-2 py-1 text-gray-500 dark:text-gray-400 whitespace-nowrap">
                       {entry.mtime > 0 ? formatTime(entry.mtime) : '—'}
                     </td>
-                    <td className="hidden lg:table-cell px-2 py-1 text-gray-500 dark:text-gray-400 uppercase truncate">
+                    <td className="hidden md:table-cell px-2 py-1 text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                      {entry.indexed_at != null ? formatTime(entry.indexed_at) : '—'}
+                    </td>
+                    <td className="hidden xl:table-cell px-2 py-1 text-gray-500 dark:text-gray-400 uppercase truncate">
                       {(() => {
                         const label = entryTypeLabel(entry)
                         if (label === 'folder') return t('folder_type_label')

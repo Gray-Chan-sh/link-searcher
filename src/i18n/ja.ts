@@ -197,6 +197,8 @@ const ja: Record<string, string> = {
     folder_type_label: 'フォルダ',
     file_type_label: 'ファイル',
     file_not_indexed_yet: '未インデックスのため、プレビューのみ表示できます',
+    path_outside_library: 'ライブラリ外のフォルダは開けません',
+    last_indexed: '最終インデックス',
     select_library: 'ライブラリ',
     folder_load_failed: 'フォルダの読み込みに失敗しました',
     open: '開く',

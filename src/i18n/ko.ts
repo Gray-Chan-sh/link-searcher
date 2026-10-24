@@ -197,6 +197,8 @@ const ko: Record<string, string> = {
     folder_type_label: '폴더',
     file_type_label: '파일',
     file_not_indexed_yet: '아직 인덱싱되지 않아 미리보기만 가능합니다',
+    path_outside_library: '라이브러리 외부 폴더는 열 수 없습니다',
+    last_indexed: '마지막 인덱싱',
     select_library: '라이브러리',
     folder_load_failed: '폴더를 읽지 못했습니다',
     open: '열기',

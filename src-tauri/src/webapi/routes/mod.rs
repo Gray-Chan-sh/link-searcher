@@ -42,32 +42,17 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// 目录枚举的**越界防护**（Web API 专用）。
+/// 目录枚举的**越界防护**（Web API 入口层）。
 ///
-/// 桌面端 IPC 不受此限：添加索引目录本来就要能浏览任意位置（用户得先走到目标
-/// 文件夹）。但 Web 端把"任意路径枚举"暴露给持有 token 的任意客户端，等于把整块
-/// 磁盘当目录浏览器 —— `~/.ssh`、浏览器 profile、其它项目的文件名全可列举
-/// （正文仍受 DB 追踪限制，但文件名/结构本身就是敏感信息）。
-///
-/// 规则：只允许列举**已注册索引目录之内**的路径；拒绝 `..`（防穿越）。
+/// 实际判定在 [`crate::db::dir_config::path_within_registered_roots`] —— 桌面端
+/// `list_dir_entries` / `get_dir_children` 也走同一份逻辑（2026-10-24 修复：
+/// 此前桌面端不校验，浏览页「上一级」可从资料库根一路走到 `D:\`）。
 pub(crate) fn ensure_within_registered_roots(
     conn: &rusqlite::Connection,
     requested: &str,
 ) -> Result<(), ApiError> {
-    if std::path::Path::new(requested)
-        .components()
-        .any(|c| matches!(c, std::path::Component::ParentDir))
-    {
-        return Err(ApiError { error: "path must not contain '..'".into() });
-    }
-    let roots = crate::db::dir_config::list_dirs(conn)
+    let allowed = crate::db::dir_config::path_within_registered_roots(conn, requested)
         .map_err(|e| ApiError { error: e.to_string() })?;
-    let want = canon_path(requested);
-    let allowed = !want.is_empty()
-        && roots.iter().any(|d| {
-            let root = canon_path(&d.path);
-            !root.is_empty() && (want == root || want.starts_with(&format!("{root}/")))
-        });
     if allowed {
         Ok(())
     } else {
@@ -75,13 +60,6 @@ pub(crate) fn ensure_within_registered_roots(
             error: "path is outside the registered index roots".into(),
         })
     }
-}
-
-/// 归一化以便比较：与 DB 存储一致的正斜杠路径；Windows 下大小写不敏感。
-fn canon_path(p: &str) -> String {
-    let n = crate::scanner::helpers::normalize_os_path(p.trim());
-    let n = n.trim_end_matches('/').to_string();
-    if cfg!(windows) { n.to_lowercase() } else { n }
 }
 
 #[cfg(test)]
@@ -126,6 +104,16 @@ mod tests {
         crate::db::init_db(&conn).expect("schema");
         let any = if cfg!(windows) { r"D:\anything" } else { "/anything" };
         assert!(ensure_within_registered_roots(&conn, any).is_err());
+    }
+
+    /// 盘符根作为资料库（`D:\`）时，前缀判断不能被 `D://` 拼错。
+    #[test]
+    #[cfg(windows)]
+    fn drive_root_prefix_is_handled() {
+        let conn = db_with_root(r"D:\");
+        assert!(ensure_within_registered_roots(&conn, r"D:\docs").is_ok());
+        assert!(ensure_within_registered_roots(&conn, "D:/docs/deep").is_ok());
+        assert!(ensure_within_registered_roots(&conn, r"E:\docs").is_err());
     }
 }
 

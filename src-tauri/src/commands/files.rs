@@ -552,6 +552,9 @@ pub struct DirEntry {
     pub status: Option<String>,
     /// 防重复取正文质量分（未索引为 None）。
     pub quality_score: Option<f64>,
+    /// 最后索引时间（秒级 Unix 时间戳）——取 `content_index.indexed_at`，
+    /// 即正文最后一次提取入库的时间（重新提取/OCR 后会刷新）。未索引为 None。
+    pub indexed_at: Option<i64>,
 }
 
 /// List files and directories at a given filesystem path.
@@ -572,6 +575,13 @@ pub(crate) fn list_dir_entries_impl(
     let dir = std::path::Path::new(path);
     if !dir.is_dir() {
         return Err("not a directory".to_string());
+    }
+    // **硬边界**：只能浏览已注册资料库根之内的目录（桌面端同样校验，
+    // 防止「上一级」从资料库根走到整个磁盘）。
+    if !db::dir_config::path_within_registered_roots(conn, path)
+        .map_err(|e| format!("db error: {e}"))?
+    {
+        return Err("路径不在已添加的资料库范围内".to_string());
     }
 
     let dir_configs = db::dir_config::list_dirs(conn)
@@ -596,7 +606,7 @@ pub(crate) fn list_dir_entries_impl(
         let like_children = format!("{like_prefix}%");
         let like_deeper = format!("{like_prefix}%/%");
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT ft.path, ft.id, ft.indexed, ft.error_msg, ft.status, ci.quality_score \
+            "SELECT ft.path, ft.id, ft.indexed, ft.error_msg, ft.status, ci.quality_score, ci.indexed_at \
              FROM file_tracking ft LEFT JOIN content_index ci ON ci.md5 = ft.md5 \
              WHERE ft.dir_id = ?1 AND ft.path LIKE ?2 AND ft.path NOT LIKE ?3",
         ) {
@@ -608,10 +618,11 @@ pub(crate) fn list_dir_entries_impl(
                     r.get::<_, Option<String>>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, Option<f64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
                 ))
             }) {
-                for (rel, id, indexed, error_msg, status, quality) in rows.flatten() {
-                    by_rel.insert(rel, TrackerRow { id, indexed, error_msg, status, quality });
+                for (rel, id, indexed, error_msg, status, quality, indexed_at) in rows.flatten() {
+                    by_rel.insert(rel, TrackerRow { id, indexed, error_msg, status, quality, indexed_at });
                 }
             }
         }
@@ -646,19 +657,26 @@ pub(crate) fn list_dir_entries_impl(
         let mut file_id: Option<String> = None;
         let mut status: Option<String> = None;
         let mut quality_score: Option<f64> = None;
+        let mut indexed_at: Option<i64> = None;
 
         if !is_dir && let Some((cfg, _)) = owner.as_ref()
             && let Ok(rel_path) = crate::scanner::helpers::to_relative(&cfg.path, &entry_path_raw)
             && let Some(row) = by_rel.remove(&rel_path)
-            && row.status != "deleted"
         {
-            // `deleted` 的追踪行在这里按"未索引"处理（文件明明还在磁盘上，是遗留记录）：
-            // 恢复操作留在"列表"视图里做，免得浏览时把存在的文件标成已删除。
-            indexed = row.indexed;
-            error_msg = row.error_msg;
             file_id = Some(row.id);
-            status = Some(row.status);
-            quality_score = row.quality;
+            error_msg = row.error_msg;
+            status = Some(row.status.clone());
+            if row.status == "deleted" {
+                // 文件还在磁盘上、库记录却是软删除（遗留状态）：按"未索引 + 可恢复"呈现，
+                // 这样原来的「恢复」入口（以前只在列表视图）不会因为移除列表视图而丢失。
+                indexed = 0;
+            } else {
+                indexed = row.indexed;
+                quality_score = row.quality;
+                if row.indexed == 1 {
+                    indexed_at = row.indexed_at;
+                }
+            }
         }
 
         entries.push(DirEntry {
@@ -673,6 +691,7 @@ pub(crate) fn list_dir_entries_impl(
             file_id,
             status,
             quality_score,
+            indexed_at,
         });
     }
 
@@ -694,6 +713,7 @@ struct TrackerRow {
     error_msg: Option<String>,
     status: String,
     quality: Option<f64>,
+    indexed_at: Option<i64>,
 }
 
 /// 把库里存的**相对路径**解析成绝对路径（文件夹视图处理引用深链 `?path=` 用）。
@@ -1217,10 +1237,13 @@ mod tests {
         assert_eq!(a.file_id.as_deref(), Some(a_id.as_str()));
         assert_eq!(a.status.as_deref(), Some("active"));
         assert!((a.quality_score.unwrap() - 0.92).abs() < 0.01, "质量分应随批量查询带出");
+        assert!(a.indexed_at.is_some(), "已索引文件应带最后索引时间");
 
         let plain = entries.iter().find(|e| e.name == "plain.txt").unwrap();
         assert_eq!(plain.indexed, 0, "deleted 记录按未索引处理");
-        assert!(plain.file_id.is_none());
+        assert_eq!(plain.status.as_deref(), Some("deleted"), "保留软删除状态以便恢复");
+        assert!(plain.file_id.is_some(), "恢复/打开需要 file_id");
+        assert!(plain.indexed_at.is_none(), "未索引文件没有索引时间");
 
         // 子目录里才看得到 b.docx 的关联
         let sub = list_dir_entries_impl(&conn, &root.join("sub").to_string_lossy()).unwrap();
@@ -1235,6 +1258,31 @@ mod tests {
         let conn = setup();
         let err = list_dir_entries_impl(&conn, "D:/definitely/not/a/dir").unwrap_err();
         assert_eq!(err, "not a directory");
+    }
+
+    /// **回归（2026-10-24）**：浏览页「上一级」曾能从资料库根走到 `D:\`，
+    /// 把整块磁盘暴露出来。后端必须硬性拒绝根目录之外的任何路径。
+    #[test]
+    fn list_dir_entries_rejects_paths_outside_registered_roots() {
+        let conn = setup();
+        let tmp = TempDir::new("ls_dir_guard").unwrap();
+        let library = tmp.path().join("library");
+        std::fs::create_dir_all(library.join("sub")).unwrap();
+        std::fs::write(library.join("sub/a.txt"), b"x").unwrap();
+        db::dir_config::add_dir(&conn, &library.to_string_lossy(), None, None, None, None, true).unwrap();
+
+        // 根本身、根之内：放行
+        assert!(list_dir_entries_impl(&conn, &library.to_string_lossy()).is_ok());
+        assert!(list_dir_entries_impl(&conn, &library.join("sub").to_string_lossy()).is_ok());
+
+        // 根的**父目录**（正是"上一级"会走到的位置）：必须拒绝
+        let outside = tmp.path().to_string_lossy().to_string();
+        let err = list_dir_entries_impl(&conn, &outside).unwrap_err();
+        assert_eq!(err, "路径不在已添加的资料库范围内");
+
+        // `..` 穿越：拒绝
+        let escape = format!("{}/../", library.to_string_lossy());
+        assert!(list_dir_entries_impl(&conn, &escape).is_err());
     }
 
     fn insert_indexed(
