@@ -226,6 +226,38 @@ pub async fn open_file(state: State<'_, AppState>, id: String) -> Result<(), Str
     opener::open(&abs).map_err(|e| format!("failed to open file: {e}"))
 }
 
+/// 按**绝对路径**打开文件（文件夹视图里尚未索引的文件没有 file_id）。
+///
+/// 硬边界：路径必须在已注册资料库根之内，且存在（与 `list_dir_entries` 同一道校验）。
+#[tauri::command]
+pub async fn open_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let abs = checked_library_path(&state, &path)?;
+    opener::open(&abs).map_err(|e| format!("failed to open file: {e}"))
+}
+
+/// 按**绝对路径**在系统文件管理器中定位文件（同上的边界校验）。
+#[tauri::command]
+pub async fn reveal_path(state: State<'_, AppState>, path: String) -> Result<(), String> {
+    let abs = checked_library_path(&state, &path)?;
+    reveal_in_file_manager(&abs).map_err(|e| format!("failed to reveal: {e}"))
+}
+
+/// 校验"绝对路径在资料库根内且存在"，返回规范化后的路径。
+fn checked_library_path(state: &State<'_, AppState>, path: &str) -> Result<std::path::PathBuf, String> {
+    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let allowed = db::dir_config::path_within_registered_roots(&conn, path)
+        .map_err(|e| format!("db error: {e}"))?;
+    drop(conn);
+    if !allowed {
+        return Err("路径不在已添加的资料库范围内".to_string());
+    }
+    let abs = std::path::PathBuf::from(path);
+    if !abs.exists() {
+        return Err("file not found".to_string());
+    }
+    Ok(abs)
+}
+
 #[tauri::command]
 pub async fn download_files(state: State<'_, AppState>, ids: Vec<String>) -> Result<String, String> {
     let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;

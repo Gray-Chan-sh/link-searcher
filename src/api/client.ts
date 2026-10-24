@@ -97,6 +97,9 @@ const MAPPINGS: Record<string, Mapping> = {
   },
   download_files: { method: 'POST', path: '/api/files/download' },
   open_file: { method: 'POST', path: '/api/files/open' },
+  // 桌面端专用（浏览器模式返回 501）：文件夹视图打开/定位尚未索引的文件
+  open_path: (a) => ({ method: 'POST', path: '/api/files/open-path', body: { path: a.path } }),
+  reveal_path: (a) => ({ method: 'POST', path: '/api/files/reveal-path', body: { path: a.path } }),
   reveal_in_folder: { method: 'POST', path: '/api/files/reveal' },
 
   // ── Index ──

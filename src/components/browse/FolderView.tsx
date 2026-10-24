@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { listDirEntries, openFile, resolveFilePath, type DirEntry } from '../../api/files'
+import {
+  askDocuments,
+  aiCapabilities,
+  exportFileText,
+  listDirEntries,
+  openFile,
+  openFilePath,
+  revealInFolder,
+  revealPath,
+  resolveFilePath,
+  type AiCapabilities,
+  type DirEntry,
+  type ExportFormat,
+} from '../../api/files'
 import type { DirConfig } from '../../api/dirs'
+import { reindexFiles, restoreFiles } from '../../api/index'
+import { invoke } from '../../api/client'
+import { confirm, saveFile } from '../../utils/platform'
 import { useI18n } from '../../i18n'
 import { ChevronDownIcon, FolderIcon, RefreshIcon, SearchIcon } from '../../icons'
 import { fileTypeIcon } from '../../utils/fileIcon'
@@ -9,6 +25,7 @@ import {
   breadcrumbs,
   canGoUp,
   cleanPath,
+  entryExt,
   entryStatus,
   entryTypeLabel,
   filterEntries,
@@ -73,8 +90,14 @@ function StatusCell({ entry }: { entry: DirEntry }) {
   }
 }
 
-function QualityCell({ entry }: { entry: DirEntry }) {
-  if (entry.is_dir || entry.quality_score == null) {
+const AUDIO_EXTS = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wma']
+
+/** 音频才有"带标签 (.md)"导出（时间轴 + 说话人）。 */
+function isAudioEntry(entry: DirEntry): boolean {
+  return AUDIO_EXTS.includes(entryExt(entry))
+}
+
+function QualityCell({ entry }: { entry: DirEntry }) {  if (entry.is_dir || entry.quality_score == null) {
     return <span className="text-gray-300 dark:text-gray-600">—</span>
   }
   const q = entry.quality_score
@@ -113,6 +136,25 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
   const pendingSelectRef = useRef<string | null>(null)
   const tableRef = useRef<HTMLDivElement>(null)
   const filterRef = useRef<HTMLInputElement>(null)
+
+  // 右键菜单 / 导出 / 索引日志 / AI 问答
+  const [ctx, setCtx] = useState<{ x: number; y: number; entry: DirEntry } | null>(null)
+  const [log, setLog] = useState<string | null>(null)
+  const [logLoading, setLogLoading] = useState(false)
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [askQ, setAskQ] = useState('')
+  const [askA, setAskA] = useState<string | null>(null)
+  const [askErr, setAskErr] = useState(false)
+  const [askLoading, setAskLoading] = useState(false)
+
+  useEffect(() => { aiCapabilities().then(setAiCap).catch(() => {}) }, [])
+
+  useEffect(() => {
+    if (!ctx) return
+    const close = () => setCtx(null)
+    document.addEventListener('click', close)
+    return () => document.removeEventListener('click', close)
+  }, [ctx])
 
   const rootPaths = useMemo(() => roots.map(r => r.path), [roots])
 
@@ -250,14 +292,119 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
       navigate(entry.path)
       return
     }
-    if (entry.file_id) {
-      void openFile(entry.file_id).catch(e => {
-        onNotice?.(e instanceof Error ? e.message : String(e))
-      })
-    } else {
-      onNotice?.(t('file_not_indexed_yet'))
+    // 已索引走 id（顺带校验归属）；未索引的文件没有 file_id → 按绝对路径打开
+    const task = entry.file_id ? openFile(entry.file_id) : openFilePath(entry.path)
+    void task.catch(e => {
+      onNotice?.(e instanceof Error ? e.message : String(e))
+    })
+  }, [navigate, onNotice])
+
+  const notify = useCallback((msg: string) => onNotice?.(msg), [onNotice])
+
+  const copyPath = useCallback((entry: DirEntry) => {
+    navigator.clipboard.writeText(entry.path)
+      .then(() => notify(t('copied_path')))
+      .catch(e => console.warn('复制失败:', e))
+  }, [notify, t])
+
+  const reveal = useCallback((entry: DirEntry) => {
+    const task = entry.file_id ? revealInFolder(entry.file_id) : revealPath(entry.path)
+    void task.catch(e => notify(e instanceof Error ? e.message : String(e)))
+  }, [notify])
+
+  /** 重新索引：只有进过库的文件才有 file_id（新文件等下一轮扫描即可）。 */
+  const reindex = useCallback(async (entries: DirEntry[]) => {
+    const ids = entries.map(e => e.file_id).filter((x): x is string => !!x)
+    if (ids.length === 0) {
+      notify(t('file_not_indexed_yet'))
+      return
     }
-  }, [navigate, onNotice, t])
+    // 覆盖已有索引数据时先确认（与旧列表视图一致）
+    if (entries.length === ids.length && entries.every(e => e.indexed === 1)) {
+      const ok = await confirm(t('confirm_reindex'), t('reindex'))
+      if (!ok) return
+    }
+    try {
+      await reindexFiles(ids)
+      setReloadTick(v => v + 1)
+    } catch (e) {
+      notify(e instanceof Error ? e.message : String(e))
+    }
+  }, [notify, t])
+
+  /** 恢复"文件还在磁盘上但库记录被标删"的遗留记录。 */
+  const restore = useCallback(async (entries: DirEntry[]) => {
+    const ids = entries.filter(e => e.status === 'deleted').map(e => e.file_id).filter((x): x is string => !!x)
+    if (ids.length === 0) return
+    try {
+      const n = await restoreFiles(ids)
+      notify(t('restored_n', { n }))
+      setReloadTick(v => v + 1)
+    } catch (e) {
+      notify(t('restore_failed', { error: e instanceof Error ? e.message : String(e) }))
+    }
+  }, [notify, t])
+
+  const exportText = useCallback(async (entry: DirEntry, format: ExportFormat) => {
+    if (!entry.file_id) {
+      notify(t('file_not_indexed_yet'))
+      return
+    }
+    try {
+      const { content } = await exportFileText(entry.file_id, format)
+      if (!content.trim()) {
+        notify(t('no_text_to_export'))
+        return
+      }
+      const base = entry.name.replace(/\.[^.]+$/, '') || 'export'
+      await saveFile(content, `${base}${format === 'tagged' ? '.md' : '.txt'}`)
+      notify(t('export_done'))
+    } catch (e) {
+      notify(e instanceof Error ? e.message : String(e))
+    }
+  }, [notify, t])
+
+  const viewLog = useCallback(async (entry: DirEntry) => {
+    if (!entry.file_id) {
+      notify(t('file_not_indexed_yet'))
+      return
+    }
+    setLogLoading(true)
+    setLog(null)
+    try {
+      const lines: string[] = await invoke('get_logs', { lines: 500, fileId: entry.file_id })
+      setLog(lines.join('\n') || t('no_index_log_for_file'))
+    } catch {
+      setLog(t('failed_load_index_log'))
+    } finally {
+      setLogLoading(false)
+    }
+  }, [notify, t])
+
+  const selectedEntries = useMemo(
+    () => visibleEntries.filter(e => selection.has(e.path)),
+    [visibleEntries, selection],
+  )
+  /** AI 问答只针对已进库的文件（需要 file_id）。 */
+  const selectedFileIds = useMemo(
+    () => selectedEntries.map(e => e.file_id).filter((x): x is string => !!x),
+    [selectedEntries],
+  )
+
+  const handleAsk = useCallback(async () => {
+    if (!askQ.trim() || askLoading || selectedFileIds.length === 0) return
+    setAskLoading(true)
+    setAskA(null)
+    setAskErr(false)
+    try {
+      setAskA(await askDocuments(selectedFileIds, askQ.trim()))
+    } catch (e) {
+      setAskA(e instanceof Error ? e.message : t('ai_ask_failed'))
+      setAskErr(true)
+    } finally {
+      setAskLoading(false)
+    }
+  }, [askQ, askLoading, selectedFileIds, t])
 
   const refresh = useCallback(() => setReloadTick(v => v + 1), [])
   // 进入/切换目录后把键盘焦点收进列表：↑↓/Enter/Backspace 立刻可用
@@ -327,10 +474,6 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
   const canBack = nav.index > 0
   const canForward = nav.index >= 0 && nav.index < nav.stack.length - 1
   const canUp = canGoUp(currentPath, rootPath ?? '')
-  const selectedEntries = useMemo(
-    () => visibleEntries.filter(e => selection.has(e.path)),
-    [visibleEntries, selection],
-  )
   const selectedSize = useMemo(() => totalSize(selectedEntries), [selectedEntries])
 
   const navBtn = 'p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-500 dark:text-gray-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors'
@@ -487,6 +630,14 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
                     data-entry-path={entry.path}
                     onClick={e => selectEntry(entry, e.ctrlKey || e.metaKey)}
                     onDoubleClick={() => openEntry(entry)}
+                    onContextMenu={e => {
+                      e.preventDefault()
+                      if (!selection.has(entry.path)) {
+                        setSelection(new Set([entry.path]))
+                        setFocusedPath(entry.path)
+                      }
+                      setCtx({ x: e.clientX, y: e.clientY, entry })
+                    }}
                     className={`border-b border-gray-100 dark:border-gray-800/50 cursor-pointer transition-colors ${
                       isSelected
                         ? 'bg-blue-50 dark:bg-blue-900/20'
@@ -536,6 +687,42 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
         )}
       </div>
 
+      {/* AI 问答（对选中的已索引文件） */}
+      {(aiCap.llm || askA) && (
+        <div className="px-3 py-2 border-t border-gray-200 dark:border-gray-800 shrink-0">
+          <div className="flex items-center gap-2">
+            <input
+              value={askQ}
+              onChange={e => setAskQ(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') void handleAsk() }}
+              disabled={!aiCap.llm || selectedFileIds.length === 0}
+              placeholder={!aiCap.llm
+                ? t('ai_llm_unavailable')
+                : selectedFileIds.length > 0
+                  ? t('ask_selected', { n: selectedFileIds.length })
+                  : t('ask_select_files')}
+              className="flex-1 px-3 py-1.5 text-xs border border-gray-200 dark:border-gray-700 rounded bg-gray-50 dark:bg-gray-800 text-gray-700 dark:text-gray-300 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-purple-500 disabled:opacity-40"
+            />
+            <button
+              onClick={() => void handleAsk()}
+              disabled={askLoading || !aiCap.llm || selectedFileIds.length === 0 || !askQ.trim()}
+              className="px-3 py-1.5 text-xs font-medium text-white bg-purple-600 hover:bg-purple-700 rounded disabled:opacity-40 disabled:cursor-not-allowed transition-colors shrink-0"
+            >
+              {askLoading ? '…' : t('ask_ai')}
+            </button>
+          </div>
+          {askA && (
+            <div className={`mt-2 text-xs rounded p-2.5 ${
+              askErr
+                ? 'text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/10 border border-red-100 dark:border-red-800/30'
+                : 'text-gray-700 dark:text-gray-300 bg-purple-50 dark:bg-purple-900/10 border border-purple-100 dark:border-purple-800/30'
+            }`}>
+              {askA}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* 状态栏 */}
       <div className="flex items-center justify-between px-3 py-1.5 border-t border-gray-200 dark:border-gray-800 text-xs text-gray-500 dark:text-gray-400 shrink-0">
         <span>{t('items_count', { count: visibleEntries.length })}</span>
@@ -545,6 +732,83 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
             : ''}
         </span>
       </div>
+
+      {/* 右键菜单（资源管理器风格） */}
+      {ctx && (() => {
+        const multi = selectedEntries.length > 1 && selection.has(ctx.entry.path)
+        const targets = multi ? selectedEntries : [ctx.entry]
+        const withIds = targets.filter(e => !!e.file_id)
+        const deletedTargets = targets.filter(e => e.status === 'deleted')
+        return (
+          <div
+            className="fixed z-50 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1 min-w-[180px]"
+            style={{
+              left: Math.min(ctx.x, Math.max(0, window.innerWidth - 200)),
+              top: Math.min(ctx.y, Math.max(0, window.innerHeight - 260)),
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { setCtx(null); openEntry(ctx.entry) }}>
+              {t('open')}
+            </button>
+            <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { setCtx(null); reveal(ctx.entry) }}>
+              {t('show_in_folder')}
+            </button>
+            <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={() => { setCtx(null); copyPath(ctx.entry) }}>
+              {t('copy_path')}
+            </button>
+            {!ctx.entry.is_dir && (
+              <>
+                <div className="my-1 border-t border-gray-100 dark:border-gray-700" />
+                <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  onClick={() => { setCtx(null); void exportText(ctx.entry, 'raw') }}>
+                  {t('export_raw')}
+                </button>
+                {isAudioEntry(ctx.entry) && (
+                  <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                    onClick={() => { setCtx(null); void exportText(ctx.entry, 'tagged') }}>
+                    {t('export_tagged')}
+                  </button>
+                )}
+                <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                  onClick={() => { setCtx(null); void reindex(targets) }}>
+                  {multi ? t('batch_reindex', { n: withIds.length }) : t('reindex')}
+                </button>
+              </>
+            )}
+            {deletedTargets.length > 0 && (
+              <button className="w-full px-3 py-1.5 text-left text-sm text-green-700 dark:text-green-400 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { setCtx(null); void restore(targets) }}>
+                {multi ? t('batch_restore', { n: deletedTargets.length }) : t('restore')}
+              </button>
+            )}
+            {!ctx.entry.is_dir && (
+              <button className="w-full px-3 py-1.5 text-left text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700"
+                onClick={() => { setCtx(null); void viewLog(ctx.entry) }}>
+                {t('view_index_log')}
+              </button>
+            )}
+          </div>
+        )
+      })()}
+
+      {/* 索引日志弹层 */}
+      {log !== null && (
+        <div className="fixed inset-0 z-50 bg-black/30 flex items-center justify-center" onClick={() => setLog(null)}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full mx-4 max-h-[70vh] overflow-auto" onClick={e => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
+              <span className="text-sm font-medium">{t('index_log_title')}</span>
+              <button onClick={() => setLog(null)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200">×</button>
+            </div>
+            <pre className="p-4 text-xs text-gray-700 dark:text-gray-300 whitespace-pre-wrap font-mono leading-relaxed">
+              {logLoading ? t('loading') : log}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

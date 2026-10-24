@@ -494,8 +494,8 @@ export default function IndexStatus() {
         <>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
             <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('total_files')} value={status.total_files.toLocaleString()} color="gray" icon={<FileTextIcon className="size-4" />} /></div>
-            <div onClick={() => navigate('/browse?filter=indexed')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" icon={<CheckIcon className="size-4" />} /></div>
-            <div onClick={() => navigate('/browse?filter=pending')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} icon={<RefreshIcon className="size-4" />} /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('indexed')} value={status.indexed.toLocaleString()} color="green" icon={<CheckIcon className="size-4" />} /></div>
+            <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('pending')} value={status.pending.toLocaleString()} color="yellow" subtitle={status.errors > 0 ? t('incl_errors') : undefined} icon={<RefreshIcon className="size-4" />} /></div>
             <div onClick={() => navigate('/browse')} className="cursor-pointer hover:opacity-80"><StatCard label={t('ocred')} value={status.ocred.toLocaleString()} color="purple" icon={<FileImageIcon className="size-4" />} /></div>
             <div
               className={`p-4 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 rounded-lg cursor-pointer hover:border-red-300 dark:hover:border-red-700 transition-colors ${status.errors > 0 ? 'cursor-pointer' : ''}`}

@@ -42,7 +42,9 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/dir-entries", get(dir_entries_handler))
         .route("/api/files/download", post(desktop_only_stub))
         .route("/api/files/open", post(desktop_only_stub))
+        .route("/api/files/open-path", post(desktop_only_stub))
         .route("/api/files/reveal", post(desktop_only_stub))
+        .route("/api/files/reveal-path", post(desktop_only_stub))
         .route("/api/files/restore", post(restore_handler))
 }
 

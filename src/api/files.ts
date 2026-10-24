@@ -367,6 +367,16 @@ export async function openFile(id: string): Promise<void> {
   return client.invoke('open_file', { id })
 }
 
+/** 按绝对路径打开文件（文件夹视图里尚未索引的文件）；仅桌面端可用。 */
+export async function openFilePath(path: string): Promise<void> {
+  return client.invoke('open_path', { path })
+}
+
+/** 按绝对路径在系统文件管理器中定位文件；仅桌面端可用。 */
+export async function revealPath(path: string): Promise<void> {
+  return client.invoke('reveal_path', { path })
+}
+
 export interface FileItem {
   file_id: string
   file_name: string
