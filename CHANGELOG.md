@@ -1,3 +1,41 @@
+## 2026-10-29（第六十九轮）：界面卡死（UI 线程被同步命令堵住）——会话命令移出 UI 线程 + 慢 IPC 看门狗
+
+> 背景（用户反馈）：程序在一次 AI 问答（网关 400 拒绝）后**彻底无响应**。
+> 现场取证：`link-searcher.exe` CPU 增量 **0s**（不是死循环，是阻塞等待）、
+> `Responding=False`（UI 线程没在泵消息）；同时 **Web API 全部 0.1s 正常**
+> （`/api/chat/sessions`、`/api/config`、`/api/index/status`、`/api/ai/capabilities`
+> 全 200）→ 后端健康、DB 池没饿死、没有全局锁被占，**只有 UI 线程卡住**。
+> `app.log` 停在 `← LLM: 16 chars` 之后，**没有任何命令级线索**（这是本次排查最大障碍）。
+
+**① 会话命令改为 `async` + `spawn_blocking`（`commands/ai.rs`）**
+
+- Tauri 的**同步**命令（没写 `async`）由框架在 **UI 线程原地执行**。而这一组命令每次都要
+  读写整份 `chat_history.json`（实测 1.6MB / 12 会话）：磁盘、杀软或同步盘一抖，整个窗口
+  就是"无响应"。
+- 改造 `list/create/delete/load/save/rename_chat_session` +
+  `export_chat_session` / `export_chat_session_json` + `get_ai_events` /
+  `get_turn_ai_events`：命令体只 clone `data_dir`（+ `db` 池）再交给
+  `spawn_blocking`，内部直接调 `session::*_impl`（参数名保持不变，
+  `save_chat_session { session }` 那条 AGENTS #4 的坑照旧避着）。
+- 并发安全：`mutate_history` 自带进程内互斥 + 原子 rename 写；顺序性由前端的
+  `.then()` 链保证（save 完才 list）。
+
+**② 慢 IPC 看门狗（`src/api/client.ts` + `commands/logs.rs`）**
+
+- `client.invoke` 现在统一计时，**≥2s** 就：`console.warn` + 调
+  `log_slow_invoke(cmd, ms)` 落到 `app.log`，格式 `[SLOW-IPC] <命令> took <ms>ms`。
+- 走原生 `invoke` 上报（不走包装器，避免递归）；Web 模式下跳过（没有 IPC）。
+- 同步命令的耗时**就等于** UI 冻结时长 —— 下次再卡，`grep SLOW-IPC app.log` 就能直接
+  指出是哪条命令、卡了多久，不必再靠外部工具猜。
+
+**③ 文档**
+
+- `AGENTS.md` 新增「⑥ 同步 `#[tauri::command]` 跑在 UI 线程」条目：凡是会碰磁盘/网络/
+  大文件的命令必须 `async` + `spawn_blocking`，否则偶发"整个窗口无响应"且日志无痕。
+
+> ⚠️ 如实记录：本轮**没有**100% 证明卡死就是会话命令造成的（现场没抓到栈）。取证只能
+> 确认"UI 线程阻塞 + 后端健康"。①是消除最可疑的一类阻塞源，②是补齐下一次的定位手段。
+
 ## 2026-10-29（第六十八轮）：设置页「测试连接」其实从未联网（2026-09-01 起的回归）；顺序探测 + 测完即卸 + 补 rerank
 
 > 背景（用户反馈）：切到局域网网关 `192.168.1.100:8000` 后，点「测试连接」服务器**没有任何

@@ -3,6 +3,17 @@ use tauri::State;
 
 use crate::state::AppState;
 
+/// 前端上报「这次 IPC 慢于阈值」（`client.invoke` 里统一计时，默认 >2s 才报）。
+///
+/// 存在理由：2026-10-29 那次界面卡死排查**完全没有线索** —— `app.log` 里没有任何
+/// 命令级耗时，只能靠外部工具猜是哪个同步命令把 UI 线程堵住了。现在任何慢调用
+/// 都会在这里落一行 `[SLOW-IPC]`，事后 grep 即可定位（同步命令慢 = UI 线程被占）。
+/// 前端在 Web 模式下不发（没有 IPC），故用不到 `async`。
+#[tauri::command]
+pub fn log_slow_invoke(cmd: String, ms: u64) {
+    log::warn!("[SLOW-IPC] {cmd} took {ms}ms");
+}
+
 #[tauri::command]
 pub fn get_logs(
     state: State<'_, AppState>,

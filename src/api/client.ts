@@ -343,7 +343,38 @@ function dispatchSessionDenied(body: Record<string, unknown>): void {
   }
 }
 
+/**
+ * 慢调用阈值：超过它就把「哪条命令、耗了多久」写进 app.log。
+ *
+ * 2026-10-29 排查界面卡死时**完全没有命令级线索**（后端全活、UI 线程被某个同步命令
+ * 堵住，日志里却什么都没有）。同步命令的耗时直接等于 UI 冻结时长，所以这个计时器
+ * 是唯一能从日志反推"是谁卡住"的手段。
+ */
+const SLOW_INVOKE_MS = 2000;
+
+async function reportSlowInvoke(command: string, ms: number): Promise<void> {
+  console.warn(`[SLOW-IPC] ${command} took ${ms}ms`);
+  if (!isTauri()) return;
+  try {
+    // 直接用原生 invoke：走本文件的 `invoke` 会形成递归。
+    const { invoke: rawInvoke } = await import('@tauri-apps/api/core');
+    await rawInvoke('log_slow_invoke', { cmd: command, ms });
+  } catch {
+    /* 上报失败不影响调用方 */
+  }
+}
+
 export async function invoke<T = unknown>(command: string, args?: InvokeArgs): Promise<T> {
+  const started = Date.now();
+  try {
+    return await invokeInner<T>(command, args);
+  } finally {
+    const ms = Date.now() - started;
+    if (ms >= SLOW_INVOKE_MS) void reportSlowInvoke(command, ms);
+  }
+}
+
+async function invokeInner<T = unknown>(command: string, args?: InvokeArgs): Promise<T> {
   if (isTauri()) {
     const { invoke: tauriInvoke } = await import('@tauri-apps/api/core');
     return tauriInvoke<T>(command, args || {});

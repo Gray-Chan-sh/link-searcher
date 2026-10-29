@@ -933,92 +933,158 @@ use session::now_ts;
 // 桌面端（IPC）一律以 `ORIGIN_UI` 身份访问会话，故 `origin` **不出现在命令参数里**
 // —— 前端不需要知道这个概念，也避免动 IPC 参数名（AGENTS.md #4 的坑）。
 // Web / 飞书分别由 webapi 路由传 `web` / `lark`（§5.5 阶段二）。
+//
+// ⚠️ 这一组命令**必须是 `async` + `spawn_blocking`**：每次调用都要读写整份
+// `chat_history.json`（实测 1.6MB / 12 会话）。同步命令由 Tauri 在 **UI 线程原地
+// 执行**，磁盘、杀软或同步盘一抖，整个窗口就是"无响应"——2026-10-29 实测卡死
+// （后端 Web API 全部 0.1s 正常，只有 UI 线程卡住）后改成现在的形式。
+// 顺序性由前端的 `.then()` 链保证（save 完才 list），后端 `mutate_history`
+// 另有进程内互斥，跨线程并发写是安全的。
 
 /// List this end's chat sessions, newest first (IPC = desktop `ui`).
 #[tauri::command]
-pub fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionMeta>, String> {
-    session::list_chat_sessions(state, Some(session::ORIGIN_UI.to_string()))
+pub async fn list_chat_sessions(state: State<'_, AppState>) -> Result<Vec<ChatSessionMeta>, String> {
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        session::list_chat_sessions_filtered(&dir, Some(session::ORIGIN_UI))
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))
 }
 
 /// Create a new empty session for this end. Returns its id.
 #[tauri::command]
-pub fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
-    session::create_chat_session(state, Some(session::ORIGIN_UI.to_string()))
+pub async fn create_chat_session(state: State<'_, AppState>) -> Result<String, String> {
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || session::create_chat_session_impl(&dir, session::ORIGIN_UI))
+        .await
+        .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Delete a session by id (only this end's sessions).
 #[tauri::command]
-pub fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    session::delete_chat_session(state, id, Some(session::ORIGIN_UI.to_string()))
+pub async fn delete_chat_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        session::delete_chat_session_impl(&dir, id, Some(session::ORIGIN_UI))
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Load a full session by id (only this end's sessions). Returns None if not found.
 #[tauri::command]
-pub fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Option<ChatSession>, String> {
-    session::load_chat_session(state, id, Some(session::ORIGIN_UI.to_string()))
+pub async fn load_chat_session(state: State<'_, AppState>, id: String) -> Result<Option<ChatSession>, String> {
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || Ok(session::find_chat_session(&dir, &id, Some(session::ORIGIN_UI))))
+        .await
+        .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Save (create or update) a session. If the session is new or has no title,
 /// derives a title from the first user message.
 #[tauri::command]
-pub fn save_chat_session(
+pub async fn save_chat_session(
     state: State<'_, AppState>,
     // 参数名必须与前端 `invoke('save_chat_session', { session })` 一致：Tauri
     // 按参数名反序列化，改名会让前端每次调用报 “invalid args” 且被静默吞掉，
     // 表现为聊天内容全部无法持久化（2026-09-23 拆分重构曾误改为 `sess`）。
     session: ChatSession,
 ) -> Result<(), String> {
-    session::save_chat_session(state, session, Some(session::ORIGIN_UI.to_string()))
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        self::session::save_chat_session_impl(&dir, session, Some(self::session::ORIGIN_UI))
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Rename a session (title only) — same narrow write entry the Feishu bot's
 /// `/rename` uses; kept symmetric so both transports behave identically.
 #[tauri::command]
-pub fn rename_chat_session(
+pub async fn rename_chat_session(
     state: State<'_, AppState>,
     id: String,
     title: String,
 ) -> Result<String, String> {
-    session::rename_chat_session_impl(&state.data_dir, &id, &title, Some(session::ORIGIN_UI))
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        session::rename_chat_session_impl(&dir, &id, &title, Some(session::ORIGIN_UI))
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Export a session as Markdown (chat transcript with full traceability).
 #[tauri::command]
-pub fn export_chat_session(
+pub async fn export_chat_session(
     state: State<'_, AppState>,
     id: String,
     turns: Option<Vec<usize>>,
 ) -> Result<String, String> {
-    session::export_chat_session(state, id, turns, Some(session::ORIGIN_UI.to_string()))
+    let dir = state.data_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        session::export_chat_session_impl(&dir, &id, turns.as_deref(), Some(session::ORIGIN_UI))
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Export a session as analysis-friendly JSON.
 #[tauri::command]
-pub fn export_chat_session_json(
+pub async fn export_chat_session_json(
     state: State<'_, AppState>,
     id: String,
     turns: Option<Vec<usize>>,
 ) -> Result<String, String> {
-    session::export_chat_session_json(state, id, turns, Some(session::ORIGIN_UI.to_string()))
+    let dir = state.data_dir.clone();
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        session::export_chat_session_json_impl(
+            &dir,
+            &id,
+            Some(&db),
+            turns.as_deref(),
+            Some(session::ORIGIN_UI),
+        )
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Structured RAG pipeline events for a session.
 #[tauri::command]
-pub fn get_ai_events(
+pub async fn get_ai_events(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<Vec<AiEventJson>, String> {
-    session::get_ai_events(state, session_id)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+        let events = crate::db::ai_events::get_session_events(&conn, &session_id)
+            .map_err(|e| format!("{e}"))?;
+        Ok(events.iter().map(session::ai_event_to_json).collect())
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 /// Structured RAG pipeline events for one turn of a session.
 #[tauri::command]
-pub fn get_turn_ai_events(
+pub async fn get_turn_ai_events(
     state: State<'_, AppState>,
     session_id: String,
     turn_number: usize,
 ) -> Result<Vec<AiEventJson>, String> {
-    session::get_turn_ai_events(state, session_id, turn_number)
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
+        let events = crate::db::ai_events::get_turn_events(&conn, &session_id, turn_number)
+            .map_err(|e| format!("{e}"))?;
+        Ok(events.iter().map(session::ai_event_to_json).collect())
+    })
+    .await
+    .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ use crate::commands::settings::{
 };
 use crate::commands::webapi::{web_session_logout, web_session_status};
 use crate::commands::performance::{detect_hardware, auto_optimize, get_performance_profile, set_performance_tier};
-use crate::commands::logs::{clear_logs, get_logs, list_session_logs};
+use crate::commands::logs::{clear_logs, get_logs, list_session_logs, log_slow_invoke};
 use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::rerank::check_rerank_installed;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
@@ -129,6 +129,7 @@ fn run_with_config(app_config: config::AppConfig) {
             test_ai_gateway,
             ai_capabilities,
             cancel_ai_request,
+            log_slow_invoke,
             get_search_history,
             clear_search_history,
             export_search_results,

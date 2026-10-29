@@ -421,3 +421,22 @@ semgrep scan \
 - **触发条件**：任何新增/改动"提取"路径（批处理、watcher、Web API、verify/重提取、integrity 自愈）；所有重提取入口都汇入 `index_file`
 - **修复人/时间**：2026-10-15
 - **Tags**: `indexer.rs`, `extract_and_index_single`, `index_file`, `&Pool`, 连接池, `acquire_doc`, 界面无响应
+
+### 6. 同步 `#[tauri::command]` 在 UI 线程原地执行 → 整个窗口"无响应"
+- **现象**：界面彻底卡住（`Responding=False`），但 **CPU 不涨**（阻塞等待而非死循环）；同时 Web API
+  （`https://127.0.0.1:8443/api/...`）**0.1s 全部正常** —— 后端健康，只有 UI 线程卡住；`app.log`
+  里**没有任何命令级线索**（2026-10-29 实测，停在某个 LLM 日志之后）
+- **根因**：Tauri 的**同步**命令（签名没写 `async`）由 `body_blocking` 在收到 IPC 的那个线程
+  **原地执行**，而该线程就是跑窗口消息循环的 UI 线程。命令里只要碰磁盘/网络/大文件（如每次
+  读写 1.6MB 的 `chat_history.json`），磁盘、杀软或同步盘一抖，整个窗口就冻住
+- **修复**（2026-10-29）：会话类 10 个命令（`list/create/delete/load/save/rename_chat_session`、
+  `export_chat_session(_json)`、`get_(turn_)ai_events`）改为 `async` + `spawn_blocking`，
+  只 clone `data_dir` / `db` 池进去；`src/api/client.ts` 的 `invoke` 统一计时，**≥2s** 调
+  `log_slow_invoke` 落 `[SLOW-IPC] <cmd> took <ms>ms`
+- **铁律**：命令体里出现「文件读写 / HTTP / 大 JSON 序列化 / 全表查询」就**必须 `async` +
+  `spawn_blocking`**。只有纯内存、亚毫秒的读取才允许同步；拿不准就 `async`
+- **检查方法**：`grep "\[SLOW-IPC\]" app.log` 看是哪条命令、卡了多久；或对比"Web API 正常 +
+  窗口无响应"这个组合快速确认是 UI 线程
+- **触发条件**：任何新增 `#[tauri::command]`（尤其是"读配置/读会话/读写日志/导出"这类）
+- **修复人/时间**：2026-10-29
+- **Tags**: `#[tauri::command]`, `body_blocking`, UI 线程, `spawn_blocking`, `chat_history.json`, `SLOW-IPC`
