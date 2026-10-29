@@ -26,7 +26,7 @@ pub(super) fn prepare_smart_prompt(
     query: &str,
 ) -> Result<PreparedSmart, String> {
     let hits = bm25_relevant_hits(
-        state, &query.to_lowercase(), 3, crate::ai::embedding_enabled(),
+        &RetrievalCtx::from_state(state), &query.to_lowercase(), 3, crate::ai::embedding_enabled(),
         None, None, None, None, None, None,
     )?;
 
@@ -231,9 +231,37 @@ pub(crate) async fn prepare_conversation_prompt(
     .await
 }
 
+/// `spawn_blocking` 阶段需要独占持有的全部输入（查询改写结果 + 本轮参数）。
+/// `spawn_blocking` 要求 `'static`，所以这里都是 owned 值（`messages` 等为
+/// 小对象拷贝，几 KB 量级）。
+struct AssembleJob {
+    messages: Vec<ChatMessage>,
+    source_ids: Vec<String>,
+    scope: TurnScope,
+    session_retrieval_scope: Vec<String>,
+    strict_docs: bool,
+    full_recall: bool,
+    session_id: String,
+    clarify_reply: Option<ClarifyReply>,
+    last_q: String,
+    search_q: String,
+    search_terms: Vec<String>,
+    rewritten: bool,
+    events: Vec<(String, serde_json::Value)>,
+    material_order: Vec<String>,
+    app: Option<tauri::AppHandle>,
+    cancel: Option<std::sync::Arc<crate::ai::CancelToken>>,
+}
+
 /// [`prepare_conversation_prompt`] plus a per-generation [`CancelToken`], so a
 /// cancel that arrives during retrieval aborts the pipeline instead of letting
 /// it hand work to the LLM afterwards.
+///
+/// ⚠️ 本函数分两段执行：**查询改写**（含两次 LLM 调用）留在 async 上下文；
+/// **检索 + 组装**整体交给 `spawn_blocking`（`assemble_conversation_prompt`）。
+/// 后者是纯同步重活（BM25 + 全库向量扫描 + chunk 精检 + 远程 rerank），debug
+/// 构建实测 30~60s —— 以前它直接跑在 async worker 上，会把 tokio worker 钉死
+/// 数十秒，表现为「发问后界面长时间零输出」。
 pub(crate) async fn prepare_conversation_prompt_with_cancel(
     state: &AppState,
     messages: &[ChatMessage],
@@ -248,8 +276,9 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     clarify_reply: Option<&ClarifyReply>,
     // 重跑（卡片「换一批证据」）：上一轮的回答正文。`Some` ⇒ 走"查询扩展 + 重新检索"。
     retry_prior_answer: Option<&str>,
-    cancel: Option<&crate::ai::CancelToken>,
+    cancel: Option<std::sync::Arc<crate::ai::CancelToken>>,
 ) -> Result<PreparedConversation, String> {
+    let ctx = RetrievalCtx::from_state(state);
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = app {
             let _ = a.emit("ai-progress", AiProgress {
@@ -261,13 +290,6 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             });
         }
     };
-    macro_rules! check_cancel {
-        () => {
-            if cancel.is_some_and(crate::ai::CancelToken::is_cancelled) {
-                return Err("请求已取消".into());
-            }
-        };
-    }
     let last_q = question_from_messages(messages);
     // 澄清回填：用户回答追问时，前端只发答案本身（如"汪均益"），原问题随 binding
     // 回传。此处用「原问题 + 答案」作为本轮问题，答案即强锚点，检索才不会退化成
@@ -287,7 +309,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         strict_docs,
     );
     let mut events: Vec<(String, serde_json::Value)> = Vec::new();
-    let mut material_order = prior_material_order(state, session_id);
+    let material_order = prior_material_order(&ctx, session_id);
     emit_progress("query_rewrite", "查询改写中...", 0, 0);
     let rule = rewrite_query(&last_q, messages);
     let original_rule_query = rule.query.clone();
@@ -334,7 +356,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     } else if skip_llm_rewrite {
         rule.query.clone()
     } else {
-        let context_paths = prior_evidence_paths(state, session_id);
+        let context_paths = prior_evidence_paths(&ctx, session_id);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
             // 不许继承的场合（新话题）改写不得引入本轮问句之外的实体（见 rewrite_adds_foreign_entity）
             Some(llm) if llm != rule.query && !rewrite_adds_foreign_entity(&llm, &last_q, parent_q) => llm,
@@ -360,13 +382,68 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         "retry": is_retry,
     })));
 
+    // ── 检索 + 组装：同步重活，整体挪出 async worker ─────────────────────
+    // 复用 `ai.rs` 里 LLM 调用同款的 `spawn_blocking` 范式。此前这段直接
+    // `.await` 在命令体内，debug 构建下要把一个 tokio worker 钉死 30~60s。
+    let job = AssembleJob {
+        messages: messages.to_vec(),
+        source_ids: source_ids.to_vec(),
+        scope: scope.clone(),
+        session_retrieval_scope: session_retrieval_scope.to_vec(),
+        strict_docs,
+        full_recall,
+        session_id: session_id.to_string(),
+        clarify_reply: clarify_reply.cloned(),
+        last_q,
+        search_q,
+        search_terms,
+        rewritten,
+        events,
+        material_order,
+        app: app.cloned(),
+        cancel,
+    };
+    tokio::task::spawn_blocking(move || assemble_conversation_prompt(&ctx, job))
+        .await
+        .map_err(|e| format!("检索任务异常退出: {e}"))?
+}
+
+/// [`prepare_conversation_prompt_with_cancel`] 的阻塞段：纯同步检索 + prompt 组装。
+fn assemble_conversation_prompt(
+    ctx: &RetrievalCtx,
+    job: AssembleJob,
+) -> Result<PreparedConversation, String> {
+    let AssembleJob {
+        messages, source_ids, scope, session_retrieval_scope, strict_docs, full_recall,
+        session_id, clarify_reply, last_q, search_q, search_terms, rewritten,
+        mut events, mut material_order, app, cancel,
+    } = job;
+    let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
+        if let Some(a) = &app {
+            let _ = a.emit("ai-progress", AiProgress {
+                session_id: session_id.clone(),
+                phase: phase.to_string(),
+                message: message.to_string(),
+                current,
+                total,
+            });
+        }
+    };
+    macro_rules! check_cancel {
+        () => {
+            if cancel.as_deref().is_some_and(crate::ai::CancelToken::is_cancelled) {
+                return Err("请求已取消".into());
+            }
+        };
+    }
+
     // 从 scope 提取检索过滤参数
     let mut dir_ids: Vec<String> = Vec::new();
     let mut path_prefixes: Vec<String> = Vec::new();
     let mut scope_file_resolved: Vec<(String, String)> = Vec::new();
     {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
-        for dir_path in session_retrieval_scope {
+        let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
+        for dir_path in &session_retrieval_scope {
             let p = dir_path.trim().trim_end_matches('/');
             if p.is_empty() { continue; }
             // 先试监控根精确匹配（绝对路径或别名）
@@ -404,12 +481,12 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     }
     // 解析 @目录：绝对监控根 → dir_ids；相对路径子目录 → path_prefixes
     let dir_roots: Vec<(String, String)> = {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
         let dirs = crate::db::dir_config::list_dirs(&conn).map_err(|e| format!("db error: {e}"))?;
         dirs.into_iter().map(|d| (d.id, d.path)).collect()
     };
     {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
         for dir_path in &scope.mention_dirs {
             let p = dir_path.trim_end_matches('/');
             if p.is_empty() {
@@ -458,7 +535,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
 
     // 解析 @mention 文件路径 → file_ids，传给搜索限定范围
     let (mut mention_resolved, missing_mentions) = {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
         let (r, m) = resolve_mention_file_ids(&conn, &scope.mention_files);
         drop(conn);
         (r, m)
@@ -539,7 +616,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         .map(|v| !v.eq_ignore_ascii_case("mix"))
         .unwrap_or(true);
     let mut rrf_acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    let trace_ids_v = trace_target_ids(state, &std::env::var("LINK_SEARCHER_TRACE_TARGET").unwrap_or_default());
+    let trace_ids_v = trace_target_ids(&ctx, &std::env::var("LINK_SEARCHER_TRACE_TARGET").unwrap_or_default());
     // 从问句提炼核心实体词（如"常宏"），三通道共用：
     // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
     // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
@@ -548,7 +625,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         .map(|v| !v.eq_ignore_ascii_case("off"))
         .unwrap_or(false);
     let final_kws = if vocab_rewrite_enabled {
-        match state.db.get() {
+        match ctx.db.get() {
             Ok(c) => match crate::ai::vocabulary_rewrite(&search_q, &c) {
                 Some(llm_kws) => {
                     let mut merged = retrieval_kws.clone();
@@ -582,11 +659,11 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         check_cancel!();
         emit_progress("bm25", "BM25 检索中...", 0, 0);
         let total_files = {
-            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
         };
         let bm25_hits = bm25_relevant_hits(
-            state, &bm25_query, (total_files as usize).max(500), inner_semantic_fuse,
+            &ctx, &bm25_query, (total_files as usize).max(500), inner_semantic_fuse,
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
         ).unwrap_or_default();
         let bm25_count = bm25_hits.len();
@@ -619,7 +696,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         if crate::ai::embedding_enabled() && !has_locked_scope {
             emit_progress("vector", "语义扫描中...", 0, 0);
             log::info!("[AI]   about to call vector_full_scan");
-            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             // 语义查询用**改写后的完整问句**：把问句压成实体词会让查询向量
             // 退化成几个孤立汉字（"深蓝公司"→"深蓝"），余弦普遍低于阈值，
             // 语义通道等于被关掉。实体词本就在 search_q 内，无需再拼。
@@ -664,6 +741,9 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
                 // 注：曾试过把全库 chunk 扫描作为独立召回通道，实测**无效果**
                 // （候选仅 +5/~3244，top-20 完全不变）——因为 BM25 已命中数千份、
                 // 文档本就在候选池内，弱 chunk 信号无法改变排名，且 +6.2s/查询。
+                // 这一步要遍历数万 chunk 的向量做余弦，是"语义扫描"之后的第二个
+                // 静默长阶段（日志里只有事后的一行 chunk_vector_scan），补事件。
+                emit_progress("vector", "块级语义精检中...", 0, 0);
                 if let Ok(chunk_hits) = {
                     // 收集粗筛命中文件 → md5 候选集
                     let hit_ids: Vec<String> = all_hits.iter().map(|h| h.file_id.clone()).collect();
@@ -721,7 +801,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             }
             emit_progress("vector", &format!("语义扫描完成，累计 {} 份", all_hits.len()), all_hits.len(), all_hits.len());
         }
-        let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
         let path_kws: Vec<String> = if final_kws.is_empty() {
             // 无实体词时退化为完整问句 OR 分词片段，尽量不丢召回
             crate::search::schema::split_query_terms(&search_q)
@@ -754,7 +834,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             && bm25_count < char_fallback_max
             && strong_vector_hits == 0
         {
-            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             let cands = char_cooccur_candidates(
                 &c, &final_kws, CHAR_FALLBACK_MAX_CHARS, CHAR_FALLBACK_MAX_CANDIDATES,
             );
@@ -771,7 +851,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             }
         }
         {
-            let c = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             // 批量补全 path，避免每 hit 一次 DB round trip（N+1）
             let missing_ids: Vec<String> = all_hits.iter()
                 .filter(|h| h.path.is_empty())
@@ -842,7 +922,11 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             .unwrap_or(50);
         if rerank_enabled && all_hits.len() > 10 {
             let top_n = rerank_top_n.min(all_hits.len());
-            let rc = state.db.get().map_err(|e| format!("db error: {e}"))?;
+            // 重排是最长的**静默**阶段：远程 /rerank 一次要传 50 份片段，实测
+            // 17s（debug）且此前一行日志/事件都不发 —— 用户只看到"语义扫描完成"
+            // 之后界面彻底不动。开始/备妥/完成各发一次。
+            emit_progress("rerank", &format!("重排中... 候选 {top_n} 份（远程重排通常需数秒）"), 0, 0);
+            let rc = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             let cand_ids: Vec<String> = all_hits[..top_n].iter().map(|h| h.file_id.clone()).collect();
             let cand_recs = crate::db::tracker::get_files_by_ids(&rc, &cand_ids).unwrap_or_default();
             let mut md5s: Vec<String> = cand_recs.iter()
@@ -900,6 +984,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             }
             drop(rc);
             if !passages.is_empty() {
+                emit_progress("rerank", &format!("重排中... 已备妥 {} 份候选片段", passages.len()), 0, 0);
                 match crate::ai::rerank(&search_q, &passages) {
                     Some(scores) if scores.len() == rerank_idx.len() => {
                         // 默认 0.3：实测 75 题下 w=0.3 的每一类别都不低于启用重排前，
@@ -921,6 +1006,9 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
                         log::warn!("[AI]   rerank: unavailable, keeping original order");
                     }
                 }
+                emit_progress("rerank", &format!("重排完成，{} 份候选已重排", rerank_idx.len()), rerank_idx.len(), rerank_idx.len());
+            } else {
+                emit_progress("rerank", "重排跳过（无可用候选片段）", 0, 0);
             }
         }
         emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());
@@ -928,7 +1016,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     }
 
     const MAX_CONTENT_INJECT: usize = 30;
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
 
     // 预取本轮需要的所有文件记录（旧来源 + mention + 注入候选），
     // 后续循环一律查内存 Map，避免每文件一次 DB round trip（N+1）。
@@ -1306,13 +1394,13 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     // 指代消解基于改写后的 search_q：代词已在改写中展开，避免规则管道二次误判歧义。
     let (clarify_note, clarify_candidates, clarify_slots, clarify_blocking) = {
         use crate::commands::clarify;
-        let session_paths = prior_evidence_paths(state, session_id);
+        let session_paths = prior_evidence_paths(&ctx, &session_id);
         let current: Vec<(String, String)> =
             evidence.iter().map(|e| (e.path.clone(), e.snippet.clone())).collect();
         let conditions: Vec<(String, String)> =
             scope.conditions.iter().map(|c| (c.kind.clone(), c.value.clone())).collect();
         let mut ir = clarify::propose_ir(&search_q);
-        if let Some(r) = clarify_reply {
+        if let Some(r) = clarify_reply.as_ref() {
             for b in &r.bindings {
                 if !clarify::apply_binding(&mut ir, &b.surface, &b.value) {
                     log::warn!("[AI]   clarify binding missed: surface={} value={}", b.surface, b.value);

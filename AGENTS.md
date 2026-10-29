@@ -262,6 +262,33 @@ bot 是**成员 crate**，不是应用包的依赖 → `tauri dev` 的文件监�
 改了 `src-tauri/lark-bot/**` 后**必须重启 dev**（`predev` 才会重编 sidecar），否则跑的还是旧二进制
 （2026-10-15 实测：第一次飞书验收跑的就是旧 bin，白测一轮）。
 
+**⑥ `--lib` 测试二进制启动即 `0xc0000139`：别怀疑代码，先看 manifest（2026-10-29 实测）**
+
+症状：`cargo test --lib` 里 `link_searcher_lib-*.exe` **在任何测试代码运行前**就退出，
+`--lib --list` 也立刻失败，cargo 只报：
+
+```
+process didn't exit successfully: ...\link_searcher_lib-<hash>.exe
+(exit code: 0xc0000139, STATUS_ENTRYPOINT_NOT_FOUND)
+note: test exited abnormally
+```
+
+同一轮的 `integration` / `lark-gate` / `lark-bot` 全部正常；`git stash` 掉当轮改动后同一条命令全绿
+—— 极易被误判成"改动引入的 bug"。
+
+根因：`build.rs` 用 `cargo:rustc-link-arg-tests` 给测试目标补 comctl32 v6 manifest，而 cargo
+**不把 `--lib` 的单元测试二进制当作 test 目标**（那是 lib target 以 `--test` 模式链接）。
+它平时能用，只是因为 `windows`/`rfd` 的 `comctl32!TaskDialogIndirect` 恰好没被链进去；一旦某次
+**CGU 划分变化**（与 UI 无关的改动也会）把它带进来，无 manifest ⇒ 加载器按 comctl32 **v5** 绑定
+⇒ 缺导出函数 ⇒ 启动即死。
+
+→ 修法：用 `cargo:rustc-link-arg`（覆盖所有目标）补 manifest，并给 **bins** 加
+`/MANIFEST:NO`（后出现的选项生效）——主二进制那份由 `tauri_build` 的 `resource.lib` 提供，
+再叠 `/MANIFESTINPUT` 会 `LNK1123`。
+
+→ 排查手法（不必装 dumpbin）：读 PE 导入表比对"能跑的 exe"与"跑不起来的 exe"差在哪几个导入；
+或用 ASCII 搜 `asm.v1` 判断 manifest 是否真的嵌进去了（主程序有、测试二进制没有 ⇒ 就是这个坑）。
+
 ## 静态分析（Semgrep）
 
 每次提交前，必须运行阻塞级检查，**零发现**才可提交：

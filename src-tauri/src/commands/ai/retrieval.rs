@@ -1,7 +1,40 @@
 //! Retrieval scoring: scope filtering, BM25/semantic fusion, rerank ordering
 //! and trace instrumentation.
 
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+
+use crate::search::IndexManager;
+
 use super::{AppState, ScoredHit, truncate_text};
+
+/// 检索/组装阶段真正用到的状态子集（DB 池 + 索引 + 数据目录）。
+///
+/// 存在的理由：整条 RAG 检索管线是**同步重活**（BM25 + 全库向量扫描 + chunk
+/// 精检 + 远程 rerank，debug 构建实测 30~60s），必须整体挪进
+/// `spawn_blocking`；而它要求 `'static`，`AppState` 又含不可 `Clone` 的
+/// `Option<FileWatcher>`，无法整体搬走。此处只搬可 `Clone` 的句柄（不复制数据），
+/// 顺带收窄依赖面：管线读不到「扫描/重建」等无关状态。
+#[derive(Clone)]
+pub(crate) struct RetrievalCtx {
+    pub(crate) db: Pool<SqliteConnectionManager>,
+    pub(crate) index_manager: Arc<RwLock<IndexManager>>,
+    pub(crate) data_dir: PathBuf,
+}
+
+impl RetrievalCtx {
+    pub(crate) fn from_state(state: &AppState) -> Self {
+        Self {
+            db: state.db.clone(),
+            index_manager: Arc::clone(&state.index_manager),
+            data_dir: state.data_dir.clone(),
+        }
+    }
+}
+
 /// Merge retrieval-scope entries into a non-overlapping (union) set of
 /// path prefixes. dir 过滤（监控根, dir_ids）与子目录 prefix 过滤当前是两个
 /// 独立 Must 条件——同设父目录+子目录会被 AND 错误收窄。此处按"父吞子"
@@ -396,9 +429,9 @@ pub(super) fn trace_rank<'a>(
     );
 }
 
-pub(super) fn trace_target_ids(state: &AppState, sub: &str) -> Vec<String> {
+pub(super) fn trace_target_ids(ctx: &RetrievalCtx, sub: &str) -> Vec<String> {
     if sub.is_empty() { return Vec::new(); }
-    let Ok(conn) = state.db.get() else { return Vec::new() };
+    let Ok(conn) = ctx.db.get() else { return Vec::new() };
     let Ok(mut stmt) = conn.prepare("SELECT id FROM file_tracking WHERE path LIKE ?1") else { return Vec::new() };
     let pat = format!("%{sub}%");
     stmt.query_map([&pat], |r| r.get::<_, String>(0))
@@ -537,7 +570,7 @@ pub(super) fn apply_rerank_order(
 /// BM25 candidates via RRF fusion with embedding cosine scores (gracefully
 /// falls back to BM25-only on any failure).
 pub(crate) fn bm25_relevant_hits(
-    state: &AppState,
+    ctx: &RetrievalCtx,
     query: &str,
     limit: usize,
     semantic: bool,
@@ -549,7 +582,7 @@ pub(crate) fn bm25_relevant_hits(
     file_ids: Option<Vec<String>>,
 ) -> Result<Vec<ScoredHit>, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
-    let mgr = state.index_manager.read().map_err(|e| format!("{e}"))?;
+    let mgr = ctx.index_manager.read().map_err(|e| format!("{e}"))?;
     let reader = mgr.reader().map_err(|e| format!("{e}"))?;
     let searcher = SearcherWrap::new(reader.clone(), mgr.index().as_ref().clone());
     drop(mgr);
@@ -592,7 +625,7 @@ pub(crate) fn bm25_relevant_hits(
         result = searcher.search(&fallback_params).map_err(|e| format!("{e}"))?;
     }
 
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut bm25_hits: Vec<ScoredHit> = Vec::new();
     let mut seen_md5: std::collections::HashSet<String> = std::collections::HashSet::new();
     {

@@ -242,7 +242,7 @@ async fn chat_ask_handler(
     }
     let app_state = state.app_handle.state::<AppState>();
     let hits = crate::commands::ai::bm25_relevant_hits(
-        &app_state,
+        &crate::commands::ai::RetrievalCtx::from_state(&app_state),
         &question.to_lowercase(),
         3,
         crate::ai::embedding_enabled(),

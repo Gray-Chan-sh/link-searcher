@@ -4,7 +4,7 @@
 use serde::Serialize;
 use tauri::State;
 
-use super::{ChatMessage, EvidenceItem, truncate_text};
+use super::{ChatMessage, EvidenceItem, RetrievalCtx, truncate_text};
 use crate::state::AppState;
 pub fn chat_history_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join("chat_history.json")
@@ -893,9 +893,9 @@ pub(super) fn visible_material_numbers(context: &str) -> std::collections::BTree
 
 /// Session-stable material numbers: distinct file_ids in first-appearance order
 /// across the session's persisted per-turn evidence; index + 1 = stable `[N]`.
-pub(super) fn prior_material_order(state: &AppState, session_id: &str) -> Vec<String> {
+pub(super) fn prior_material_order(ctx: &RetrievalCtx, session_id: &str) -> Vec<String> {
     if session_id.is_empty() { return Vec::new(); }
-    let h = read_history(&state.data_dir);
+    let h = read_history(&ctx.data_dir);
     let Some(session) = h.sessions.into_iter().find(|s| s.id == session_id) else { return Vec::new() };
     let mut order: Vec<String> = Vec::new();
     for turn in &session.per_turn_evidence {
@@ -910,9 +910,9 @@ pub(super) fn prior_material_order(state: &AppState, session_id: &str) -> Vec<St
 
 /// File paths the session has already surfaced (first-appearance order). Fed to
 /// the rewrite model as entity context so pronouns can bind to case/person names.
-pub(super) fn prior_evidence_paths(state: &AppState, session_id: &str) -> Vec<String> {
+pub(super) fn prior_evidence_paths(ctx: &RetrievalCtx, session_id: &str) -> Vec<String> {
     if session_id.is_empty() { return Vec::new(); }
-    let h = read_history(&state.data_dir);
+    let h = read_history(&ctx.data_dir);
     let Some(session) = h.sessions.into_iter().find(|s| s.id == session_id) else { return Vec::new() };
     let mut paths: Vec<String> = Vec::new();
     for turn in &session.per_turn_evidence {

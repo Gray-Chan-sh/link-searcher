@@ -411,7 +411,7 @@ pub fn run_cli() -> Result<()> {
                 };
                 let limit = if full_recall { (total_files as usize).max(500) } else { 100 };
                 let bm25_hits = crate::commands::ai::bm25_relevant_hits(
-                    &state,
+                    &crate::commands::ai::RetrievalCtx::from_state(&state),
                     &query.to_lowercase(),
                     limit,
                     false,

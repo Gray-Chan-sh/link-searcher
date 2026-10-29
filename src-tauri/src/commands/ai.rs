@@ -637,6 +637,7 @@ mod retrieval;
 pub use retrieval::{merge_scope_prefixes, weighted_mix};
 pub(crate) use retrieval::{bm25_relevant_hits, rrf_add};
 use retrieval::{apply_rerank_order, char_cooccur_candidates, hit_in_scope, trace_rank, trace_target_ids};
+pub(crate) use retrieval::RetrievalCtx;
 #[cfg(test)]
 use retrieval::rrf_fuse;
 
@@ -768,7 +769,7 @@ pub async fn conversation_ask_stream(
     log::info!("[AI] conversation_ask_stream: scope={:?}", scope);
     let _chat_turn = crate::ai::ChatTurnGuard::begin();
 
-    let prepared = prepare_conversation_prompt_with_cancel(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref(), retry_prior_answer.as_deref(), Some(inflight.token())).await;
+    let prepared = prepare_conversation_prompt_with_cancel(&state, &messages, &source_ids, &scope, &session_retrieval_scope, strict_docs, full_recall.unwrap_or(false), false, Some(&app), &session_id, clarify_reply.as_ref(), retry_prior_answer.as_deref(), Some(inflight.token_arc())).await;
     match &prepared {
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),

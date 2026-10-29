@@ -45,6 +45,25 @@ fn embed_test_manifest() {
     if std::fs::write(&manifest_path, manifest).is_err() {
         return;
     }
+    // ⚠️ 用 `rustc-link-arg`（**所有目标**）而不是 `rustc-link-arg-tests`：
+    // 后者只覆盖 `tests/*.rs` 这类独立测试目标，**不覆盖 `--lib` 的单元测试
+    // 二进制**（那是 lib target 以 `--test` 模式链接，cargo 不把它算作 test 目标）。
+    // 2026-10-29 实测：一次与 UI 无关的改动（RAG 检索挪进 spawn_blocking）改变了
+    // CGU 划分，`rfd`/`tauri` 的 `comctl32!TaskDialogIndirect` 被连带链进了 lib
+    // 测试二进制 —— 它没有 manifest → 加载期按 comctl32 v5 绑定 → 进程在任何测试
+    // 运行前就以 `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)` 退出。
+    //
+    // 主二进制（bin target）的 manifest 由 `tauri_build` 的 resource.lib 提供，
+    // 再叠一份 `/MANIFESTINPUT` 会让 link.exe 报 LNK1123 —— 所以对 bins 显式给
+    // `/MANIFEST:NO`（后出现的选项生效），即"不要生成新的，用 .res 里那份"。
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
+    println!("cargo:rustc-link-arg=/MANIFESTUAC:NO");
+    println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
+    // 旧的 `-tests` 版本保留：重复输入由 link.exe 合并，行为不变。
     println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
     println!(
         "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",

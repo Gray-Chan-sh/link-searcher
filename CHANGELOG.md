@@ -1,3 +1,64 @@
+## 2026-10-29（第六十七轮）：AI 聊天"发问后长时间零输出"——检索挪出 async worker + 补齐静默阶段进度
+
+> 背景（现场日志 `D:\index\app.log`，2026-10-29 四次启动）：点「发送」后 30~60 秒界面
+> **完全没有任何输出**，用户以为卡死。还原时间线（06:45 那轮）：点发送 06:45:32 →
+> BM25 06:45:34 → 文档向量扫描 06:45:38 → chunk 扫描 06:45:44 → **rerank 17s 完全静默**
+> → 06:46:02 才发 LLM。不是死锁，是"同步重活跑在 async worker 上 + 长阶段不发事件"。
+
+**① 检索 + 组装整体挪进 `spawn_blocking`（`commands/ai/prompt.rs`）**
+
+- `prepare_conversation_prompt_with_cancel` 拆成两段：**查询改写**（两次 LLM 调用，必须
+  `.await`）留在 async 上下文；**检索 + prompt 组装**（BM25 + 全库向量扫描 + chunk 精检 +
+  远程 rerank，debug 构建实测 30~60s，纯同步）整体交给
+  `tokio::task::spawn_blocking(assemble_conversation_prompt)` —— 与同文件 LLM 调用
+  （`ai.rs:848`）的既有范式一致。此前这段直接 `.await` 在命令体内，会把一个 tokio worker
+  钉死数十秒（Tauri 命令、Web API、后台任务共用同一 runtime）。
+- 新增 `AssembleJob`（`spawn_blocking` 需要 `'static`，故把改写结果与本轮参数打包成 owned 值；
+  都是小对象拷贝，几 KB 量级）+ `assemble_conversation_prompt(ctx, job)` 同步函数
+  （约 1000 行 Retrieval 段原文搬移，`state.` → `ctx.`）。
+- 新增窄上下文 `RetrievalCtx { db, index_manager, data_dir }`（`commands/ai/retrieval.rs`）：
+  `AppState` 含不可 `Clone` 的 `Option<FileWatcher>`，无法整体搬进 `'static` 闭包；
+  只搬可 `Clone` 的句柄（不复制数据），顺带收窄检索管线的依赖面。
+  同步改签名：`bm25_relevant_hits` / `trace_target_ids` / `prior_material_order` /
+  `prior_evidence_paths` 收 `&RetrievalCtx`（调用方 `cli.rs`、`webapi/routes/ai.rs` 各 1 处适配）。
+- 取消语义不变：`CancelToken` 改成 `Arc` 传入（`inflight.token_arc()`），阻塞段内的
+  `check_cancel!()` 照旧在每个阶段边界生效。
+
+**② 补齐静默阶段的 `ai-progress` 事件（`commands/ai/prompt.rs`）**
+
+- **chunk 级语义精检**：发「块级语义精检中...」——此前这步要遍历数万条块向量做余弦，日志里
+  只有事后一行的 `chunk_vector_scan returned N hits`，界面全程不动。
+- **rerank**：开始发「重排中... 候选 50 份（远程重排通常需数秒）」→ 备妥片段发
+  「重排中... 已备妥 N 份候选片段」→ 结束发「重排完成，N 份候选已重排」；无候选片段时发
+  「重排跳过」。此前 17s 的远程 rerank **一行事件都不发**（`prompt.rs` 只在向量阶段结束后
+  发过一条）。
+- 前端无需改动：`ChatPanel` 直接渲染 `progress.message`（phase 只用于区分事件来源）。
+
+**③ 修复测试门禁的 `0xc0000139`（`src-tauri/build.rs`，本轮实测踩到）**
+
+- 症状：`cargo test --lib` 的测试二进制在**任何测试代码运行前**就以
+  `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)` 退出，`--list` 也立刻失败；而 `integration` /
+  `lark-gate` / `lark-bot` 全部正常。对照实验：把本轮改动 `git stash` 后同一条命令全绿。
+- 根因：`build.rs` 给**测试目标**补的 comctl32 v6 manifest 用的是
+  `cargo:rustc-link-arg-tests`，而 cargo **不把 `--lib` 的单元测试二进制当作 test 目标**
+  （那是 lib target 以 `--test` 模式链接）→ 该二进制从来没有 manifest。它此前能用，只是因为
+  `windows`/`rfd` 的 `comctl32!TaskDialogIndirect` 恰好没被链进去；本轮 CGU 划分变化把它带了
+  进来 → 无 manifest ⇒ 加载器按 comctl32 **v5** 绑定 ⇒ 缺 `TaskDialogIndirect` ⇒ 启动即死。
+- 修复：改用 `cargo:rustc-link-arg`（覆盖所有目标，含 lib 单元测试）给全部目标补 manifest；
+  同时给 **bins** 显式加 `/MANIFEST:NO`（后出现的选项生效）——主二进制的 manifest 由
+  `tauri_build` 的 `resource.lib` 提供，再叠一份 `/MANIFESTINPUT` 会让 link.exe 报
+  `LNK1123`（本轮实测）。原 `-tests` 三行保留（对 `tests/*.rs` 同样有效，重复输入由 link.exe 合并）。
+- 验证：`cargo test --workspace` 全绿（lib 691 passed / 2 ignored）；`cargo build` 后主程序
+  `--help` 正常，主程序 manifest 特征与改动前一致（`asm.v1` + `Common-Controls` 均在）。
+
+**验证**
+
+- `cargo test --manifest-path src-tauri/Cargo.toml --workspace`：全部目标通过
+  （lib 691 + 2 ignored、`ai_chat_stream_wire` 15、`auto_ui_e2e` 15、`ipc_test` 8、`integration` 10…）。
+- `npx tsc -b` / `npx vitest run`（139 passed）：通过。
+- 真机 smoke：`link-searcher.exe chat "深蓝公司" --dry-run` 走完整 检索 → 组装 链路
+  （命中 55 份 / 注入 6 条证据，exit 0），确认 `spawn_blocking` 路径可用。
+
 ## 2026-10-24（第六十六轮）：浏览页只保留文件夹视图；新增「最后索引时间」列
 
 > 背景（用户反馈）：
