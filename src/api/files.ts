@@ -41,6 +41,24 @@ export async function aiCapabilities(): Promise<AiCapabilities> {
   return client.invoke<AiCapabilities>('ai_capabilities')
 }
 
+/** 一次网关连通性探测的结果（`ai::GatewayTest`）。 */
+export interface GatewayTestPayload {
+  kind: string
+  ok: boolean
+  detail: string
+  max_output_tokens?: number
+}
+
+/**
+ * 真的去 ping 各网关（embedding → llm → rerank，顺序执行；支持卸载的网关会在
+ * 每个模型测完后立刻卸载）。与 {@link aiCapabilities} 的区别：后者**只读配置、
+ * 不发任何请求** —— 别拿它冒充"连接测试"（2026-09-01 的设置页重构就是这么
+ * 把按钮变成"永远显示 OK"的，2026-10-29 修）。
+ */
+export async function testAiGateway(): Promise<GatewayTestPayload[]> {
+  return client.invoke<GatewayTestPayload[]>('test_ai_gateway')
+}
+
 export interface TopicCluster {
   topic: string
   files: string[]

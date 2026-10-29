@@ -42,6 +42,7 @@ const en: Record<string, string> = {
     semantic_search: 'Semantic search (requires AI gateway config and generated vector index)',
     embedding_gateway: 'Embedding Gateway',
     llm_gateway: 'LLM Gateway',
+    reranker_gateway: 'Rerank Gateway',
     test_ai_gateways: 'Test Connection',
     ai_embedding_unavailable: 'Embedding gateway not configured or failed test — semantic search unavailable (configure in Settings)',
     ai_current_usage: 'Current Usage',

@@ -42,6 +42,7 @@ const ja: Record<string, string> = {
     semantic_search: 'セマンティック検索（AIゲートウェイ設定とベクトルインデックスの生成が必要）',
     embedding_gateway: '埋め込みゲートウェイ',
     llm_gateway: 'LLMゲートウェイ',
+    reranker_gateway: 'リランクゲートウェイ',
     test_ai_gateways: '接続テスト',
     ai_embedding_unavailable: '埋め込みゲートウェイが未設定またはテスト不合格 — セマンティック検索は利用できません（設定ページで構成）',
     ai_current_usage: '現在の使用',

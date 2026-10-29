@@ -4,6 +4,16 @@ import type { ConfigInfo, ModelType, ProviderInfo } from '../../api/config'
 import type { AiCapabilities } from '../../api/files'
 import { Section, UsageSelect, RowAction, maskApiKey } from './SettingsFields'
 
+/** 结果行的网关名。后端 `kind`：embedding / llm / rerank（error 只在 IPC 抛错时出现）。 */
+function gatewayLabel(kind: string, t: (key: string, params?: Record<string, string | number>) => string): string {
+  switch (kind) {
+    case 'embedding': return t('embedding_gateway')
+    case 'rerank': return t('reranker_gateway')
+    case 'error': return '⚠'
+    default: return t('llm_gateway')
+  }
+}
+
 interface AiTabProps {
   appConfig: ConfigInfo | null
   setAppConfig: (c: ConfigInfo | null | ((prev: ConfigInfo | null) => ConfigInfo | null)) => void
@@ -137,12 +147,12 @@ export function AiTab({
             {aiTestLoading ? '…' : t('test_ai_gateways')}
           </button>
           {aiTest && (
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-1">
               {aiTest.map((r, i) => (
                 <div key={i} className={`flex items-center gap-1 text-xs ${r.ok ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
                   <span>{r.ok ? '✓' : '✗'}</span>
-                  <span className="font-medium">{r.kind === 'embedding' ? t('embedding_gateway') : t('llm_gateway')}</span>
-                  <span className="text-gray-500 dark:text-gray-400 truncate max-w-48">{r.detail}</span>
+                  <span className="font-medium">{gatewayLabel(r.kind, t)}</span>
+                  <span className="text-gray-500 dark:text-gray-400 break-all">{r.detail}</span>
                   {r.max_output_tokens != null && (
                     <span className="text-gray-400 dark:text-gray-500">max={r.max_output_tokens.toLocaleString()}</span>
                   )}

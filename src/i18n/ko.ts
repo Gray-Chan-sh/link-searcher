@@ -42,6 +42,7 @@ const ko: Record<string, string> = {
     semantic_search: '의미 검색 (AI 게이트웨이 설정 및 벡터 인덱스 생성 필요)',
     embedding_gateway: '임베딩 게이트웨이',
     llm_gateway: 'LLM 게이트웨이',
+    reranker_gateway: '리랭크 게이트웨이',
     test_ai_gateways: '연결 테스트',
     ai_embedding_unavailable: '임베딩 게이트웨이가 설정되지 않았거나 테스트 실패 — 의미 검색을 사용할 수 없습니다 (설정 페이지에서 구성)',
     ai_current_usage: '현재 사용',

@@ -1789,7 +1789,9 @@ pub struct GatewayTest {
     pub max_output_tokens: Option<u32>,
 }
 
-/// Frontend-facing capability flags (from a cached test).
+/// Frontend-facing capability flags (**配置判断，零网络**).
+///
+/// 只在设置页决定"哪些入口可用/置灰"；真实连通性由 [`test_gateways`] 探测。
 #[derive(Debug, Clone, Copy, serde::Serialize, Default)]
 pub struct AiCapabilities {
     pub embedding: bool,
@@ -1802,22 +1804,58 @@ impl AiCapabilities {
     }
 }
 
-/// Ping both gateways with the smallest realistic request. Used by the
-/// settings "test" button and for capability probes. The two probes run in
-/// parallel: the LLM one may take many seconds to schedule a model, and
-/// serial order would make it start only after the embedding probe finishes.
+/// 网关探测的可选行为。
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeOptions {
+    /// 每个模型测完立刻卸载（`POST /v1/models/{id}/unload`，oMLX 0.7 起的公开接口）。
+    ///
+    /// 只对**托管式**网关有意义：实测本机上限 23.5GB，装不下「一个大 LLM + bge-m3 +
+    /// bge-reranker」，并行/连测会被互相挤掉，反而分不清谁失败；顺序探测 + 测完卸载
+    /// 还能在服务器日志里看到每一次加载。网关没这个接口时静默跳过（404/405）。
+    ///
+    /// 单元测试必须传 `false` —— 测试不该把用户正在用的模型踢出显存。
+    pub unload_after: bool,
+}
+
+/// Ping every gateway with the smallest realistic request. Used by the settings
+/// "test" button and for capability probes.
+///
+/// **顺序执行**（embedding → llm → rerank）：三者通常挂在同一台机器/同一个网关背后，
+/// 并行会互相抢显存与排期，谁的失败都说不清。
 pub fn test_gateways() -> Vec<GatewayTest> {
-    let failed = |kind: &'static str| GatewayTest { kind, ok: false, detail: "probe panicked".into(), max_output_tokens: None };
-    let emb_handle = std::thread::spawn(test_embedding);
-    let llm_handle = std::thread::spawn(test_llm);
-    let tests = vec![
-        emb_handle.join().unwrap_or_else(|_| failed("embedding")),
-        llm_handle.join().unwrap_or_else(|_| failed("llm")),
-    ];
-    for t in &tests {
-        log::info!("[AI] capability probe: {} = {} ({})", t.kind, t.ok, t.detail);
+    probe_gateways(ProbeOptions { unload_after: true })
+}
+
+/// 探测顺序（设置页结果行的顺序也依赖它）：embedding → llm → rerank。
+///
+/// 纯常量，供门禁**不联网**地断言"三种角色各一条"；真实探测见 [`probe_gateways`]。
+const PROBE_ORDER: [&'static str; 3] = ["embedding", "llm", "rerank"];
+
+/// [`test_gateways`] 的实现（`unload_after` 由调用方决定，测试用 `false`）。
+pub(crate) fn probe_gateways(opts: ProbeOptions) -> Vec<GatewayTest> {
+    let probes: [fn() -> ProbeOutcome; 3] = [test_embedding, test_llm, test_rerank];
+    let mut out = Vec::with_capacity(PROBE_ORDER.len());
+    for (expected, probe) in PROBE_ORDER.iter().zip(probes) {
+        let ProbeOutcome { mut test, unload } = probe();
+        debug_assert_eq!(test.kind, *expected, "探测顺序必须与 PROBE_ORDER 一致");
+        if opts.unload_after
+            && let Some(ep) = unload
+        {
+            let note = unload_probed_model(&ep);
+            log::info!(
+                "[AI] capability probe unload: {} @ {} => {}",
+                ep.model_id,
+                ep.base_url,
+                note
+            );
+            if !note.is_empty() {
+                test.detail = format!("{} · {note}", test.detail);
+            }
+        }
+        log::info!("[AI] capability probe: {} = {} ({})", test.kind, test.ok, test.detail);
+        out.push(test);
     }
-    tests
+    out
 }
 
 /// Frontend-facing capability flags from CONFIGURATION ONLY (no network).
@@ -1909,33 +1947,148 @@ pub fn list_provider_models(base_url: &str, api_key: &str) -> (Vec<crate::config
     }
 }
 
-fn test_embedding() -> GatewayTest {
+/// 一次探测的结果，外加"探完该卸载谁"（只有托管式网关能卸载）。
+struct ProbeOutcome {
+    test: GatewayTest,
+    unload: Option<ActiveEndpoint>,
+}
+
+impl ProbeOutcome {
+    fn new(test: GatewayTest) -> Self {
+        Self { test, unload: None }
+    }
+    fn with_unload(test: GatewayTest, ep: ActiveEndpoint) -> Self {
+        Self { test, unload: Some(ep) }
+    }
+}
+
+impl GatewayTest {
+    fn pass(kind: &'static str, detail: String) -> Self {
+        Self { kind, ok: true, detail, max_output_tokens: None }
+    }
+    fn fail(kind: &'static str, detail: String) -> Self {
+        Self { kind, ok: false, detail, max_output_tokens: None }
+    }
+}
+
+/// 测试结果里"打到了谁"—— 没有它，用户只能看到「LLM 网关 ✅」而不知道
+/// 请求究竟发给了哪台机器（2026-10-29 实际踩坑：切到局域网网关后测试界面上
+/// 看不出探针仍指向云端）。
+fn probe_target(ep: &ActiveEndpoint) -> String {
+    format!("{} @ {}", ep.model_id, ep.base_url)
+}
+
+/// 探测超时：回环/局域网网关放宽到 120s —— 本地 20B 级模型冷加载实测 ~15s，
+/// 机器忙时更久，30s 会假红（测试失败但聊天其实可用）。公网网关仍 30s
+/// （组合代理排模型 4~12s 已足够）。
+fn probe_timeout(base_url: &str) -> std::time::Duration {
+    if is_private_gateway(base_url) {
+        std::time::Duration::from_secs(120)
+    } else {
+        std::time::Duration::from_secs(30)
+    }
+}
+
+/// host 部分（去掉 scheme、端口；`[::1]:8000` → `::1`）。
+fn host_of(base_url: &str) -> &str {
+    let rest = base_url.split("://").nth(1).unwrap_or(base_url);
+    let host_port = rest.split(['/', '?']).next().unwrap_or("");
+    if let Some(inner) = host_port.strip_prefix('[') {
+        inner.split(']').next().unwrap_or(inner)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    }
+}
+
+/// 回环 / RFC1918 私网 / `*.local` —— 这些地址的模型是"本地加载"的，超时要放宽。
+fn is_private_gateway(base_url: &str) -> bool {
+    let host = host_of(base_url).to_ascii_lowercase();
+    if host == "localhost" || host == "::1" || host == "0.0.0.0" || host.ends_with(".local") {
+        return true;
+    }
+    let mut parts = host.split('.');
+    let a = parts.next().and_then(|s| s.parse::<u8>().ok());
+    let b = parts.next().and_then(|s| s.parse::<u8>().ok());
+    matches!((a, b), (Some(127), _) | (Some(10), Some(_)) | (Some(192), Some(168)))
+        || matches!((a, b), (Some(172), Some(16..=31)))
+}
+
+/// percent-encode 一个路径段：模型 id 里可能有 `/`、空格、中文，直接拼进 URL 会
+/// 404/422（聚合网关的 id 形如 `modelscope/Qwen/Qwen3-8B`）。
+fn encode_path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// 测完把模型从网关内存里卸掉（尽力而为），返回一句给 UI 看的说明。
+///
+/// 只打公开的 `POST /v1/models/{id}/unload`（oMLX 0.7 起），不碰 admin API；
+/// 其它网关（云端聚合、llama.cpp、Ollama）没有这个接口 → 404/405，静默降级。
+fn unload_probed_model(ep: &ActiveEndpoint) -> String {
+    let url = format!(
+        "{}/models/{}/unload",
+        ep.base_url.trim_end_matches('/'),
+        encode_path_segment(&ep.model_id)
+    );
+    let agent = ureq::builder().timeout(std::time::Duration::from_secs(15)).build();
+    match agent.post(&url).set_auth(&ep.api_key).send_string("") {
+        Ok(_) => "已卸载".to_string(),
+        Err(ureq::Error::Status(404 | 405, _)) => "网关无卸载接口".to_string(),
+        Err(ureq::Error::Status(code, _)) => format!("卸载未成功（HTTP {code}）"),
+        Err(e) => format!("卸载未成功（{e}）"),
+    }
+}
+
+fn test_embedding() -> ProbeOutcome {
     let cfg = crate::config::load_config();
     if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
         let model_name = local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
         if !local_embed::bge_model_ready(&cfg.data_dir, model_name) {
-            return GatewayTest { kind: "embedding", ok: false, detail: format!("{model_name} 模型未下载"), max_output_tokens: None };
+            return ProbeOutcome::new(GatewayTest::fail("embedding", format!("内置 {model_name} 模型未下载")));
         }
-        return match local_embed::init_local_embedder(&cfg.data_dir, model_name) {
-            Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: format!("内置 {model_name}"), max_output_tokens: None },
-            Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e, max_output_tokens: None },
-        };
+        return ProbeOutcome::new(match local_embed::init_local_embedder(&cfg.data_dir, model_name) {
+            Ok(()) => GatewayTest::pass("embedding", format!("OK · 内置 {model_name}")),
+            Err(e) => GatewayTest::fail("embedding", e),
+        });
     }
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
-        return GatewayTest { kind: "embedding", ok: false, detail: "未配置".into(), max_output_tokens: None };
+        return ProbeOutcome::new(GatewayTest::fail("embedding", "未配置".into()));
     };
     let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
     let body = serde_json::json!({ "model": ep.model_id, "input": [""] });
-    match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(5)) {
-        Ok(()) => GatewayTest { kind: "embedding", ok: true, detail: "OK".into(), max_output_tokens: None },
-        Err(e) => GatewayTest { kind: "embedding", ok: false, detail: e, max_output_tokens: None },
-    }
+    let target = probe_target(&ep);
+    let test = match ping_post(&url, &ep.api_key, &body, probe_timeout(&ep.base_url)) {
+        Ok(raw) => {
+            // 只判 2xx 会把「200 但空向量 / 坏 JSON」当健康 —— 校验维度非空。
+            let dim = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/data/0/embedding")
+                        .and_then(|e| e.as_array())
+                        .map(|a| a.len())
+                })
+                .unwrap_or(0);
+            if dim == 0 {
+                GatewayTest::fail("embedding", format!("响应异常：{target} 未返回向量"))
+            } else {
+                GatewayTest::pass("embedding", format!("OK · {target}（{dim} 维）"))
+            }
+        }
+        Err(e) => GatewayTest::fail("embedding", format!("{e}（{target}）")),
+    };
+    ProbeOutcome::with_unload(test, ep)
 }
 
-fn test_llm() -> GatewayTest {
+fn test_llm() -> ProbeOutcome {
     let cfg = crate::config::load_config();
     let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Llm) else {
-        return GatewayTest { kind: "llm", ok: false, detail: "未配置".into(), max_output_tokens: None };
+        return ProbeOutcome::new(GatewayTest::fail("llm", "未配置".into()));
     };
     let url = format!("{}/chat/completions", ep.base_url.trim_end_matches('/'));
     let body = serde_json::json!({
@@ -1943,18 +2096,74 @@ fn test_llm() -> GatewayTest {
         "messages": [{"role":"user","content":"ping"}],
         "max_tokens": 1
     });
-    match ping_post(&url, &ep.api_key, &body, std::time::Duration::from_secs(30)) {
-        Ok(()) => {
+    let target = probe_target(&ep);
+    let test = match ping_post(&url, &ep.api_key, &body, probe_timeout(&ep.base_url)) {
+        Ok(_) => {
             // 检测值优先；网关不报 capabilities 时显示实际会使用的 fallback
             let max_out = fetch_llm_max_output(&ep.base_url, &ep.api_key, &ep.model_id)
                 .or_else(|| Some(active_max_tokens()));
             if let Some(m) = max_out {
                 log::info!("[AI] LLM model max_output_tokens = {m}");
             }
-            GatewayTest { kind: "llm", ok: true, detail: "OK".into(), max_output_tokens: max_out }
+            GatewayTest {
+                kind: "llm",
+                ok: true,
+                detail: format!("OK · {target}"),
+                max_output_tokens: max_out,
+            }
         }
-        Err(e) => GatewayTest { kind: "llm", ok: false, detail: e, max_output_tokens: None },
+        Err(e) => GatewayTest::fail("llm", format!("{e}（{target}）")),
+    };
+    ProbeOutcome::with_unload(test, ep)
+}
+
+fn test_rerank() -> ProbeOutcome {
+    let cfg = crate::config::load_config();
+    // 内置 cross-encoder：只有"模型文件在不在 + 能不能真打分"可测。
+    if let Some(model_name) = local_embed::local_model_dir_name(&cfg.active_reranker_model_id) {
+        if !local_rerank::rerank_model_ready(&cfg.data_dir, model_name) {
+            return ProbeOutcome::new(GatewayTest::fail("rerank", format!("内置 {model_name} 模型未下载")));
+        }
+        let passages = vec!["alpha".to_string(), "beta".to_string()];
+        let _ = local_rerank::init_local_reranker(&cfg.data_dir, model_name);
+        let test = match local_rerank::rerank_local("ping", &passages) {
+            Some(scores) if scores.len() == passages.len() => {
+                GatewayTest::pass("rerank", format!("OK · 内置 {model_name}（{} 条打分）", scores.len()))
+            }
+            Some(scores) => GatewayTest::fail(
+                "rerank",
+                format!("响应异常：返回 {} 条，期望 {}", scores.len(), passages.len()),
+            ),
+            None => GatewayTest::fail("rerank", format!("内置 {model_name} 打分失败")),
+        };
+        return ProbeOutcome::new(test);
     }
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Reranker) else {
+        return ProbeOutcome::new(GatewayTest::fail("rerank", "未配置".into()));
+    };
+    let url = format!("{}/rerank", ep.base_url.trim_end_matches('/'));
+    let documents = ["alpha", "beta"];
+    let body = serde_json::json!({ "model": ep.model_id, "query": "ping", "documents": documents });
+    let target = probe_target(&ep);
+    let test = match ping_post(&url, &ep.api_key, &body, probe_timeout(&ep.base_url)) {
+        Ok(raw) => {
+            // `{"results":[]}` 也是 200，但重排实际不可用 —— 校验条数。
+            let n = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            if n == documents.len() {
+                GatewayTest::pass("rerank", format!("OK · {target}（{n} 条打分）"))
+            } else {
+                GatewayTest::fail(
+                    "rerank",
+                    format!("响应异常：{target} 返回 {n} 条，期望 {}", documents.len()),
+                )
+            }
+        }
+        Err(e) => GatewayTest::fail("rerank", format!("{e}（{target}）")),
+    };
+    ProbeOutcome::with_unload(test, ep)
 }
 
 /// Query the gateway's `/v1/models` endpoint for the active model's
@@ -1983,16 +2192,17 @@ fn fetch_llm_max_output(base_url: &str, api_key: &str, model_id: &str) -> Option
         .map(|v| v as u32)
 }
 
-/// Issue a tiny POST and return Ok on any 2xx. Rejects 4xx/5xx with the
-/// status text, and network errors with the transport message. `timeout`
-/// differs per gateway: combo proxies (9router) take 4-12s to schedule a
-/// model, so a 5s probe would flakily "fail" a healthy gateway.
+/// Issue a tiny POST and return the response body on 2xx. Rejects 4xx/5xx with
+/// status + (truncated) error body — that body is often the only actionable clue
+/// (`429 需要实名认证` / `503 No active credentials for provider: agnes` /
+/// `403 model is not available in the current token plan`). `timeout` differs per
+/// gateway, see [`probe_timeout`].
 fn ping_post(
     url: &str,
     key: &str,
     body: &serde_json::Value,
     timeout: std::time::Duration,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let agent = ureq::builder().timeout(timeout).build();
     let send = agent
         .post(url)
@@ -2000,17 +2210,15 @@ fn ping_post(
         .set_auth(key)
         .send_string(&body.to_string());
     match send {
-        Ok(r) => {
-            let status = r.status();
-            if (200..300).contains(&status) {
-                Ok(())
-            } else {
-                let mut err = String::new();
-                let _ = r.into_string().map(|s| err = s);
-                Err(format!("HTTP {status}: {}", err.trim().chars().take(120).collect::<String>()))
-            }
+        Ok(r) => r.into_string().map_err(|e| e.to_string()),
+        Err(ureq::Error::Status(code, r)) => {
+            let body = r.into_string().unwrap_or_default();
+            Err(format!(
+                "HTTP {code}: {}",
+                body.trim().chars().take(160).collect::<String>()
+            ))
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(friendly_net_error(&e.to_string())),
     }
 }
 
@@ -2351,24 +2559,70 @@ mod tests {
         assert_eq!(llm_unavailable_reason_for(&with_active("p1:m1", vec![provider])), None);
     }
 
+    /// 探测顺序 = UI 行序：三种角色各一条。**纯常量断言，不联网**——门禁里不许出现
+    /// "打真实网关"的用例（AGENTS.md 门禁 ④；2026-10-29 实测它会把 lib 目标从 ~40s
+    /// 拖到 181s，本地大模型冷加载时还会更久、网关不通时更糟）。
     #[test]
+    fn probe_plan_covers_all_three_roles() {
+        assert_eq!(PROBE_ORDER, ["embedding", "llm", "rerank"]);
+    }
+
+    /// 真实探测的**手动**验收（默认不跑）：
+    /// `cargo test --lib ai::tests::gateways_probe_reports_one_entry_per_role -- --ignored --nocapture`
+    ///
+    /// 只断言与环境无关的结构性事实。⚠️ 必须传 `unload_after: false`：门禁/本机跑的是
+    /// 用户真机配置，卸载会把用户正在用的模型踢出显存（2026-10-29 加"测完即卸"时的护栏）。
+    #[test]
+    #[ignore]
     fn gateways_probe_reports_one_entry_per_role() {
-        // 只断言**与环境无关**的结构性事实。
-        //
-        // ⚠️ 这里原来还断言"未配置 ⇒ ok=false"，但它依赖两样**进程级全局**，并行跑时互相打架：
-        //   ① 网关探测结果有 **30s 缓存**（`test_ai_gateway` / `capabilities`），别的测试可能已把
-        //      "有网关、ok=true"缓存进去；
-        //   ② **`LS_CONFIG_DIR` 是进程级环境变量**，`commands/backup.rs` 的测试会临时 `set_var` 指向
-        //      一个只有 `{"theme":"dark"}` 的一次性配置目录 —— 于是 `llm_enabled()` 读到"没网关"，
-        //      而缓存里是"有网关" → 两者不一致，断言随机失败（2026-10-15 三次复现，且 HEAD 上同样会红）。
-        //   结论：这类"读真实配置 + 真实网络探测"的断言**不可放进门禁**（AGENTS.md 门禁 ④）。
-        let tests = test_gateways();
-        assert_eq!(tests.len(), 2, "embedding / llm 各一条");
+        let tests = probe_gateways(ProbeOptions { unload_after: false });
+        assert_eq!(tests.len(), 3, "embedding / llm / rerank 各一条");
         for t in &tests {
             assert!(!t.kind.is_empty(), "每条都要有 kind，UI 依赖它归因");
             assert!(!t.detail.is_empty(), "每条都要有 detail，便于排查");
+            let max = t.max_output_tokens.map(|m| format!(" max={m}")).unwrap_or_default();
+            println!("[{:>9}] ok={:<5} {}{max}", t.kind, t.ok, t.detail);
         }
         let _ = capabilities();
+    }
+
+    /// 超时分层：局域网/回环放宽（本地大模型冷加载），公网仍 30s。
+    #[test]
+    fn probe_timeout_tiers_by_host() {
+        use std::time::Duration;
+        let lan = Duration::from_secs(120);
+        let wan = Duration::from_secs(30);
+        for u in [
+            "http://192.168.1.100:8000/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost/v1",
+            "http://10.0.0.7:1234/v1",
+            "http://172.16.5.5/v1",
+            "http://172.31.255.1/v1",
+            "http://[::1]:8000/v1",
+            "http://mac-mini.local:8000/v1",
+        ] {
+            assert_eq!(probe_timeout(u), lan, "{u} 应放宽到 120s");
+        }
+        for u in [
+            "https://apihub.agnes-ai.com/v1",
+            "http://192.169.1.1/v1",
+            "http://172.15.0.1/v1",
+            "http://172.32.0.1/v1",
+            "http://11.0.0.1/v1",
+        ] {
+            assert_eq!(probe_timeout(u), wan, "{u} 应保持 30s");
+        }
+    }
+
+    /// 模型 id 可能含 `/`、空格（聚合网关），必须逐段转义，否则卸载/加载 404。
+    #[test]
+    fn encode_path_segment_escapes_reserved_chars() {
+        assert_eq!(encode_path_segment("bge-m3"), "bge-m3");
+        assert_eq!(encode_path_segment("Qwen3.6-27B_v2"), "Qwen3.6-27B_v2");
+        assert_eq!(encode_path_segment("modelscope/Qwen/Qwen3-8B"), "modelscope%2FQwen%2FQwen3-8B");
+        assert_eq!(encode_path_segment("a b"), "a%20b");
+        assert_eq!(encode_path_segment("中文"), "%E4%B8%AD%E6%96%87");
     }
 
     #[test]

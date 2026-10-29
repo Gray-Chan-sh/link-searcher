@@ -42,6 +42,7 @@ const zh: Record<string, string> = {
     semantic_search: '语义搜索（需配置 AI 服务且已生成向量索引）',
     embedding_gateway: 'Embedding 网关',
     llm_gateway: 'LLM 网关',
+    reranker_gateway: '重排网关',
     test_ai_gateways: '测试连接',
     ai_embedding_unavailable: 'Embedding 网关未配置或未通过测试，语义搜索不可用（设置页配置）',
     ai_current_usage: '当前使用',

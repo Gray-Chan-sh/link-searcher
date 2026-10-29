@@ -3,7 +3,7 @@ import { useI18n } from '../i18n'
 import { confirm } from '../utils/platform'
 import { addProvider, deleteProvider, getConfig, refreshProviderModels, setActiveModel, testProvider, updateConfig, type ConfigInfo, type ModelType, type ProviderInfo } from '../api/config'
 import { checkEmbeddingConsistency, rebuildEmbeddings } from '../api/index'
-import { aiCapabilities, type AiCapabilities } from '../api/files'
+import { aiCapabilities, testAiGateway, type AiCapabilities, type GatewayTestPayload } from '../api/files'
 import { maskApiKey } from '../components/settings/SettingsFields'
 
 export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig: (c: ConfigInfo | null | ((prev: ConfigInfo | null) => ConfigInfo | null)) => void) {
@@ -21,7 +21,7 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
   const [newProv, setNewProv] = useState({ name: '', baseUrl: '', apiKey: '' })
   const [modelFilter, setModelFilter] = useState<Record<string, string>>({})
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
-  const [aiTest, setAiTest] = useState<{ kind: string; ok: boolean; detail: string; max_output_tokens?: number }[] | null>(null)
+  const [aiTest, setAiTest] = useState<GatewayTestPayload[] | null>(null)
   const [aiTestLoading, setAiTestLoading] = useState(false)
 
   const persistProviders = async (providers: ProviderInfo[]) => {
@@ -238,10 +238,13 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     setAiTestLoading(true)
     setAiTest(null)
     try {
-      const r = await aiCapabilities()
-      setCaps(r)
-      setAiTest([{ kind: 'embedding', ok: r.embedding, detail: r.embedding ? 'OK' : 'Not configured' },
-                  { kind: 'llm', ok: r.llm, detail: r.llm ? 'OK' : 'Not configured' }])
+      // 真的 ping 各网关。⚠️ 别改回 `aiCapabilities()`：那个函数**只读配置、不发请求**，
+      // 拿它渲染结果等于"填了 id 就 ✅"——网关 429/503 全挂时也显示 OK
+      // （2026-09-01 设置页拆 hooks 时的回归，2026-10-29 修）。
+      const results = await testAiGateway()
+      setAiTest(results)
+      // 探测完再刷新"哪些入口可用"的标记（仍是纯配置判断，不发请求）。
+      await aiCapabilities().then(setCaps).catch(() => {})
     } catch (e) {
       setAiTest([{ kind: 'error', ok: false, detail: e instanceof Error ? e.message : String(e) }])
     } finally {

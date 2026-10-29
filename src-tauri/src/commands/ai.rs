@@ -37,12 +37,12 @@ pub struct SummaryResult {
     pub cached: bool,
 }
 
-/// Whether each gateway is usable right now (cached test, 30s TTL). The
-/// frontend uses this to enable/disable AI entry points and show guidance.
+/// Whether each gateway is **configured** (zero network). The frontend uses this
+/// to enable/disable AI entry points and show guidance; real connectivity is
+/// [`test_ai_gateway`]'s job.
 #[tauri::command]
 pub async fn ai_capabilities() -> crate::ai::AiCapabilities {
-    // The underlying probe does blocking HTTP; run it off the UI thread so
-    // a slow/hanging gateway cannot freeze the command.
+    // 配置读取会碰磁盘（整份 config.json），仍在阻塞线程上做，避免在 async worker 上读盘。
     tokio::task::spawn_blocking(|| {
         crate::ai::AiCapabilities::from_gateways(crate::ai::capabilities())
     })
@@ -50,9 +50,10 @@ pub async fn ai_capabilities() -> crate::ai::AiCapabilities {
     .unwrap_or_default()
 }
 
-/// Connectivity test for the configured AI gateways. Returns one result per
-/// gateway (embedding / llm); the frontend disables the corresponding
-/// features when `ok` is false.
+/// Connectivity test for the configured AI gateways: **顺序**探测
+/// embedding → llm → rerank，每个模型测完如果网关支持就立刻卸载
+/// （见 `ai::probe_gateways`）。每个结果的 `detail` 里带上实际打到的主机与模型，
+/// 便于判断"探针到底发给了谁"。
 #[tauri::command]
 pub async fn test_ai_gateway() -> Vec<crate::ai::GatewayTest> {
     tokio::task::spawn_blocking(crate::ai::test_gateways)

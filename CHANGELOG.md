@@ -1,3 +1,66 @@
+## 2026-10-29（第六十八轮）：设置页「测试连接」其实从未联网（2026-09-01 起的回归）；顺序探测 + 测完即卸 + 补 rerank
+
+> 背景（用户反馈）：切到局域网网关 `192.168.1.100:8000` 后，点「测试连接」服务器**没有任何
+> 加载迹象**；而手动发同样的请求，服务器立刻载入模型。查日志发现 `app.log` 里
+> **一条 `[AI] capability probe:` 都没有** —— 探针从未被调用。
+
+**① 根因：前端调用的是"纯配置判断"**
+
+- `src/hooks/useSettingsProviders.ts::testAi` 里写的是 `await aiCapabilities()`，而
+  `ai_capabilities` 只做 `(embedding_enabled(), llm_enabled())` —— **不发任何请求**，
+  随后前端还把 `detail` 硬编码成 `'OK' / 'Not configured'`。于是自 `d6426fb`
+  （2026-09-01「Settings.tsx 拆分为 tab 组件 + hooks」）起，这个按钮**填了 id 就显示 ✅**，
+  网关 429/503/403 全挂（日志里天天报）也照样绿。
+- 真正的探针 `test_ai_gateway` → `ai::test_gateways()`（打 `/embeddings` +
+  `/chat/completions`，并记 `capability probe` 日志）此前只有 Web API
+  `/api/ai/gateways/test` 在用，桌面端无入口。
+- 修复：`api/files.ts` 新增 `testAiGateway()`（走 `test_ai_gateway`，桌面 IPC / Web 路由同一份
+  代码），`testAi` 改用它拿真实结果；`aiCapabilities()` 只在探测后刷新"哪些入口可用"的标记。
+  顺手修掉 `ai_capabilities` 的过期注释（"cached test, 30s TTL" —— 早就不做网络探测了）。
+
+**② 顺序探测 + 测完即卸（`src-tauri/src/ai/mod.rs`）**
+
+- `test_gateways()` 原来是**两个线程并行**探 embedding / llm；现在改为**顺序**跑
+  `embedding → llm → rerank`（`PROBE_ORDER`）。理由：三者常挂同一台机器/同一个网关，
+  并行会互相抢显存与排期，谁的失败都说不清。
+- 新增 `ProbeOptions { unload_after }` + `probe_gateways()`：每个模型测完调用
+  `POST /v1/models/{id}/unload`（oMLX 0.7 起的**公开**接口，不碰 admin API），
+  实测返回 `{"status":"ok","model_id":"bge-m3"}`、`model_memory_used` 归零。
+  模型 id 逐段 percent-encode（聚合网关的 id 形如 `modelscope/Qwen/Qwen3-8B`）。
+  网关没有该接口（云端聚合 / llama.cpp / Ollama）→ 404/405 → 详情追加「网关无卸载接口」并继续。
+  结果行 detail 变成 `OK · bge-m3 @ http://192.168.1.100:8000/v1（1024 维） · 已卸载`。
+- **门禁护栏**：`ProbeOptions.unload_after=false` 供测试使用 —— 测试跑在用户真机配置上，
+  卸载会把用户正在用的模型踢出显存。
+
+**③ 新增重排探针 + 超时分层 + 判定收紧**
+
+- 新 `test_rerank()`：内置 cross-encoder → 检查模型文件 + 真打分；远程 → `POST /rerank`
+  `{model, query:"ping", documents:["alpha","beta"]}`，**校验返回条数**（`{"results":[]}` 也是
+  200，但重排实际不可用）。此前 rerank 完全没有任何探针，网关坏了只会静默降级（保持原序）。
+- `probe_timeout()`：回环/RFC1918/`*.local` 网关 **120s**，公网仍 **30s**。本地 27B 冷加载
+  实测 ~15s（oMLX 自报 `load_seconds_per_gb ≈ 0.73` × 19.7GB），机器忙时 30s 会假红
+  （测试标红但聊天可用）。
+- Embedding 探针现在**校验返回向量维度非空**（`data[0].embedding.len()`），detail 里报维数。
+- `ping_post` 改为返回响应体，4xx/5xx 时带上**截断后的错误体** —— 这才是能行动的线索
+  （`429 需要实名认证` / `503 No active credentials for provider: agnes`）。
+- 每条 detail 都带上「实际打到的主机 + 模型」，解决"探针到底发给了谁"的困惑。
+
+**④ 测试与 UI**
+
+- `gateways_probe_reports_one_entry_per_role` 改为 `#[ignore]`：它会**真的联网**（本地大模型
+  冷加载时实测把 `--lib` 从 ~40s 拖到 181s），违反 AGENTS 门禁 ④。门禁里换成纯常量断言
+  `probe_plan_covers_all_three_roles`；手动验收用
+  `cargo test --lib ai::tests::gateways_probe_reports_one_entry_per_role -- --ignored --nocapture`。
+- 新增纯函数单测：`probe_timeout_tiers_by_host`、`encode_path_segment_escapes_reserved_chars`。
+- `AiTab.tsx` 结果行改三分支标签（原先"不是 embedding 就当 llm"，`error` 会被错标成 LLM 网关），
+  显示完整 detail（不再 `truncate max-w-48`），新增 i18n `reranker_gateway`（zh/en/ja/ko）。
+
+**验证**
+
+- 真机：`cargo test --lib ai::tests::gateways_probe_reports_one_entry_per_role -- --ignored --nocapture`
+  → 三条都 `ok=true`、均带"已卸载"，探测前后服务器 `loaded_models` 均为空（确认卸载生效）。
+- `cargo test --workspace` 全绿；`npx tsc -b` / `npx vitest run`（139）通过；semgrep ERROR 0。
+
 ## 2026-10-29（第六十七轮）：AI 聊天"发问后长时间零输出"——检索挪出 async worker + 补齐静默阶段进度
 
 > 背景（现场日志 `D:\index\app.log`，2026-10-29 四次启动）：点「发送」后 30~60 秒界面
