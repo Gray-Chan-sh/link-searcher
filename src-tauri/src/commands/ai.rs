@@ -636,6 +636,8 @@ use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_ke
 use rewrite::{rewrite_history, valid_rewrite_output, may_inherit_parent_entities};
 
 mod retrieval;
+#[allow(dead_code)] // Staged for P4.3: wired into progressive retrieval next.
+mod sufficiency;
 pub use retrieval::{merge_scope_prefixes, weighted_mix};
 pub(crate) use retrieval::{bm25_relevant_hits, rrf_add};
 use retrieval::{apply_rerank_order, char_cooccur_candidates, hit_in_scope, trace_rank, trace_target_ids};

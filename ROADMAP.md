@@ -1,6 +1,6 @@
 # Link-Searcher 路线图
 
-> 最后更新：2026-09-23
+> 最后更新：2026-11-01
 
 ---
 
@@ -79,6 +79,60 @@
 - [x] **多语言界面**：中/英/日/韩 UI 完整覆盖，设置页切换（i18n/{zh,en,ja,ko}.ts；2026-08-25 核实）
 - [x] **CLI 增强**：已有 `index`(别名 search)、`scan [dir]`、`watch dir`、`health`、`chat`、`quality backfill|audit|reextract` 子命令与全局 `--data-dir`，无 GUI 可用（2026-09-23 核实）
 - [x] **RAG 内容分析**：摘要（AI 摘要按钮）、跨文件关联（askDocuments/聊天）、主题聚类（索引状态页 `ai_topic_clusters`，2026-08-25）
+
+---
+
+## P4 — Scope-first RAG 与 Workflow 化（规划中，未实现）
+
+> 目标：用户只提问，不配置字段/模式；**显式 scope 是硬约束**；默认全库找候选、局部读正文；列全/统计走可对账的 scan；流程与 prompt 可配置，核心不变量留在代码。
+
+### 背景与约束
+
+- 当前 AI 链路是 top-30 文件 / 约 140K 字符；`full_recall` 不可靠；无逐文档台账/覆盖率。
+- 当前数据：19,914 个 active 文件、19,698 个已索引、16,431 篇 `content_index`、约 1.11 亿字符、71,165 个 chunk；1,314 条抽取失败、27 个不支持格式。
+- **不使用 `doc_meta`**：人工维护、文件量大时不可行，也不是完整性/准确性的必要条件。
+- 完整性是**相对 scope** 的完整，不是全库完整；准确性靠原文 span 校验，不靠 LLM 置信度。
+
+### 范围（Roadmap）
+
+- [ ] **Scope 模型**：
+  - `Explicit`：用户选目录/文件/@mention → 硬过滤，**不自动突破**；
+  - `Inferred`：从上下文/实体推断 → 软约束，允许回退；
+  - `Global`：未选范围/明确全库 → 全库检索，路径/实体只做 boost，不硬过滤。
+- [ ] **TaskSpec parser（LLM）**：输出 `tasks / coverage / granularity / subject / conditions / assumptions / ambiguities`；**不输出 route**，由 planner 推导；无 `has_filters` / `multi_task` 布尔值。
+- [ ] **Planner**：内部 task 枚举 `answer | list | count | compare | summarize | check_duplicates`；按 `tasks + coverage + scope` 推导计划；不做每场景 UI 开关。
+- [ ] **渐进检索**：`sufficiency_check` + 查询扩展/检索扩展/邻块扩展；最多 2 轮扩展、2 次回答生成、1 次可选 verifier；显式 scope 内不跨范围。
+- [ ] **Scan 模式**：`scope_snapshot` + 逐文档 ledger + 正则全扫 + LLM 只兜底不确定项；状态含 `processed / no_match / failed / unsupported / not_indexed / stale`；输出覆盖率与缺口。
+- [ ] **准确性**：每个条目必须带 `file_id + span_start/end + evidence`；归一化、去重、冲突标记、引用校验；无 span 不进入最终结果。
+- [ ] **成本守卫**：全量正则扫描约 1–3 分钟；**禁止全库 LLM 逐篇**（约 8,200 万 token）；推荐“正则全扫 + 5–10% LLM 兜底”（约 400–800 万 token，后台分钟级）。
+- [ ] **UI / 日志 / 导出**：scope 徽章、假设、条件精度（精确/近似）、覆盖率、缺口；`ai_events` 记录 `task_spec_parsed / scope_resolved / sufficiency_check / expansion_round / coverage_report`；导出 `run_manifest`。
+- [ ] **Workflow DSL + prompt/skill registry**：编排、prompt、阈值可配置；scope 硬约束、ledger 对账、引用校验、预算上限等**核心不变量必须留在代码**；新能力仍需写 skill。
+
+### 分阶段
+
+- [ ] **P4.1 Shadow**：TaskSpec parser + ScopeResolver + Planner 推导，只记录不改变现有行为。
+- [ ] **P4.2 全局检索增强**：`Global/Inferred` 路径 boost；`Explicit` 保持硬过滤；本地结果不足仅对 `Inferred/Global` 自动回退。
+- [ ] **P4.3 渐进检索**：证据充分性检查、扩展策略、引用/span 校验。
+- [ ] **P4.4 Scan 模式**：scope snapshot + 逐文档台账 + 正则全扫 + LLM 兜底 + 覆盖率 UI。
+- [ ] **P4.5 Workflow 化**：YAML DSL + prompt/skill registry + golden trace 回归。
+- [ ] **P4.6 评估**：61 条真实问题 + 改写扩充到 200–300；看 scope 正确率、引用正确率、列全 false negative、覆盖率、延迟/成本。
+
+### 验收标准
+
+- [ ] **显式 scope 违规次数 = 0**（绝不自动越界）。
+- [ ] 引用正确率 ≥ 95%。
+- [ ] 列全任务 false negative < 5%（在 gold set 上）。
+- [ ] 每次 scan 都有覆盖率/失败数/缺口说明。
+- [ ] 普通问答 P95 延迟不显著退化。
+
+### 非目标
+
+- 不做 `doc_meta`；
+- 不做“每个场景一个 UI 开关”；
+- 不自动突破显式 scope；
+- 不默认全库 LLM 扫描；
+- 不让 LLM 直接决定最终计划；
+- 不承诺任意 OCR 下 100% 抽取。
 
 ---
 
