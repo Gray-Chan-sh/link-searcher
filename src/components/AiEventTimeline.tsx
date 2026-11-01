@@ -13,6 +13,7 @@ const EVENT_ICONS: Record<string, string> = {
   retrieval: '🔍',
   sufficiency_check: '⚖️',
   progressive_round: '🔁',
+  citation_check: '🔗',
   context_assembled: '📋',
   llm_call: '🤖',
   turn_complete: '✅',
@@ -24,6 +25,7 @@ const EVENT_KEYS: Record<string, string> = {
   retrieval: 'ai_event_retrieval',
   sufficiency_check: 'ai_event_sufficiency_check',
   progressive_round: 'ai_event_progressive_round',
+  citation_check: 'ai_event_citation_check',
   context_assembled: 'ai_event_context_assembled',
   llm_call: 'ai_event_llm_call',
   turn_complete: 'ai_event_turn_complete',
@@ -81,6 +83,16 @@ function formatPayload(type: string, payload: Record<string, unknown>): string {
       if (p.phase) parts.push(p.phase)
       if (p.queries?.length) parts.push(`q=${p.queries.length}`)
       return parts.join(' · ')
+    }
+    case 'citation_check': {
+      const p = payload as {
+        citations?: number
+        invalid_citations?: number
+        visible_materials?: number
+        cancelled?: boolean
+      }
+      if (p.cancelled) return 'cancelled'
+      return `citations=${p.citations ?? 0} · invalid=${p.invalid_citations ?? 0} · visible=${p.visible_materials ?? 0}`
     }
     case 'context_assembled': {
       const p = payload as { material_count?: number; total_chars?: number; strict_docs?: boolean }

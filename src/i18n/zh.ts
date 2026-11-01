@@ -109,6 +109,7 @@ const zh: Record<string, string> = {
     ai_event_retrieval: '检索',
     ai_event_sufficiency_check: '证据充分性',
     ai_event_progressive_round: '补充检索',
+    ai_event_citation_check: '引用校验',
     ai_event_context_assembled: '上下文组装',
     topic_clusters: '主题聚类',
     topic_clusters_hint: '用 AI 将已索引文档按内容主题分组',

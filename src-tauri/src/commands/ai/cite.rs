@@ -103,6 +103,26 @@ pub fn sanitize_citations(answer: &str, evidence_len: usize) -> String {
         .into_owned()
 }
 
+/// Count citation markers and how many point outside the visible material set.
+/// Used by the post-answer observability event; sanitization still decides what
+/// actually reaches the user.
+pub(crate) fn citation_stats(
+    answer: &str,
+    valid: &std::collections::BTreeSet<usize>,
+) -> (usize, usize) {
+    let cite_re = regex::Regex::new(r"\[(\d+)\]").unwrap();
+    let mut total = 0usize;
+    let mut invalid = 0usize;
+    for caps in cite_re.captures_iter(answer) {
+        total += 1;
+        let n = caps[1].parse::<usize>().unwrap_or(0);
+        if !valid.contains(&n) {
+            invalid += 1;
+        }
+    }
+    (total, invalid)
+}
+
 /// Set-based variant of [`sanitize_citations`]: strips any `[N]` whose number is
 /// not among the materials actually provided this turn (session-stable numbers).
 pub fn sanitize_citations_set(answer: &str, valid: &std::collections::BTreeSet<usize>) -> String {
@@ -120,6 +140,20 @@ pub fn sanitize_citations_set(answer: &str, valid: &std::collections::BTreeSet<u
             }
         })
         .into_owned()
+}
+
+#[cfg(test)]
+mod citation_stats_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn counts_all_and_invalid_markers() {
+        let valid = BTreeSet::from([1usize, 2]);
+        assert_eq!(citation_stats("[1][3][9]", &valid), (3, 2));
+        assert_eq!(citation_stats("no citations", &valid), (0, 0));
+        assert_eq!(citation_stats("[1][2]", &valid), (2, 0));
+    }
 }
 
 /// Jaccard overlap (`|A∩B| / |A∪B|`) between two strings' content words.

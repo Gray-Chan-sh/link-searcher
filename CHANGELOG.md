@@ -4,8 +4,10 @@
 - **配套 13 条单元测试**：无命中、稀疏命中、低分但强词法、缺实体、缺槽位、覆盖率缺口、全覆盖、查询变体去重、金额/日期/文号槽位缺失检测、通用词不当作实体等。
 - **接入 `prompt.rs` 检索链（两段）**：① 初始多通道合并并按 scope 硬过滤后，若命中数低于阈值（默认 5），用 `search_q / last_q / 关键词串` 做最多 1 轮补充 BM25 检索；② rerank 后读取 top-10 候选正文，检查查询实体与金额/日期/文号槽位是否缺失，缺失时再做一次实体定向 BM25；新增命中仍走同一 `hit_in_scope`，显式 scope 绝不突破。日志新增 `sufficiency_check` / `progressive_round` 事件。
 - **开关**：`LINK_SEARCHER_PROGRESSIVE=on|shadow|off`（默认 `on`）、`LINK_SEARCHER_PROGRESSIVE_MIN_HITS`（默认 5）、`LINK_SEARCHER_PROGRESSIVE_MAX_ROUNDS`（默认 1，最多 2）。`shadow` 只记录判定，不扩查。
-- **AI 事件时间线**：新增 `sufficiency_check`（证据充分性）与 `progressive_round`（补充检索）图标、i18n 标签和 payload 摘要，用户可直接看到命中了多少、缺什么、补了几篇。
-- **本阶段不改变回答生成/引用校验**；回答后校验与邻块扩展留待后续 P4.3 增量。
+- **邻块扩展**：chunk-vector 命中块向左右各扩 1 块（半权重，`LINK_SEARCHER_NEIGHBOR_CHUNKS` 默认 1，可设 0 关闭、最大 2）；解决答案落在命中块相邻位置时的漏召回。
+- **回答后引用校验（仅观测）**：新增 `citation_check` 事件，统计本轮 `[N]` 总数、越界引用数和可见材料数；流式回答已发出，故当前只记录不改写/不自动重答。
+- **AI 事件时间线**：新增 `sufficiency_check`（证据充分性）、`progressive_round`（补充检索）、`citation_check`（引用校验）图标、i18n 标签和 payload 摘要。
+- **本阶段不改变答案正文**；严格模式下的自动重答仍未接入。
 - **顺带修复测试假红**：`identity::local_dir_hash_is_stable_and_content_sensitive` 用等长内容快速覆写，Windows 下两次写入可能拿到相同 mtime，全量并行时偶发 `assert_ne` 失败；改为写入不同字节长度，稳定触发缓存签名变化。
 
 ## 2026-11-01（第七十轮）：切换 embedding / rerank 模型不再静默混向量空间（schema v14 + 模型指纹 + 五态语料）

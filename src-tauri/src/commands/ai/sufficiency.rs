@@ -258,6 +258,40 @@ pub(crate) fn missing_slots(question: &str, evidence_text: &str) -> Vec<String> 
     out
 }
 
+/// Expand chunk-vector hits to their immediate neighbours.
+///
+/// The chunk channel only returns the chunks that cleared the vector
+/// threshold; the answer often starts one chunk earlier or continues one chunk
+/// later. Neighbours get half the parent score so the original hit still wins
+/// when the packing budget is tight. Duplicate indices keep the highest score.
+pub(crate) fn expand_neighbor_chunks(
+    chunks: &[(usize, f32)],
+    radius: usize,
+) -> Vec<(usize, f32)> {
+    use std::collections::BTreeMap;
+
+    if radius == 0 {
+        return chunks.to_vec();
+    }
+    let mut by_index: BTreeMap<usize, f32> = BTreeMap::new();
+    let mut add = |idx: usize, score: f32| {
+        by_index
+            .entry(idx)
+            .and_modify(|s| *s = s.max(score))
+            .or_insert(score);
+    };
+    for &(idx, score) in chunks {
+        add(idx, score);
+        for distance in 1..=radius {
+            if let Some(prev) = idx.checked_sub(distance) {
+                add(prev, score * 0.5);
+            }
+            add(idx + distance, score * 0.5);
+        }
+    }
+    by_index.into_iter().collect()
+}
+
 /// Deterministic query variants for one expansion round.
 ///
 /// No LLM: the caller already has the rewritten query, the original question
@@ -404,6 +438,18 @@ mod tests {
         };
         let report = check_sufficiency(&signals);
         assert!(report.sufficient);
+    }
+
+    #[test]
+    fn neighbor_chunks_add_both_sides_with_half_score() {
+        let expanded = expand_neighbor_chunks(&[(5, 0.9)], 1);
+        assert_eq!(expanded, vec![(4, 0.45), (5, 0.9), (6, 0.45)]);
+    }
+
+    #[test]
+    fn neighbor_chunks_keep_highest_score_and_skip_underflow() {
+        let expanded = expand_neighbor_chunks(&[(0, 1.0), (1, 0.8)], 1);
+        assert_eq!(expanded, vec![(0, 1.0), (1, 0.8), (2, 0.4)]);
     }
 
     #[test]

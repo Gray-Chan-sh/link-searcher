@@ -867,6 +867,14 @@ pub async fn conversation_ask_stream(
         result.text.as_ref().map(|t| t.chars().count()).unwrap_or(0),
         source_ids.len()
     );
+    let (citation_total, citation_invalid) =
+        cite::citation_stats(result.text.as_deref().unwrap_or(""), &visible_nums);
+    events.push(("citation_check".into(), serde_json::json!({
+        "citations": citation_total,
+        "invalid_citations": citation_invalid,
+        "visible_materials": visible_nums.len(),
+        "cancelled": result.cancelled,
+    })));
     events.push(("turn_complete".into(), serde_json::json!({
         "took_ms": result.took_ms,
         "cancelled": result.cancelled,

@@ -3,7 +3,8 @@
 
 use super::*;
 use super::sufficiency::{
-    check_sufficiency, expansion_queries, is_specific_entity, missing_slots, SufficiencySignals,
+    check_sufficiency, expand_neighbor_chunks, expansion_queries, is_specific_entity, missing_slots,
+    SufficiencySignals,
 };
 
 /// 查询向量（`cached_embed`）的等待上限：本地嵌入池可能被后台回填占满（bge-large
@@ -1472,6 +1473,11 @@ fn assemble_conversation_prompt(
     let mut content_budget = CONTEXT_BUDGET
         .saturating_sub(SYSTEM_OVERHEAD)
         .saturating_sub(ANSWER_RESERVE);
+    let neighbor_radius = std::env::var("LINK_SEARCHER_NEIGHBOR_CHUNKS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .min(2);
     emit_progress("injection", "注入文件内容中...", 0, content_hits.len());
     log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
     let mut inject_idx = 0usize;
@@ -1486,7 +1492,17 @@ fn assemble_conversation_prompt(
                         } else {
                             (content_budget * PER_FILE_PCT / 100).max(MIN_PER_FILE).min(content_budget)
                         };
-                        let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, &hit.hit_chunks);
+                        let expanded_chunks = if neighbor_radius > 0 && !hit.hit_chunks.is_empty() {
+                            expand_neighbor_chunks(&hit.hit_chunks, neighbor_radius)
+                        } else {
+                            Vec::new()
+                        };
+                        let hit_chunks: &[(usize, f32)] = if expanded_chunks.is_empty() {
+                            &hit.hit_chunks
+                        } else {
+                            &expanded_chunks
+                        };
+                        let (injected, injected_spans) = chunked_or_truncated_with_budget(&conn, md5, text, &search_q, per_file, hit_chunks);
                         if !injected.trim().is_empty() {
                             let n = assign_material_no(&mut material_order, &hit.file_id);
                             docs.push(format!("[{n}]（{}）\n{}", rec.path, injected));

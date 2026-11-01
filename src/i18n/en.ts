@@ -109,6 +109,7 @@ const en: Record<string, string> = {
     ai_event_retrieval: 'Retrieval',
     ai_event_sufficiency_check: 'Evidence sufficiency',
     ai_event_progressive_round: 'Supplementary retrieval',
+    ai_event_citation_check: 'Citation check',
     ai_event_context_assembled: 'Context assembly',
     topic_clusters: 'Topic Clusters',
     topic_clusters_hint: 'Group indexed documents by topic with AI',
