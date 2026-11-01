@@ -104,6 +104,8 @@ const ja: Record<string, string> = {
     ai_event_query_rewrite: 'クエリ書き換え',
     ai_event_scope_resolved: 'スコープ解決',
     ai_event_retrieval: '検索',
+    ai_event_sufficiency_check: '根拠の十分性',
+    ai_event_progressive_round: '追加検索',
     ai_event_context_assembled: 'コンテキスト組み立て',
     topic_clusters: 'トピッククラスタ',
     topic_clusters_hint: 'インデックス済み文書をAIで主題ごとにグループ化',

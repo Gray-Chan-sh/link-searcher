@@ -107,6 +107,8 @@ const en: Record<string, string> = {
     ai_event_query_rewrite: 'Query rewrite',
     ai_event_scope_resolved: 'Scope resolved',
     ai_event_retrieval: 'Retrieval',
+    ai_event_sufficiency_check: 'Evidence sufficiency',
+    ai_event_progressive_round: 'Supplementary retrieval',
     ai_event_context_assembled: 'Context assembly',
     topic_clusters: 'Topic Clusters',
     topic_clusters_hint: 'Group indexed documents by topic with AI',

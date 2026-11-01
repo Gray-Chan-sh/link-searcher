@@ -104,6 +104,8 @@ const ko: Record<string, string> = {
     ai_event_query_rewrite: '쿼리 재작성',
     ai_event_scope_resolved: '스코프 해석',
     ai_event_retrieval: '검색',
+    ai_event_sufficiency_check: '근거 충분성',
+    ai_event_progressive_round: '보충 검색',
     ai_event_context_assembled: '컨텍스트 조립',
     topic_clusters: '주제 클러스터',
     topic_clusters_hint: 'AI로 색인된 문서를 주제별로 그룹화',

@@ -11,6 +11,8 @@ const EVENT_ICONS: Record<string, string> = {
   query_rewrite: '✏️',
   scope_resolved: '📁',
   retrieval: '🔍',
+  sufficiency_check: '⚖️',
+  progressive_round: '🔁',
   context_assembled: '📋',
   llm_call: '🤖',
   turn_complete: '✅',
@@ -20,6 +22,8 @@ const EVENT_KEYS: Record<string, string> = {
   query_rewrite: 'ai_event_query_rewrite',
   scope_resolved: 'ai_event_scope_resolved',
   retrieval: 'ai_event_retrieval',
+  sufficiency_check: 'ai_event_sufficiency_check',
+  progressive_round: 'ai_event_progressive_round',
   context_assembled: 'ai_event_context_assembled',
   llm_call: 'ai_event_llm_call',
   turn_complete: 'ai_event_turn_complete',
@@ -46,6 +50,36 @@ function formatPayload(type: string, payload: Record<string, unknown>): string {
       const parts = [`q="${p.search_query ?? ''}"`, `matched=${p.total_matches ?? p.merged_hits ?? 0}`]
       if (p.semantic_fused) parts.push('semantic')
       if (p.from_history_count) parts.push(`history=${p.from_history_count}`)
+      return parts.join(' · ')
+    }
+    case 'sufficiency_check': {
+      const p = payload as {
+        round?: number | string
+        phase?: string
+        hit_count?: number
+        sufficient?: boolean
+        reasons?: unknown[]
+        missing_entities?: string[]
+        missing_slots?: string[]
+      }
+      const parts = [`hits=${p.hit_count ?? 0}`, p.sufficient ? 'sufficient' : 'insufficient']
+      if (p.phase) parts.push(p.phase)
+      if (p.reasons?.length) parts.push(`reasons=${p.reasons.length}`)
+      if (p.missing_entities?.length) parts.push(`missing=${p.missing_entities.join(',')}`)
+      if (p.missing_slots?.length) parts.push(`slots=${p.missing_slots.join(',')}`)
+      return parts.join(' · ')
+    }
+    case 'progressive_round': {
+      const p = payload as {
+        round?: number
+        phase?: string
+        queries?: string[]
+        added?: number
+        hit_count?: number
+      }
+      const parts = [`round=${p.round ?? 1}`, `added=${p.added ?? 0}`, `hits=${p.hit_count ?? 0}`]
+      if (p.phase) parts.push(p.phase)
+      if (p.queries?.length) parts.push(`q=${p.queries.length}`)
       return parts.join(' · ')
     }
     case 'context_assembled': {
