@@ -450,6 +450,14 @@ fn semantic_fuse(
     bm25_hits: &[ScoredHit],
     semantic_weight: f64,
 ) -> Option<Vec<ScoredHit>> {
+    let fp = crate::ai::identity::active_embedding_fp()?;
+    // 门禁：库里混了其它模型空间的向量时拒绝语义重排（与搜索页同一判据）。
+    // 不拒绝也没有"混空间"，但会白跑一次查询向量 + 全库扫描再返回空 —— 而且
+    // 调用方会把"语义已应用"标上，用户看到的是没有语义的语义结果。
+    if crate::commands::index::has_foreign_vectors(conn, Some(&fp)).unwrap_or(false) {
+        log::warn!("[AI] 检索语义重排已暂停：库中存在其它模型空间的向量（需重建或认领）");
+        return None;
+    }
     let q_vec = {
         let (tx, rx) = std::sync::mpsc::channel();
         let q = query.to_string();
@@ -460,7 +468,7 @@ fn semantic_fuse(
             .ok()
             .and_then(|r| r)
     }?;
-    let rows = crate::db::tracker::get_all_embeddings(conn).ok()?;
+    let rows = crate::db::tracker::get_all_embeddings(conn, Some(&fp)).ok()?;
     let bm25_ids: std::collections::HashSet<&str> =
         bm25_hits.iter().map(|h| h.file_id.as_str()).collect();
     let emb_map: std::collections::HashMap<&str, &Vec<f32>> = rows

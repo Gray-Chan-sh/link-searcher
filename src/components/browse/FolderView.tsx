@@ -141,7 +141,7 @@ export default function FolderView({ roots, deepLinkPath, selectedPath, onSelect
   const [ctx, setCtx] = useState<{ x: number; y: number; entry: DirEntry } | null>(null)
   const [log, setLog] = useState<string | null>(null)
   const [logLoading, setLogLoading] = useState(false)
-  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false, rerank: false })
   const [askQ, setAskQ] = useState('')
   const [askA, setAskA] = useState<string | null>(null)
   const [askErr, setAskErr] = useState(false)

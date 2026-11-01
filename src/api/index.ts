@@ -82,15 +82,50 @@ export async function backfillEmbeddings(): Promise<BackfillReport> {
   return client.invoke<BackfillReport>('backfill_embeddings')
 }
 
+export interface ModelFpCount {
+  /** 16 位十六进制；空串 = 来源未知（v14 之前写入） */
+  model_fp: string
+  doc_rows: number
+  chunk_rows: number
+}
+
+export type CorpusState = 'empty' | 'current' | 'stale' | 'mixed' | 'legacy'
+
 export interface EmbeddingConsistency {
   active_model: string
   expected_dim: number | null
   stored_dims: number[]
+  /** 当前模型的指纹（null = 配置解析不出模型） */
+  active_fp: string | null
+  corpus_state: CorpusState
+  fp_counts: ModelFpCount[]
+  legacy_rows: number
+  pending_docs: number
+  pending_chunks: number
+  /** 维度一致**且**没有混空间 */
   consistent: boolean
+  /** stale / mixed（或维度不一致）→ 语义检索已暂停 */
+  rebuild_required: boolean
 }
 
 export async function checkEmbeddingConsistency(): Promise<EmbeddingConsistency> {
   return client.invoke<EmbeddingConsistency>('check_embedding_consistency')
+}
+
+export interface ClaimLegacyReport {
+  model_fp: string
+  claimed_docs: number
+  claimed_chunks: number
+}
+
+/**
+ * 把来源未知（v14 之前写入）的旧向量**认领**为当前模型。
+ *
+ * 这是断言，不是核验：系统无法验证那些向量是谁生成的，用户说"就是我建的"，
+ * 系统就照写。只影响 `model_fp=''` 的行，绝不覆盖已有指纹。
+ */
+export async function claimLegacyEmbeddings(): Promise<ClaimLegacyReport> {
+  return client.invoke<ClaimLegacyReport>('claim_legacy_embeddings')
 }
 
 export interface RebuildEmbeddingsReport {

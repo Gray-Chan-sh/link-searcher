@@ -1,10 +1,19 @@
 import { useState, useCallback } from 'react'
 import { useI18n } from '../i18n'
 import { confirm } from '../utils/platform'
-import { addProvider, deleteProvider, getConfig, refreshProviderModels, setActiveModel, testProvider, updateConfig, type ConfigInfo, type ModelType, type ProviderInfo } from '../api/config'
-import { checkEmbeddingConsistency, rebuildEmbeddings } from '../api/index'
+import { addProvider, deleteProvider, getConfig, previewEmbeddingSwitch, refreshProviderModels, setActiveModel, testProvider, updateConfig, type ConfigInfo, type ModelType, type ProviderInfo } from '../api/config'
+import { rebuildEmbeddings } from '../api/index'
 import { aiCapabilities, testAiGateway, type AiCapabilities, type GatewayTestPayload } from '../api/files'
 import { maskApiKey } from '../components/settings/SettingsFields'
+import type { SwitchPrompt } from '../components/settings/EmbeddingSwitchDialog'
+
+/** `uuid:bge-m3` / `local:bge-m3` → `bge-m3`（对话框里不展示 provider uuid）。 */
+function modelLabel(modelId: string): string {
+  if (!modelId) return ''
+  if (modelId.startsWith('local:')) return modelId.slice('local:'.length)
+  const idx = modelId.indexOf(':')
+  return idx >= 0 ? modelId.slice(idx + 1) : modelId
+}
 
 export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig: (c: ConfigInfo | null | ((prev: ConfigInfo | null) => ConfigInfo | null)) => void) {
   const { t } = useI18n()
@@ -23,6 +32,9 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set())
   const [aiTest, setAiTest] = useState<GatewayTestPayload[] | null>(null)
   const [aiTestLoading, setAiTestLoading] = useState(false)
+  // 待用户决定"重建 / 仅切换 / 取消"的模型切换（null = 没有待决切换）。
+  const [switchPrompt, setSwitchPrompt] = useState<SwitchPrompt | null>(null)
+  const [switchBusy, setSwitchBusy] = useState(false)
 
   const persistProviders = async (providers: ProviderInfo[]) => {
     if (!appConfig) return
@@ -95,20 +107,36 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     )
   }
 
-  const promptRebuildEmbeddings = async () => {
-    const c = await checkEmbeddingConsistency().catch(() => null)
-    if (!c || c.stored_dims.length === 0) return
-    const ok = await confirm(
-      t('embed_rebuild_confirm', { model: c.active_model, stored: c.stored_dims.join('/') }),
-      t('embed_rebuild_title'),
-    )
-    if (!ok) return
-    setAiWarn(t('embed_rebuild_started'))
-    // Fire-and-forget: the rebuild can take hours; the IndexStatus page shows
-    // progress via the `rebuild-embeddings` task id.
-    void rebuildEmbeddings().catch(e => setAiWarn(e instanceof Error ? e.message : String(e)))
+  const applyActiveModel = async (kind: 'embedding' | 'llm' | 'reranker', modelId: string, prev: string) => {
+    const keyMap: Record<'embedding' | 'llm' | 'reranker', 'active_embedding_model_id' | 'active_llm_model_id' | 'active_reranker_model_id'> = {
+      embedding: 'active_embedding_model_id',
+      llm: 'active_llm_model_id',
+      reranker: 'active_reranker_model_id',
+    }
+    const key = keyMap[kind]
+    setAppConfig(c => (c ? { ...c, [key]: modelId } : c))
+    setCaps(c => (c ? { ...c, [kind]: undefined } : c))
+    try {
+      const result = await setActiveModel(kind, modelId)
+      aiCapabilities().then(setCaps).catch(() => {})
+      // 切换后语料若已不属于新模型的空间，语义检索**已经暂停**（后端读路径会
+      // 拒绝）。这里必须说出来：否则用户只会觉得"搜索突然变笨了"。
+      if (result.rebuild_required) {
+        setAiWarn(t('embed_switch_suspended', { model: modelLabel(modelId) }))
+      }
+    } catch (e) {
+      setAppConfig(c => (c ? { ...c, [key]: prev } : c))
+      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
+    }
   }
 
+  /**
+   * 切换嵌入模型：**先预览再问**。
+   *
+   * 预览（`preview_embedding_switch`）不写配置，所以"取消"是真的什么都没发生；
+   * 先切再问的话，用户点取消只能再切回去 —— 两次写盘、两次重置本地 embedder，
+   * 中间还有一段时间处在错误的空间里。
+   */
   const handleActiveModel = async (kind: 'embedding' | 'llm' | 'reranker', modelId: string) => {
     if (!appConfig) return
     const keyMap: Record<'embedding' | 'llm' | 'reranker', 'active_embedding_model_id' | 'active_llm_model_id' | 'active_reranker_model_id'> = {
@@ -116,21 +144,41 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
       llm: 'active_llm_model_id',
       reranker: 'active_reranker_model_id',
     }
-    const key = keyMap[kind]
-    const prev = appConfig[key]
-    setAppConfig({ ...appConfig, [key]: modelId })
-    setCaps(c => (c ? { ...c, [kind]: undefined } : c))
-    try {
-      await setActiveModel(kind, modelId)
-      aiCapabilities().then(setCaps).catch(() => {})
-      // Switching the embedding model invalidates every stored vector (their
-      // vector space changes). Offer a one-click rebuild.
-      if (kind === 'embedding' && modelId && modelId !== prev) {
-        await promptRebuildEmbeddings()
+    const prev = appConfig[keyMap[kind]]
+
+    if (kind === 'embedding' && modelId !== prev) {
+      const preview = await previewEmbeddingSwitch(modelId).catch(() => null)
+      // 只有"真的需要重建"或"来源未知"才值得打断用户。空库 / 已同空间直接切。
+      if (preview && (preview.rebuild_required || preview.corpus_state === 'legacy')) {
+        setSwitchPrompt({ modelId, modelLabel: modelLabel(modelId), preview })
+        return
       }
-    } catch (e) {
-      setAppConfig((c: ConfigInfo | null) => (c ? { ...c, [key]: prev } : c))
-      setAiWarn(t('ai_error', { error: e instanceof Error ? e.message : String(e) }))
+    }
+    await applyActiveModel(kind, modelId, prev)
+  }
+
+  /** 三按钮对话框的结果。 */
+  const resolveSwitch = async (choice: 'cancel' | 'only' | 'rebuild') => {
+    const p = switchPrompt
+    if (!p) return
+    if (choice === 'cancel') {
+      setSwitchPrompt(null)
+      return
+    }
+    setSwitchBusy(true)
+    try {
+      const prev = appConfig?.active_embedding_model_id ?? ''
+      await applyActiveModel('embedding', p.modelId, prev)
+      setSwitchPrompt(null)
+      if (choice === 'rebuild') {
+        setAiWarn(t('embed_rebuild_started'))
+        // Fire-and-forget: the rebuild can take hours; the IndexStatus page shows
+        // progress via the `rebuild-embeddings` task id. 后端有单飞锁，重复点会
+        // 被明确拒绝而不是把两边都搞乱。
+        void rebuildEmbeddings().catch(e => setAiWarn(e instanceof Error ? e.message : String(e)))
+      }
+    } finally {
+      setSwitchBusy(false)
     }
   }
 
@@ -264,5 +312,6 @@ export function useSettingsProviders(appConfig: ConfigInfo | null, setAppConfig:
     handleToggleEnabled, handleActiveModel, handleTestProvider,
     handleRefreshProvider, handleDeleteProvider, openEdit,
     handleSaveEdit, handleModelType, handleAddProvider, testAi,
+    switchPrompt, switchBusy, resolveSwitch,
   }
 }

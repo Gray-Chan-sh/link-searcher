@@ -270,7 +270,28 @@ pub fn search_with_semantic(
     // **翻页复用**（2026-10-18）：查询 + 过滤条件相同的融合顺序是确定的，而"查询向量 +
     // 全库余弦 + RRF"是整条路径最贵的一段（日志实测 ~4s）→ 缓存 5 分钟，
     // 语义下翻页第 2 页起几乎即时。
-    if should_semantic_rerank(&params, crate::ai::embedding_enabled()) {
+    let active_fp = crate::ai::identity::active_embedding_fp();
+    let mut semantic_ok = should_semantic_rerank(&params, crate::ai::embedding_enabled());
+
+    // 门禁：库里混了其它模型空间的向量时**拒绝**语义检索。过滤层（按 model_fp
+    // 取行）已经保证不会拿旧空间向量去比，但那样只会白跑一次查询向量 + 全库
+    // 扫描再返回空 —— 这里提前退出，并明确告知原因。
+    if semantic_ok {
+        let foreign = match (active_fp.as_deref(), state.db.get()) {
+            (Some(fp), Ok(conn)) => {
+                crate::commands::index::has_foreign_vectors(&conn, Some(fp)).unwrap_or(false)
+            }
+            _ => false,
+        };
+        if foreign {
+            if let Some(fp) = active_fp.as_deref() {
+                warn_semantic_blocked_once(fp);
+            }
+            semantic_ok = false;
+        }
+    }
+
+    if semantic_ok {
         // 全库 top-N BM25（同过滤、不分页）作 RRF 的 BM25 侧融合源：
         // 页内 20 条的 page-local rank 会让第 2+ 页命中完全不参与融合。
         let mut top_params = params.clone();
@@ -278,10 +299,15 @@ pub fn search_with_semantic(
         top_params.page_size = BM25_FUSION_TOP_N;
         match searcher.search(&top_params) {
             Ok(top) => {
-                let key = semantic_cache_key(&params);
+                let key = semantic_cache_key(&params, active_fp.as_deref().unwrap_or(""));
                 let fusion = match cache_get(&key) {
                     Some(f) => f,
-                    None => match compute_semantic_fusion(&state.db, &params.query, &top.hits) {
+                    None => match compute_semantic_fusion(
+                        &state.db,
+                        &params.query,
+                        &top.hits,
+                        active_fp.as_deref(),
+                    ) {
                         Ok(f) => {
                             cache_put(&key, &f);
                             f
@@ -404,9 +430,12 @@ const SEMANTIC_CACHE_MAX: usize = 8;
 const SEMANTIC_ORDER_TOP: usize = 300;
 
 /// 缓存键：查询 + 所有影响检索/排序的参数（**不含** page/page_size —— 那正是要复用的维度）。
-fn semantic_cache_key(params: &SearchParams) -> String {
+///
+/// **必须含模型指纹**：缓存只活 5 分钟，但切换模型正好发生在这 5 分钟内的概率
+/// 并不低（用户改了设置立刻回去搜），而旧模型的融合顺序在新模型下毫无意义。
+fn semantic_cache_key(params: &SearchParams, model_fp: &str) -> String {
     format!(
-        "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
+        "{model_fp}|{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{}",
         params.query,
         params.dir_ids,
         params.file_ids,
@@ -445,6 +474,21 @@ fn cache_store(entries: &mut Vec<SemanticCacheEntry>, entry: SemanticCacheEntry,
     }
 }
 
+/// "语义检索被拒绝"每次切换只 warn 一次：这条路径在每次搜索时都会走到，逐次
+/// 刷屏只会把真正有用的日志埋掉。
+fn warn_semantic_blocked_once(model_fp: &str) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut g = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if g.as_deref() == Some(model_fp) {
+        return;
+    }
+    *g = Some(model_fp.to_string());
+    log::warn!(
+        "[AI] 语义检索已暂停：库中存在其它模型空间的向量（当前 model_fp={model_fp}）。\
+         请在「索引状态」里重建向量或认领旧向量后再用 —— 现在只返回关键词结果。"
+    );
+}
+
 fn cache_get(key: &str) -> Option<SemanticFusion> {
     let now = std::time::Instant::now();
     let guard = SEMANTIC_CACHE.lock().unwrap_or_else(|e| e.into_inner());
@@ -472,9 +516,13 @@ fn compute_semantic_fusion(
     pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
     query: &str,
     bm25_top: &[SearchHit],
+    model_fp: Option<&str>,
 ) -> Result<SemanticFusion, String> {
     use std::collections::HashMap;
 
+    let Some(fp) = model_fp else {
+        return Ok(SemanticFusion::default());
+    };
     let q_vec = {
         let (tx, rx) = std::sync::mpsc::channel();
         let q = query.to_string();
@@ -488,7 +536,8 @@ fn compute_semantic_fusion(
     .ok_or_else(|| "query embedding timeout (5s)".to_string())?;
 
     let conn = pool.get().map_err(|e| format!("db error: {e}"))?;
-    let rows = crate::db::tracker::get_all_embeddings(&conn).map_err(|e| e.to_string())?;
+    let rows = crate::db::tracker::get_all_embeddings(&conn, Some(fp))
+        .map_err(|e| e.to_string())?;
     drop(conn);
 
     if rows.is_empty() {
@@ -501,6 +550,19 @@ fn compute_semantic_fusion(
         .map(|(fid, vec)| (fid.clone(), crate::ai::cosine(&q_vec, vec)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    // 全零余弦 = 查询向量与库中向量**根本不可比**（维度不同、向量是零长度、
+    // 或者网关返回了常量向量）。此时 `scored` 的排序没有信息量，RRF 会按
+    // HashMap 迭代顺序把随机文档推上来，而调用方还会把它标成 `semantic_applied`
+    // —— 用户看到的是"语义检索生效了"，其实是噪声。不如明确退回纯 BM25。
+    let max_cos = scored.first().map(|(_, c)| *c).unwrap_or(0.0);
+    if !(max_cos > 0.0) {
+        log::warn!(
+            "[AI] semantic fusion skipped: {} 条向量的余弦全部为 0（查询向量与库中向量不可比），退回纯关键词",
+            scored.len()
+        );
+        return Ok(SemanticFusion::default());
+    }
 
     // RRF fusion: score = 1/(60 + rank) summed over BM25 and semantic lists.
     const K: f64 = 60.0;
@@ -1438,20 +1500,39 @@ mod semantic_gate_tests {
         );
     }
 
-    /// 缓存键**不含** page/page_size（那正是要复用的维度）；查询/过滤变了才换键。
+    /// 缓存键**不含** page/page_size（那正是要复用的维度）；查询/过滤/模型变了才换键。
     #[test]
     fn semantic_cache_key_ignores_pagination_but_tracks_query() {
         let a = params("合同", true);
         let mut b = a.clone();
         b.page = 7;
         b.page_size = 50;
-        assert_eq!(semantic_cache_key(&a), semantic_cache_key(&b), "翻页必须命中同一键");
+        assert_eq!(
+            semantic_cache_key(&a, "fp1"),
+            semantic_cache_key(&b, "fp1"),
+            "翻页必须命中同一键"
+        );
         let mut c = a.clone();
         c.query = "物业".into();
-        assert_ne!(semantic_cache_key(&a), semantic_cache_key(&c), "查询变了要换键");
+        assert_ne!(
+            semantic_cache_key(&a, "fp1"),
+            semantic_cache_key(&c, "fp1"),
+            "查询变了要换键"
+        );
         let mut d = a.clone();
         d.ext_filter = Some(vec!["pdf".into()]);
-        assert_ne!(semantic_cache_key(&a), semantic_cache_key(&d), "过滤变了要换键");
+        assert_ne!(
+            semantic_cache_key(&a, "fp1"),
+            semantic_cache_key(&d, "fp1"),
+            "过滤变了要换键"
+        );
+        // 换模型必须换键：切换后 5 分钟内还命中旧模型的融合顺序，等于拿旧空间
+        // 的排名去排新空间的命中。
+        assert_ne!(
+            semantic_cache_key(&a, "fp1"),
+            semantic_cache_key(&a, "fp2"),
+            "换模型必须换键"
+        );
     }
 
     /// 缓存读写：TTL 内命中、过期不命中、同 key 覆盖、超上限淘汰最旧。

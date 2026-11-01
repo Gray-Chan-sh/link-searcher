@@ -701,7 +701,7 @@ pub fn get_unsupported_ext_stats(conn: &Connection) -> Result<Vec<UnsupportedExt
 
 mod embeddings;
 pub use embeddings::{
-    count_chunk_embeddings, delete_chunk_embeddings, delete_embedding_unreferenced,
+    count_by_model_fp, count_chunk_embeddings, delete_chunk_embeddings, delete_embedding_unreferenced,
     get_all_chunk_embeddings, get_all_embeddings,
     get_chunk_embeddings_by_md5s, upsert_chunk_embedding, upsert_embedding,
 };
@@ -1158,16 +1158,16 @@ mod tests {
         let conn = db();
         track(&conn, "f1", "m1");
         track(&conn, "f2", "m2");
-        upsert_embedding(&conn, "m1", &[0.5, -1.0, 2.0]).unwrap();
-        upsert_embedding(&conn, "m2", &[1.0, 2.0]).unwrap();
-        let all = get_all_embeddings(&conn).unwrap();
+        upsert_embedding(&conn, "m1", &[0.5, -1.0, 2.0], "test-fp").unwrap();
+        upsert_embedding(&conn, "m2", &[1.0, 2.0], "test-fp").unwrap();
+        let all = get_all_embeddings(&conn, None).unwrap();
         assert_eq!(all.len(), 2);
         let v = all.iter().find(|(id, _)| id == "f1").unwrap();
         assert_eq!(v.1, vec![0.5, -1.0, 2.0]);
 
         // 同内容再覆盖（md5 冲突 → 更新，不新增行）。
-        upsert_embedding(&conn, "m1", &[9.0]).unwrap();
-        let all = get_all_embeddings(&conn).unwrap();
+        upsert_embedding(&conn, "m1", &[9.0], "test-fp").unwrap();
+        let all = get_all_embeddings(&conn, None).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all.iter().find(|(id, _)| id == "f1").unwrap().1, vec![9.0]);
 
@@ -1189,9 +1189,9 @@ mod tests {
         let conn = db();
         track(&conn, "a", "md5-dup");
         track(&conn, "b", "md5-dup");
-        upsert_embedding(&conn, "md5-dup", &[1.0]).unwrap();
+        upsert_embedding(&conn, "md5-dup", &[1.0], "test-fp").unwrap();
         assert_eq!(count_embeddings(&conn).unwrap(), 1, "同内容只存一份");
-        let all = get_all_embeddings(&conn).unwrap();
+        let all = get_all_embeddings(&conn, None).unwrap();
         assert_eq!(all.len(), 2, "读侧按 file_id 展开");
         assert_eq!(all.iter().filter(|(_, v)| v == &vec![1.0]).count(), 2);
         // 删掉 a 后 b 还在引用 → 向量保留。
@@ -1199,30 +1199,65 @@ mod tests {
         assert_eq!(delete_embedding_unreferenced(&conn, "md5-dup", "").unwrap(), 0);
         assert_eq!(count_embeddings(&conn).unwrap(), 1);
         // 非活跃文件不再出现在候选里。
-        assert_eq!(get_all_embeddings(&conn).unwrap().len(), 1);
+        assert_eq!(get_all_embeddings(&conn, None).unwrap().len(), 1);
     }
 
     #[test]
     fn test_chunk_embedding_roundtrip() {
         let conn = db();
-        upsert_chunk_embedding(&conn, "m1", 0, &[0.5, -1.0, 2.0]).unwrap();
-        upsert_chunk_embedding(&conn, "m1", 1, &[1.0, 2.0]).unwrap();
-        upsert_chunk_embedding(&conn, "m2", 0, &[3.0]).unwrap();
-        let all = get_all_chunk_embeddings(&conn).unwrap();
+        upsert_chunk_embedding(&conn, "m1", 0, &[0.5, -1.0, 2.0], "test-fp").unwrap();
+        upsert_chunk_embedding(&conn, "m1", 1, &[1.0, 2.0], "test-fp").unwrap();
+        upsert_chunk_embedding(&conn, "m2", 0, &[3.0], "test-fp").unwrap();
+        let all = get_all_chunk_embeddings(&conn, None).unwrap();
         assert_eq!(all.len(), 3);
         let v = all.iter().find(|(m, i, _)| m == "m1" && *i == 0).unwrap();
         assert_eq!(v.2, vec![0.5, -1.0, 2.0]);
 
         // upsert replaces the same (md5, chunk_index) row.
-        upsert_chunk_embedding(&conn, "m1", 0, &[9.0]).unwrap();
-        let all = get_all_chunk_embeddings(&conn).unwrap();
+        upsert_chunk_embedding(&conn, "m1", 0, &[9.0], "test-fp").unwrap();
+        let all = get_all_chunk_embeddings(&conn, None).unwrap();
         assert_eq!(all.len(), 3);
         assert_eq!(all.iter().find(|(m, i, _)| m == "m1" && *i == 0).unwrap().2, vec![9.0]);
 
         // delete by md5 removes only that md5's chunks.
         delete_chunk_embeddings(&conn, "m1").unwrap();
         assert_eq!(count_chunk_embeddings(&conn).unwrap(), 1);
-        assert_eq!(get_all_chunk_embeddings(&conn).unwrap()[0].0, "m2");
+        assert_eq!(get_all_chunk_embeddings(&conn, None).unwrap()[0].0, "m2");
+    }
+
+    /// 切换模型后，旧指纹的行必须**结构性地**不参与检索 —— 不是靠"维度恰好
+    /// 不同"来碰运气。v14 之前这条只能靠日志推断。
+    #[test]
+    fn test_embeddings_filtered_by_model_fp() {
+        let conn = db();
+        track(&conn, "f1", "m1");
+        track(&conn, "f2", "m2");
+        upsert_embedding(&conn, "m1", &[1.0, 0.0], "fp-old").unwrap();
+        upsert_embedding(&conn, "m2", &[0.0, 1.0], "fp-new").unwrap();
+
+        let only_new = get_all_embeddings(&conn, Some("fp-new")).unwrap();
+        assert_eq!(only_new.len(), 1);
+        assert_eq!(only_new[0].0, "f2");
+
+        let only_old = get_all_embeddings(&conn, Some("fp-old")).unwrap();
+        assert_eq!(only_old.len(), 1);
+        assert_eq!(only_old[0].0, "f1");
+
+        assert!(get_all_embeddings(&conn, Some("fp-missing")).unwrap().is_empty());
+        assert_eq!(get_all_embeddings(&conn, None).unwrap().len(), 2);
+
+        upsert_chunk_embedding(&conn, "m1", 0, &[1.0], "fp-old").unwrap();
+        upsert_chunk_embedding(&conn, "m2", 0, &[1.0], "fp-new").unwrap();
+        let chunks = get_all_chunk_embeddings(&conn, Some("fp-new")).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "m2");
+
+        // 指纹统计是"混空间"的直接事实来源。
+        let counts = count_by_model_fp(&conn).unwrap();
+        assert_eq!(
+            counts,
+            vec![("fp-new".to_string(), 1, 1), ("fp-old".to_string(), 1, 1)]
+        );
     }
 
     #[test]

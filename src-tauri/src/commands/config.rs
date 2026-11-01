@@ -56,15 +56,26 @@ pub fn get_config() -> Result<ConfigInfo, String> {
 }
 
 #[tauri::command]
-pub fn update_config(
+pub async fn update_config(
     state: State<'_, AppState>,
+    new_config: ConfigInfo,
+) -> Result<(), String> {
+    // 读写的是一份 117 KB 的 JSON，还可能删/建目录 —— 不能在 UI 线程原地做。
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || update_config_core(&db, new_config))
+        .await
+        .map_err(|e| format!("update_config task panicked: {e}"))?
+}
+
+fn update_config_core(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
     mut new_config: ConfigInfo,
 ) -> Result<(), String> {
     use crate::commands::settings::is_masked;
     // Only validate when the data dir is actually changing.
     let current = load_config();
     if Path::new(&new_config.data_dir) != current.data_dir.as_path() {
-        let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+        let conn = db.get().map_err(|e| format!("db error: {e}"))?;
         let dirs = db::dir_config::list_dirs(&conn).map_err(|e| format!("{e}"))?;
         drop(conn);
         for dir in &dirs {
@@ -144,7 +155,18 @@ pub fn update_config(
     config.llm_api_key = new_config.llm_api_key;
     config.llm_model = new_config.llm_model;
     config.providers = new_config.providers;
-    config.active_embedding_model_id = new_config.active_embedding_model_id;
+    // ⚠️ `active_embedding_model_id` **不在这里改**：它是唯一会改变向量空间身份的
+    // 字段，必须走 `set_active_model`（重置 embedder、清查询缓存、剪枝本地模型、
+    // 算了语料状态并要求重建）。设置页本来也是通过它改的；这里接受一个值只会
+    // 开出第二条"静默换模型"的路（例如 persistProviders 拿旧 appConfig 回写，
+    // 反而把用户刚选的模型改回去）。模型 id 变了就明确忽略并记一条日志。
+    if config.active_embedding_model_id != new_config.active_embedding_model_id {
+        log::warn!(
+            "[CONFIG] update_config 试图直接改 active_embedding_model_id（{:?} → {:?}），已忽略；请改用 set_active_model",
+            config.active_embedding_model_id,
+            new_config.active_embedding_model_id
+        );
+    }
     config.active_llm_model_id = new_config.active_llm_model_id;
     config.semantic_weight = new_config.semantic_weight;
     config.active_reranker_model_id = new_config.active_reranker_model_id;
@@ -303,11 +325,70 @@ pub async fn refresh_provider_models(id: String) -> Result<Vec<crate::config::Mo
     Ok(result)
 }
 
+/// 切换模型的判定口径。
+///
+/// 这是给前端**选措辞**用的，不是"能不能切"的开关：数据库随时能回答"现在库里
+/// 的向量是不是当前模型的"（`corpus_state`），但这个判断能有多确定取决于模型
+/// 在哪 —— 本地模型的权重在磁盘上、哈希可比；远程网关背后换了权重我们看不见。
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchVerdict {
+    /// 模型没变（或只是刷新缓存）：什么都不用提示。
+    Unchanged,
+    /// 库里还没有向量：没有可重建的东西。
+    Empty,
+    /// 两边都是**本地**模型：权重目录哈希直接可比 → 可以断言"不一致"。
+    DifferentLocal,
+    /// 远程/混合：只能确认"声明的身份不同"，不能确认背后是哪份权重。
+    Unknown,
+    /// 旧向量来源未知（`model_fp=''`）：不是"不一致"，而是"不知道"。
+    LegacyUnknown,
+}
+
+#[derive(Serialize, Clone, Debug)]
+pub struct SetActiveModelResult {
+    pub kind: String,
+    /// 实际生效的模型 id（空串 = 已清除）。
+    pub model_id: String,
+    /// 是否真的换了模型（相同 → false，前端不必弹框）。
+    pub changed: bool,
+    /// 切换后的语料状态 —— 直接从库里的事实推出来。
+    pub corpus_state: crate::commands::index::CorpusState,
+    /// 必须重建才能恢复语义检索（`Stale` / `Mixed`）。
+    pub rebuild_required: bool,
+    /// 需要重建但还没重建的内容数 / 块数（让用户知道代价）。
+    pub pending_docs: u64,
+    pub pending_chunks: u64,
+    pub verdict: SwitchVerdict,
+}
+
 /// Set (or clear, with empty id) which model is used for a role.
+///
+/// ## 为什么现在要 `async`
+///
+/// 这条命令读一份 117 KB 的 `config.json`、写回、再可能要删模型目录（`prune`）
+/// 并对全库向量做一次指纹聚合。同步命令由 Tauri 在 **UI 线程**原地执行，磁盘/
+/// 杀软一抖整个窗口就"无响应"（AGENTS.md 已反复出现过的问题清单第 6 条）。
 #[tauri::command]
-pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
+pub async fn set_active_model(
+    state: State<'_, AppState>,
+    kind: String,
+    model_id: String,
+) -> Result<SetActiveModelResult, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || set_active_model_core(&db, &kind, &model_id))
+        .await
+        .map_err(|e| format!("set_active_model task panicked: {e}"))?
+}
+
+/// [`set_active_model`] 的本体。Web API 直接调它（那边没有 `State` 便捷入口）。
+pub fn set_active_model_core(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    kind: &str,
+    model_id: &str,
+) -> Result<SetActiveModelResult, String> {
     let mut config = load_config();
-    let field = match kind.as_str() {
+    let field = match kind {
         "embedding" => &mut config.active_embedding_model_id,
         "llm" => &mut config.active_llm_model_id,
         "reranker" => &mut config.active_reranker_model_id,
@@ -320,12 +401,16 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
                 && let Some(m) = p.models.iter_mut().find(|m| m.id == mid) {
                     m.enabled = true;
                 }
-    *field = model_id.clone();
+    *field = model_id.to_string();
+    // 先算出"切换后库里是什么状态"再落盘：判定用的是新模型 + 旧数据，
+    // 与写配置的先后无关，但放前面可以在写失败时不去动任何缓存。
+    let changed = previous != model_id;
+    let assessment = assess_switch(db, &config, kind, model_id, &previous, changed);
     save_config(&config)?;
     if kind == "embedding" {
         // Switching the embedding model invalidates the loaded local embedder
         // (wrong dimension if the new model differs) and any cached query vectors.
-        if previous != model_id {
+        if changed {
             crate::ai::local_embed::reset_local_embedder();
             crate::ai::clear_query_embed_cache();
         }
@@ -333,23 +418,157 @@ pub fn set_active_model(kind: String, model_id: String) -> Result<(), String> {
         // disk. Remote selections leave local models untouched. Only prune when
         // the selected model is actually present, so a stale UI selection can't
         // delete the working model.
-        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(&model_id) {
+        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(model_id) {
             if crate::ai::local_embed::bge_model_ready(&config.data_dir, keep) {
                 crate::commands::bge::prune_local_models_except(&config.data_dir, keep);
             }
         }
     } else if kind == "reranker" {
         // Local rerankers are a single choice too: keep only the selected one.
-        if previous != model_id {
+        if changed {
             crate::ai::local_rerank::reset_local_reranker();
         }
-        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(&model_id) {
+        if let Some(keep) = crate::ai::local_embed::local_model_dir_name(model_id) {
             if crate::ai::local_rerank::rerank_model_ready(&config.data_dir, keep) {
                 crate::ai::local_rerank::prune_local_rerank_models_except(&config.data_dir, keep);
             }
         }
     }
-    Ok(())
+
+    let corpus_state = assessment.corpus_state;
+    let rebuild_required = corpus_state.blocks_semantic();
+    let verdict = assessment.verdict;
+    let (pending_docs, pending_chunks) = (assessment.pending_docs, assessment.pending_chunks);
+
+    if rebuild_required {
+        log::warn!(
+            "[AI] embedding 模型已切换为 {model_id}，但语料状态={corpus_state:?}（待回填 doc={pending_docs} chunk={pending_chunks}）—— 语义检索暂停，直到重建或认领"
+        );
+    }
+
+    Ok(SetActiveModelResult {
+        kind: kind.to_string(),
+        model_id: model_id.to_string(),
+        changed,
+        corpus_state,
+        rebuild_required,
+        pending_docs,
+        pending_chunks,
+        verdict,
+    })
+}
+
+/// 一次切换评估的全部结论（切换前预览与切换后返回共用同一份计算）。
+struct SwitchAssessment {
+    corpus_state: crate::commands::index::CorpusState,
+    pending_docs: u64,
+    pending_chunks: u64,
+    verdict: SwitchVerdict,
+}
+
+/// 评估"把 `kind` 切换到 `model_id` 之后，库里会是什么状态"。
+///
+/// **纯读**：不改配置、不动缓存，所以可以用于切换前的预览（前端据此决定
+/// 是否弹三按钮对话框）。`config` 必须已经是**目标状态**（嵌入模型字段已写成
+/// `model_id`）—— 判定的对象是"新模型 + 旧数据"。
+fn assess_switch(
+    db: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    config: &crate::config::AppConfig,
+    kind: &str,
+    model_id: &str,
+    previous: &str,
+    changed: bool,
+) -> SwitchAssessment {
+    let (corpus_state, pending_docs, pending_chunks) = if kind == "embedding" {
+        match db.get() {
+            // DB 打不开时退化成 `Empty`（= 不拦、不提示重建）。宁可少提示一次，
+            // 也不能因为读库失败而让用户没法切模型。
+            Ok(conn) => match crate::commands::index::corpus_snapshot(&conn, config) {
+                Ok((state, docs, chunks)) => (state, docs, chunks),
+                Err(e) => {
+                    log::warn!("[AI] 读取语料状态失败: {e}");
+                    (crate::commands::index::CorpusState::Empty, 0, 0)
+                }
+            },
+            Err(e) => {
+                log::warn!("[AI] 读取语料状态失败（取连接）: {e}");
+                (crate::commands::index::CorpusState::Empty, 0, 0)
+            }
+        }
+    } else {
+        (crate::commands::index::CorpusState::Empty, 0, 0)
+    };
+
+    let verdict = if kind != "embedding" || !changed {
+        SwitchVerdict::Unchanged
+    } else {
+        match corpus_state {
+            crate::commands::index::CorpusState::Empty => SwitchVerdict::Empty,
+            crate::commands::index::CorpusState::Current => SwitchVerdict::Unchanged,
+            crate::commands::index::CorpusState::Legacy => SwitchVerdict::LegacyUnknown,
+            // 两边都是本地模型：权重目录哈希是同一套**确定性**算法算出来的，
+            // 指纹不同就是真的不是同一个空间 —— 可以断言"不一致"。
+            crate::commands::index::CorpusState::Stale
+            | crate::commands::index::CorpusState::Mixed
+                if crate::config::is_local_embedding_model(model_id)
+                    && crate::config::is_local_embedding_model(previous) =>
+            {
+                SwitchVerdict::DifferentLocal
+            }
+            // 含远程网关：同 URL 背后可能已经换了权重，只能诚实地说"不一致/
+            // 无法确认"，不能替用户断言。
+            _ => SwitchVerdict::Unknown,
+        }
+    };
+
+    SwitchAssessment {
+        corpus_state,
+        pending_docs,
+        pending_chunks,
+        verdict,
+    }
+}
+
+#[derive(Serialize)]
+pub struct EmbeddingSwitchPreview {
+    pub model_id: String,
+    pub changed: bool,
+    pub corpus_state: crate::commands::index::CorpusState,
+    pub rebuild_required: bool,
+    pub pending_docs: u64,
+    pub pending_chunks: u64,
+    pub verdict: SwitchVerdict,
+}
+
+/// 切换前预览：**不写配置**，只回答"切过去之后库里会怎样"。
+///
+/// 前端需要这个才能在用户点下模型的**那一刻**弹出三按钮对话框；否则只能先切
+/// 再问，选"取消"就得再切回去（两次写盘 + 两次重置 embedder，还能被并发打乱）。
+#[tauri::command]
+pub async fn preview_embedding_switch(
+    state: State<'_, AppState>,
+    model_id: String,
+) -> Result<EmbeddingSwitchPreview, String> {
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || {
+        let cfg = load_config();
+        let previous = cfg.active_embedding_model_id.clone();
+        let changed = previous != model_id;
+        let mut hypothetical = cfg;
+        hypothetical.active_embedding_model_id = model_id.clone();
+        let a = assess_switch(&db, &hypothetical, "embedding", &model_id, &previous, changed);
+        Ok(EmbeddingSwitchPreview {
+            model_id,
+            changed,
+            rebuild_required: a.corpus_state.blocks_semantic(),
+            corpus_state: a.corpus_state,
+            pending_docs: a.pending_docs,
+            pending_chunks: a.pending_chunks,
+            verdict: a.verdict,
+        })
+    })
+    .await
+    .map_err(|e| format!("preview_embedding_switch task panicked: {e}"))?
 }
 
 /// Test a provider's connectivity (GET /models). Returns ok + detail.

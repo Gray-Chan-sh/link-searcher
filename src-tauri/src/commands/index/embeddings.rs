@@ -59,6 +59,9 @@ pub(super) fn run_backfill_embeddings(
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    let Some(model_fp) = crate::ai::identity::active_embedding_fp() else {
+        return Err("无法解析当前 embedding 模型的身份（配置不完整），拒绝写入向量".into());
+    };
     if DOC_BACKFILL_RUNNING.swap(true, Ordering::SeqCst) {
         log::info!("[AI] doc 向量回填已在运行，跳过本次");
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
@@ -106,7 +109,7 @@ pub(super) fn run_backfill_embeddings(
             match v {
                 Some(vec) => {
                     // 一个 md5 一行：共享同内容的多个文件不需要各写一份。
-                    if let Err(e) = tracker::upsert_embedding(&conn, md5, &vec) {
+                    if let Err(e) = tracker::upsert_embedding(&conn, md5, &vec, &model_fp) {
                         log::warn!("[AI] upsert_embedding failed {md5}: {e}");
                         failed += ids.len();
                     }
@@ -419,6 +422,16 @@ fn run_keeper_loop(
 pub(super) fn missing_embedding_rows(
     conn: &rusqlite::Connection,
 ) -> anyhow::Result<Vec<(String, String, String)>> {
+    // 队列只补**没有向量**的内容（或内容比向量新）。
+    //
+    // ⚠️ 刻意**不**按 `model_fp` 过滤：属于"另一个已知模型"的向量不是缺口 ——
+    // 它存在、而且可能是用户上一次会话特意保留的（"仅切换，语义检索暂停"）。
+    // 如果这里把它算成缺口，自动回填会在后台把整库悄悄重嵌一遍（数小时 CPU），
+    // 用户明确选择的"暂停"就被后台任务推翻了。换空间只由显式的「重建语义向量」
+    // 处理（它先把所有行删掉，于是这里自然全部变成缺口）。
+    //
+    // 已删掉向量的情况（md5 孤行/内容变更）仍会进来：`e.md5 IS NULL` 或
+    // `e.updated_at < ci.indexed_at`。
     let mut stmt = conn
         .prepare(
             "SELECT ft.id, ft.md5, ci.text_content
@@ -490,6 +503,8 @@ pub(super) fn missing_chunk_embedding_md5s(
     conn: &rusqlite::Connection,
     limit: usize,
 ) -> anyhow::Result<Vec<String>> {
+    // 与 [`missing_embedding_rows`] 同一口径：只看"这个 (md5, chunk_index) 有没有
+    // 行"，不看指纹 —— 属于旧空间的向量不是缺口，重建才会清掉重来。
     let mut stmt = conn
         .prepare(
             "SELECT dc.md5
@@ -511,7 +526,10 @@ pub(super) fn missing_chunk_embedding_md5s(
 /// Existing (md5, chunk_index) pairs that already have embeddings, so the
 /// per-md5 backfill loop only embeds the missing ones (partial progress —
 /// a doc interrupted mid-run resumes without re-embedding finished chunks).
-pub(super) fn existing_chunk_indexes(conn: &rusqlite::Connection, md5: &str) -> anyhow::Result<std::collections::HashSet<i64>> {
+pub(super) fn existing_chunk_indexes(
+    conn: &rusqlite::Connection,
+    md5: &str,
+) -> anyhow::Result<std::collections::HashSet<i64>> {
     let mut stmt = conn
         .prepare("SELECT chunk_index FROM chunk_embeddings WHERE md5 = ?1")
         .context("prepare existing-chunk-indexes")?;
@@ -542,6 +560,9 @@ pub(super) fn run_backfill_chunk_embeddings(
     if !crate::ai::embedding_enabled() {
         return Err("AI 未配置（embedding_api_base 为空），无法生成语义向量".into());
     }
+    let Some(model_fp) = crate::ai::identity::active_embedding_fp() else {
+        return Err("无法解析当前 embedding 模型的身份（配置不完整），拒绝写入向量".into());
+    };
     if CHUNK_BACKFILL_RUNNING.swap(true, Ordering::SeqCst) {
         log::info!("[AI] chunk 向量回填已在运行，跳过本次");
         return Ok(BackfillReport { processed: 0, pending: 0, failed: 0 });
@@ -635,7 +656,7 @@ pub(super) fn run_backfill_chunk_embeddings(
             for ((md5, idx, _), v) in group.iter().zip(vecs) {
                 match v {
                     Some(vec) => {
-                        match crate::db::tracker::upsert_chunk_embedding(&conn, md5, *idx, &vec) {
+                        match crate::db::tracker::upsert_chunk_embedding(&conn, md5, *idx, &vec, &model_fp) {
                             Ok(()) => pass_ok += 1,
                             Err(e) => {
                                 log::warn!("[AI] upsert_chunk_embedding failed {md5}#{idx}: {e}");
@@ -797,8 +818,16 @@ mod tests {
 
         assert!(has_missing_doc_embeddings(&conn).unwrap(), "有内容但无 doc 向量 → 应报告有活");
 
-        crate::db::tracker::upsert_embedding(&conn, "m1", &[1.0, 2.0]).unwrap();
+        crate::db::tracker::upsert_embedding(&conn, "m1", &[1.0, 2.0], "fp").unwrap();
         assert!(!has_missing_doc_embeddings(&conn).unwrap(), "补上向量后应报告无活");
+
+        // 属于**别的模型**的向量不是"缺口"：它存在，只是不在当前空间。自动回填
+        // 不该把它悄悄重嵌一遍（用户选了"仅切换，暂停语义检索"就得真暂停）。
+        conn.execute("UPDATE doc_embeddings SET model_fp='old-fp'", []).unwrap();
+        assert!(
+            !has_missing_doc_embeddings(&conn).unwrap(),
+            "旧空间的向量不该让自动回填把整库重嵌"
+        );
     }
 
     /// `RunningFlag` must clear on drop even when its scope returns early —
@@ -934,7 +963,7 @@ mod tests {
         crate::db::chunks::replace_chunks(&conn, "md5-b", &wb).unwrap();
         let chunks_b = crate::db::chunks::get_chunks(&conn, "md5-b").unwrap();
         for c in chunks_b.iter().take(2) {
-            crate::db::tracker::upsert_chunk_embedding(&conn, "md5-b", c.chunk_index, &[1.0, 2.0, 3.0]).unwrap();
+            crate::db::tracker::upsert_chunk_embedding(&conn, "md5-b", c.chunk_index, &[1.0, 2.0, 3.0], "fp").unwrap();
         }
 
         let total = count_missing_chunks(&conn).unwrap();
@@ -947,5 +976,13 @@ mod tests {
         assert_eq!(all.len(), total);
         let b_missing = all.iter().filter(|(m, _, _)| m == "md5-b").count();
         assert_eq!(b_missing, chunks_b.len() - 2, "embedded chunks must not be re-selected");
+
+        // 指纹不同**不算缺口**：自动回填只管"没有行"，换空间必须走显式重建。
+        conn.execute("UPDATE chunk_embeddings SET model_fp='other-fp'", []).unwrap();
+        assert_eq!(
+            count_missing_chunks(&conn).unwrap(),
+            wa.len() + (chunks_b.len() - 2),
+            "旧空间的块向量不该让自动回填把整库重嵌"
+        );
     }
 }

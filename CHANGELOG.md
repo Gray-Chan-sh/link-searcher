@@ -1,3 +1,78 @@
+## 2026-11-01（第七十轮）：切换 embedding / rerank 模型不再静默混向量空间（schema v14 + 模型指纹 + 五态语料）
+
+> 背景（用户提出三条要求）：① 切换模型时必须与"原模型造出来的数据"的可用性一致，不能混；
+> ② 不一致时程序应拒绝或提示重建；③ 如果还是切了，事后必须能检测并恢复。
+>
+> 旧的判定只有一条：**维度**。`bge-m3` 在 A 网关与 B 网关同为 1024 维 → 判"一致"，
+> 语义检索照常跑，但每条余弦都是在两个不同空间的向量之间算的（2026-09-29 的实际事故形态）。
+> 而库里**根本没有"这条向量是谁生成的"这个事实**，只能靠日志与相邻 chunk 余弦事后推断。
+
+**① schema v14：向量表记录"生成它的模型"（`db/mod.rs`、`ai/identity.rs`）**
+
+- `doc_embeddings` / `chunk_embeddings` 增加 `model_fp TEXT NOT NULL DEFAULT ''`（纯元数据
+  `ADD COLUMN`，不重写表）；旧行落成 `''` = **来源未知（legacy）**，`CorpusState::Legacy` 单独处理。
+- 指纹 `fp = sha256(base_url_norm | model | PREPROC_VERSION | extra)[..16]`：
+  **故意包含 base_url**（"同名模型在不同服务器上不是同一个空间"）；本地模型额外混入
+  **模型目录哈希**（黑名单策略：哈希全部文件，只排除 `*.md`/`.git*`/`LICENSE` ——
+  白名单漏一个文件就是假阴性）。不含 provider UUID / api_key / 超时。
+- `PREPROC_VERSION` 是"改了预处理就自动让全库变 stale"的闸门（本地查询前缀、512 token
+  截断、2000 字符截断、池化、归一化）。
+- 目录哈希缓存的签名是 `(文件数, 总字节数, 最新 mtime 纳秒)`。**必须是纳秒**：秒级精度下
+  "同一秒内换一个同大小的权重文件"会命中旧缓存 → 换了模型却判一致（单测直接踩到）。
+
+**② 写路径盖章、读路径过滤（全库唯一依据）**
+
+- `upsert_embedding` / `upsert_chunk_embedding` 增加 `model_fp` 参数；两个回填入口
+  （doc / chunk）取 `active_embedding_fp()` 并盖章，解析不出模型就**拒绝写入**。
+- **自动回填只补"没有向量"的内容**（`e.md5 IS NULL` 或内容比向量新），**不**按指纹判缺口。
+  这一点是刻意的：属于"另一个已知模型"的向量不是缺口，否则用户选「仅切换（语义检索暂停）」
+  后，后台回填会在几分钟内把整库悄悄重嵌一遍（数小时 CPU），明确的选择被后台任务推翻。
+  换空间**只**由显式的「重建语义向量」处理（它先 `DELETE` 全表，于是自然全部变成缺口）。
+  "重建代价"另有口径（`count_pending_docs/pending_chunks`，按指纹统计），供对话框与横幅显示。
+- 所有读路径（`ai::vector_scan*`、`chunk_vector_scan_for_md5s`、`search::compute_semantic_fusion`、
+  `ai::retrieval`、`ai::prompt`）按指纹取行。切换模型后的旧向量**结构性地**不参与检索，
+  不再靠"维度恰好不同"碰运气。
+
+**③ 五态语料 + 切换门禁（`commands/index/vector_health.rs`、`commands/config.rs`）**
+
+- `CorpusState`：`Empty / Current / Stale / Mixed / Legacy`，全由库里的事实推出。
+  `Stale` / `Mixed` → **语义检索拒绝**（`has_foreign_vectors` 廉价 `EXISTS` 提前退出，
+  不再白跑一次查询向量 + 全库扫描再返回空，且只 warn 一次）；`Legacy` 不阻断（升级第一天
+  必然是 legacy，判成故障会让所有人以为坏了），但可**人工认领**（`claim_legacy_embeddings`，
+  只改 `''` 行，绝不覆盖已有指纹 —— 否则认领会把 `Mixed` 洗成 `Current`）。
+- `set_active_model` 改 `async` + `spawn_blocking`（读 117KB JSON + 写回 + 删模型目录，
+  同步命令会堵 UI 线程），返回 `{changed, corpus_state, rebuild_required, pending_docs,
+  pending_chunks, verdict}`；新增 `preview_embedding_switch`（**不写配置**）供前端切换前询问。
+- 措辞按"怎么知道的"分三种，不编造确定性：两边本地 → `different_local`（"不一致"，
+  目录哈希可比）；含远程 → `unknown`（"无法确认"，同 URL 背后可能换了权重）；
+  旧行 → `legacy_unknown`（"来源未知"）。
+- `update_config` **不再接受** `active_embedding_model_id`：它是唯一会改变向量空间身份的
+  字段，必须走 `set_active_model`（否则 persistProviders 回写旧 appConfig 会把刚选的模型改回去）。
+- `rebuild_embeddings` 加**单飞锁**：并发重建会两边各自 `DELETE` 再回填，最终库里可能只剩
+  一半向量而两边都报"成功"。
+- 全零余弦早退：`compute_semantic_fusion` 在 `max cosine == 0` 时退回纯关键词 —— 否则 RRF
+  按 HashMap 迭代顺序把随机文档推上来，还被标成 `semantic_applied`（用户看到"语义生效"，
+  其实是噪声）。语义缓存键加入模型指纹（5 分钟窗口内切模型仍会串味）。
+- `rerank`：`AiCapabilities` 增加 `rerank` 标志；AI 事件里的"重排完成"改为**如实汇报**
+  （模型不可用/返回条数不符时明确说"跳过、保持原顺序"，不再把降级包装成成功）。
+- 启动清理补 `cleanup_orphan_doc_embeddings`（v12 起 doc 向量是 md5 键，这条清理此前
+  从没在启动时跑过，孤儿向量一直白占空间）。
+
+**④ 前端（三按钮对话框 / 五态横幅 / 认领）**
+
+- 新增 `EmbeddingSwitchDialog`：**取消 / 仅切换（语义检索暂停）/ 切换并重建**。
+  "仅切换"只在 `rebuild_required` 时才写"语义检索暂停"（legacy 状态下语义本来能跑，
+  写成"暂停"就是骗人）。取消 = 什么都没发生（预览不写盘），不需要"切回去"。
+- `IndexStatus` 五态横幅（`EmbeddingStateBanner`）：stale/mixed 红、legacy 黄，
+  显示指纹分布、待回填规模、维度不符，附「重建 / 认领 / 重新检查」。
+- `DepsTab` 安装完自动启用本地模型时，若语料已不同空间会提示去重建（这条路径绕过了对话框）。
+- 认领措辞一律是"断言，不是核验"：`embed_state_claim_confirm` 明确写"这是你的判断，
+  不是系统的核验。若之后检索结果明显不对，请回来重建"。zh/en/ja/ko 四语同步。
+
+> ⚠️ 如实记录：指纹记的是**声明的身份**，不是**验证过的身份**。网关若在同一 URL 后面
+> 悄悄换权重，指纹看不出来；`Legacy` 认领也纯属人工断言。这两点无法在离线状态解决，
+> 所以系统只做"能确定的说确定、不能确定的说不能确定"。
+
 ## 2026-10-29（第六十九轮）：界面卡死（UI 线程被同步命令堵住）——会话命令移出 UI 线程 + 慢 IPC 看门狗
 
 > 背景（用户反馈）：程序在一次 AI 问答（网关 400 拒绝）后**彻底无响应**。

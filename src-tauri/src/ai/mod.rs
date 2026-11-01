@@ -4,6 +4,7 @@
 //! `ai_api_base` disables the feature; every public entry point degrades
 //! gracefully to `None`/empty when unconfigured or unreachable.
 
+pub mod identity;
 pub mod local_embed;
 pub mod local_rerank;
 
@@ -389,6 +390,15 @@ pub fn embedding_enabled() -> bool {
 /// True when an LLM model is active (summary / RAG usable).
 pub fn llm_enabled() -> bool {
     resolve_active_endpoint(&crate::config::load_config(), ModelType::Llm).is_some()
+}
+
+/// True when a reranker model is active (chat-stage reordering usable).
+///
+/// 之前 `AiCapabilities` 只有 embedding / llm 两个标志，rerank 是否配置**完全
+/// 不可见** —— 用户以为排序里有重排，实际每次都是 `rerank: unavailable`。这里
+/// 只做配置判断（零网络），真实可用性仍由设置页的探测负责。
+pub fn rerank_enabled() -> bool {
+    resolve_active_endpoint(&crate::config::load_config(), ModelType::Reranker).is_some()
 }
 
 /// 区分"未配置"与"已配置但当前模型不可用"（active 指向被删 provider /
@@ -954,7 +964,12 @@ pub fn vector_scan_with_query_emb(
     threshold: f32,
     release_top_k: usize,
 ) -> Result<Vec<(String, f32)>, String> {
-    let all = crate::db::tracker::get_all_embeddings(conn).map_err(|e| e.to_string())?;
+    let Some(fp) = crate::ai::identity::active_embedding_fp() else {
+        // 没有可用的 embedding 模型 → 语义通道没有任何可比对象。
+        return Ok(Vec::new());
+    };
+    let all = crate::db::tracker::get_all_embeddings(conn, Some(&fp))
+        .map_err(|e| e.to_string())?;
     let all_count = all.len();
     let mut scored: Vec<(String, f32)> = all
         .into_iter()
@@ -1002,7 +1017,11 @@ pub fn chunk_vector_scan_with_query_emb(
     top_k: usize,
     release_top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
-    let all = crate::db::tracker::get_all_chunk_embeddings(conn).map_err(|e| e.to_string())?;
+    let Some(fp) = crate::ai::identity::active_embedding_fp() else {
+        return Ok(Vec::new());
+    };
+    let all = crate::db::tracker::get_all_chunk_embeddings(conn, Some(&fp))
+        .map_err(|e| e.to_string())?;
     let all_count = all.len();
     let results = chunk_vector_scan_impl(query_emb, &all, threshold, top_k, release_top_k);
     let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
@@ -1049,7 +1068,11 @@ pub fn chunk_vector_scan_for_md5s(
     top_k: usize,
     release_top_k: usize,
 ) -> Result<Vec<(String, usize, f32)>, String> {
-    let rows = crate::db::tracker::get_chunk_embeddings_by_md5s(conn, md5s).map_err(|e| e.to_string())?;
+    let Some(fp) = crate::ai::identity::active_embedding_fp() else {
+        return Ok(Vec::new());
+    };
+    let rows = crate::db::tracker::get_chunk_embeddings_by_md5s(conn, md5s, &fp)
+        .map_err(|e| e.to_string())?;
     let scanned = rows.len();
     let results = chunk_vector_scan_impl(query_emb, &rows, threshold, top_k, release_top_k);
     let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
@@ -1796,11 +1819,18 @@ pub struct GatewayTest {
 pub struct AiCapabilities {
     pub embedding: bool,
     pub llm: bool,
+    /// 重排模型是否已配置。**不**代表这次请求一定重排成功（网关可能是 404 /
+    /// 超时），但至少能让前端说清"有没有这个能力"，而不是静默跳过。
+    pub rerank: bool,
 }
 
 impl AiCapabilities {
     pub fn from_gateways((emb, llm): (bool, bool)) -> Self {
-        Self { embedding: emb, llm }
+        Self { embedding: emb, llm, ..Default::default() }
+    }
+
+    pub fn from_flags(emb: bool, llm: bool, rerank: bool) -> Self {
+        Self { embedding: emb, llm, rerank }
     }
 }
 

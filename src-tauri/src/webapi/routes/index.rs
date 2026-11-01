@@ -48,6 +48,10 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/index/rebuild-embeddings",
             post(rebuild_embeddings_handler),
         )
+        .route(
+            "/api/index/claim-legacy-embeddings",
+            post(claim_legacy_embeddings_handler),
+        )
 }
 
 /// OS thread, not tokio::spawn: the command futures borrow an AppState owned
@@ -533,4 +537,14 @@ async fn rebuild_embeddings_handler(
         StatusCode::ACCEPTED,
         Json(serde_json::json!({ "status": "started" })),
     ))
+}
+
+/// 把来源未知（`model_fp=''`）的旧向量认领为当前模型 —— 纯人工断言。
+async fn claim_legacy_embeddings_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<crate::commands::index::ClaimLegacyReport>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::claim_legacy_embeddings(app_state)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
 }

@@ -151,6 +151,7 @@ const MAPPINGS: Record<string, Mapping> = {
   }),
   backfill_chunk_embeddings: { method: 'POST', path: '/api/index/backfill-chunk-embeddings' },
   check_embedding_consistency: { method: 'GET', path: '/api/index/embedding-consistency' },
+  claim_legacy_embeddings: { method: 'POST', path: '/api/index/claim-legacy-embeddings' },
   rebuild_embeddings: { method: 'POST', path: '/api/index/rebuild-embeddings' },
   heal_index_integrity: { method: 'POST', path: '/api/index/heal' },
 
@@ -255,6 +256,10 @@ const MAPPINGS: Record<string, Mapping> = {
   delete_provider: (a) => ({ method: 'DELETE', path: `/api/config/providers/${a.id}` }),
   refresh_provider_models: (a) => ({ method: 'POST', path: `/api/config/providers/${a.id}/refresh` }),
   set_active_model: (a) => ({ method: 'PUT', path: '/api/config/active-model', body: a }),
+  preview_embedding_switch: {
+    method: 'GET', path: '/api/config/embedding-switch-preview',
+    paramMap: { modelId: 'model_id' },
+  },
   // Server ignores the path id (Path(_id)); credentials travel in the body.
   test_provider: (a) => ({ method: 'POST', path: '/api/config/providers/-/test', body: a }),
 

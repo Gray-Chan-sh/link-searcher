@@ -44,7 +44,8 @@ pub struct SummaryResult {
 pub async fn ai_capabilities() -> crate::ai::AiCapabilities {
     // 配置读取会碰磁盘（整份 config.json），仍在阻塞线程上做，避免在 async worker 上读盘。
     tokio::task::spawn_blocking(|| {
-        crate::ai::AiCapabilities::from_gateways(crate::ai::capabilities())
+        let (emb, llm) = crate::ai::capabilities();
+        crate::ai::AiCapabilities::from_flags(emb, llm, crate::ai::rerank_enabled())
     })
     .await
     .unwrap_or_default()

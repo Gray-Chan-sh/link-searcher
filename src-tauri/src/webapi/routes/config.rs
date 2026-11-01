@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -28,6 +28,10 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         )
         .route("/api/config/active-model", put(set_active_model_handler))
         .route(
+            "/api/config/embedding-switch-preview",
+            get(embedding_switch_preview_handler),
+        )
+        .route(
             "/api/config/providers/{id}/test",
             post(test_provider_handler),
         )
@@ -55,6 +59,7 @@ async fn update_config_handler(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
     config::update_config(app_state, body)
+        .await
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -117,11 +122,35 @@ pub struct SetActiveModelBody {
 }
 
 async fn set_active_model_handler(
+    State(state): State<ApiState>,
     Json(body): Json<SetActiveModelBody>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    config::set_active_model(body.kind, body.model_id)
+) -> Result<Json<config::SetActiveModelResult>, ApiError> {
+    let db = state.app_handle.state::<AppState>().db.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        config::set_active_model_core(&db, &body.kind, &body.model_id)
+    })
+    .await
+    .map_err(|e| ApiError { error: format!("set_active_model task panicked: {e}") })?
+    .map_err(|e| ApiError { error: e })?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddingSwitchPreviewQuery {
+    pub model_id: String,
+}
+
+/// 切换前预览：不写配置，只回答"切过去之后库里会怎样"。
+async fn embedding_switch_preview_handler(
+    State(state): State<ApiState>,
+    Query(q): Query<EmbeddingSwitchPreviewQuery>,
+) -> Result<Json<config::EmbeddingSwitchPreview>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let preview = config::preview_embedding_switch(app_state, q.model_id)
+        .await
         .map_err(|e| ApiError { error: e })?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    Ok(Json(preview))
 }
 
 #[derive(Deserialize)]

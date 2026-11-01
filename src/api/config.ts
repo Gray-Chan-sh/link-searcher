@@ -93,8 +93,51 @@ export async function refreshProviderModels(id: string): Promise<ModelInfo[]> {
     return client.invoke<ModelInfo[]>('refresh_provider_models', { id })
 }
 
-export async function setActiveModel(kind: 'embedding' | 'llm' | 'reranker', modelId: string): Promise<void> {
-    await client.invoke('set_active_model', { kind, modelId })
+/** 语料的向量空间状态（后端 `CorpusState`，与库里的事实一一对应）。 */
+export type CorpusState = 'empty' | 'current' | 'stale' | 'mixed' | 'legacy'
+
+/** 切换模型的"能有多确定"（后端 `SwitchVerdict`）——决定对话框措辞。 */
+export type SwitchVerdict =
+  | 'unchanged'
+  | 'empty'
+  | 'different_local'
+  | 'unknown'
+  | 'legacy_unknown'
+
+export interface SetActiveModelResult {
+  kind: string
+  model_id: string
+  /** 是否真的换了模型（false = 没必要弹框） */
+  changed: boolean
+  corpus_state: CorpusState
+  /** 必须重建才能恢复语义检索（stale / mixed） */
+  rebuild_required: boolean
+  /** 需要重建的内容数 / 块数（让用户知道代价） */
+  pending_docs: number
+  pending_chunks: number
+  verdict: SwitchVerdict
+}
+
+export interface EmbeddingSwitchPreview {
+  model_id: string
+  changed: boolean
+  corpus_state: CorpusState
+  rebuild_required: boolean
+  pending_docs: number
+  pending_chunks: number
+  verdict: SwitchVerdict
+}
+
+/** 切换前预览（不写配置）：切过去之后库里会是什么状态。 */
+export async function previewEmbeddingSwitch(modelId: string): Promise<EmbeddingSwitchPreview> {
+  return client.invoke<EmbeddingSwitchPreview>('preview_embedding_switch', { modelId })
+}
+
+export async function setActiveModel(
+  kind: 'embedding' | 'llm' | 'reranker',
+  modelId: string,
+): Promise<SetActiveModelResult> {
+  return client.invoke<SetActiveModelResult>('set_active_model', { kind, modelId })
 }
 
 export async function testProvider(baseUrl: string, apiKey: string): Promise<ProviderTest> {

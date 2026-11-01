@@ -1434,8 +1434,8 @@ mod tests {
         let c = svc.db.get().unwrap();
 
         crate::db::tracker::update_indexed(&c, &fid, Some("oldhash")).unwrap();
-        crate::db::tracker::upsert_embedding(&c, "oldhash", &[1.0, 2.0, 3.0]).unwrap();
-        crate::db::tracker::upsert_chunk_embedding(&c, "oldhash", 0, &[1.0, 2.0]).unwrap();
+        crate::db::tracker::upsert_embedding(&c, "oldhash", &[1.0, 2.0, 3.0], "test-fp").unwrap();
+        crate::db::tracker::upsert_chunk_embedding(&c, "oldhash", 0, &[1.0, 2.0], "test-fp").unwrap();
 
         IndexerService::clear_stale_embeddings(&c, &fid, "oldhash");
         let n: i64 = c
@@ -1651,11 +1651,11 @@ mod tests {
             let _fid_shared = crate::db::tracker::upsert_file(&conn, "/tmp2/dup.txt", "d2", 1000, 42, Some(&shared_md5)).unwrap();
             let _fid_only = crate::db::tracker::upsert_file(&conn, "/tmp/only.txt", "d1", 1000, 42, Some("only1")).unwrap();
             // doc 向量按 **md5** 键（v12）：共享内容只写一份。
-            crate::db::tracker::upsert_embedding(&conn, &shared_md5, &[1.0, 2.0]).unwrap();
-            crate::db::tracker::upsert_embedding(&conn, "only1", &[1.0, 2.0]).unwrap();
+            crate::db::tracker::upsert_embedding(&conn, &shared_md5, &[1.0, 2.0], "test-fp").unwrap();
+            crate::db::tracker::upsert_embedding(&conn, "only1", &[1.0, 2.0], "test-fp").unwrap();
             let md5s = [shared_md5.clone(), "only1".to_string()];
             for md5 in &md5s {
-                crate::db::tracker::upsert_chunk_embedding(&conn, md5, 0, &[1.0]).unwrap();
+                crate::db::tracker::upsert_chunk_embedding(&conn, md5, 0, &[1.0], "test-fp").unwrap();
             }
             crate::db::tracker::store_content(&conn, &shared_md5, "shared body", false, None).unwrap();
             crate::db::tracker::store_content(&conn, "only1", "only body", false, None).unwrap();
@@ -1717,8 +1717,8 @@ mod tests {
                 [],
             )
             .unwrap();
-            crate::db::tracker::upsert_embedding(&conn, "ghostmd5", &[1.0]).unwrap();
-            crate::db::tracker::upsert_chunk_embedding(&conn, "ghostmd5", 0, &[1.0]).unwrap();
+            crate::db::tracker::upsert_embedding(&conn, "ghostmd5", &[1.0], "test-fp").unwrap();
+            crate::db::tracker::upsert_chunk_embedding(&conn, "ghostmd5", 0, &[1.0], "test-fp").unwrap();
             crate::db::tracker::store_content(&conn, "ghostmd5", "ghost body", false, None).unwrap();
             conn.execute(
                 "INSERT INTO doc_chunks (md5,chunk_index,start_char,end_char,text) VALUES ('ghostmd5',0,0,10,'ghost')",

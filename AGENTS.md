@@ -206,6 +206,16 @@ PowerShell 5.1 的 `Set-Content` 默认按**系统 ANSI 编码**写文件（本�
 > 同样是**重跑即过**。→ 结论不变：**链接期的环境抖动先重跑**；若连续两次都红，再考虑
 > `cargo test -j 1`（降并发链接峰值内存）或清一次 `target`。
 
+> **第四个签名（2026-11-01，v14 门禁）**：`ai_chat_stream_wire` **12/15 失败**，且除第一条外
+> 全是 `PoisonError`（先失败的那条把 `CFG_LOCK` 毒化，后面连锁都拿不到）。
+> 真凶：**机器上设了 `HTTP_PROXY` / `http_proxy`**（本机 `http://192.168.1.50:7890`），
+> 而 `ureq` 不认 `NO_PROXY` 里的 `127.0.0.1` → 打 mock 网关（127.0.0.1:48xxx）的请求被送去
+> 代理 → 所有"期望成功"的用例全挂；`conn_refused` / `unconfigured` 这类**期望失败**的用例反而全过。
+>
+> → 跑门禁前先清代理：`$env:HTTP_PROXY=''; $env:HTTPS_PROXY=''; $env:http_proxy=''; $env:https_proxy=''`。
+> → 判据：**只有"期望成功"的用例全灭** = 先怀疑代理/网络出口，别怀疑代码；用
+> `git worktree add` 在 HEAD 上复跑一次可立刻证明"与本次改动无关"。
+
 **⑤ 结构性改动有"门禁盲区"：必须真的起一次应用**
 
 给应用**新增 bin 目标**、加 `default-run`、换入口点这类改动，`cargo build` / `cargo test` **都不会**

@@ -34,7 +34,7 @@ export default function SearchPage() {
   const [showFilters, setShowFilters] = useState(true)
   const [filterWidth, setFilterWidth] = useState(224)
   const [exportMsg, setExportMsg] = useState<string | null>(null)
-  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false, rerank: false })
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
 
   const [refineHistory, setRefineHistory] = useState<RefineStep[]>(() => {

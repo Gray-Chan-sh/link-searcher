@@ -35,6 +35,8 @@ export async function askDocuments(fileIds: string[], question: string): Promise
 export interface AiCapabilities {
   embedding: boolean
   llm: boolean
+  /** 重排模型是否已配置（不代表这次请求一定重排成功） */
+  rerank: boolean
 }
 
 export async function aiCapabilities(): Promise<AiCapabilities> {

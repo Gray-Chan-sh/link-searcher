@@ -67,6 +67,9 @@ export function DepsTab() {
   )
   // Which grouped model to activate once its background install completes.
   const pendingRef = useRef<{ kind: 'embedding' | 'reranker'; id: string } | null>(null)
+  // 安装完自动启用的模型会改变向量空间；如果说不出"语料已同空间"，必须提示
+  // 用户去重建 —— 这条路径绕过了设置页的切换对话框（用户点的是"下载并使用"）。
+  const [switchNote, setSwitchNote] = useState<string | null>(null)
 
   useEffect(() => {
     const un = listen<{ dep: string; success: boolean; message: string }>(
@@ -77,14 +80,22 @@ export function DepsTab() {
         // Make the chosen model active; the backend also prunes the sibling
         // models of the same group (set_active_model).
         if (r.success && pending && pending.id === r.dep) {
-          setActiveModel(pending.kind, `local:${r.dep}`).catch(() => {})
+          setActiveModel(pending.kind, `local:${r.dep}`)
+            .then(res => {
+              setSwitchNote(
+                res.rebuild_required
+                  ? t('embed_switch_suspended', { model: r.dep })
+                  : null,
+              )
+            })
+            .catch(e => setSwitchNote(e instanceof Error ? e.message : String(e)))
         }
       },
     )
     return () => {
       un.then(f => f())
     }
-  }, [])
+  }, [t])
 
   if (setup.loading) {
     return (
@@ -95,6 +106,12 @@ export function DepsTab() {
   }
 
   const active = setup.activeDep
+
+  const note = switchNote && (
+    <div className="mb-4 px-3 py-2 text-xs rounded-lg bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 text-amber-700 dark:text-amber-300">
+      {switchNote}
+    </div>
+  )
 
   const depRow = (dep: DepStatus) => {
     const installing = active === dep.id
@@ -242,6 +259,8 @@ export function DepsTab() {
       <Section title={t('dep_center_title')}>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-3">{t('dep_center_desc')}</p>
         <p className="text-xs text-gray-400 mb-4">data dir: {setup.status?.data_dir}</p>
+
+        {note}
 
         <div className="space-y-2">
           {deps.map(dep => {

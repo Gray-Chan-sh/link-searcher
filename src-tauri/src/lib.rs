@@ -25,10 +25,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::commands::backup::{apply_restore, delete_backup, export_backup, get_backup_status, get_dead_dirs, list_backups, plan_restore, preview_remap, remap_dir, remove_dir_with_files, restore_backup, restore_from_zip, trigger_backup, verify_backup};
 use crate::commands::ai::{ai_capabilities, ai_topic_clusters, ask_documents, cancel_ai_request, conversation_ask, conversation_ask_stream, create_chat_session, delete_chat_session, export_chat_session, export_chat_session_json, get_ai_events, get_turn_ai_events, list_chat_sessions, load_chat_session, rename_chat_session, save_chat_session, smart_search, smart_search_stream, summarize_file, test_ai_gateway};
-use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
+use crate::commands::config::{add_provider, delete_provider, get_config, migrate_data, preview_embedding_switch, refresh_provider_models, restart_app, set_active_model, test_provider, update_config, update_provider};
 use crate::commands::dirs::{add_dir, get_dir_children, get_dir_tree, list_dirs, remove_dir, update_dir};
 use crate::commands::files::{download_files, export_file_text, get_duplicates, get_file, get_file_preview, list_dir_entries, list_files, list_files_db, open_file, open_path, preview_file, preview_file_by_path, resolve_file_path, reveal_in_folder, reveal_path};
-use crate::commands::index::{backfill_audio_timeline, backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, retry_failed_files, trigger_scan, verify_index_content};
+use crate::commands::index::{backfill_audio_timeline, backfill_chunk_embeddings, backfill_embeddings, backfill_quality, cancel_scan, check_embedding_consistency, claim_legacy_embeddings, check_index_health, check_index_integrity, get_index_errors, get_index_status, get_quality_summary, heal_index_integrity, quality_audit, re_extract_file, re_extract_low_quality, rebuild_embeddings, rebuild_index, reextract_missing_content, reindex_file, reindex_files, restore_files, retry_failed_files, trigger_scan, verify_index_content};
 use crate::commands::lark::{get_lark_bindings, get_lark_config, get_lark_status, lark_bind_cancel, lark_bind_dismiss, lark_bind_start, lark_bind_status, lark_pairing_cancel, lark_pairing_start, lark_restart, lark_self_check, set_lark_config};
 use crate::commands::search::{clear_search_history, export_search_results, get_browse_file_types, get_file_type_stats, get_search_history, refine_search, search, search_file_ids_only, search_file_paths, search_tree_prune, suggest};
 use crate::commands::settings::{
@@ -205,6 +205,7 @@ get_dir_children,
             backfill_chunk_embeddings,
             backfill_audio_timeline,
             check_embedding_consistency,
+            claim_legacy_embeddings,
             rebuild_embeddings,
             backfill_quality,
             get_logs,
@@ -229,6 +230,7 @@ get_dir_children,
             delete_provider,
             refresh_provider_models,
             set_active_model,
+            preview_embedding_switch,
             test_provider,
             migrate_data,
             restart_app,
@@ -618,6 +620,12 @@ get_dir_children,
                     }
                     if let Err(e) = crate::db::cleanup_orphan_chunk_embeddings(&conn) {
                         log::error!("[STARTUP] orphan chunk-embedding cleanup failed: {e}");
+                    }
+                    // v12 起 doc 向量是 md5 键，"没有任何追踪行再引用该 md5"的
+                    // 行才是孤儿。此前这条清理**从未在启动时跑过**（只有
+                    // chunk 的那条跑了），孤儿 doc 向量会一直留在库里白占空间。
+                    if let Err(e) = crate::db::cleanup_orphan_doc_embeddings(&conn) {
+                        log::error!("[STARTUP] orphan doc-embedding cleanup failed: {e}");
                     }
                     if let Err(e) = crate::db::cleanup_orphan_file_rows(&conn) {
                         log::error!("[STARTUP] orphan doc vector/summary cleanup failed: {e}");

@@ -934,7 +934,11 @@ fn assemble_conversation_prompt(
                 .collect();
             md5s.sort();
             md5s.dedup();
-            let chunk_embs = crate::db::tracker::get_chunk_embeddings_by_md5s(&rc, &md5s).unwrap_or_default();
+            let chunk_embs = match crate::ai::identity::active_embedding_fp() {
+                Some(fp) => crate::db::tracker::get_chunk_embeddings_by_md5s(&rc, &md5s, &fp)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
             let mut chunks_by_md5: std::collections::HashMap<String, Vec<(usize, Vec<f32>)>> = std::collections::HashMap::new();
             for (md5, idx, vec) in chunk_embs {
                 chunks_by_md5.entry(md5).or_default().push((idx, vec));
@@ -985,6 +989,10 @@ fn assemble_conversation_prompt(
             drop(rc);
             if !passages.is_empty() {
                 emit_progress("rerank", &format!("重排中... 已备妥 {} 份候选片段", passages.len()), 0, 0);
+                // 重排失败**必须**如实说：以前无论成败都发"重排完成，N 份候选已重排"，
+                // 于是模型没加载/网关 404 时用户看到的是"重排生效了"，实际是原始
+                // 顺序 —— 静默降级被包装成了成功（与 embedding 那次事故同一类）。
+                let mut rerank_note = "重排跳过（模型不可用，保持原顺序）";
                 match crate::ai::rerank(&search_q, &passages) {
                     Some(scores) if scores.len() == rerank_idx.len() => {
                         // 默认 0.3：实测 75 题下 w=0.3 的每一类别都不低于启用重排前，
@@ -997,16 +1005,18 @@ fn assemble_conversation_prompt(
                         let new_hits: Vec<ScoredHit> = perm.iter().map(|&i| all_hits[i].clone()).collect();
                         all_hits = new_hits;
                         trace_rank("4. rerank 后", all_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
-                log::info!("[AI]   rerank: reordered {} candidates", rerank_idx.len());
+                        log::info!("[AI]   rerank: reordered {} candidates", rerank_idx.len());
+                        rerank_note = "重排完成";
                     }
                     Some(scores) => {
                         log::warn!("[AI]   rerank: score count mismatch ({} vs {}), keeping original order", scores.len(), rerank_idx.len());
+                        rerank_note = "重排跳过（返回条数与候选不符，保持原顺序）";
                     }
                     None => {
                         log::warn!("[AI]   rerank: unavailable, keeping original order");
                     }
                 }
-                emit_progress("rerank", &format!("重排完成，{} 份候选已重排", rerank_idx.len()), rerank_idx.len(), rerank_idx.len());
+                emit_progress("rerank", &format!("{rerank_note}（{} 份候选）", rerank_idx.len()), rerank_idx.len(), rerank_idx.len());
             } else {
                 emit_progress("rerank", "重排跳过（无可用候选片段）", 0, 0);
             }

@@ -6,19 +6,23 @@ use rusqlite::Connection;
 /// Store (or replace) a **content's** document embedding vector as a
 /// little-endian f32 blob. Keyed by `md5`: duplicate files (same content) share
 /// one row, exactly like `chunk_embeddings`.
+///
+/// `model_fp` 是生成该向量的模型指纹（`ai::identity`）。写入时盖章，读取时按它
+/// 过滤 —— 这是"切换模型后不拿旧空间向量去比新空间查询"的唯一依据。
 pub fn upsert_embedding(
     conn: &Connection,
     md5: &str,
     vector: &[f32],
+    model_fp: &str,
 ) -> Result<()> {
     let mut bytes: Vec<u8> = Vec::with_capacity(vector.len() * 4);
     for x in vector {
         bytes.extend_from_slice(&x.to_le_bytes());
     }
     conn.execute(
-        "INSERT INTO doc_embeddings (md5, dim, vector, updated_at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(md5) DO UPDATE SET dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
-        rusqlite::params![md5, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
+        "INSERT INTO doc_embeddings (md5, dim, vector, updated_at, model_fp) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(md5) DO UPDATE SET dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at, model_fp=excluded.model_fp",
+        rusqlite::params![md5, vector.len() as i64, bytes, chrono::Utc::now().timestamp(), model_fp],
     )?;
     Ok(())
 }
@@ -38,16 +42,24 @@ pub fn upsert_embedding(
 /// 失效契约（或换 ANN 索引）。
 ///
 /// 这里只做**度量**（行数 / 字节 / 耗时，debug 级），好判断"多大规模开始痛"。
-pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
+///
+/// `model_fp`：`Some(fp)` 只取该指纹的行（检索路径必须用这个）；`None` 不过滤
+/// （仅诊断 / 统计用）。切换模型后旧指纹的行**结构性地**不参与检索 —— 不再靠
+/// "维度恰好不同"来碰运气。
+pub fn get_all_embeddings(
+    conn: &Connection,
+    model_fp: Option<&str>,
+) -> Result<Vec<(String, Vec<f32>)>> {
     let started = std::time::Instant::now();
     let mut s = conn.prepare(
         "SELECT ft.id, e.dim, e.vector
          FROM doc_embeddings e
          JOIN file_tracking ft ON ft.md5 = e.md5
-         WHERE ft.status = 'active'",
+         WHERE ft.status = 'active'
+           AND (?1 IS NULL OR e.model_fp = ?1)",
     )?;
     let mut bytes: usize = 0;
-    let rows = s.query_map([], |row| {
+    let rows = s.query_map(rusqlite::params![model_fp], |row| {
         let file_id: String = row.get(0)?;
         let dim: usize = row.get(1)?;
         let blob: Vec<u8> = row.get(2)?;
@@ -107,17 +119,19 @@ pub fn upsert_chunk_embedding(
     md5: &str,
     chunk_index: i64,
     vector: &[f32],
+    model_fp: &str,
 ) -> Result<()> {
     let mut bytes: Vec<u8> = Vec::with_capacity(vector.len() * 4);
     for x in vector {
         bytes.extend_from_slice(&x.to_le_bytes());
     }
     conn.execute(
-        "INSERT INTO chunk_embeddings (md5, chunk_index, dim, vector, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO chunk_embeddings (md5, chunk_index, dim, vector, updated_at, model_fp)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(md5, chunk_index) DO UPDATE SET
-             dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at",
-        rusqlite::params![md5, chunk_index, vector.len() as i64, bytes, chrono::Utc::now().timestamp()],
+             dim=excluded.dim, vector=excluded.vector, updated_at=excluded.updated_at,
+             model_fp=excluded.model_fp",
+        rusqlite::params![md5, chunk_index, vector.len() as i64, bytes, chrono::Utc::now().timestamp(), model_fp],
     )?;
     Ok(())
 }
@@ -129,13 +143,15 @@ pub fn upsert_chunk_embedding(
 /// （长文档每篇多个 chunk），所以别在热路径上反复调用；度量见下面的 debug 日志。
 pub fn get_all_chunk_embeddings(
     conn: &Connection,
+    model_fp: Option<&str>,
 ) -> Result<Vec<(String, usize, Vec<f32>)>> {
     let started = std::time::Instant::now();
     let mut s = conn.prepare(
-        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings",
+        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings
+         WHERE (?1 IS NULL OR model_fp = ?1)",
     )?;
     let mut bytes: usize = 0;
-    let rows = s.query_map([], |row| {
+    let rows = s.query_map(rusqlite::params![model_fp], |row| {
         let md5: String = row.get(0)?;
         let chunk_index: usize = row.get(1)?;
         let dim: usize = row.get(2)?;
@@ -168,17 +184,20 @@ pub fn get_all_chunk_embeddings(
 pub fn get_chunk_embeddings_by_md5s(
     conn: &Connection,
     md5s: &[String],
+    model_fp: &str,
 ) -> Result<Vec<(String, usize, Vec<f32>)>> {
     if md5s.is_empty() {
         return Ok(Vec::new());
     }
     let placeholders = std::iter::repeat_n("?", md5s.len()).collect::<Vec<_>>().join(",");
     let sql = format!(
-        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings WHERE md5 IN ({placeholders})"
+        "SELECT md5, chunk_index, dim, vector FROM chunk_embeddings
+         WHERE md5 IN ({placeholders}) AND model_fp = ?"
     );
     let mut s = conn.prepare(&sql)?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+    let mut param_refs: Vec<&dyn rusqlite::types::ToSql> =
         md5s.iter().map(|s| s as &dyn rusqlite::types::ToSql).collect();
+    param_refs.push(&model_fp);
     let rows = s.query_map(param_refs.as_slice(), |row| {
         let md5: String = row.get(0)?;
         let chunk_index: usize = row.get(1)?;
@@ -211,4 +230,35 @@ pub fn count_chunk_embeddings(conn: &Connection) -> Result<u64> {
     conn.query_row("SELECT COUNT(*) FROM chunk_embeddings", [], |r| r.get::<_, i64>(0))
         .map(|n| n as u64)
         .context("count chunk embeddings")
+}
+
+/// 按模型指纹统计向量行数：`(model_fp, doc 行数, chunk 行数)`。
+///
+/// 这是"语料是否混了多个向量空间"的**直接事实**（v14 之前只能靠日志推断）。
+/// 空串代表 legacy（v14 之前写入、来源未知）。按指纹升序返回，便于稳定展示。
+pub fn count_by_model_fp(conn: &Connection) -> Result<Vec<(String, u64, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT fp,
+                SUM(doc_n)   AS doc_n,
+                SUM(chunk_n) AS chunk_n
+         FROM (
+             SELECT model_fp AS fp, COUNT(*) AS doc_n, 0 AS chunk_n FROM doc_embeddings GROUP BY model_fp
+             UNION ALL
+             SELECT model_fp AS fp, 0 AS doc_n, COUNT(*) AS chunk_n FROM chunk_embeddings GROUP BY model_fp
+         )
+         GROUP BY fp
+         ORDER BY fp",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)? as u64,
+            r.get::<_, i64>(2)? as u64,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
 }

@@ -43,7 +43,7 @@ function buildResultTree(paths: string[]): ResultNode[] {
 
 export default function AiChat() {
   const { t } = useI18n()
-  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false })
+  const [aiCap, setAiCap] = useState<AiCapabilities>({ embedding: false, llm: false, rerank: false })
   const [capFailed, setCapFailed] = useState(false)
   const [sessions, setSessions] = useState<ChatSessionMeta[]>([])
   const [sessionsLoaded, setSessionsLoaded] = useState(false)

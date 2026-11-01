@@ -12,6 +12,7 @@ import { useSettingsProviders } from '../hooks/useSettingsProviders'
 import { useSettingsBackup } from '../hooks/useSettingsBackup'
 import { useSettingsOcr } from '../hooks/useSettingsOcr'
 import { GeneralTab, DocsTab, IndexTab, AiTab, DepsTab, BackupTab, SystemTab, PerformanceTab, LarkTab } from '../components/settings'
+import EmbeddingSwitchDialog from '../components/settings/EmbeddingSwitchDialog'
 
 export default function Settings() {
   const { t, lang, setLang } = useI18n()
@@ -312,6 +313,16 @@ export default function Settings() {
         <div className="text-center text-xs text-gray-400 dark:text-gray-600 mt-4 pt-4 border-t border-gray-100 dark:border-gray-800">
           git: {version.hash} ({version.time})
         </div>
+      )}
+
+      {providers.switchPrompt && (
+        <EmbeddingSwitchDialog
+          prompt={providers.switchPrompt}
+          busy={providers.switchBusy}
+          onCancel={() => void providers.resolveSwitch('cancel')}
+          onSwitchOnly={() => void providers.resolveSwitch('only')}
+          onRebuild={() => void providers.resolveSwitch('rebuild')}
+        />
       )}
     </div>
   )

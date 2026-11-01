@@ -11,7 +11,12 @@ use r2d2::{CustomizeConnection, Pool};
 use r2d2_sqlite::{rusqlite::Connection, SqliteConnectionManager};
 
 /// Current schema version. Bump when adding migrations.
-const SCHEMA_VERSION: &str = "13";
+///
+/// v14: `doc_embeddings` / `chunk_embeddings` 增加 `model_fp`（生成该向量的模型
+/// 指纹）。此前库里没有任何"这条向量是谁生成的"的事实，切换 embedding 模型
+/// 后无法判断语料是否仍与当前模型同空间 —— 只能靠维度 + 事后推断（详见
+/// `ai/identity.rs` 的模块注释）。
+const SCHEMA_VERSION: &str = "14";
 
 /// Connection customizer that enables WAL mode and foreign keys on every
 /// pooled connection.  r2d2 calls this right after a new connection is created,
@@ -119,6 +124,10 @@ pub(crate) fn run_migrations(conn: &Connection) -> Result<()> {
 
     // Schema v12: `doc_embeddings` 由 file_id 键改为 md5 键（同内容只存一份向量）。
     migrate_doc_embeddings_to_md5(&tx)?;
+
+    // Schema v14: 两张向量表增加 `model_fp`（必须在 v12 的建表重建之后 ——
+    // 那条迁移重建出来的表不含此列）。
+    ensure_embedding_model_fp_column(&tx)?;
 
     // Retired feature: the offline QA-pair retrieval channel was removed.
     // Drop its table to reclaim space (idempotent — no-op on fresh DBs).
@@ -282,6 +291,25 @@ fn migrate_doc_embeddings_to_md5(tx: &Connection) -> Result<()> {
     )
     .context("failed to migrate doc_embeddings to md5 key")?;
     log::info!("[DB] doc_embeddings 已迁移为 md5 键（同内容只保留一份向量）");
+    Ok(())
+}
+
+/// Schema v14: add `model_fp` to both vector tables.
+///
+/// 纯元数据 `ADD COLUMN`，SQLite 不重写表（983 MB 的库也是毫秒级）。旧行落成
+/// `''` = legacy（来源未知），由 `CorpusState::Legacy` 单独处理 —— 既不当成
+/// "一致"，也不当成"不一致"，而是"无法确认"，交给用户认领或重建。
+fn ensure_embedding_model_fp_column(tx: &Connection) -> Result<()> {
+    for table in ["doc_embeddings", "chunk_embeddings"] {
+        if has_column(tx, table, "model_fp")? {
+            continue;
+        }
+        tx.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN model_fp TEXT NOT NULL DEFAULT ''"
+        ))
+        .with_context(|| format!("failed to add model_fp to {table}"))?;
+        log::info!("[DB] {table} 已增加 model_fp 列（旧行标记为 legacy）");
+    }
     Ok(())
 }
 
@@ -475,11 +503,14 @@ const CREATE_TABLES_SQL: &str = "
         updated_at  INTEGER NOT NULL
     );
 
+    -- model_fp：生成这条向量的模型指纹（见 ai/identity.rs）。
+    -- '' = v14 之前写入，来源未知（legacy）。
     CREATE TABLE IF NOT EXISTS doc_embeddings (
         md5         TEXT PRIMARY KEY,
         dim         INTEGER NOT NULL,
         vector      BLOB NOT NULL,
-        updated_at  INTEGER NOT NULL
+        updated_at  INTEGER NOT NULL,
+        model_fp    TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS doc_summaries (
@@ -515,6 +546,7 @@ const CREATE_TABLES_SQL: &str = "
         dim         INTEGER NOT NULL,
         vector      BLOB NOT NULL,
         updated_at  INTEGER NOT NULL,
+        model_fp    TEXT NOT NULL DEFAULT '',
         PRIMARY KEY (md5, chunk_index)
     );
 
@@ -832,6 +864,42 @@ mod tests {
     fn test_migrations_are_idempotent() {
         let conn = setup_conn();
         run_migrations(&conn).unwrap();
+    }
+
+    /// v14：旧库（两张向量表都还没有 `model_fp`）必须被补上这一列，且旧行落成
+    /// `''`（legacy）—— 迁移只是加元数据列，不重写表、不动任何向量。
+    #[test]
+    fn v14_adds_model_fp_to_existing_vector_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        // 模拟 v13 的表结构（没有 model_fp）。
+        conn.execute_batch(
+            "CREATE TABLE doc_embeddings (
+                 md5 TEXT PRIMARY KEY, dim INTEGER NOT NULL,
+                 vector BLOB NOT NULL, updated_at INTEGER NOT NULL);
+             CREATE TABLE chunk_embeddings (
+                 md5 TEXT NOT NULL, chunk_index INTEGER NOT NULL, dim INTEGER NOT NULL,
+                 vector BLOB NOT NULL, updated_at INTEGER NOT NULL,
+                 PRIMARY KEY (md5, chunk_index));
+             INSERT INTO doc_embeddings VALUES ('m1', 2, X'0000803f0000803f', 0);
+             INSERT INTO chunk_embeddings VALUES ('m1', 0, 2, X'0000803f0000803f', 0);",
+        )
+        .unwrap();
+
+        run_migrations(&conn).unwrap();
+
+        assert!(has_column(&conn, "doc_embeddings", "model_fp").unwrap());
+        assert!(has_column(&conn, "chunk_embeddings", "model_fp").unwrap());
+        let docs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM doc_embeddings WHERE model_fp = ''", [], |r| r.get(0))
+            .unwrap();
+        let chunks: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunk_embeddings WHERE model_fp = ''", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((docs, chunks), (1, 1), "旧行必须是 legacy，且向量本身不动");
+        let dim: i64 = conn
+            .query_row("SELECT dim FROM doc_embeddings WHERE md5='m1'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dim, 2);
     }
 
     /// `doc_summaries` 仍是 `file_id` 键，且没有任何 md5 清理会覆盖它：只要 tracking

@@ -894,7 +894,7 @@ pub use embeddings::{
 use embeddings::{run_backfill_chunk_embeddings, run_backfill_embeddings};
 
 mod vector_health;
-pub use vector_health::{check_embedding_consistency, rebuild_embeddings, EmbeddingConsistency, RebuildEmbeddingsReport};
+pub use vector_health::{check_embedding_consistency, claim_legacy_embeddings, corpus_snapshot, has_foreign_vectors, rebuild_embeddings, ClaimLegacyReport, CorpusState, EmbeddingConsistency, RebuildEmbeddingsReport};
 #[cfg(test)]
 use embeddings::{existing_chunk_indexes, missing_chunk_embedding_md5s, missing_embedding_rows};
 
@@ -1781,13 +1781,20 @@ mod tests {
         // c: indexed + content + embedding ALREADY present → skip
         tracker::store_content(&conn, "md5c", "content c", false, None).unwrap();
         tracker::update_indexed(&conn, &id_c, Some("md5c")).unwrap();
-        tracker::upsert_embedding(&conn, "md5c", &[1.0, 2.0, 3.0]).unwrap();
+        tracker::upsert_embedding(&conn, "md5c", &[1.0, 2.0, 3.0], "fp").unwrap();
 
         let rows = missing_embedding_rows(&conn).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, id_a);
         assert_eq!(rows[0].1, "md5a");
         assert_eq!(rows[0].2, "content a");
+
+        // 属于**别的模型空间**的向量不是缺口：自动回填不该顺手把整库重嵌
+        // （用户选了"仅切换，语义检索暂停"就必须真暂停）。换空间走显式重建。
+        conn.execute("UPDATE doc_embeddings SET model_fp='other-fp'", []).unwrap();
+        let rows = missing_embedding_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 1, "只剩真正没有向量的 md5a：{rows:?}");
+        assert_eq!(rows[0].1, "md5a");
     }
 
     #[test]
@@ -1798,7 +1805,7 @@ mod tests {
         let id = tracker::upsert_file(&conn, "/s.txt", "d1", 1000, 10, Some("md5s")).unwrap();
         tracker::store_content(&conn, "md5s", "old content", false, None).unwrap();
         tracker::update_indexed(&conn, &id, Some("md5s")).unwrap();
-        tracker::upsert_embedding(&conn, "md5s", &[1.0, 2.0]).unwrap();
+        tracker::upsert_embedding(&conn, "md5s", &[1.0, 2.0], "fp").unwrap();
 
         assert!(
             missing_embedding_rows(&conn).unwrap().is_empty(),
@@ -2133,7 +2140,7 @@ mod tests {
         assert!(chunks_b.len() >= 3);
         // 给 md5-b 前 2 块补向量（用 DB 里的真实 chunk_index）
         for c in chunks_b.iter().take(2) {
-            crate::db::tracker::upsert_chunk_embedding(&conn, "md5-b", c.chunk_index, &[1.0, 2.0, 3.0]).unwrap();
+            crate::db::tracker::upsert_chunk_embedding(&conn, "md5-b", c.chunk_index, &[1.0, 2.0, 3.0], "fp").unwrap();
         }
 
         let rows = missing_chunk_embedding_md5s(&conn, 10).unwrap();
@@ -2275,7 +2282,7 @@ mod clear_index_tables_tests {
         crate::db::dir_config::add_dir(&conn, "/d", None, None, None, None, true).unwrap();
         let d = crate::db::dir_config::list_dirs(&conn).unwrap().remove(0);
         let id = crate::db::tracker::upsert_file(&conn, "a.txt", &d.id, 1, 10, None).unwrap();
-        crate::db::tracker::upsert_embedding(&conn, "clear-md5", &[0.1, 0.2, 0.3, 0.4]).unwrap();
+        crate::db::tracker::upsert_embedding(&conn, "clear-md5", &[0.1, 0.2, 0.3, 0.4], "fp").unwrap();
         crate::db::tracker::upsert_summary(&conn, &id, "summary").unwrap();
 
         clear_index_tables(&conn);

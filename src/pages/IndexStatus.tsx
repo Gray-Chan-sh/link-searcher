@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { invoke, listen } from '../api/client'
 import { useNavigate } from 'react-router-dom'
 import { useIndexStatus } from '../hooks/useIndexStatus'
-import { getIndexErrors, backfillEmbeddings, backfillAudioTimeline, verifyIndexContent, reextractMissingContent, retryFailedFiles, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
+import { getIndexErrors, backfillEmbeddings, backfillAudioTimeline, verifyIndexContent, reextractMissingContent, retryFailedFiles, listenScanProgress, getQualitySummary, backfillQuality, checkEmbeddingConsistency, claimLegacyEmbeddings, rebuildEmbeddings, type IndexError, type EmbeddingConsistency } from '../api/index'
 import { getDuplicates, aiCapabilities, getTopicClusters, type DuplicateGroup, type TopicCluster } from '../api/files'
 import { getFileTypeStats, type FileTypeStat } from '../api/search'
 import { LoadingSpinner, RefreshIcon, ChevronDownIcon, FileTextIcon, CheckIcon, FileImageIcon, XIcon } from '../icons'
@@ -10,6 +10,7 @@ import { getSettings, listOcrEngines } from '../api/settings'
 import { useI18n } from '../i18n'
 import { confirm } from '../utils/platform'
 import EmptyState from '../components/EmptyState'
+import EmbeddingStateBanner from '../components/EmbeddingStateBanner'
 import { StatsCardSkeleton } from '../components/Skeleton'
 
 /** Compact ETA: "45s" / "12m" / "1h20m". */
@@ -247,11 +248,29 @@ export default function IndexStatus() {
     }
   }
 
+  const handleClaimLegacy = async () => {
+    const rows = (embedConsistency?.legacy_rows ?? 0).toLocaleString()
+    const confirmed = await confirm(
+      t('embed_state_claim_confirm', { rows }),
+      t('embed_state_claim'),
+    )
+    if (!confirmed) return
+    try {
+      const r = await claimLegacyEmbeddings()
+      setBackfillMsg(
+        t('embed_state_claimed', { docs: r.claimed_docs, chunks: r.claimed_chunks }),
+      )
+      await loadEmbedConsistency()
+    } catch (e) {
+      setBackfillMsg(String(e))
+    }
+  }
+
   const handleRebuildEmbeddings = async () => {
     const active = embedConsistency?.active_model || '当前模型'
     const confirmed = await confirm(
-      `将清空全部语义向量并用 ${active} 重新嵌入，可能耗时较久（大库可达数小时）。继续？`,
-      '重建语义向量',
+      t('embed_state_rebuild_confirm', { model: active }),
+      t('embed_state_rebuild'),
     )
     if (!confirmed) return
     setRebuildingEmbeddings(true)
@@ -259,7 +278,7 @@ export default function IndexStatus() {
     try {
       const r = await rebuildEmbeddings()
       setBackfillMsg(
-        `✓ 重建完成：文档 ${r.embedded_docs} / 块 ${r.embedded_chunks}${r.failed > 0 ? `，${r.failed} 个失败` : ''}`,
+        `✓ ${t('embed_state_rebuilt', { docs: r.embedded_docs, chunks: r.embedded_chunks })}${r.failed > 0 ? `，${r.failed} 个失败` : ''}`,
       )
       await loadEmbedConsistency()
     } catch (e) {
@@ -576,30 +595,15 @@ export default function IndexStatus() {
             </div>
           )}
 
-          {/* Embedding model / vector dimension mismatch */}
-          {embedConsistency && !embedConsistency.consistent && (
-            <div className="mb-6 p-4 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg">
-              <div className="flex items-start gap-3">
-                <span className="text-amber-500 text-lg leading-none mt-0.5">⚠</span>
-                <div className="flex-1 text-sm">
-                  <p className="font-medium text-amber-800 dark:text-amber-200">语义向量维度与当前模型不一致</p>
-                  <p className="text-amber-700 dark:text-amber-300 mt-1">
-                    当前模型 <code className="px-1 rounded bg-amber-100 dark:bg-amber-900/40">{embedConsistency.active_model}</code> 期望{' '}
-                    {embedConsistency.expected_dim ?? '?'} 维，但库中向量为{' '}
-                    {embedConsistency.stored_dims.length > 0 ? embedConsistency.stored_dims.join('/') : '空'} 维
-                    —— 语义搜索会静默失效，需重建语义向量。
-                  </p>
-                  <button
-                    onClick={handleRebuildEmbeddings}
-                    disabled={rebuildingEmbeddings || taskActive('rebuild-embeddings') || !embedCapable || status?.is_scanning}
-                    className="mt-2 flex items-center gap-2 px-3 py-1.5 text-sm font-medium text-white bg-amber-600 hover:bg-amber-700 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
-                  >
-                    {(rebuildingEmbeddings || taskActive('rebuild-embeddings')) && <LoadingSpinner className="size-4" />}
-                    重建语义向量
-                  </button>
-                </div>
-              </div>
-            </div>
+          {/* 语义向量的"空间身份"：五态横幅 */}
+          {embedConsistency && (
+            <EmbeddingStateBanner
+              c={embedConsistency}
+              busy={rebuildingEmbeddings || !!taskActive('rebuild-embeddings') || !embedCapable || !!status?.is_scanning}
+              onRebuild={handleRebuildEmbeddings}
+              onClaim={handleClaimLegacy}
+              onRecheck={() => void loadEmbedConsistency()}
+            />
           )}
 
           {/* Maintenance tools */}
