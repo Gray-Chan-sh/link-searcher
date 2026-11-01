@@ -310,7 +310,10 @@ mod tests {
         assert_eq!(a, b, "同目录两次必须相同");
         assert_eq!(a.len(), 16);
 
-        std::fs::write(models.join("model.onnx"), b"weights-v2").unwrap();
+        // Deliberately change the byte length too: Windows may give two quick
+        // writes the same coarse mtime, and the directory-hash cache signature
+        // includes (file count, total bytes, latest mtime).
+        std::fs::write(models.join("model.onnx"), b"weights-v2-long").unwrap();
         let c = local_model_dir_hash(&root, "bge").unwrap();
         assert_ne!(a, c, "权重变了必须变");
 

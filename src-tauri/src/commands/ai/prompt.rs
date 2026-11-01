@@ -2,7 +2,9 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
-use super::sufficiency::{check_sufficiency, expansion_queries, SufficiencySignals};
+use super::sufficiency::{
+    check_sufficiency, expansion_queries, is_specific_entity, missing_slots, SufficiencySignals,
+};
 
 /// 查询向量（`cached_embed`）的等待上限：本地嵌入池可能被后台回填占满（bge-large
 /// 单次推理 85s 量级），绝不能把整轮聊天卡在"语义扫描中"。超时后各阶段自行退回
@@ -1141,6 +1143,152 @@ fn assemble_conversation_prompt(
                 emit_progress("rerank", &format!("{rerank_note}（{} 份候选）", rerank_idx.len()), rerank_idx.len(), rerank_idx.len());
             } else {
                 emit_progress("rerank", "重排跳过（无可用候选片段）", 0, 0);
+            }
+        }
+
+        // ── Post-rerank entity/slot sufficiency ─────────────────────────
+        // The sparse-hit pass above cannot see *what* is missing: five
+        // unrelated hits are enough to skip it. This pass reads the top
+        // candidates' text and checks two cheap signals:
+        //   1) a query entity is absent from all top passages;
+        //   2) the question asks for an amount/date/number and no plausible
+        //      token exists in the top passages.
+        // If either is true, one bounded lexical retry is allowed. New hits are
+        // prepended (they are entity-targeted) but still pass `hit_in_scope`.
+        if progressive_enabled {
+            let mut missing_entities: Vec<String> = Vec::new();
+            let mut missing_slots_found: Vec<String> = Vec::new();
+            if !all_hits.is_empty() {
+                let rc = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
+                let top_ids: Vec<String> = all_hits
+                    .iter()
+                    .take(10)
+                    .map(|h| h.file_id.clone())
+                    .collect();
+                let recs = crate::db::tracker::get_files_by_ids(&rc, &top_ids).unwrap_or_default();
+                let mut md5s: Vec<String> = recs
+                    .iter()
+                    .filter_map(|r| r.as_ref().and_then(|r| r.md5.clone()))
+                    .collect();
+                md5s.sort();
+                md5s.dedup();
+                let contents = crate::db::tracker::get_contents(&rc, &md5s).unwrap_or_default();
+                drop(rc);
+                let mut evidence_text = String::new();
+                for text in contents.iter().flatten() {
+                    if evidence_text.chars().count() >= 50_000 {
+                        break;
+                    }
+                    evidence_text.push_str(text);
+                    evidence_text.push('\n');
+                }
+                for kw in final_kws.iter().take(3) {
+                    let kw = kw.trim();
+                    if !is_specific_entity(kw) || DOC_TYPE_NOUNS.contains(&kw) {
+                        continue;
+                    }
+                    let in_text = evidence_text.contains(kw);
+                    let in_path = all_hits.iter().take(10).any(|h| h.path.contains(kw));
+                    if !in_text && !in_path {
+                        missing_entities.push(kw.to_string());
+                    }
+                }
+                missing_slots_found = missing_slots(&last_q, &evidence_text);
+            }
+
+            if !missing_entities.is_empty() || !missing_slots_found.is_empty() {
+                let post_report = check_sufficiency(&SufficiencySignals {
+                    hit_count: all_hits.len(),
+                    min_hits: 0,
+                    missing_entities: missing_entities.clone(),
+                    missing_slots: missing_slots_found.clone(),
+                    ..Default::default()
+                });
+                events.push(("sufficiency_check".into(), serde_json::json!({
+                    "round": progressive_rounds + 1,
+                    "phase": "post_rerank",
+                    "hit_count": all_hits.len(),
+                    "missing_entities": &missing_entities,
+                    "missing_slots": &missing_slots_found,
+                    "sufficient": post_report.sufficient,
+                    "reasons": &post_report.reasons,
+                    "suggested": &post_report.suggested,
+                })));
+                if !progressive_shadow && progressive_rounds < progressive_max_rounds {
+                    let mut variants: Vec<String> = Vec::new();
+                    for q in missing_entities
+                        .iter()
+                        .cloned()
+                        .chain(expansion_queries(&last_q, &search_q, &final_kws))
+                    {
+                        let q = q.trim().to_string();
+                        if !q.is_empty() && progressive_tried.insert(q.clone()) {
+                            variants.push(q);
+                        }
+                    }
+                    variants.truncate(3);
+                    if !variants.is_empty() {
+                        emit_progress(
+                            "progressive",
+                            &format!("补充检索... 命中缺失（{} 个查询变体）", variants.len()),
+                            0,
+                            0,
+                        );
+                        let mut new_hits: Vec<ScoredHit> = Vec::new();
+                        for variant in &variants {
+                            check_cancel!();
+                            match bm25_relevant_hits(
+                                &ctx,
+                                variant,
+                                200,
+                                false,
+                                dir_ids_opt.clone(),
+                                ext_filter.clone(),
+                                date_from,
+                                date_to,
+                                None,
+                                mention_file_ids.clone(),
+                            ) {
+                                Ok(hits) => {
+                                    for (rank, hit) in hits.into_iter().enumerate() {
+                                        rrf_add(&mut rrf_acc, &hit.file_id, rank, 0.5);
+                                        if all_seen.insert(hit.file_id.clone()) {
+                                            new_hits.push(hit);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::warn!("[AI]   progressive: post-rerank bm25 failed: {e}");
+                                }
+                            }
+                        }
+                        if !new_hits.is_empty() {
+                            let added = new_hits.len();
+                            // Entity-targeted hits go in front; existing rerank
+                            // order is preserved behind them.
+                            new_hits.extend(all_hits.drain(..));
+                            all_hits = new_hits;
+                            all_hits.retain(|h| {
+                                hit_in_scope(
+                                    &h.file_id,
+                                    &h.path,
+                                    path_prefixes_opt.as_deref(),
+                                    mention_file_ids.as_deref(),
+                                )
+                            });
+                            progressive_rounds += 1;
+                            events.push(("progressive_round".into(), serde_json::json!({
+                                "round": progressive_rounds,
+                                "phase": "post_rerank",
+                                "queries": variants,
+                                "added": added,
+                                "hit_count": all_hits.len(),
+                                "missing_entities": &missing_entities,
+                                "missing_slots": &missing_slots_found,
+                            })));
+                        }
+                    }
+                }
             }
         }
         emit_progress("retrieval", &format!("三路合并完成，共 {} 份文件", all_hits.len()), all_hits.len(), all_hits.len());

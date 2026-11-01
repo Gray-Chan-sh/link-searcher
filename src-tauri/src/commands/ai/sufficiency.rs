@@ -192,6 +192,72 @@ pub(crate) fn check_sufficiency(signals: &SufficiencySignals) -> SufficiencyRepo
     }
 }
 
+/// Common query nouns that are not useful as entity-targeted expansion terms.
+/// They are intentionally exact matches: "北京公司" stays specific, "公司" does
+/// not.
+const GENERIC_ENTITY_TERMS: &[&str] = &[
+    "公司",
+    "报告",
+    "案件",
+    "材料",
+    "内容",
+    "问题",
+    "情况",
+    "结果",
+    "法院",
+    "判决",
+    "裁定",
+    "合同",
+    "协议",
+    "当事人",
+    "原告",
+    "被告",
+    "律师",
+    "证据",
+    "文件",
+    "资料",
+];
+
+/// Whether a keyword is specific enough to justify an entity-targeted retry.
+pub(crate) fn is_specific_entity(keyword: &str) -> bool {
+    let keyword = keyword.trim();
+    keyword.chars().count() >= 2 && !GENERIC_ENTITY_TERMS.contains(&keyword)
+}
+
+/// Cheap slot-presence check for the post-rerank sufficiency pass.
+///
+/// This is intentionally heuristic: it only answers "does the top evidence
+/// contain any plausible amount/date/report-number token at all?". It is used
+/// to decide whether an extra bounded retrieval round is worth trying, not to
+/// validate the final answer.
+pub(crate) fn missing_slots(question: &str, evidence_text: &str) -> Vec<String> {
+    let q = question;
+    let text = evidence_text;
+    let has_digit = text.chars().any(|c| c.is_ascii_digit());
+    let mut out = Vec::new();
+
+    let asks_amount = ["金额", "多少钱", "价款", "费用", "律师费", "验资额", "注册资本"]
+        .iter()
+        .any(|k| q.contains(k));
+    if asks_amount && !has_digit {
+        out.push("金额".to_string());
+    }
+
+    let asks_date = ["日期", "时间", "什么时候", "哪年", "几年", "何时"]
+        .iter()
+        .any(|k| q.contains(k));
+    if asks_date && !text.contains('年') && !has_digit {
+        out.push("日期".to_string());
+    }
+
+    let asks_number = ["文号", "编号", "案号"].iter().any(|k| q.contains(k));
+    if asks_number && !text.contains('号') && !has_digit {
+        out.push("文号/编号".to_string());
+    }
+
+    out
+}
+
 /// Deterministic query variants for one expansion round.
 ///
 /// No LLM: the caller already has the rewritten query, the original question
@@ -338,6 +404,37 @@ mod tests {
         };
         let report = check_sufficiency(&signals);
         assert!(report.sufficient);
+    }
+
+    #[test]
+    fn generic_terms_are_not_specific_entities() {
+        assert!(!is_specific_entity("公司"));
+        assert!(!is_specific_entity("报告"));
+        assert!(!is_specific_entity("  "));
+        assert!(is_specific_entity("常宏"));
+        assert!(is_specific_entity("北京公司"));
+        assert!(is_specific_entity("申洲大通"));
+    }
+
+    #[test]
+    fn missing_slots_detects_absent_amount_date_and_number() {
+        let slots = missing_slots(
+            "这份合同的律师费金额、签署日期和文号是多少？",
+            "合同正文没有数字",
+        );
+        assert_eq!(
+            slots,
+            vec!["金额".to_string(), "日期".to_string(), "文号/编号".to_string()]
+        );
+    }
+
+    #[test]
+    fn missing_slots_accepts_present_digits() {
+        let slots = missing_slots(
+            "这份合同的律师费金额、签署日期和文号是多少？",
+            "律师费 100000 元，2025年1月1日签署，文号 2007验280",
+        );
+        assert!(slots.is_empty());
     }
 
     #[test]

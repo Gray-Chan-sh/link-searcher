@@ -102,7 +102,7 @@
 - [ ] **TaskSpec parser（LLM）**：输出 `tasks / coverage / granularity / subject / conditions / assumptions / ambiguities`；**不输出 route**，由 planner 推导；无 `has_filters` / `multi_task` 布尔值。
 - [ ] **Planner**：内部 task 枚举 `answer | list | count | compare | summarize | check_duplicates`；按 `tasks + coverage + scope` 推导计划；不做每场景 UI 开关。
 - [ ] **渐进检索**：`sufficiency_check` + 查询扩展/检索扩展/邻块扩展；最多 2 轮扩展、2 次回答生成、1 次可选 verifier；显式 scope 内不跨范围。
-  - 进展（2026-11-01）：`sufficiency` 判定模块 + 稀疏命中 1 轮 BM25 补充检索已落地（默认 `on`，`shadow/off` 可关）；实体/槽位扩展、邻块、回答后校验尚未接入。
+  - 进展（2026-11-02）：`sufficiency` 判定模块 + 稀疏命中补充检索 + rerank 后实体/金额/日期/文号槽位检查与实体定向补充检索已落地（默认 `on`，`shadow/off` 可关）；邻块扩展、回答后引用校验与严格模式重答尚未接入。
 - [ ] **Scan 模式**：`scope_snapshot` + 逐文档 ledger + 正则全扫 + LLM 只兜底不确定项；状态含 `processed / no_match / failed / unsupported / not_indexed / stale`；输出覆盖率与缺口。
 - [ ] **准确性**：每个条目必须带 `file_id + span_start/end + evidence`；归一化、去重、冲突标记、引用校验；无 span 不进入最终结果。
 - [ ] **成本守卫**：全量正则扫描约 1–3 分钟；**禁止全库 LLM 逐篇**（约 8,200 万 token）；推荐“正则全扫 + 5–10% LLM 兜底”（约 400–800 万 token，后台分钟级）。
