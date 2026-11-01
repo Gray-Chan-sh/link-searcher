@@ -2,6 +2,7 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
+use super::sufficiency::{check_sufficiency, expansion_queries, SufficiencySignals};
 
 /// 查询向量（`cached_embed`）的等待上限：本地嵌入池可能被后台回填占满（bge-large
 /// 单次推理 85s 量级），绝不能把整轮聊天卡在"语义扫描中"。超时后各阶段自行退回
@@ -880,6 +881,127 @@ fn assemble_conversation_prompt(
                 mention_file_ids.as_deref(),
             )
         });
+
+        // ── Progressive retrieval (P4.3) ────────────────────────────────
+        // The first multi-channel pass is intentionally broad but can still be
+        // sparse (short entity query, unusual wording, OCR variance). Give it
+        // one bounded lexical second chance *before* rerank/injection. Scope is
+        // never widened here: every supplementary hit goes through the same
+        // `hit_in_scope` predicate below.
+        let progressive_mode = std::env::var("LINK_SEARCHER_PROGRESSIVE")
+            .map(|v| v.trim().to_ascii_lowercase())
+            .unwrap_or_else(|_| "on".into());
+        let progressive_enabled = progressive_mode != "off";
+        let progressive_shadow = progressive_mode == "shadow";
+        let progressive_min_hits = std::env::var("LINK_SEARCHER_PROGRESSIVE_MIN_HITS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(5);
+        let progressive_max_rounds = std::env::var("LINK_SEARCHER_PROGRESSIVE_MAX_ROUNDS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .min(2);
+        let mut progressive_rounds = 0usize;
+        let mut progressive_tried: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut suff_signals = SufficiencySignals {
+            hit_count: all_hits.len(),
+            min_hits: progressive_min_hits,
+            top_rerank_score: None,
+            min_rerank_score: 0.0,
+            has_strong_lexical: all_hits
+                .iter()
+                .any(|h| h.bm25_score.is_some_and(|s| s > 0.0)),
+            has_strong_vector: all_hits.iter().any(|h| h.semantic_score.is_some()),
+            ..Default::default()
+        };
+        let mut suff_report = check_sufficiency(&suff_signals);
+        events.push(("sufficiency_check".into(), serde_json::json!({
+            "round": 0,
+            "hit_count": suff_signals.hit_count,
+            "sufficient": suff_report.sufficient,
+            "reasons": &suff_report.reasons,
+            "suggested": &suff_report.suggested,
+        })));
+        while progressive_enabled
+            && !progressive_shadow
+            && !suff_report.sufficient
+            && progressive_rounds < progressive_max_rounds
+        {
+            check_cancel!();
+            let variants: Vec<String> = expansion_queries(&last_q, &search_q, &final_kws)
+                .into_iter()
+                .filter(|q| progressive_tried.insert(q.clone()))
+                .collect();
+            if variants.is_empty() {
+                break;
+            }
+            emit_progress(
+                "progressive",
+                &format!("补充检索... 第 {} 轮（{} 个查询变体）", progressive_rounds + 1, variants.len()),
+                0,
+                0,
+            );
+            let mut added = 0usize;
+            for variant in &variants {
+                check_cancel!();
+                match bm25_relevant_hits(
+                    &ctx,
+                    variant,
+                    500,
+                    false,
+                    dir_ids_opt.clone(),
+                    ext_filter.clone(),
+                    date_from,
+                    date_to,
+                    None,
+                    mention_file_ids.clone(),
+                ) {
+                    Ok(hits) => {
+                        for (rank, hit) in hits.into_iter().enumerate() {
+                            rrf_add(&mut rrf_acc, &hit.file_id, rank, 0.5);
+                            if all_seen.insert(hit.file_id.clone()) {
+                                all_hits.push(hit);
+                                added += 1;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[AI]   progressive: variant bm25 failed: {e}");
+                    }
+                }
+            }
+            // Supplementary BM25 still runs over the global index; re-apply the
+            // same hard scope before anything can reach the prompt.
+            all_hits.retain(|h| {
+                hit_in_scope(
+                    &h.file_id,
+                    &h.path,
+                    path_prefixes_opt.as_deref(),
+                    mention_file_ids.as_deref(),
+                )
+            });
+            progressive_rounds += 1;
+            suff_signals.hit_count = all_hits.len();
+            suff_signals.has_strong_lexical = all_hits
+                .iter()
+                .any(|h| h.bm25_score.is_some_and(|s| s > 0.0));
+            suff_signals.has_strong_vector = all_hits.iter().any(|h| h.semantic_score.is_some());
+            suff_report = check_sufficiency(&suff_signals);
+            events.push(("progressive_round".into(), serde_json::json!({
+                "round": progressive_rounds,
+                "queries": variants,
+                "added": added,
+                "hit_count": all_hits.len(),
+                "sufficient": suff_report.sufficient,
+                "reasons": &suff_report.reasons,
+                "suggested": &suff_report.suggested,
+            })));
+            if added == 0 {
+                break;
+            }
+        }
         // 统一排序：三通道命中按混合分（weighted_mix）降序排列，而非按通道
         // 添加顺序。BM25 分与语义分归一化后加权（w=semantic_weight），
         // 路径命中（无分）排最后。保证"最相关的文件先进注入前 30"。

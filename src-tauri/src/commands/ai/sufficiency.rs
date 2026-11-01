@@ -11,10 +11,12 @@
 //! scan ledger, so this logic stays deterministic and cheap.
 
 /// Why the current evidence is not sufficient.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum GapReason {
     /// No candidate documents at all.
     NoHits,
+    /// Fewer candidates than the calibrated minimum for this question shape.
+    SparseHits { count: usize, min: usize },
     /// Top rerank score is below the calibrated threshold and no lexical or
     /// vector channel is strong.
     LowScore,
@@ -31,7 +33,7 @@ pub(crate) enum GapReason {
 }
 
 /// A bounded expansion the caller may apply in the next retrieval round.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) enum Expansion {
     /// Add deterministic query variants (aliases, normalized forms, synonyms).
     QueryVariant,
@@ -52,6 +54,9 @@ pub(crate) enum Expansion {
 #[derive(Debug, Clone)]
 pub(crate) struct SufficiencySignals {
     pub hit_count: usize,
+    /// Below this many candidates the retrieval is considered sparse even when
+    /// every hit is relevant. `0` disables the check.
+    pub min_hits: usize,
     pub top_rerank_score: Option<f32>,
     /// Calibrated per model; `0.0` disables the low-score check.
     pub min_rerank_score: f32,
@@ -69,6 +74,7 @@ impl Default for SufficiencySignals {
     fn default() -> Self {
         Self {
             hit_count: 0,
+            min_hits: 0,
             top_rerank_score: None,
             min_rerank_score: 0.0,
             has_strong_lexical: false,
@@ -83,7 +89,7 @@ impl Default for SufficiencySignals {
 }
 
 /// Result of one sufficiency check.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub(crate) struct SufficiencyReport {
     pub sufficient: bool,
     pub reasons: Vec<GapReason>,
@@ -102,16 +108,26 @@ pub(crate) fn check_sufficiency(signals: &SufficiencySignals) -> SufficiencyRepo
         reasons.push(GapReason::NoHits);
         suggested.push(Expansion::QueryVariant);
         suggested.push(Expansion::IncreaseTopK);
-    } else if signals.min_rerank_score > 0.0
-        && signals
-            .top_rerank_score
-            .is_some_and(|s| s < signals.min_rerank_score)
-        && !signals.has_strong_lexical
-        && !signals.has_strong_vector
-    {
-        reasons.push(GapReason::LowScore);
-        suggested.push(Expansion::QueryVariant);
-        suggested.push(Expansion::IncreaseTopK);
+    } else {
+        if signals.min_hits > 0 && signals.hit_count < signals.min_hits {
+            reasons.push(GapReason::SparseHits {
+                count: signals.hit_count,
+                min: signals.min_hits,
+            });
+            suggested.push(Expansion::QueryVariant);
+            suggested.push(Expansion::IncreaseTopK);
+        }
+        if signals.min_rerank_score > 0.0
+            && signals
+                .top_rerank_score
+                .is_some_and(|s| s < signals.min_rerank_score)
+            && !signals.has_strong_lexical
+            && !signals.has_strong_vector
+        {
+            reasons.push(GapReason::LowScore);
+            suggested.push(Expansion::QueryVariant);
+            suggested.push(Expansion::IncreaseTopK);
+        }
     }
 
     for entity in &signals.missing_entities {
@@ -176,6 +192,36 @@ pub(crate) fn check_sufficiency(signals: &SufficiencySignals) -> SufficiencyRepo
     }
 }
 
+/// Deterministic query variants for one expansion round.
+///
+/// No LLM: the caller already has the rewritten query, the original question
+/// and extracted keywords. We only need a small, deduplicated set so a sparse
+/// first pass gets a second lexical chance without changing scope.
+pub(crate) fn expansion_queries(
+    question: &str,
+    search_q: &str,
+    keywords: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for candidate in [search_q, question] {
+        let candidate = candidate.trim();
+        if !candidate.is_empty() && !out.iter().any(|q| q == candidate) {
+            out.push(candidate.to_string());
+        }
+    }
+    let joined = keywords
+        .iter()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !joined.is_empty() && !out.iter().any(|q| q == &joined) {
+        out.push(joined);
+    }
+    out.truncate(3);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +233,22 @@ mod tests {
         assert_eq!(report.reasons, vec![GapReason::NoHits]);
         assert!(report.suggested.contains(&Expansion::QueryVariant));
         assert!(report.suggested.contains(&Expansion::IncreaseTopK));
+    }
+
+    #[test]
+    fn sparse_hits_is_insufficient() {
+        let signals = SufficiencySignals {
+            hit_count: 2,
+            min_hits: 5,
+            ..Default::default()
+        };
+        let report = check_sufficiency(&signals);
+        assert!(!report.sufficient);
+        assert_eq!(
+            report.reasons,
+            vec![GapReason::SparseHits { count: 2, min: 5 }]
+        );
+        assert!(report.suggested.contains(&Expansion::QueryVariant));
     }
 
     #[test]
@@ -276,6 +338,22 @@ mod tests {
         };
         let report = check_sufficiency(&signals);
         assert!(report.sufficient);
+    }
+
+    #[test]
+    fn expansion_queries_are_deduped_and_bounded() {
+        let variants = expansion_queries(
+            "深蓝公司的律师费是多少",
+            "深蓝公司 律师费",
+            &["深蓝公司".into(), "律师费".into()],
+        );
+        assert_eq!(
+            variants,
+            vec![
+                "深蓝公司 律师费".to_string(),
+                "深蓝公司的律师费是多少".to_string()
+            ]
+        );
     }
 
     #[test]

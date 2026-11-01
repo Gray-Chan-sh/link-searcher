@@ -1,8 +1,10 @@
 ## 2026-11-01（第七十一轮）：渐进检索基础——确定性证据充分性判定
 
 - **新增 `commands/ai/sufficiency.rs`**：把“证据够不够”从 LLM 置信度里拆出来，改为纯函数判定。输入 hit 数、top rerank 分数、词法/向量强命中标志、缺失实体/槽位、比较缺边、覆盖率、引用校验结果；输出 `SufficiencyReport`（`sufficient / reasons / suggested`）。显式 scope 是否允许全局回退仍由调用方决定，模块本身不做越界决定。
-- **配套 8 条单元测试**：无命中、低分但强词法、缺实体、缺槽位、覆盖率缺口、全覆盖、建议去重等。
-- **本阶段只落地判定模块，不改变现有检索/回答行为**；下一步接入 `progressive_retrieve` 主循环。
+- **配套 10 条单元测试**：无命中、稀疏命中、低分但强词法、缺实体、缺槽位、覆盖率缺口、全覆盖、查询变体去重等。
+- **接入 `prompt.rs` 检索链**：初始多通道合并并按 scope 硬过滤后，若命中数低于阈值（默认 5），用 `search_q / last_q / 关键词串` 做最多 1 轮补充 BM25 检索；新增命中仍走同一 `hit_in_scope`，显式 scope 绝不突破。日志新增 `sufficiency_check` / `progressive_round` 事件。
+- **开关**：`LINK_SEARCHER_PROGRESSIVE=on|shadow|off`（默认 `on`）、`LINK_SEARCHER_PROGRESSIVE_MIN_HITS`（默认 5）、`LINK_SEARCHER_PROGRESSIVE_MAX_ROUNDS`（默认 1，最多 2）。`shadow` 只记录判定，不扩查。
+- **本阶段不改变回答生成/引用校验**；回答后校验与实体/槽位扩展留待后续 P4.3 增量。
 
 ## 2026-11-01（第七十轮）：切换 embedding / rerank 模型不再静默混向量空间（schema v14 + 模型指纹 + 五态语料）
 
