@@ -211,6 +211,21 @@ mod history_backed_entity_tests {
         assert!(h.contains("1956"), "上一轮回答应进改写历史: {h}");
         assert!(h.contains("不得作为事实依据"), "必须标注仅供参考: {h}");
     }
+
+    /// 回归（2026-11-03）：旧实现的沿用闸门要求"本轮命中 < 30"，而正常检索动辄数千命中
+    /// ⇒ 追问轮从不沿用上一轮证据（实测 `from_history=0`），模型据此编出错误的出生年。
+    #[test]
+    fn history_carry_is_not_gated_by_hit_count() {
+        // 大量命中 + 依赖上文的追问 ⇒ 仍必须沿用
+        assert!(should_carry_history(true, true, false, false));
+        // 零命中 ⇒ 沿用
+        assert!(should_carry_history(true, false, false, true));
+        // 点名了文件 ⇒ 沿用
+        assert!(should_carry_history(true, false, true, false));
+        // 首轮 / 自足的新问题 ⇒ 不沿用
+        assert!(!should_carry_history(false, true, false, false));
+        assert!(!should_carry_history(true, false, false, false));
+    }
 }
 
 #[cfg(test)]
@@ -824,4 +839,19 @@ pub(super) fn ensure_parent_entities(search_q: &str, parent_q: &str, current_q: 
 /// documents because the question never names the file.
 pub(super) fn carry_forward_source(is_named: bool, all_hits_empty: bool) -> bool {
     is_named || all_hits_empty
+}
+
+/// 追问轮是否沿用上一轮引用的材料。
+///
+/// 2026-11-03 回归：旧实现额外要求 `all_hits.len() < 30`，而正常检索动辄数千命中，
+/// 于是这条"证据延续"从未生效过（实测 `from_history=0`，追问轮注入的全是无关材料，
+/// 模型据此编出了错误的出生年）。判据只应与"是不是追问"和"问句是否依赖上文"有关，
+/// 与"本轮命中多少"无关。
+pub(super) fn should_carry_history(
+    is_follow_up: bool,
+    context_dependent: bool,
+    is_named: bool,
+    all_hits_empty: bool,
+) -> bool {
+    is_follow_up && (context_dependent || carry_forward_source(is_named, all_hits_empty))
 }

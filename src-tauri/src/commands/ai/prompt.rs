@@ -1426,32 +1426,44 @@ fn assemble_conversation_prompt(
     // 旧来源保留：同一会话的追问（messages.len() > 1 说明有历史轮次）延续讨论
     // 上一轮引用的证据。即使追问未显式点名文件名（如"列出清单/把时间列出来"），
     // 上一轮已注入引用的文件也应作为保底候选带入本轮，避免历史证据断层。
-    // 仅在 strict 模式（要求严格依据当前范围）下不自动保留，避免越界引用。
+    //
+    // ⚠️ 2026-11-03 修复：原条件 `all_hits.len() < MAX_CONTENT_INJECT`（30）等于**永不放行**
+    // —— 正常检索动辄数千命中，于是"沿用上一轮证据"从来没生效过。实测：
+    // `陈秀芳的家庭成员有哪些？` → `今天是…各人的年龄是多少` 时 `from_history=0`，
+    // 本轮注入的全是无关案件材料，模型只能把"1958/1938"编出来（材料里的正确值是 1928）。
+    //
+    // 现在改为：追问轮 + **依赖上文**（问句没有专名）⇒ 沿用上一轮引用材料，
+    // 数量上限 `MAX_HISTORY_CARRY`（不抢占本轮材料预算），且必须仍在本轮 scope 内。
     let is_follow_up = messages.len() > 1;
+    const MAX_HISTORY_CARRY: usize = 10;
     let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
-    // 追问轮沿用上一轮**已引用**的材料。
-    //
-    // 2026-11-02/03 实测两次翻车：`陈秀芳的家庭成员有哪些？` → `今天是…各人的年龄是多少`，
-    // 一轮因为改写被守卫误杀、一轮因为网关断连，两次都退化成原句检索到无关材料，
-    // 模型只能答"本轮材料里没有陈秀芳" —— 而出生年其实就在上一轮引用的户籍/判决书里。
-    //
-    // strict 的原意是"不许用**范围外**材料"；上一轮已引用的文件本就通过了范围校验，
-    // 沿用它们不算越界。为避免把旧话题硬塞进新话题，只在**本轮问句没有专名**（= 依赖上文）
-    // 或点名了文件、或本轮零命中时才沿用。
     let context_dependent = !super::rewrite::has_proper_noun(&last_q);
-    if is_follow_up && all_hits.len() < MAX_CONTENT_INJECT {
+    if is_follow_up {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-        for fid in source_ids.iter().rev() {
-            if all_hits.len() >= MAX_CONTENT_INJECT { break; }
+        for fid in source_ids.iter().rev().take(MAX_HISTORY_CARRY) {
             if all_seen.contains(fid) { continue; }
             let Some(rec) = rec_by_id.get(fid) else { continue };
             if rec.status != "active" || rec.md5.is_none() { continue; }
+            // 范围守卫：上一轮引用的文件也必须仍在本轮 scope 内（用户可能刚切换了范围）。
+            if !hit_in_scope(
+                fid,
+                &rec.path,
+                path_prefixes_opt.as_deref(),
+                mention_file_ids.as_deref(),
+            ) {
+                continue;
+            }
             // 追问未点名文件时也保留（保底证据），而非要求文件名出现在问句中
             let named = {
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 !stem.is_empty() && message_text.contains(stem.as_str())
             };
-            if context_dependent || carry_forward_source(named, all_hits.is_empty()) {
+            if super::rewrite::should_carry_history(
+                is_follow_up,
+                context_dependent,
+                named,
+                all_hits.is_empty(),
+            ) {
                 all_seen.insert(fid.clone());
                 // 记入 history_resolved，稍后随 Layer 0.5 注入为实际材料
                 if !history_resolved.iter().any(|(id, _)| id == fid) {
