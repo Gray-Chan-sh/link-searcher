@@ -252,6 +252,8 @@ struct AssembleJob {
     search_q: String,
     search_terms: Vec<String>,
     rewritten: bool,
+    /// 本轮是否依赖上文（模型自评；模型没给时用离线启发式）。决定是否沿用上一轮材料。
+    context_dependent: bool,
     /// Pronoun follow-up already bound to a parent person entity
     /// (surface, entity). Handed to the clarify engine so it does not report
     /// the same pronoun as ambiguous.
@@ -366,6 +368,8 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         .zip(parent_person_entities(parent_q).into_iter().next())
         .map(|(surface, entity)| (surface.to_string(), entity));
     let mut rewrite_fallback: Option<String> = None;
+    // 模型自评「这句话离开上文读不懂」；None = 模型没给（旧格式/回退规则链）。
+    let mut self_contained: Option<bool> = None;
     let (search_q, rewrite_method) = if let Some(q) = retry_q {
         (q, "retry")
     } else if skip_llm_rewrite || !crate::ai::llm_enabled() {
@@ -373,21 +377,22 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         (rule.query.clone(), "rule")
     } else {
         let context_paths = prior_evidence_paths(&ctx, session_id);
-        let history_text = super::rewrite::recent_history_text(messages, &last_q);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
-            // 守卫从"不得引入本轮之外的实体"改成"引入的实体必须有历史出处"：
-            // 指代消解本来就必须引入本轮问句里没有的人名/机构名。
-            super::rewrite::RewriteAttempt::Ok(llm)
-                if !super::rewrite::entities_backed_by_history(&llm, &last_q, &history_text) =>
-            {
-                log::warn!(
-                    "[AI]   llm rewrite 引入了历史里没有的实体，弃用：{:?}",
-                    truncate_text(&llm, 40)
-                );
-                rewrite_fallback = Some("entity not in history".into());
-                (rule.query.clone(), "rule")
+            super::rewrite::RewriteAttempt::Ok(ok) => {
+                self_contained = ok.self_contained;
+                // 用**语料事实**过滤改写词：正文里一次都没出现过的词直接丢弃
+                // （编造的人名自动出局；「兄长/家兄」等同义词只要语料有就保留）。
+                match super::rewrite::strip_nonexistent_terms(&ok.query, &last_q, |t| {
+                    super::retrieval::term_doc_freq(&ctx, t)
+                }) {
+                    Some(q) => (q, "llm"),
+                    None => {
+                        log::warn!("[AI]   llm rewrite 的词在语料里全不存在，回退规则链");
+                        rewrite_fallback = Some("no term exists in corpus".into());
+                        (rule.query.clone(), "rule")
+                    }
+                }
             }
-            super::rewrite::RewriteAttempt::Ok(llm) => (llm, "llm"),
             super::rewrite::RewriteAttempt::Invalid(why) => {
                 log::info!("[AI]   llm rewrite 无效（回退规则链）：{why}");
                 rewrite_fallback = Some(format!("invalid: {why}"));
@@ -410,6 +415,12 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         super::rewrite::ensure_parent_entities(&search_q, parent_q, &last_q)
     } else {
         search_q
+    };
+    // 是否需要沿用上一轮材料：**以模型自评为准**（它看得到完整对话，
+    // 兄长/家兄/各人/办公室 对它都是普通语义）；模型没给时才退回离线启发式。
+    let context_dependent = match self_contained {
+        Some(v) => !v,
+        None => super::rewrite::needs_history_rewrite(&last_q),
     };
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
@@ -440,6 +451,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         search_q,
         search_terms,
         rewritten,
+        context_dependent,
         pronoun_binding,
         events,
         material_order,
@@ -459,7 +471,7 @@ fn assemble_conversation_prompt(
     let AssembleJob {
         messages, source_ids, scope, session_retrieval_scope, strict_docs, full_recall,
         session_id, clarify_reply, last_q, search_q, search_terms, rewritten,
-        pronoun_binding, mut events, mut material_order, app, cancel,
+        context_dependent, pronoun_binding, mut events, mut material_order, app, cancel,
     } = job;
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = &app {
@@ -1437,7 +1449,6 @@ fn assemble_conversation_prompt(
     let is_follow_up = messages.len() > 1;
     const MAX_HISTORY_CARRY: usize = 10;
     let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
-    let context_dependent = !super::rewrite::has_proper_noun(&last_q);
     if is_follow_up {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
         for fid in source_ids.iter().rev().take(MAX_HISTORY_CARRY) {

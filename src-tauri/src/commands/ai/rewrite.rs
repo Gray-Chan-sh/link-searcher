@@ -153,64 +153,56 @@ mod history_backed_entity_tests {
         ChatMessage { role: role.into(), content: content.into() }
     }
 
-    /// 核心回归（2026-11-02 实测）：模型把「今天是2026年11月12日，各人的年龄是多少」
-    /// 正确改写成 `陈秀芳 家庭成员 年龄`，`陈秀芳` 来自上一轮对话 → **必须放行**。
+    /// 改写输出解析：两行格式（QUERY / SELF_CONTAINED）。
     #[test]
-    fn entity_from_history_is_allowed() {
-        let msgs = vec![
-            msg("user", "陈秀芳的家庭成员有哪些？"),
-            msg("assistant", "陈秀芳的父亲是陈贤文，哥哥是陈正先……"),
-            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
-        ];
-        let hist = recent_history_text(&msgs, "今天是2026年11月12日，各人的年龄是多少");
-        assert!(
-            entities_backed_by_history("陈秀芳 家庭成员 年龄", "今天是2026年11月12日，各人的年龄是多少", &hist),
-            "{hist}"
+    fn parses_two_line_rewrite_reply() {
+        let (q, sc) = parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
+        assert_eq!(q, "陈秀芳 兄长 出生日期");
+        assert_eq!(sc, Some(false));
+
+        let (q, sc) = parse_rewrite_reply("QUERY: 汪均益案 判决\nSELF_CONTAINED: yes");
+        assert_eq!(q, "汪均益案 判决");
+        assert_eq!(sc, Some(true));
+    }
+
+    /// 兼容旧格式（模型只回一行查询）：self_contained 未知，交给调用方回退启发式。
+    #[test]
+    fn parses_legacy_single_line_reply() {
+        let (q, sc) = parse_rewrite_reply("陈秀芳 家庭成员");
+        assert_eq!(q, "陈秀芳 家庭成员");
+        assert_eq!(sc, None);
+    }
+
+    /// 用**语料事实**过滤改写词：语料里不存在的词被丢弃，同义词只要存在就保留。
+    /// 这是替代"词性/词表判断实体"的关键：不需要知道「兄长」是不是人名。
+    #[test]
+    fn strips_terms_absent_from_corpus() {
+        // df: 陈秀芳/兄长/出生日期 存在；张三不存在
+        let df = |w: &str| match w {
+            "陈秀芳" => 83,
+            "兄长" => 12,
+            "出生日期" => 500,
+            "张三" => 0,
+            _ => 0,
+        };
+        let out = strip_nonexistent_terms("陈秀芳 张三 兄长 出生日期", "各人的年龄", df)
+            .expect("仍有可用词");
+        assert!(out.contains("陈秀芳"), "{out}");
+        assert!(out.contains("兄长"), "语料里存在的同义词必须保留: {out}");
+        assert!(!out.contains("张三"), "语料里没有的词要丢弃: {out}");
+    }
+
+    /// 用户自己写的词不查语料（可能是生僻写法），全部被过滤光时返回 None。
+    #[test]
+    fn keeps_user_typed_terms_and_reports_empty() {
+        let none = |_: &str| 0u64;
+        // 问句自带的词一律保留
+        assert_eq!(
+            strip_nonexistent_terms("某个生僻词", "某个生僻词", none).as_deref(),
+            Some("某个生僻词")
         );
-    }
-
-    /// 历史里根本没有的实体（模型编的）仍然要拦。
-    #[test]
-    fn entity_absent_from_history_is_rejected() {
-        let msgs = vec![
-            msg("user", "陈秀芳的家庭成员有哪些？"),
-            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
-        ];
-        let hist = recent_history_text(&msgs, "今天是2026年11月12日，各人的年龄是多少");
-        assert!(!entities_backed_by_history(
-            "张三 家庭成员 年龄",
-            "今天是2026年11月12日，各人的年龄是多少",
-            &hist
-        ));
-    }
-
-    /// 本轮问句自带的实体不需要历史出处。
-    #[test]
-    fn entity_typed_in_question_needs_no_history() {
-        assert!(entities_backed_by_history(
-            "汪均益案 最终结果 判决",
-            "汪均益案的最终结果是什么？",
-            ""
-        ));
-    }
-
-    /// 只校验"实体"，不拦普通同义改写。
-    /// 2026-11-02 实测：`出生日期` 是把「今年多少岁」换了个说法，却被当成编造实体，
-    /// 导致整条正确的改写（含 9 个人名）被弃用。
-    #[test]
-    fn synonyms_are_not_treated_as_entities() {
-        let msgs = vec![
-            msg("user", "陈秀芳的家庭成员有哪些？"),
-            msg("assistant", "陈秀芳的父亲是陈贤文，哥哥是陈正先"),
-            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
-        ];
-        let q = "今天是2026年11月12日，各人的年龄是多少";
-        let hist = recent_history_text(&msgs, q);
-        assert!(entities_backed_by_history(
-            "陈秀芳 陈贤文 陈正先 出生日期",
-            q,
-            &hist
-        ));
+        // 既不在问句、语料里也没有 ⇒ 丢弃 ⇒ 空 ⇒ None
+        assert!(strip_nonexistent_terms("张三 李四", "各人的年龄", none).is_none());
     }
 
     /// 改写历史要包含助手回答（仅用于解析指代），且标注不得当事实。
@@ -280,6 +272,74 @@ mod inherited_term_tests {
         // "所有" is part of the current question here → must survive.
         let out = strip_inherited_generic_terms("万城公司 所有 工商变更", "万城公司所有工商变更");
         assert!(out.contains("所有"), "{out}");
+    }
+}
+
+/// 解析改写的两行输出：
+///
+/// ```text
+/// QUERY: 陈秀芳 兄长 出生日期
+/// SELF_CONTAINED: no
+/// ```
+///
+/// 兼容旧格式（模型只回一行查询）：此时 `self_contained = None`，调用方退回离线启发式。
+fn parse_rewrite_reply(raw: &str) -> (String, Option<bool>) {
+    let mut query: Option<String> = None;
+    let mut self_contained: Option<bool> = None;
+    for line in raw.lines() {
+        let t = line.trim();
+        let lower = t.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("query:") {
+            // 用原行切片取回大小写无关的正文
+            let start = t.len() - rest.len();
+            query = Some(t[start..].trim().to_string());
+        } else if lower.starts_with("self_contained:") {
+            let v = lower.split(':').nth(1).unwrap_or("").trim().to_string();
+            self_contained = match v.as_str() {
+                "no" | "false" | "0" | "否" => Some(false),
+                "yes" | "true" | "1" | "是" => Some(true),
+                _ => None,
+            };
+        }
+    }
+    match query {
+        Some(q) if !q.is_empty() => (q, self_contained),
+        // 没有 QUERY: 前缀 → 视为旧格式，整段就是查询
+        _ => (raw.trim().to_string(), self_contained),
+    }
+}
+
+/// 用**语料事实**过滤改写词：正文索引里一次都没出现过的词直接丢弃。
+///
+/// 这替代了"像不像实体"的词性/词表判断：编造的人名（语料里没有）自动出局，
+/// 而「兄长 / 家兄」这类同义词只要语料里出现过就保留 —— 不需要任何封闭词表。
+///
+/// 本轮问句里用户自己写的词**不校验**（用户可能故意用生僻写法）。
+/// 全部被丢光 ⇒ 返回 `None`，调用方回退规则链。
+pub(super) fn strip_nonexistent_terms(
+    rewritten: &str,
+    current_q: &str,
+    df: impl Fn(&str) -> u64,
+) -> Option<String> {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut dropped: Vec<&str> = Vec::new();
+    for token in rewritten.split_whitespace() {
+        if token.is_empty() {
+            continue;
+        }
+        if current_q.contains(token) || df(token) > 0 {
+            kept.push(token);
+        } else {
+            dropped.push(token);
+        }
+    }
+    if !dropped.is_empty() {
+        log::info!("[AI]   rewrite 丢弃语料中不存在的词：{dropped:?}");
+    }
+    if kept.is_empty() {
+        None
+    } else {
+        Some(kept.join(" "))
     }
 }
 
@@ -355,13 +415,16 @@ pub async fn llm_rewrite_query(
     let history_str = rewrite_history(messages, context_paths, last_q);
     let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的提问改写成一条**可独立检索**的中文查询。\
 规则：\
-1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」），必须从上文找出它真正指向的人名/机构名/案件名补进查询。\
+1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」「兄长呢」），必须从上文找出它真正指向的人名/机构名/案件名补进查询。\
 2) 继承的主题实体必须**来自对话历史**（用户的提问或助手的回答），不得凭空编造。\
 3) 若当前问题本身就是一个完整、独立的新问题（自带明确的人名/机构名/案件名/文件号），就只围绕它改写，**不要**引入历史里的对象。\
 4) 助手的历史回答只用于判断「这句话在说什么」，**不得**把它当作事实写进查询。\
-5) 输出最小必要关键词短语（6～12 个词，空格分隔），去掉“的/了/吗/呢/报告/文件”这类无区分词。\
-只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”，也不要照抄整句问题。";
-    let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
+5) 查询用最小必要关键词（6～12 个词，空格分隔），去掉“的/了/吗/呢/报告/文件”这类无区分词。\
+输出格式（两行，不要解释、不要引号）：\
+QUERY: <改写后的检索词>\
+SELF_CONTAINED: yes 或 no\
+其中 SELF_CONTAINED 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
+    let user = format!("{history_str}\n当前问题：{last_q}");
     let sys = system.to_string();
     let budget = rewrite_timeout_secs();
     let started = std::time::Instant::now();
@@ -375,8 +438,12 @@ pub async fn llm_rewrite_query(
         let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys_c, &user_c));
         match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
             Ok(Ok(Some(s))) => {
-                return match valid_rewrite_output(&s, last_q) {
-                    Some(v) => RewriteAttempt::Ok(strip_inherited_generic_terms(&v, last_q)),
+                let (query_raw, self_contained) = parse_rewrite_reply(&s);
+                return match valid_rewrite_output(&query_raw, last_q) {
+                    Some(v) => RewriteAttempt::Ok(RewriteOk {
+                        query: strip_inherited_generic_terms(&v, last_q),
+                        self_contained,
+                    }),
                     None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
                 };
             }
@@ -409,14 +476,25 @@ pub async fn llm_rewrite_query(
 /// 日志里只剩 `method=rule`，查不出是网关慢还是守卫拦的（2026-11-02 实测：
 /// 一次 5.0s 超时与一次被守卫弃用，现象完全相同）。
 pub enum RewriteAttempt {
-    /// 可用（已通过 `valid_rewrite_output` + 泛词清洗）。
-    Ok(String),
+    /// 可用（已通过 `valid_rewrite_output` + 泛词清洗 + 语料存在性过滤）。
+    Ok(RewriteOk),
     /// 模型返回了，但内容不可用（空/超长/无检索词/原样回显）。
     Invalid(String),
     /// 超时。
     Timeout(u64),
     /// 未启用（无 LLM 配置或显式跳过）。
     Unavailable,
+}
+
+/// 一次成功的改写。
+pub struct RewriteOk {
+    pub query: String,
+    /// 模型自己判断「这句话离开上文读不懂」。
+    ///
+    /// 这是"要不要沿用上一轮材料"的**主判据**：模型看得到完整对话，
+    /// `兄长 / 家兄 / 各人 / 办公室` 这类说法对它都是普通语义，不需要我们列词表。
+    /// `None` 表示模型没给这个字段（老格式/解析失败）→ 调用方退回离线启发式。
+    pub self_contained: Option<bool>,
 }
 
 /// 改写超时（秒）。默认 60 —— 这个网关的改写请求常态 4–6 秒，旧值 5 秒会
@@ -446,62 +524,6 @@ pub(super) fn recent_history_text(messages: &[ChatMessage], last_q: &str) -> Str
     out
 }
 
-/// 改写结果里**本轮问句没出现**的实体，是否都能在对话历史里找到出处。
-///
-/// 只针对**实体**（专名 / 含数字的编号）判定 —— 普通词汇（同义词、上位词，例如把
-/// 「今年多少岁」改成「出生日期」）不受此限：那不是"指代消解"，只是换词，不该拦。
-/// 2026-11-02 实测踩到：模型把「今天是2026年11月12日，各人的年龄是多少」改写成
-/// `陈秀芳 陈贤文 … 李耀华 出生日期`（名字全部来自上一轮回答，完全正确），
-/// 却因为 `出生日期` 不在历史里被整条弃用 —— 守卫把"换词"当成了"编造实体"。
-pub(super) fn entities_backed_by_history(
-    rewritten: &str,
-    current_q: &str,
-    history_text: &str,
-) -> bool {
-    let cur = current_q.to_lowercase();
-    let hist = history_text.to_lowercase();
-    for kw in extract_retrieval_keywords(rewritten) {
-        let k = kw.to_lowercase();
-        if k.chars().count() < 2 {
-            continue;
-        }
-        // 本轮问句已有 → 无需历史
-        if cur.contains(&k) {
-            continue;
-        }
-        if !is_entity_like(&k) {
-            // 普通词汇/同义改写：不参与实体校验
-            continue;
-        }
-        if hist.contains(&k) {
-            continue;
-        }
-        log::info!("[AI]   llm rewrite 引入了历史里不存在的实体：{kw}");
-        return false;
-    }
-    true
-}
-
-/// 这个词像不像"具体对象"（人名/地名/机构名/专名，或含数字的编号/案号）。
-/// 决定它是否必须能在历史里找到出处。
-fn is_entity_like(word: &str) -> bool {
-    if word.chars().any(|c| c.is_ascii_digit()) {
-        return true;
-    }
-    crate::search::schema::JIEBA
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .tag(word, true)
-        .iter()
-        .any(|t| {
-            let tag = t.tag.to_string();
-            t.word.chars().count() >= 2
-                && (tag.starts_with("nr")
-                    || tag.starts_with("ns")
-                    || tag.starts_with("nt")
-                    || tag.starts_with("nz"))
-        })
-}
 ///
 /// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
 /// 的材料，这次换一组**不一样**但更可能命中的检索词。

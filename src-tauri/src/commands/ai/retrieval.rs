@@ -636,12 +636,28 @@ pub(super) fn apply_rerank_order(
     fused.into_iter().map(|(i, _)| i).collect()
 }
 
+/// 某个词在正文索引里出现在多少篇文档中（0 = 语料里没有）。
+///
+/// 用于**用事实校验改写词**，而不是用词表猜"像不像实体"。
+pub(crate) fn term_doc_freq(ctx: &RetrievalCtx, word: &str) -> u64 {
+    use crate::search::searcher::SearcherWrap;
+    let (reader, index) = {
+        let Ok(mgr) = ctx.index_manager.read() else {
+            return 0;
+        };
+        let Ok(reader) = mgr.reader() else {
+            return 0;
+        };
+        (reader.clone(), mgr.index().as_ref().clone())
+    };
+    SearcherWrap::new(reader, index).term_doc_freq(word)
+}
+
 /// BM25 retrieval returning top relevant hits — tokenised as explicit OR
 /// (a raw question would parse as an exact phrase and miss). When
 /// `semantic` is true and the embedding gateway is configured, reranks the
 /// BM25 candidates via RRF fusion with embedding cosine scores (gracefully
 /// falls back to BM25-only on any failure).
-/// BM25 通道的返回结果：命中列表 + 索引层报告的原始字面命中数。
 ///
 /// `matched_total` 是**去重前、scope 过滤前**的字面命中数，用来做通道自检：
 /// 2026-11-02 实测过一次同一个查询的返回数从 7003 掉到 1（重启后 6 分钟，随后自愈），

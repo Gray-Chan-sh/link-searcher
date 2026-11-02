@@ -132,6 +132,44 @@ impl SearcherWrap {
         Self { reader, index }
     }
 
+    /// 该词在**正文索引**里出现在多少篇文档中（0 = 语料里根本没有这个词）。
+    ///
+    /// 用途：判断改写产出的检索词是否真实存在。相比词表/词性判断"像不像实体"，
+    /// 这是**事实判据** —— 编造的人名（语料里没有）自动为 0，而「兄长 / 家兄」
+    /// 这类同义词只要语料里出现过就能通过，不需要任何封闭词表。
+    ///
+    /// 复合词会被索引分词器切开（"验资报告" → "验资"/"报告"），直接查整词会误判为 0，
+    /// 所以整词查不到时再按 jieba 子词查，任一子词存在即视为存在。
+    pub fn term_doc_freq(&self, word: &str) -> u64 {
+        let w = word.trim().to_lowercase();
+        if w.is_empty() {
+            return 0;
+        }
+        let direct = self.raw_doc_freq(&w);
+        if direct > 0 {
+            return direct;
+        }
+        let tokens: Vec<String> = crate::search::schema::JIEBA
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .cut(&w, false)
+            .iter()
+            .map(|t| t.word.to_lowercase())
+            .filter(|t| t.chars().count() >= 2)
+            .collect();
+        tokens.iter().map(|t| self.raw_doc_freq(t)).max().unwrap_or(0)
+    }
+
+    fn raw_doc_freq(&self, word: &str) -> u64 {
+        let schema = build_schema();
+        let Some(field) = schema.get_field("content").ok() else {
+            return 0;
+        };
+        let searcher = self.reader.searcher();
+        let term = tantivy::Term::from_field_text(field, word);
+        searcher.doc_freq(&term).unwrap_or(0)
+    }
+
     /// Run a full-text search with optional filters, sorting, and pagination.
     ///
     /// Returns matching results along with total count and timing metadata.

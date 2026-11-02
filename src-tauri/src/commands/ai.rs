@@ -631,9 +631,9 @@ mod topic_shift_tests {
 
 mod rewrite;
 pub use rewrite::{RewriteAttempt, RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
-use rewrite::{carry_forward_source, extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity};
+use rewrite::{extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity};
 #[cfg(test)]
-use rewrite::{rewrite_history, valid_rewrite_output};
+use rewrite::{carry_forward_source, rewrite_history, valid_rewrite_output};
 
 mod retrieval;
 #[allow(dead_code)] // Staged for P4.3: wired into progressive retrieval next.
