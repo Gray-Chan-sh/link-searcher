@@ -11,7 +11,7 @@ members = ["lark-gate", "lark-bot"]
 
 [package]
 name = "link-searcher"
-version = "1.5.0"
+version = "1.5.1"
 description = "Cross-platform full-text search desktop application"
 authors = ["Link-Searcher"]
 edition = "2024"

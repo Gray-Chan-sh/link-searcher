@@ -180,6 +180,25 @@ mod history_backed_entity_tests {
         ));
     }
 
+    /// 只校验"实体"，不拦普通同义改写。
+    /// 2026-11-02 实测：`出生日期` 是把「今年多少岁」换了个说法，却被当成编造实体，
+    /// 导致整条正确的改写（含 9 个人名）被弃用。
+    #[test]
+    fn synonyms_are_not_treated_as_entities() {
+        let msgs = vec![
+            msg("user", "陈秀芳的家庭成员有哪些？"),
+            msg("assistant", "陈秀芳的父亲是陈贤文，哥哥是陈正先"),
+            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
+        ];
+        let q = "今天是2026年11月12日，各人的年龄是多少";
+        let hist = recent_history_text(&msgs, q);
+        assert!(entities_backed_by_history(
+            "陈秀芳 陈贤文 陈正先 出生日期",
+            q,
+            &hist
+        ));
+    }
+
     /// 改写历史要包含助手回答（仅用于解析指代），且标注不得当事实。
     #[test]
     fn rewrite_history_includes_reference_only_answers() {
@@ -362,12 +381,11 @@ pub(super) fn recent_history_text(messages: &[ChatMessage], last_q: &str) -> Str
 
 /// 改写结果里**本轮问句没出现**的实体，是否都能在对话历史里找到出处。
 ///
-/// 这才是"结合之前的提问和回答改写"的正确守卫：以前用「本轮问句之外的实体一律
-/// 弃用」（[`may_inherit_parent_entities`] 那套），它分不清**新话题**和**指代消解** ——
-/// 而指代消解恰恰**必须**引入本轮问句里没有的实体。2026-11-02 实测：
-/// 模型把「今天是2026年11月12日，各人的年龄是多少」正确改写成
-/// `陈秀芳 家庭成员 年龄`（陈秀芳来自上一轮对话），却被守卫弃用，退回原句后
-/// 整轮检索跑偏，模型只能拒答。
+/// 只针对**实体**（专名 / 含数字的编号）判定 —— 普通词汇（同义词、上位词，例如把
+/// 「今年多少岁」改成「出生日期」）不受此限：那不是"指代消解"，只是换词，不该拦。
+/// 2026-11-02 实测踩到：模型把「今天是2026年11月12日，各人的年龄是多少」改写成
+/// `陈秀芳 陈贤文 … 李耀华 出生日期`（名字全部来自上一轮回答，完全正确），
+/// 却因为 `出生日期` 不在历史里被整条弃用 —— 守卫把"换词"当成了"编造实体"。
 pub(super) fn entities_backed_by_history(
     rewritten: &str,
     current_q: &str,
@@ -380,8 +398,12 @@ pub(super) fn entities_backed_by_history(
         if k.chars().count() < 2 {
             continue;
         }
-        // 本轮问句已有（含包含关系）→ 无需历史
+        // 本轮问句已有 → 无需历史
         if cur.contains(&k) {
+            continue;
+        }
+        if !is_entity_like(&k) {
+            // 普通词汇/同义改写：不参与实体校验
             continue;
         }
         if hist.contains(&k) {
@@ -391,6 +413,27 @@ pub(super) fn entities_backed_by_history(
         return false;
     }
     true
+}
+
+/// 这个词像不像"具体对象"（人名/地名/机构名/专名，或含数字的编号/案号）。
+/// 决定它是否必须能在历史里找到出处。
+fn is_entity_like(word: &str) -> bool {
+    if word.chars().any(|c| c.is_ascii_digit()) {
+        return true;
+    }
+    crate::search::schema::JIEBA
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .tag(word, true)
+        .iter()
+        .any(|t| {
+            let tag = t.tag.to_string();
+            t.word.chars().count() >= 2
+                && (tag.starts_with("nr")
+                    || tag.starts_with("ns")
+                    || tag.starts_with("nt")
+                    || tag.starts_with("nz"))
+        })
 }
 ///
 /// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
