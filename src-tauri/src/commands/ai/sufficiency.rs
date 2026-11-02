@@ -195,7 +195,7 @@ pub(crate) fn check_sufficiency(signals: &SufficiencySignals) -> SufficiencyRepo
 /// Common query nouns that are not useful as entity-targeted expansion terms.
 /// They are intentionally exact matches: "北京公司" stays specific, "公司" does
 /// not.
-const GENERIC_ENTITY_TERMS: &[&str] = &[
+const GENERIC_NOUN_TERMS: &[&str] = &[
     "公司",
     "报告",
     "案件",
@@ -216,8 +216,12 @@ const GENERIC_ENTITY_TERMS: &[&str] = &[
     "证据",
     "文件",
     "资料",
-    // verbs / quantifiers / discourse words that jieba's keyword extractor
-    // can leave in `final_kws` during follow-up rewrites.
+];
+
+/// Verbs / quantifiers / discourse words. They are not entities *and* they are
+/// also useless as inherited retrieval terms: a follow-up like "这些文号有没有
+/// 重复的？" must not drag the parent's "做过 / 多份 / 所有" into BM25.
+const NON_ENTITY_WORDS: &[&str] = &[
     "做过",
     "多份",
     "所有",
@@ -247,7 +251,15 @@ const GENERIC_ENTITY_TERMS: &[&str] = &[
 /// Whether a keyword is specific enough to justify an entity-targeted retry.
 pub(crate) fn is_specific_entity(keyword: &str) -> bool {
     let keyword = keyword.trim();
-    keyword.chars().count() >= 2 && !GENERIC_ENTITY_TERMS.contains(&keyword)
+    keyword.chars().count() >= 2
+        && !GENERIC_NOUN_TERMS.contains(&keyword)
+        && !NON_ENTITY_WORDS.contains(&keyword)
+}
+
+/// Whether a single inherited token is a verb/quantifier rather than a topic
+/// term. Used to scrub rewritten follow-up queries.
+pub(crate) fn is_non_entity_word(keyword: &str) -> bool {
+    NON_ENTITY_WORDS.contains(&keyword.trim())
 }
 
 /// Cheap slot-presence check for the post-rerank sufficiency pass.

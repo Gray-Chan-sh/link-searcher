@@ -88,6 +88,29 @@ mod pronoun_followup_tests {
     }
 }
 
+#[cfg(test)]
+mod inherited_term_tests {
+    use super::*;
+
+    #[test]
+    fn drops_parent_verbs_and_quantifiers() {
+        let llm = "申洲 大通 会计师 事务所 做过 多份 验资 报告 所有 这些文号里有没有重复的？";
+        let out = strip_inherited_generic_terms(llm, "这些文号里有没有重复的？");
+        assert!(!out.contains("做过"), "{out}");
+        assert!(!out.contains("多份"), "{out}");
+        assert!(!out.contains("所有"), "{out}");
+        assert!(out.contains("验资"), "{out}");
+        assert!(out.contains("这些文号"), "{out}");
+    }
+
+    #[test]
+    fn keeps_terms_the_user_actually_typed() {
+        // "所有" is part of the current question here → must survive.
+        let out = strip_inherited_generic_terms("万城公司 所有 工商变更", "万城公司所有工商变更");
+        assert!(out.contains("所有"), "{out}");
+    }
+}
+
 /// Validate an LLM rewrite response: non-empty, not longer than the input
 /// query's practical retrieval ceiling, not echoing the original, and — the
 /// key point — carrying at least one *retrievable* term.
@@ -143,7 +166,8 @@ pub async fn llm_rewrite_query(
     let sys = system.to_string();
     let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
     match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
-        Ok(Ok(Some(s))) => valid_rewrite_output(&s, last_q),
+        Ok(Ok(Some(s))) => valid_rewrite_output(&s, last_q)
+            .map(|v| strip_inherited_generic_terms(&v, last_q)),
         _ => None,
     }
 }
@@ -391,9 +415,17 @@ pub(super) fn extract_retrieval_keywords(query: &str) -> Vec<String> {
 /// Person pronouns that must bind to a person/org entity from the parent turn,
 /// not to the parent's topic words (e.g. "身份证号/多少").
 pub(super) fn has_person_pronoun(text: &str) -> bool {
-    ["他", "她", "他们", "她们", "其", "该人", "此人", "当事人"]
+    person_pronoun_surface(text).is_some()
+}
+
+/// The pronoun surface itself (longest match first, so "他们" wins over "他").
+/// Needed to feed a binding into the clarify engine: we already resolved "他"
+/// to a concrete person, so the engine must not report it as ambiguous.
+pub(super) fn person_pronoun_surface(text: &str) -> Option<&'static str> {
+    ["他们", "她们", "他", "她", "该人", "此人", "当事人"]
         .iter()
-        .any(|p| text.contains(p))
+        .find(|p| text.contains(*p))
+        .copied()
 }
 
 /// Parent entities suitable for a pronoun follow-up. Uses jieba POS tags so
@@ -433,11 +465,42 @@ pub(super) fn pronoun_binding_query(current_q: &str, parent_q: &str) -> Option<S
     }
 }
 
+/// Scrubs verbs/quantifiers that an LLM rewrite copied over from the parent
+/// turn but that the current question never asked for.
+///
+/// 2026-11-02 实测：追问 `这些文号里有没有重复的？` 的 LLM 改写是
+/// `申洲 大通 会计师 事务所 做过 多份 验资 报告 所有 这些文号里有没有重复的？`
+/// —— `做过/多份/所有` 是上一轮的动词量词，只会稀释 BM25（hits 从 7239 涨到 9873）。
+///
+/// 只删**本轮问句里没有的**词：用户自己写的"所有"必须保留。
+pub(super) fn strip_inherited_generic_terms(rewritten: &str, current_q: &str) -> String {
+    let kept: Vec<&str> = rewritten
+        .split_whitespace()
+        .filter(|t| {
+            let t = t.trim();
+            if t.is_empty() || current_q.contains(t) {
+                return true;
+            }
+            !super::sufficiency::is_non_entity_word(t)
+        })
+        .collect();
+    if kept.is_empty() {
+        rewritten.to_string()
+    } else {
+        kept.join(" ")
+    }
+}
+
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
     let mut out = Vec::new();
     for t in crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner()).cut(text, false) {
         let w = t.word.trim();
         if w.chars().count() < 2 || is_rewrite_stopword(w) {
+            continue;
+        }
+        // 继承父问句关键词时也要滤掉动词/量词（"做过/多份/所有"），
+        // 否则规则改写路径会把上一轮的问法带进本轮检索。
+        if super::sufficiency::is_non_entity_word(w) {
             continue;
         }
         if !out.iter().any(|k: &String| k == w) {

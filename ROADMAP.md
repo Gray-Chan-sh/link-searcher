@@ -29,7 +29,7 @@
 
 ## P0 — 已知缺陷（应尽快修）
 
-- [ ] **重回答后 UI 卡死（2026-11-02，v1.4.0）**：19 篇/138K 上下文回答完成后窗口 `Responding=False`，后端已落库、DB 未锁、无 panic；判断卡在 `auto_cite`/`ai_events`/`ai-done` IPC 或 WebView 消息循环。**已加保护（待用同一重问题复测）**：`ai-done` 先于事件写入发出、事件写入 detached、`auto_cite` 5s 超时、前端 10 分钟看门狗、listener try/catch。详见 `docs/INCIDENT_2026-11-02_UI_HANG.md`。
+- [x] **重回答后 UI 卡死（2026-11-02，v1.4.0）**：19 篇/138K 上下文回答完成后窗口 `Responding=False`，后端已落库、DB 未锁、无 panic；判断卡在 `auto_cite`/`ai_events`/`ai-done` IPC 或 WebView 消息循环。**已修复并复测通过（v1.4.1/1.4.3）**：`ai-done` 先于事件写入发出、事件写入 detached、`auto_cite` 5s 超时、前端 10 分钟看门狗、listener try/catch；2026-11-02 用 22 篇/137K 的重问题复测，回答完成后窗口持续 `Responding=True`（30 分钟 900 次采样 0 次翻转）。详见 `docs/INCIDENT_2026-11-02_UI_HANG.md`。
 - [x] **PdfExtractor trait impl 硬编码 `"eng"`**：`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 池）
 - [x] **LoBackgroundGuard 死代码清理**：struct 已删除
 - [x] **Semgrep WARNING**：生产代码 `unwrap`/`expect` 已清零——4 处修复（3 处 nosemgrep 标注修正 + 1 处 webapi 地址解析改优雅降级）；测试代码 494 处保留（AGENTS.md 允许测试路径）（2026-08-25）

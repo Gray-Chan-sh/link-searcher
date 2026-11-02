@@ -1,9 +1,19 @@
+## 2026-11-02（第七十三轮）：追问检索词清洗 + 代词绑定回灌 clarify（v1.4.3）
+
+- **代词追问绑定收尾**：v1.4.2 的绑定上线后复测发现「已绑定的代词又被加回污染词」，三处补齐：
+  1. **跳过重复兜底**：`pronoun_query` 生效时不再执行 `ensure_parent_entities()`，否则父问句主题词（如「身份证号」）会重新拼到检索 query 前面（`commands/ai/prompt.rs`）。
+  2. **清洗继承词**：新增 `strip_inherited_generic_terms()`，把 LLM 改写里**本轮问句没出现**的动词/量词（做过、多份、所有…）删掉；`parent_keywords()` 同样跳过这类词。实测 `这些文号里有没有重复的？` 的检索词由 `… 做过 多份 … 所有 …` 收敛为 `申洲 大通 会计师 事务所 验资 报告 这些文号里有没有重复的？`（`commands/ai/rewrite.rs`；`sufficiency.rs` 的通用词表拆成 `GENERIC_NOUN_TERMS` + `NON_ENTITY_WORDS`，两边共用）。
+  3. **绑定回灌 clarify**：代词绑定结果通过 `clarify::apply_binding(ir, "他", "陈正先")` 注入 IR，解析成功后不再追加「「他」的指代不明确」提示（`prompt.rs`）。
+- **可观测性**：`query_rewrite` 事件新增 `rewrite_method = retry | pronoun | llm | rule | none`（此前代词/规则路径都被误标成 `llm`）。
+- **复测结论**：S3 重问题（22 篇 / 137K 上下文 / 39s / 2688 字）回答完成后窗口 `Responding=True`；后台脚本 30 分钟采样 900 次、`Responding` 翻转 **0** 次，`auto_cite_done → emit_done_done → events_done` 全部秒过。
+- 详见事故记录 `docs/INCIDENT_2026-11-02_UI_HANG.md`（状态：重问题复测通过）。
+
 ## 2026-11-02（第七十二轮）：重回答后 UI 卡死保护 + 渐进检索误判收紧
 
 - **UI 卡死保护（P0）**：`conversation_ask_stream` 改为**先发 `ai-done`，再异步写 `ai_events`**；事件写入放 detached `spawn_blocking`，单条失败只 warn，不再阻塞 UI 完成。`auto_cite` 移入 `spawn_blocking` 并加 **5 秒超时**，超时直接用原始回答。新增 `post: auto_cite_start/done`、`emit_done_start/done`、`events_start/done` 日志（`commands/ai.rs`）。
 - **前端流式看门狗**：`streamStore` 增加 10 分钟无 chunk/done 超时，超时清理 active/stream；`notify` 对每个 listener 独立 try/catch；无订阅者落库加 10 秒超时；`ChatPanel` 在流式态结束后主动清空 streaming/progress，避免输入框永久禁用（`ai/streamStore.ts`、`components/ChatPanel.tsx`）。
 - **渐进检索误判收紧**：`is_specific_entity` 增加动词/量词/话语词（做过、多份、所有、列出、多少、哪些、重复等），避免追问改写把“做过/多份”当成实体触发补查；补查 `added=0` 时也记录 `progressive_round`，便于观测（`commands/ai/sufficiency.rs`、`prompt.rs`）。
-- **代词追问绑定**：`那他涉及哪些案件？` 这类追问现在只继承父问句的人名/机构实体（jieba `nr/nt/nz`），不再把父问句的“身份证号/多少”拼进检索词；规则路径直接生成 `实体 + 当前问句`，绕过被污染的 LLM 改写（`commands/ai/rewrite.rs`、`prompt.rs`）。
+- **代词追问绑定**：`那他涉及哪些案件？` 这类追问只继承父问句的人名/机构实体（jieba `nr/nt/nz`），不再把父问句的“身份证号/多少”拼进检索词；规则路径直接生成 `实体 + 当前问句`，绕过被污染的 LLM 改写（`commands/ai/rewrite.rs`、`prompt.rs`）。
 - 详见事故记录 `docs/INCIDENT_2026-11-02_UI_HANG.md`（状态：已加保护，待重问题复测）。
 
 ## 2026-11-01（第七十一轮）：渐进检索基础——确定性证据充分性判定

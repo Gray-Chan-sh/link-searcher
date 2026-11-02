@@ -2,7 +2,7 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
-use super::rewrite::pronoun_binding_query;
+use super::rewrite::{parent_person_entities, person_pronoun_surface, pronoun_binding_query};
 use super::sufficiency::{
     check_sufficiency, expand_neighbor_chunks, expansion_queries, is_specific_entity, missing_slots,
     SufficiencySignals,
@@ -252,6 +252,10 @@ struct AssembleJob {
     search_q: String,
     search_terms: Vec<String>,
     rewritten: bool,
+    /// Pronoun follow-up already bound to a parent person entity
+    /// (surface, entity). Handed to the clarify engine so it does not report
+    /// the same pronoun as ambiguous.
+    pronoun_binding: Option<(String, String)>,
     events: Vec<(String, serde_json::Value)>,
     material_order: Vec<String>,
     app: Option<tauri::AppHandle>,
@@ -317,7 +321,6 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     let material_order = prior_material_order(&ctx, session_id);
     emit_progress("query_rewrite", "查询改写中...", 0, 0);
     let rule = rewrite_query(&last_q, messages);
-    let original_rule_query = rule.query.clone();
     // 上一条 user 消息（父问句）：实体继承与"新话题"判定的参照物。
     let parent_q = messages
         .iter()
@@ -360,36 +363,50 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     // parent's topic words. The LLM rewrite previously turned
     // "那他涉及哪些案件？" into "陈正先 身份证号 多少 那他涉及哪些案件？".
     let pronoun_query = pronoun_binding_query(&last_q, parent_q);
-    let search_q = if let Some(q) = retry_q {
-        q
+    let pronoun_binding: Option<(String, String)> = if pronoun_query.is_some() {
+        person_pronoun_surface(&last_q)
+            .zip(parent_person_entities(parent_q).into_iter().next())
+            .map(|(surface, entity)| (surface.to_string(), entity))
+    } else {
+        None
+    };
+    let pronoun_bound = pronoun_binding.is_some();
+    let (search_q_raw, rewrite_method) = if let Some(q) = retry_q {
+        (q, "retry")
     } else if let Some(q) = pronoun_query {
-        q
+        (q, "pronoun")
     } else if skip_llm_rewrite {
-        rule.query.clone()
+        (rule.query.clone(), "rule")
     } else {
         let context_paths = prior_evidence_paths(&ctx, session_id);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
             // 不许继承的场合（新话题）改写不得引入本轮问句之外的实体（见 rewrite_adds_foreign_entity）
-            Some(llm) if llm != rule.query && !rewrite_adds_foreign_entity(&llm, &last_q, parent_q) => llm,
+            Some(llm) if llm != rule.query && !rewrite_adds_foreign_entity(&llm, &last_q, parent_q) => (llm, "llm"),
             Some(llm) if llm != rule.query => {
                 log::warn!("[AI]   llm rewrite 引入了本轮问句之外的实体，弃用：{:?}", truncate_text(&llm, 40));
-                rule.query.clone()
+                (rule.query.clone(), "rule")
             }
-            _ => rule.query.clone(),
+            _ => (rule.query.clone(), "rule"),
         }
     };
     // 硬性兜底：LLM 重写可能丢失上一轮问句的核心实体（人名/案名/项目名）。
     // 把父问句缺失的实体词补进检索 query，保证三通道能命中正确的实体文档。
     // 只对"可以继承"的追问生效 —— 新话题继承实体反而跑偏（P2）。
-    let search_q = ensure_parent_entities(&search_q, parent_q, &last_q);
+    // 代词已确定绑定到具体人物时**跳过**：`pronoun_query` 里已经只有"实体 + 本轮问句"，
+    // 这条兜底会再把父问句的主题词（"身份证号"）加回来（2026-11-02 实测）。
+    let search_q = if pronoun_bound {
+        search_q_raw
+    } else {
+        ensure_parent_entities(&search_q_raw, parent_q, &last_q)
+    };
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
-    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten);
+    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={}, method={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten, rewrite_method);
     events.push(("query_rewrite".into(), serde_json::json!({
         "original": last_q,
         "rewritten": search_q,
         "was_rewritten": rewritten,
-        "rewrite_method": if rewritten { if search_q != original_rule_query { "llm" } else { "rule" } } else { "none" },
+        "rewrite_method": if rewritten { rewrite_method } else { "none" },
         "retry": is_retry,
     })));
 
@@ -409,6 +426,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         search_q,
         search_terms,
         rewritten,
+        pronoun_binding,
         events,
         material_order,
         app: app.cloned(),
@@ -427,7 +445,7 @@ fn assemble_conversation_prompt(
     let AssembleJob {
         messages, source_ids, scope, session_retrieval_scope, strict_docs, full_recall,
         session_id, clarify_reply, last_q, search_q, search_terms, rewritten,
-        mut events, mut material_order, app, cancel,
+        pronoun_binding, mut events, mut material_order, app, cancel,
     } = job;
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = &app {
@@ -1715,6 +1733,16 @@ fn assemble_conversation_prompt(
         let conditions: Vec<(String, String)> =
             scope.conditions.iter().map(|c| (c.kind.clone(), c.value.clone())).collect();
         let mut ir = clarify::propose_ir(&search_q);
+        // 我们已经把「他/她」确定绑定到上一轮的人物实体，就把这条绑定交给
+        // clarify 引擎，否则它仍会把同一个代词判成"指代不明确"并追加提示
+        // （2026-11-02 实测：检索词里明明有"陈正先"，回答前仍弹提示）。
+        if let Some((surface, value)) = pronoun_binding.as_ref() {
+            if clarify::apply_binding(&mut ir, surface, value) {
+                log::info!("[AI]   clarify auto-bound: {surface} → {value}");
+            } else {
+                log::info!("[AI]   clarify auto-bind skipped (no slot for {surface})");
+            }
+        }
         if let Some(r) = clarify_reply.as_ref() {
             for b in &r.bindings {
                 if !clarify::apply_binding(&mut ir, &b.surface, &b.value) {
