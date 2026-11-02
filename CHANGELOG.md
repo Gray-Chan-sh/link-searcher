@@ -1,3 +1,16 @@
+## 2026-11-02（第七十七轮）：重排文本截断到 512 字（v1.4.7）
+
+> 第七十六轮的耗时分解结论：60 秒里 LLM 26s、**rerank 17s**、chunk 扫描 5.1s、向量扫描 1.8s、
+> 查询 embedding 0.06s。向量通道不是瓶颈，重排才是程序侧最大单笔开销。
+
+- **原因**：送给重排的每段文本上限沿用 `EMBED_MAX_CHARS = 2000`（为 embedding 定的），
+  50 个候选最多 10 万字丢给 `bge-reranker-v2-m3`；交叉编码器开销随 token 线性增长。
+- **改法**：新增 `ai::truncate_for_rerank()`，默认 **512 字**（`LINK_SEARCHER_RERANK_CHARS`
+  可调，下限 128），只缩短**文本长度**，候选文档集合完全不变 ⇒ 无召回风险
+  （`ai/mod.rs`、`commands/ai/prompt.rs` 两处 passage 构造）。
+- **新增单测**：`truncate_for_rerank_is_shorter_than_embed_cap` 锁住"重排上限必须显著小于
+  embedding 上限"，防止后人把它改回去。
+
 ## 2026-11-02（第七十六轮）：向量通道耗时分解（v1.4.6）
 
 > 认领历史向量后语义通道真正开始扫全库（19 707 文档向量 / 56 788 chunk 向量），

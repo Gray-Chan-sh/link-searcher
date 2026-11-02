@@ -1158,7 +1158,7 @@ fn assemble_conversation_prompt(
                             let db_chunks = crate::db::chunks::get_chunks(&rc, md5).unwrap_or_default();
                             db_chunks.iter()
                                 .find(|c| c.chunk_index as usize == *chunk_idx)
-                                .map(|c| crate::ai::truncate_for_embed(&c.text))
+                                .map(|c| crate::ai::truncate_for_rerank(&c.text))
                         } else {
                             None
                         }
@@ -1170,7 +1170,7 @@ fn assemble_conversation_prompt(
                 };
                 let passage = passage.or_else(|| {
                     crate::db::tracker::get_content(&rc, md5).ok().flatten()
-                        .map(|t| crate::ai::truncate_for_embed(&t))
+                        .map(|t| crate::ai::truncate_for_rerank(&t))
                 });
                 if let Some(p) = passage {
                     passages.push(p);

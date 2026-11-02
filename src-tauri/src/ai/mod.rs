@@ -441,6 +441,30 @@ pub fn truncate_for_embed(s: &str) -> String {
     }
 }
 
+/// 送给**重排器**的文本上限。
+///
+/// 交叉编码器的开销随 token 数线性增长，而"这段材料是否与问题相关"的判定不需要
+/// 整段正文。2026-11-02 实测（19 707 篇语料）：50 个候选 × 最多 2000 字送给
+/// `bge-reranker-v2-m3`，单次批量请求耗时 **17 秒**，是整轮 60 秒里的第二大开销。
+///
+/// 只改**文本长度**，候选文档集合完全不变 ⇒ 没有召回风险；重排名次可能略有变化。
+/// `LINK_SEARCHER_RERANK_CHARS` 可调（下限 128，避免把判定所需上下文截光）。
+const RERANK_MAX_CHARS: usize = 512;
+
+pub fn truncate_for_rerank(s: &str) -> String {
+    let max = std::env::var("LINK_SEARCHER_RERANK_CHARS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|v| *v >= 128)
+        .unwrap_or(RERANK_MAX_CHARS);
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        s.to_string()
+    } else {
+        chars[..max].iter().collect()
+    }
+}
+
 /// Embed texts; failed texts map to `None`.
 ///
 /// Local models run batches in parallel across a replica pool (see
@@ -2434,6 +2458,18 @@ mod tests {
         let t = truncate_for_embed(&long);
         assert_eq!(t.chars().count(), EMBED_MAX_CHARS);
         assert!(long.starts_with(&t));
+    }
+
+    #[test]
+    fn truncate_for_rerank_is_shorter_than_embed_cap() {
+        // 重排只需要"够判断相关性"的片段，必须比 embedding 的上限短得多，
+        // 否则交叉编码器又会把整段正文算一遍（实测 50×2000 字 = 17s）。
+        assert!(RERANK_MAX_CHARS < EMBED_MAX_CHARS);
+        let long = "字".repeat(EMBED_MAX_CHARS);
+        let t = truncate_for_rerank(&long);
+        assert_eq!(t.chars().count(), RERANK_MAX_CHARS);
+        let short = "短文本";
+        assert_eq!(truncate_for_rerank(short), "短文本");
     }
 
     #[test]
