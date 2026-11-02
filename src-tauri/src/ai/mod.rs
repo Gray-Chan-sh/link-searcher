@@ -889,12 +889,20 @@ pub fn rerank(query: &str, passages: &[String]) -> Option<Vec<f32>> {
         return None;
     }
     let cfg = crate::config::load_config();
+    let started = std::time::Instant::now();
+    let total_chars: usize = passages.iter().map(|p| p.chars().count()).sum();
 
     // Bundled local cross-encoder.
     if let Some(model_name) = local_embed::local_model_dir_name(&cfg.active_reranker_model_id) {
         if local_rerank::rerank_model_ready(&cfg.data_dir, model_name) {
             let _ = local_rerank::init_local_reranker(&cfg.data_dir, model_name);
-            return local_rerank::rerank_local(query, passages);
+            let out = local_rerank::rerank_local(query, passages);
+            log::info!(
+                "[AI]   rerank timing: local, docs={} chars={total_chars} took={}ms",
+                passages.len(),
+                started.elapsed().as_millis()
+            );
+            return out;
         }
         return None;
     }
@@ -938,6 +946,12 @@ pub fn rerank(query: &str, passages: &[String]) -> Option<Vec<f32>> {
             return None;
         }
     };
+    // 量化"送给重排的文本量"：它是这一跳耗时的唯一自变量，别只记文档数。
+    log::info!(
+        "[AI]   rerank timing: remote, docs={} chars={total_chars} took={}ms",
+        passages.len(),
+        started.elapsed().as_millis()
+    );
     let mut scores = vec![f32::MIN; passages.len()];
     for entry in resp.results {
         if entry.index < passages.len() {

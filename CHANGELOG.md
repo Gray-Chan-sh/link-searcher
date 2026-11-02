@@ -1,3 +1,11 @@
+## 2026-11-02（第七十八轮）：重排耗时自证（v1.4.8）
+
+- `ai::rerank()` 增加 `rerank timing: local|remote, docs=N chars=M took=Xms` —— 文档数、
+  **实际送出的字符数**、耗时三者一起记，是判断"截断有没有生效"的唯一直接证据
+  （`ai/mod.rs`）。
+- 实测确认第七十七轮有效：`chars=22961`（50 段均 459 字，改前每段最多 2000 字）、
+  `took=5148ms`（改前 17s），整轮 60.7s → 48.4s。
+
 ## 2026-11-02（第七十七轮）：重排文本截断到 512 字（v1.4.7）
 
 > 第七十六轮的耗时分解结论：60 秒里 LLM 26s、**rerank 17s**、chunk 扫描 5.1s、向量扫描 1.8s、
@@ -10,6 +18,10 @@
   （`ai/mod.rs`、`commands/ai/prompt.rs` 两处 passage 构造）。
 - **新增单测**：`truncate_for_rerank_is_shorter_than_embed_cap` 锁住"重排上限必须显著小于
   embedding 上限"，防止后人把它改回去。
+- **重排自证日志 + 实测（v1.4.8）**：`ai::rerank()` 打 `rerank timing: local|remote, docs=N chars=M took=Xms`。
+  实测同一问题 `docs=50 chars=22961 took=5148ms`（改前 17s），整轮 60.7s → **48.4s**；
+  其余分布：LLM 生成 28.2s、chunk 扫描 4.8s、向量扫描 1.7s、查询 embedding 0.06s。
+  外部直接打网关 `/rerank` 对照：50×1500 字 = 10.1s、50×512 字 = 3.2s、50×200 字 = 1.4s。
 
 ## 2026-11-02（第七十六轮）：向量通道耗时分解（v1.4.6）
 
