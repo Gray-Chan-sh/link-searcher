@@ -2,6 +2,7 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
+use super::rewrite::pronoun_binding_query;
 use super::sufficiency::{
     check_sufficiency, expand_neighbor_chunks, expansion_queries, is_specific_entity, missing_slots,
     SufficiencySignals,
@@ -355,7 +356,13 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             None => log::info!("[AI]   retry 扩查未产出（回退规则链）：\"{}\"", truncate_text(&last_q, 30)),
         }
     }
+    // Pronoun follow-ups bind to the parent's person/org entity, never to the
+    // parent's topic words. The LLM rewrite previously turned
+    // "那他涉及哪些案件？" into "陈正先 身份证号 多少 那他涉及哪些案件？".
+    let pronoun_query = pronoun_binding_query(&last_q, parent_q);
     let search_q = if let Some(q) = retry_q {
+        q
+    } else if let Some(q) = pronoun_query {
         q
     } else if skip_llm_rewrite {
         rule.query.clone()

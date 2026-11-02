@@ -60,6 +60,34 @@ pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
     }
     RewriteOutcome { query: format!("{} {}", kws.join(" "), q) }
 }
+#[cfg(test)]
+mod pronoun_followup_tests {
+    use super::*;
+
+    #[test]
+    fn detects_person_pronouns() {
+        assert!(has_person_pronoun("那他涉及哪些案件？"));
+        assert!(has_person_pronoun("她的合同呢"));
+        assert!(!has_person_pronoun("这个合同的金额是多少"));
+    }
+
+    #[test]
+    fn keeps_person_name_and_drops_topic_words() {
+        let entities = parent_person_entities("陈正先的身份证号是多少？");
+        assert!(entities.iter().any(|e| e == "陈正先"), "{entities:?}");
+        assert!(!entities.iter().any(|e| e == "身份证号"), "{entities:?}");
+    }
+
+    #[test]
+    fn pronoun_query_uses_entity_not_parent_topic() {
+        let q = pronoun_binding_query("那他涉及哪些案件？", "陈正先的身份证号是多少？")
+            .expect("should bind");
+        assert!(q.contains("陈正先"), "{q}");
+        assert!(!q.contains("身份证号"), "{q}");
+        assert!(!q.contains("多少"), "{q}");
+    }
+}
+
 /// Validate an LLM rewrite response: non-empty, not longer than the input
 /// query's practical retrieval ceiling, not echoing the original, and — the
 /// key point — carrying at least one *retrievable* term.
@@ -358,6 +386,51 @@ pub(super) fn extract_retrieval_keywords(query: &str) -> Vec<String> {
         })
         .cloned()
         .collect()
+}
+
+/// Person pronouns that must bind to a person/org entity from the parent turn,
+/// not to the parent's topic words (e.g. "身份证号/多少").
+pub(super) fn has_person_pronoun(text: &str) -> bool {
+    ["他", "她", "他们", "她们", "其", "该人", "此人", "当事人"]
+        .iter()
+        .any(|p| text.contains(p))
+}
+
+/// Parent entities suitable for a pronoun follow-up. Uses jieba POS tags so
+/// "陈正先" (nr) survives while "身份证号/多少" do not.
+pub(super) fn parent_person_entities(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in crate::search::schema::JIEBA
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .tag(text, true)
+    {
+        let w = token.word.trim();
+        let tag = token.tag.to_string();
+        if w.chars().count() < 2
+            || !(tag.starts_with("nr") || tag.starts_with("nt") || tag.starts_with("nz"))
+        {
+            continue;
+        }
+        if !out.iter().any(|k: &String| k == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
+/// Query for a pronoun follow-up: parent person/org entities + the current
+/// question, deliberately excluding the parent's topic words.
+pub(super) fn pronoun_binding_query(current_q: &str, parent_q: &str) -> Option<String> {
+    if !has_person_pronoun(current_q) || parent_q.trim().is_empty() {
+        return None;
+    }
+    let entities = parent_person_entities(parent_q);
+    if entities.is_empty() {
+        None
+    } else {
+        Some(format!("{} {}", entities.join(" "), current_q.trim()))
+    }
 }
 
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
