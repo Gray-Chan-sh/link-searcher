@@ -12,7 +12,34 @@ const dones = new Map<string, AiDonePayload>()
 const listeners = new Map<string, Set<() => void>>()
 // 正在由 store 代为落库的会话：期间挂载的 ChatPanel 不得清 pending（会同文件竞争写）
 const persisting = new Set<string>()
+const watchdogs = new Map<string, ReturnType<typeof setTimeout>>()
 let started: Promise<void> | null = null
+
+// Long local prefills can legitimately run for several minutes. This is an
+// inactivity watchdog, reset by every chunk; it only exists so a lost
+// `ai-done` can never leave the panel stuck forever.
+const STREAM_WATCHDOG_MS = 10 * 60 * 1000
+
+function clearWatchdog(sessionId: string): void {
+  const timer = watchdogs.get(sessionId)
+  if (timer) {
+    clearTimeout(timer)
+    watchdogs.delete(sessionId)
+  }
+}
+
+function armWatchdog(sessionId: string): void {
+  clearWatchdog(sessionId)
+  const timer = setTimeout(() => {
+    watchdogs.delete(sessionId)
+    if (!active.has(sessionId)) return
+    console.warn('[streamStore] stream watchdog fired; clearing stale state', sessionId)
+    active.delete(sessionId)
+    streams.delete(sessionId)
+    notify(sessionId)
+  }, STREAM_WATCHDOG_MS)
+  watchdogs.set(sessionId, timer)
+}
 
 export function isPersisting(sessionId: string): boolean {
   return persisting.has(sessionId)
@@ -40,6 +67,7 @@ async function persistDone(sessionId: string, e: AiDonePayload): Promise<boolean
 
 async function handleDone(raw: AiDonePayload): Promise<void> {
   const sessionId = raw.session_id
+  clearWatchdog(sessionId)
   active.delete(sessionId)
   const e: AiDonePayload = {
     ...raw,
@@ -51,7 +79,11 @@ async function handleDone(raw: AiDonePayload): Promise<void> {
   const hasSubscriber = (listeners.get(sessionId)?.size ?? 0) > 0
   let persisted = false
   if (!hasSubscriber && !e.cancelled) {
-    persisted = await persistDone(sessionId, e)
+    // Don't let a stuck session write keep every future mount in "persisting".
+    persisted = await Promise.race([
+      persistDone(sessionId, e),
+      new Promise<boolean>(resolve => setTimeout(() => resolve(false), 10_000)),
+    ])
   }
   dones.set(sessionId, persisted ? { ...e, persisted: true } : e)
   streams.delete(sessionId)
@@ -61,7 +93,15 @@ async function handleDone(raw: AiDonePayload): Promise<void> {
 function notify(sessionId: string) {
   const set = listeners.get(sessionId)
   if (!set) return
-  for (const fn of set) fn()
+  for (const fn of set) {
+    try {
+      fn()
+    } catch (err) {
+      // One broken listener must not prevent the rest from clearing the
+      // streaming state (and must not keep `active` alive).
+      console.error('[streamStore] listener failed:', err)
+    }
+  }
 }
 
 function ensureStarted(): Promise<void> {
@@ -69,6 +109,7 @@ function ensureStarted(): Promise<void> {
     started = (async () => {
       await client.listen<{ session_id: string; delta: string; reasoning?: boolean }>('ai-chunk', e => {
         active.add(e.session_id)
+        armWatchdog(e.session_id)
         const s = streams.get(e.session_id) ?? { text: '', reasoning: '' }
         if (e.reasoning) s.reasoning += e.delta
         else s.text += e.delta
@@ -101,6 +142,7 @@ export function subscribeAiStream(sessionId: string, onChange: () => void): () =
 export function markStreamStarted(sessionId: string): void {
   void ensureStarted()
   active.add(sessionId)
+  armWatchdog(sessionId)
 }
 
 export function markStreamEnded(sessionId: string): void {

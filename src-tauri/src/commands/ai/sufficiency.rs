@@ -216,6 +216,32 @@ const GENERIC_ENTITY_TERMS: &[&str] = &[
     "证据",
     "文件",
     "资料",
+    // verbs / quantifiers / discourse words that jieba's keyword extractor
+    // can leave in `final_kws` during follow-up rewrites.
+    "做过",
+    "多份",
+    "所有",
+    "全部",
+    "列出",
+    "列举",
+    "分别",
+    "多少",
+    "哪些",
+    "重复",
+    "有没有",
+    "是否",
+    "不要",
+    "总结",
+    "省略",
+    "相关",
+    "涉及",
+    "方面",
+    "时候",
+    "可以",
+    "需要",
+    "进行",
+    "出现",
+    "存在",
 ];
 
 /// Whether a keyword is specific enough to justify an entity-targeted retry.
@@ -456,6 +482,8 @@ mod tests {
     fn generic_terms_are_not_specific_entities() {
         assert!(!is_specific_entity("公司"));
         assert!(!is_specific_entity("报告"));
+        assert!(!is_specific_entity("做过"));
+        assert!(!is_specific_entity("多份"));
         assert!(!is_specific_entity("  "));
         assert!(is_specific_entity("常宏"));
         assert!(is_specific_entity("北京公司"));

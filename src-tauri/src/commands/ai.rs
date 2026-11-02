@@ -883,20 +883,46 @@ pub async fn conversation_ask_stream(
         "evidence_count": evidence.len(),
         "truncated": result.truncated,
     })));
-    if let Ok(conn) = state.db.get() {
-        for (i, (event_type, payload)) in events.iter().enumerate() {
-            let _ = crate::db::ai_events::record_event(
-                &conn, &session_id, turn_number, (i + 1) as u32, event_type, payload,
-            );
+    let raw_text = stream_text_or_error(result.text, result.cancelled, result.error, "conversation");
+    log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
+
+    // auto_cite is intentionally off the critical path: a heavy answer can
+    // involve many evidence snippets, and the UI must not wait forever for
+    // citation decoration. If it exceeds the budget, emit the raw answer.
+    log::info!("[AI] post: auto_cite_start");
+    let cite_input = raw_text.clone();
+    let cite_nums = visible_nums.clone();
+    let cite_evidence = visible_evidence.clone();
+    let cite_task = tokio::task::spawn_blocking(move || {
+        auto_cite(
+            &sanitize_citations_set(&cite_input, &cite_nums),
+            &cite_evidence,
+        )
+    });
+    let cited_text = if clarify_blocking {
+        raw_text
+    } else {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), cite_task).await {
+            Ok(Ok(cited)) => match clarify_note {
+                Some(n) => format!("{n}\n\n{cited}"),
+                None => cited,
+            },
+            Ok(Err(e)) => {
+                log::warn!("[AI] post: auto_cite task failed: {e}; using raw answer");
+                compose_answer_text(clarify_blocking, raw_text, clarify_note, |raw| raw.to_string())
+            }
+            Err(_) => {
+                log::warn!("[AI] post: auto_cite timed out (>5s); using raw answer");
+                compose_answer_text(clarify_blocking, raw_text, clarify_note, |raw| raw.to_string())
+            }
         }
-     }
-     let raw_text = stream_text_or_error(result.text, result.cancelled, result.error, "conversation");
-     log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
-     let cited_text = compose_answer_text(clarify_blocking, raw_text, clarify_note, |raw| {
-         auto_cite(&sanitize_citations_set(raw, &visible_nums), &visible_evidence)
-     });
-     let _ = app.emit("ai-done", AiDone {
-         session_id,
+    };
+    log::info!("[AI] post: auto_cite_done");
+    log::info!("[AI] post: emit_done_start");
+    let event_session_id = session_id.clone();
+    let event_db = state.db.clone();
+    let _ = app.emit("ai-done", AiDone {
+        session_id,
         full_text: cited_text,
         took_ms: result.took_ms,
         cancelled: result.cancelled,
@@ -913,6 +939,24 @@ pub async fn conversation_ask_stream(
         total_match_count,
         llm_model: cfg.active_llm_model_id,
         embedding_model: cfg.active_embedding_model_id,
+    });
+    log::info!("[AI] post: emit_done_done");
+    // Analytics must never keep the UI in "streaming". Record after the done
+    // event, in a detached blocking task, and log individual failures.
+    log::info!("[AI] post: events_start");
+    tokio::task::spawn_blocking(move || {
+        let Ok(conn) = event_db.get() else {
+            log::warn!("[AI] post: event DB unavailable; {} events dropped", events.len());
+            return;
+        };
+        for (i, (event_type, payload)) in events.iter().enumerate() {
+            if let Err(e) = crate::db::ai_events::record_event(
+                &conn, &event_session_id, turn_number, (i + 1) as u32, event_type, payload,
+            ) {
+                log::warn!("[AI] post: record_event {event_type} failed: {e}");
+            }
+        }
+        log::info!("[AI] post: events_done");
     });
     Ok(())
 }

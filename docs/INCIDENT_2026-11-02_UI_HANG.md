@@ -1,6 +1,6 @@
 # 2026-11-02 重回答后 UI 卡死（未修复）
 
-> 状态：**OPEN / 必须修复**
+> 状态：**MITIGATED / 待重测**（2026-11-02 已加保护，尚未用同一重问题复测）
 > 影响版本：v1.4.0（渐进检索 v3）
 > 记录时间：2026-11-02
 
@@ -84,6 +84,15 @@ chat_stream 结束
    - 不阻塞后续操作。
 4. `handleDone` 加 `try/finally`，listener 单独 try/catch。
 5. 事件时间线改为展开时懒加载。
+
+## 已实施（2026-11-02）
+
+- `ai-done` 现在先于 `ai_events` 写入发出；事件写入改为 detached `spawn_blocking`，不再阻塞 UI 完成。
+- `auto_cite` 改为 `spawn_blocking` + **5 秒超时**；超时/失败时发出原始回答。
+- 后端新增 `post: auto_cite_start/done`、`post: emit_done_start/done`、`post: events_start/done` 日志。
+- 前端 `streamStore` 增加 **10 分钟无 chunk/done 看门狗**，超时清理流式态。
+- `handleDone` 的每个 listener 独立 `try/catch`；无订阅者落库加 10 秒超时。
+- `ChatPanel` 在 `!isStreamInFlight` 时主动清空 streaming/progress，避免残留禁用输入。
 
 ## 验收标准
 

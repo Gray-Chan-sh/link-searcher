@@ -220,6 +220,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
         setProgress(null)
         setHoverCite(null)
         setStreaming({ sessionId: sid, text: getStreamText(sid), reasoning: getStreamReasoning(sid) })
+      } else {
+        // Watchdog / lost done: never leave the composer disabled forever.
+        setStreaming(null)
+        setProgress(null)
+        setHoverCite(null)
       }
       const done = takeAiDone(sid)
       if (done) applyDone(done)

@@ -1,3 +1,10 @@
+## 2026-11-02（第七十二轮）：重回答后 UI 卡死保护 + 渐进检索误判收紧
+
+- **UI 卡死保护（P0）**：`conversation_ask_stream` 改为**先发 `ai-done`，再异步写 `ai_events`**；事件写入放 detached `spawn_blocking`，单条失败只 warn，不再阻塞 UI 完成。`auto_cite` 移入 `spawn_blocking` 并加 **5 秒超时**，超时直接用原始回答。新增 `post: auto_cite_start/done`、`emit_done_start/done`、`events_start/done` 日志（`commands/ai.rs`）。
+- **前端流式看门狗**：`streamStore` 增加 10 分钟无 chunk/done 超时，超时清理 active/stream；`notify` 对每个 listener 独立 try/catch；无订阅者落库加 10 秒超时；`ChatPanel` 在流式态结束后主动清空 streaming/progress，避免输入框永久禁用（`ai/streamStore.ts`、`components/ChatPanel.tsx`）。
+- **渐进检索误判收紧**：`is_specific_entity` 增加动词/量词/话语词（做过、多份、所有、列出、多少、哪些、重复等），避免追问改写把“做过/多份”当成实体触发补查；补查 `added=0` 时也记录 `progressive_round`，便于观测（`commands/ai/sufficiency.rs`、`prompt.rs`）。
+- 详见事故记录 `docs/INCIDENT_2026-11-02_UI_HANG.md`（状态：已加保护，待重问题复测）。
+
 ## 2026-11-01（第七十一轮）：渐进检索基础——确定性证据充分性判定
 
 - **新增 `commands/ai/sufficiency.rs`**：把“证据够不够”从 LLM 置信度里拆出来，改为纯函数判定。输入 hit 数、top rerank 分数、词法/向量强命中标志、缺失实体/槽位、比较缺边、覆盖率、引用校验结果；输出 `SufficiencyReport`（`sufficient / reasons / suggested`）。显式 scope 是否允许全局回退仍由调用方决定，模块本身不做越界决定。

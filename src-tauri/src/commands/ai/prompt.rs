@@ -1287,6 +1287,18 @@ fn assemble_conversation_prompt(
                                 "missing_entities": &missing_entities,
                                 "missing_slots": &missing_slots_found,
                             })));
+                        } else {
+                            // Keep the attempt visible even when the variant
+                            // returned only already-seen files.
+                            events.push(("progressive_round".into(), serde_json::json!({
+                                "round": progressive_rounds + 1,
+                                "phase": "post_rerank",
+                                "queries": variants,
+                                "added": 0,
+                                "hit_count": all_hits.len(),
+                                "missing_entities": &missing_entities,
+                                "missing_slots": &missing_slots_found,
+                            })));
                         }
                     }
                 }
