@@ -4075,7 +4075,7 @@ dependencies = [
 
 [[package]]
 name = "link-searcher"
-version = "1.4.3"
+version = "1.4.4"
 dependencies = [
  "ab_glyph",
  "anydoc",

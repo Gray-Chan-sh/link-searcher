@@ -1,3 +1,17 @@
+## 2026-11-02（第七十四轮）：检索通道自检 + 检索指纹（v1.4.4）
+
+> 起因：同一问题两次回答差异很大，但无法判断是「代码改了处理方式」还是「检索漂移」。
+> 实测证据：`申洲大通…文号` 这条查询 `final_kws` 完全一致，BM25 通道却一次回 7004 篇、
+> 一次回 **1 篇**（重启后 6 分钟，随后自愈），当时日志只有 `bm25=N`，无法定位。
+
+- **BM25 通道自检**：`bm25_relevant_hits` 改为返回 `Bm25Outcome{ hits, matched_total }`（新增 `bm25_relevant_hits_with_total`），
+  每次调用记录 `bm25 self-check: matched_total / returned / page_size / unscoped`；**无 scope 限定时**
+  若返回数不足字面命中数的 1%，打 `WARN retrieval anomaly` 并发 `retrieval_anomaly` 事件（`commands/ai/retrieval.rs`）。
+- **不再静默吞错**：`get_files_by_ids` 失败、BM25 通道失败都改为 `warn` + 空结果，而不是 `unwrap_or_default()` 伪装成「没命中」（`retrieval.rs`、`prompt.rs`）。
+- **检索指纹事件**：新增 `retrieval_fingerprint`，记录 `search_query` + 四个通道的返回数（bm25/vector/chunk/path）
+  + 候选池大小 + 实际注入材料数 + top-20 文件 id。以后「两次回答不同」先比指纹：**指纹一致 ⇒ LLM 采样；指纹不同 ⇒ 检索层**（`prompt.rs`）。
+- **事件时间线**：`retrieval_fingerprint`（🧭）与 `retrieval_anomaly`（⚠️）加入时间线，四语言文案补齐（`components/AiEventTimeline.tsx`、`i18n/{zh,en,ja,ko}.ts`）。
+
 ## 2026-11-02（第七十三轮）：追问检索词清洗 + 代词绑定回灌 clarify（v1.4.3）
 
 - **代词追问绑定收尾**：v1.4.2 的绑定上线后复测发现「已绑定的代词又被加回污染词」，三处补齐：

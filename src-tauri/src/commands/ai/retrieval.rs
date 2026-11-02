@@ -577,6 +577,16 @@ pub(super) fn apply_rerank_order(
 /// `semantic` is true and the embedding gateway is configured, reranks the
 /// BM25 candidates via RRF fusion with embedding cosine scores (gracefully
 /// falls back to BM25-only on any failure).
+/// BM25 通道的返回结果：命中列表 + 索引层报告的原始字面命中数。
+///
+/// `matched_total` 是**去重前、scope 过滤前**的字面命中数，用来做通道自检：
+/// 2026-11-02 实测过一次同一个查询的返回数从 7003 掉到 1（重启后 6 分钟，随后自愈），
+/// 当时日志里只有 `bm25=N`，无法判断是"查询本身命中少"还是"通道降级"。
+pub(crate) struct Bm25Outcome {
+    pub hits: Vec<ScoredHit>,
+    pub matched_total: u64,
+}
+
 pub(crate) fn bm25_relevant_hits(
     ctx: &RetrievalCtx,
     query: &str,
@@ -589,6 +599,24 @@ pub(crate) fn bm25_relevant_hits(
     path_prefixes: Option<Vec<String>>,
     file_ids: Option<Vec<String>>,
 ) -> Result<Vec<ScoredHit>, String> {
+    bm25_relevant_hits_with_total(
+        ctx, query, limit, semantic, dir_ids, ext_filter, date_from, date_to, path_prefixes, file_ids,
+    )
+    .map(|o| o.hits)
+}
+
+pub(crate) fn bm25_relevant_hits_with_total(
+    ctx: &RetrievalCtx,
+    query: &str,
+    limit: usize,
+    semantic: bool,
+    dir_ids: Option<Vec<String>>,
+    ext_filter: Option<Vec<String>>,
+    date_from: Option<i64>,
+    date_to: Option<i64>,
+    path_prefixes: Option<Vec<String>>,
+    file_ids: Option<Vec<String>>,
+) -> Result<Bm25Outcome, String> {
     use crate::search::searcher::{SearchParams, SortField, SearcherWrap};
     let mgr = ctx.index_manager.read().map_err(|e| format!("{e}"))?;
     let reader = mgr.reader().map_err(|e| format!("{e}"))?;
@@ -633,13 +661,24 @@ pub(crate) fn bm25_relevant_hits(
         result = searcher.search(&fallback_params).map_err(|e| format!("{e}"))?;
     }
 
+    // 观测：索引层报告的原始命中数（去重/过滤前）。返回数远低于它 = 词法通道降级。
+    let matched_total = result.total;
+    let unscoped = dir_ids.as_ref().is_none_or(|v| v.is_empty())
+        && file_ids.as_ref().is_none_or(|v| v.is_empty())
+        && path_prefixes.as_ref().is_none_or(|v| v.is_empty());
+
     let conn = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
     let mut bm25_hits: Vec<ScoredHit> = Vec::new();
     let mut seen_md5: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         // 批量取文件记录，避免每 hit 一次 DB round trip（N+1）
         let ids: Vec<String> = result.hits.iter().map(|h| h.file_id.clone()).collect();
-        let recs = crate::db::tracker::get_files_by_ids(&conn, &ids).unwrap_or_default();
+        // 不再 `unwrap_or_default()`：静默吞错会让通道看起来"没命中"，
+        // 而这正是 2026-11-02 那次 bm25=1 的可疑点之一。
+        let recs = crate::db::tracker::get_files_by_ids(&conn, &ids).unwrap_or_else(|e| {
+            log::warn!("[AI]   bm25: get_files_by_ids failed ({} ids): {e}", ids.len());
+            Vec::new()
+        });
         for (hit, rec) in result.hits.iter().zip(recs.iter()) {
             let Some(rec) = rec else { continue };
             if rec.status != "active" { continue; }
@@ -667,13 +706,35 @@ pub(crate) fn bm25_relevant_hits(
             });
         }
 
+    log::info!(
+        "[AI]   bm25 self-check: matched_total={} returned={} page_size={} unscoped={}",
+        matched_total, bm25_hits.len(), params.page_size, unscoped
+    );
+    // 只对"无 scope 过滤"的查询判降级：带 dir/file/prefix 限定时返回数天然偏少。
+    if unscoped
+        && !query.trim().is_empty()
+        && matched_total >= 50
+        && (bm25_hits.len() as u64) * 100 < matched_total
+    {
+        log::warn!(
+            "[AI]   bm25 suspicious: returned {} of matched_total={} for q=\"{}\" — lexical channel may be degraded",
+            bm25_hits.len(), matched_total, truncate_text(query, 40)
+        );
+    }
+
     if semantic && crate::ai::embedding_enabled() && !bm25_hits.is_empty() {
         let weight = crate::config::load_config().semantic_weight.clamp(0.0, 1.0);
         if let Some(fused) = semantic_fuse(&conn, query, &bm25_hits, weight) {
             drop(conn);
-            return Ok(fused.into_iter().take(limit).collect());
+            return Ok(Bm25Outcome {
+                hits: fused.into_iter().take(limit).collect(),
+                matched_total,
+            });
         }
     }
     drop(conn);
-    Ok(bm25_hits.into_iter().take(limit).collect())
+    Ok(Bm25Outcome {
+        hits: bm25_hits.into_iter().take(limit).collect(),
+        matched_total,
+    })
 }

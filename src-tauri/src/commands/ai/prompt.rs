@@ -602,6 +602,12 @@ fn assemble_conversation_prompt(
     // 动态依据：BM25 全量扫描 + 向量全量扫描 + SQL 路径匹配，三路合并去重。
     let mut all_hits: Vec<ScoredHit> = Vec::new();
     let mut all_seen = std::collections::HashSet::new();
+    // 通道台账：写进 `retrieval_fingerprint` 事件，让"两次回答为什么不同"可二分
+    // （指纹相同 → LLM 采样；指纹不同 → 检索层）。
+    let mut bm25_returned: usize = 0;
+    let mut vector_returned: usize = 0;
+    let mut chunk_returned: usize = 0;
+    let mut path_returned: usize = 0;
     for (fid, _) in &mention_resolved {
         all_seen.insert(fid.clone());
     }
@@ -691,11 +697,41 @@ fn assemble_conversation_prompt(
             let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
             crate::db::tracker::count_active_files(&c).map_err(|e| e.to_string())?
         };
-        let bm25_hits = bm25_relevant_hits(
+        let bm25_outcome = super::retrieval::bm25_relevant_hits_with_total(
             &ctx, &bm25_query, (total_files as usize).max(500), inner_semantic_fuse,
             dir_ids_opt.clone(), ext_filter.clone(), date_from, date_to, None, mention_file_ids.clone(),
-        ).unwrap_or_default();
+        )
+        .unwrap_or_else(|e| {
+            // 通道失败必须留痕：以前 `unwrap_or_default()` 会让"检索炸了"看起来像"没命中"。
+            log::warn!("[AI]   bm25 channel failed: {e}");
+            super::retrieval::Bm25Outcome { hits: Vec::new(), matched_total: 0 }
+        });
+        let bm25_matched_total = bm25_outcome.matched_total;
+        let bm25_hits = bm25_outcome.hits;
         let bm25_count = bm25_hits.len();
+        bm25_returned = bm25_count;
+        // 词法通道自检：无 scope 限定时，返回数远低于索引报告的字面命中数 = 降级。
+        // 2026-11-02 实测过一次 7003 → 1（重启后 6 分钟，随后自愈），当时无迹可寻。
+        let bm25_unscoped = dir_ids_opt.as_ref().is_none_or(|v| v.is_empty())
+            && mention_file_ids.as_ref().is_none_or(|v| v.is_empty())
+            && ext_filter.as_ref().is_none_or(|v| v.is_empty())
+            && date_from.is_none()
+            && date_to.is_none();
+        if bm25_unscoped
+            && bm25_matched_total >= 50
+            && (bm25_count as u64) * 100 < bm25_matched_total
+        {
+            log::warn!(
+                "[AI]   retrieval anomaly: bm25 returned {} of matched_total={} (q=\"{}\")",
+                bm25_count, bm25_matched_total, truncate_text(&search_q, 40)
+            );
+            events.push(("retrieval_anomaly".into(), serde_json::json!({
+                "channel": "bm25",
+                "returned": bm25_count,
+                "matched_total": bm25_matched_total,
+                "search_query": search_q,
+            })));
+        }
         trace_rank("1. BM25 通道原始输出", bm25_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
         // 精英加成按"纯 BM25 名次"（bm25_score 降序）判定，而非通道内迭代名次：
         // 内层 semantic_fuse 会按分数混合重排该通道，若按重排名次加成，"字面强
@@ -746,6 +782,7 @@ fn assemble_conversation_prompt(
             if let Some(qe) = &query_emb {
                 if let Ok(vec_hits) = crate::ai::vector_scan_with_query_emb(&c, qe, vector_threshold, vector_release_k) {
                     log::info!("[AI]   vector_full_scan returned {} hits", vec_hits.len());
+                    vector_returned = vec_hits.len();
                     for (rank, (fid, sim)) in vec_hits.into_iter().enumerate() {
                         // 过阈值=强命中（满权重）；保底放行的弱候选降权，避免
                         // 与强命中同权把噪声抬进注入。
@@ -797,6 +834,7 @@ fn assemble_conversation_prompt(
                     }
                 } {
                     log::info!("[AI]   chunk_vector_scan returned {} hits", chunk_hits.len());
+                    chunk_returned = chunk_hits.len();
                     let mut by_md5: std::collections::HashMap<String, Vec<(usize, f32)>> = std::collections::HashMap::new();
                     let mut md5_first_rank: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
                     for (rank, (md5, idx, sim)) in chunk_hits.into_iter().enumerate() {
@@ -843,6 +881,7 @@ fn assemble_conversation_prompt(
         };
         if let Ok(path_hits) = crate::db::tracker::path_match_files(&c, &path_kws) {
             log::info!("[AI]   path_match_files returned {} hits (kws={:?})", path_hits.len(), path_kws);
+            path_returned = path_hits.len();
             for (rank, (fid, _path)) in path_hits.into_iter().enumerate() {
                 rrf_add(&mut rrf_acc, &fid, rank, 1.0);
                 if all_seen.insert(fid.clone()) {
@@ -1718,6 +1757,25 @@ fn assemble_conversation_prompt(
         user_msg = user_msg.replace(&format!("@{path}"), &format!("[{}]", idx));
     }
     let hits = all_hits.iter().filter(|h| !h.from_history).count();
+    // 检索指纹：同一问题的两次回答不同时，先比这个事件 ——
+    // 指纹一致 ⇒ 差异来自 LLM 采样；指纹不同 ⇒ 差异来自检索层（哪条通道、哪个顺序）。
+    let fingerprint_top: Vec<&str> = all_hits
+        .iter()
+        .take(20)
+        .map(|h| h.file_id.as_str())
+        .collect();
+    events.push(("retrieval_fingerprint".into(), serde_json::json!({
+        "search_query": search_q,
+        "channels": {
+            "bm25": bm25_returned,
+            "vector": vector_returned,
+            "chunk": chunk_returned,
+            "path": path_returned,
+        },
+        "pool": all_hits.len(),
+        "injected": docs.len(),
+        "top20": fingerprint_top,
+    })));
     events.push(("context_assembled".into(), serde_json::json!({
         "material_count": docs.len(),
         "total_chars": context.chars().count(),

@@ -14,6 +14,8 @@ const EVENT_ICONS: Record<string, string> = {
   sufficiency_check: '⚖️',
   progressive_round: '🔁',
   citation_check: '🔗',
+  retrieval_fingerprint: '🧭',
+  retrieval_anomaly: '⚠️',
   context_assembled: '📋',
   llm_call: '🤖',
   turn_complete: '✅',
@@ -26,6 +28,8 @@ const EVENT_KEYS: Record<string, string> = {
   sufficiency_check: 'ai_event_sufficiency_check',
   progressive_round: 'ai_event_progressive_round',
   citation_check: 'ai_event_citation_check',
+  retrieval_fingerprint: 'ai_event_retrieval_fingerprint',
+  retrieval_anomaly: 'ai_event_retrieval_anomaly',
   context_assembled: 'ai_event_context_assembled',
   llm_call: 'ai_event_llm_call',
   turn_complete: 'ai_event_turn_complete',
@@ -93,6 +97,19 @@ function formatPayload(type: string, payload: Record<string, unknown>): string {
       }
       if (p.cancelled) return 'cancelled'
       return `citations=${p.citations ?? 0} · invalid=${p.invalid_citations ?? 0} · visible=${p.visible_materials ?? 0}`
+    }
+    case 'retrieval_fingerprint': {
+      const p = payload as {
+        channels?: { bm25?: number; vector?: number; chunk?: number; path?: number }
+        pool?: number
+        injected?: number
+      }
+      const c = p.channels ?? {}
+      return `bm25=${c.bm25 ?? 0} · vec=${c.vector ?? 0} · chunk=${c.chunk ?? 0} · path=${c.path ?? 0} · pool=${p.pool ?? 0} → ${p.injected ?? 0}`
+    }
+    case 'retrieval_anomaly': {
+      const p = payload as { channel?: string; returned?: number; matched_total?: number }
+      return `${p.channel}: ${p.returned ?? 0} of ${p.matched_total ?? 0}`
     }
     case 'context_assembled': {
       const p = payload as { material_count?: number; total_chars?: number; strict_docs?: boolean }

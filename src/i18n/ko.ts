@@ -107,6 +107,8 @@ const ko: Record<string, string> = {
     ai_event_sufficiency_check: '근거 충분성',
     ai_event_progressive_round: '보충 검색',
     ai_event_citation_check: '인용 검증',
+    ai_event_retrieval_fingerprint: '검색 지문',
+    ai_event_retrieval_anomaly: '검색 채널 이상',
     ai_event_context_assembled: '컨텍스트 조립',
     topic_clusters: '주제 클러스터',
     topic_clusters_hint: 'AI로 색인된 문서를 주제별로 그룹화',
