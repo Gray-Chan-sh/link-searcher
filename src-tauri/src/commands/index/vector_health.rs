@@ -317,29 +317,59 @@ pub struct ClaimLegacyReport {
 
 /// 把 `model_fp=''` 的行（v14 之前写入，来源未知）**认领**为当前模型。
 ///
-/// ## 这是断言，不是核验
+/// ## 认领前先核验（2026-11-02）
 ///
-/// 系统无法验证那些向量是谁生成的（正是因为无法验证，它们才是 `''`）。用户
-/// 说"这些就是我刚才用这个模型建的"，系统就照写。所以：
+/// 在此之前这是纯人工断言：用户说"这些就是我刚才用这个模型建的"，系统照写。
+/// 现在改为**先抽样重算**（[`super::legacy_vectors::sample`]）：用当前模型把同一段
+/// 正文重新嵌入，与库内历史向量比余弦。样本不同源时**拒绝认领**并返回证据 ——
+/// 除非调用方显式传 `force=true`（仍然只动 `''` 的行）。
 ///
 /// - 只动 `''` 的行，绝不覆盖已有指纹（否则"认领"就成了"把所有空间都改成当前
 ///   空间"的静默修复，把 `Mixed` 洗成 `Current`）。
 /// - 返回并展示真实行数，不显示"已核验"这类措辞。
 /// - 之后若语义检索结果明显不对，唯一的办法仍是重建。
 #[tauri::command]
-pub fn claim_legacy_embeddings(
+pub async fn claim_legacy_embeddings(
     state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<ClaimLegacyReport, String> {
+    let db_pool = state.db.clone();
+    let force = force.unwrap_or(false);
+    tokio::task::spawn_blocking(move || claim_legacy_core(&db_pool, force))
+        .await
+        .map_err(|e| format!("claim legacy task panicked: {e}"))?
+}
+
+fn claim_legacy_core(
+    db_pool: &r2d2::Pool<r2d2_sqlite::SqliteConnectionManager>,
+    force: bool,
 ) -> Result<ClaimLegacyReport, String> {
     let cfg = config::load_config();
     let model_fp = crate::ai::identity::model_fp(&cfg, &cfg.active_embedding_model_id)
         .ok_or_else(|| "当前没有可用的 embedding 模型，无法认领".to_string())?;
 
-    let conn = state.db.get().map_err(|e| format!("db error: {e}"))?;
+    // 先核验：抽样重算必须与当前模型同源。
+    let evidence = super::legacy_vectors::sample(db_pool)?;
+    if evidence.decision != "claim" && !force {
+        return Err(format!(
+            "拒绝认领：{}（样本 {} 条，min_cosine={}，阈值 {}）。如确认要认领，请传 force=true",
+            evidence.notes.join("；"),
+            evidence.sampled,
+            evidence.min_cosine.map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into()),
+            evidence.threshold
+        ));
+    }
+    if evidence.decision != "claim" && force {
+        log::warn!("[AI] 认领历史向量：核验未通过（{}），但调用方强制认领", evidence.notes.join("；"));
+    }
+
+    let conn = db_pool.get().map_err(|e| format!("db error: {e}"))?;
     let (claimed_docs, claimed_chunks) =
         claim_legacy_rows(&conn, &model_fp).map_err(|e| e.to_string())?;
 
     log::info!(
-        "[AI] 已把 {claimed_docs} 条 doc / {claimed_chunks} 条 chunk 的未知来源向量认领为 {model_fp}（用户断言）"
+        "[AI] 已把 {claimed_docs} 条 doc / {claimed_chunks} 条 chunk 的未知来源向量认领为 {model_fp}（核验 min_cosine={}）",
+        evidence.min_cosine.map(|v| format!("{v:.4}")).unwrap_or_else(|| "-".into())
     );
     Ok(ClaimLegacyReport {
         model_fp,

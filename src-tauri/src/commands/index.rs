@@ -790,6 +790,20 @@ mod integrity;
 pub use integrity::IndexHealReport;
 pub(crate) use integrity::run_index_integrity_heal;
 
+mod legacy_vectors;
+pub use legacy_vectors::LegacyVectorReport;
+
+/// 核验 `model_fp` 为空的历史向量是否真的来自当前模型（抽样重算比对，只读）。
+#[tauri::command]
+pub async fn verify_legacy_embeddings(
+    state: State<'_, AppState>,
+) -> Result<LegacyVectorReport, String> {
+    let db_pool = state.db.clone();
+    tokio::task::spawn_blocking(move || legacy_vectors::sample(&db_pool))
+        .await
+        .map_err(|e| format!("legacy embedding task panicked: {e}"))?
+}
+
 /// Manual trigger for [`run_index_integrity_heal`] (exposed to the frontend).
 #[tauri::command]
 pub async fn heal_index_integrity(state: State<'_, AppState>) -> Result<IndexHealReport, String> {

@@ -52,6 +52,10 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
             "/api/index/claim-legacy-embeddings",
             post(claim_legacy_embeddings_handler),
         )
+        .route(
+            "/api/index/verify-legacy-embeddings",
+            get(verify_legacy_embeddings_handler),
+        )
 }
 
 /// OS thread, not tokio::spawn: the command futures borrow an AppState owned
@@ -539,12 +543,32 @@ async fn rebuild_embeddings_handler(
     ))
 }
 
-/// 把来源未知（`model_fp=''`）的旧向量认领为当前模型 —— 纯人工断言。
+/// 把来源未知（`model_fp=''`）的旧向量认领为当前模型 —— 先抽样核验，通过才写。
 async fn claim_legacy_embeddings_handler(
     State(state): State<ApiState>,
+    Query(q): Query<ClaimQuery>,
 ) -> Result<Json<crate::commands::index::ClaimLegacyReport>, ApiError> {
     let app_state = state.app_handle.state::<AppState>();
-    let report = crate::commands::index::claim_legacy_embeddings(app_state)
+    let report = crate::commands::index::claim_legacy_embeddings(app_state, q.force)
+        .await
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(report))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ClaimQuery {
+    /// 核验不通过时是否仍强制认领（默认 false）。
+    #[serde(default)]
+    force: Option<bool>,
+}
+
+/// 核验历史向量是否真的来自当前模型（只读，不改数据）。
+async fn verify_legacy_embeddings_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<crate::commands::index::LegacyVectorReport>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    let report = crate::commands::index::verify_legacy_embeddings(app_state)
+        .await
         .map_err(|e| ApiError { error: e })?;
     Ok(Json(report))
 }

@@ -1,3 +1,24 @@
+## 2026-11-02（第七十五轮）：语义融合不再吞掉词法召回 + 历史向量先核验再认领（v1.4.5）
+
+> 由第七十四轮的观测事件直接抓到的真缺陷。日志证据：同一次调用
+> `bm25 self-check: matched_total=5780 returned=4899`，而调用方拿到的是 `bm25 returned 1`
+> —— 中间只隔了 `semantic_fuse`。
+
+- **缺陷 A（召回塌陷，已修）**：`semantic_fuse` 原先把 BM25 命中**替换**成"能查到向量的子集"
+  （`filter_map(|h| emb_map.get(h.file_id))`）。库里只有 66 篇有向量时，整条词法通道会从
+  4899 条塌到 1 条；交集恰好为空时又原样返回全部 —— 同一个查询因此时好时坏。
+  现改为**只重排**：有向量的按融合分在前，其余按原 BM25 名次随后（新 helper
+  `merge_fused_order`，配 3 条单测锁住"不丢命中 / 不重复"）（`commands/ai/retrieval.rs`）。
+- **缺陷 B（历史向量来源未知，已加核验）**：`doc_embeddings` 16418 条 / `chunk_embeddings` 71110 条
+  `model_fp=''`（v14 之前写入），语义通道按指纹过滤后几乎看不到它们。
+  新增 `commands/index/legacy_vectors.rs`：抽样（默认 6 条、正文 ≥200 字符）用当前模型重算嵌入，
+  与库内向量比余弦，`min_cosine ≥ 0.95`（`LINK_SEARCHER_LEGACY_FP_MIN_COS` 可调）才判定同源。
+- **认领流程收紧**：`claim_legacy_embeddings` 由"纯人工断言"改为**先核验后写**，
+  核验不通过时返回证据并拒绝，显式 `force=true` 才强制；同时从同步命令改为
+  `async + spawn_blocking`（原实现会在 UI 线程上跑 8 万多行 UPDATE）。
+  新增只读命令 `verify_legacy_embeddings`（`GET /api/index/verify-legacy-embeddings`）。
+- **README**：`legacy` 语料状态的说明与认领流程同步更新。
+
 ## 2026-11-02（第七十四轮）：检索通道自检 + 检索指纹（v1.4.4）
 
 > 起因：同一问题两次回答差异很大，但无法判断是「代码改了处理方式」还是「检索漂移」。

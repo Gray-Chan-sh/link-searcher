@@ -354,6 +354,55 @@ mod char_cooccur_tests {
     }
 }
 
+#[cfg(test)]
+mod merge_fused_order_tests {
+    use super::*;
+
+    fn hit(id: &str, score: f64) -> ScoredHit {
+        ScoredHit {
+            file_id: id.to_string(),
+            path: format!("{id}.txt"),
+            bm25_score: Some(score),
+            semantic_score: None,
+            rrf_score: None,
+            from_history: false,
+            from_chunk: false,
+            hit_chunks: Vec::new(),
+        }
+    }
+
+    /// 回归：语义融合只能重排，**不能丢弃没有向量的命中**。
+    /// 2026-11-02 实测：库里只有 66 篇有向量，旧实现让 BM25 通道从 4899 条塌到 1 条。
+    #[test]
+    fn keeps_every_bm25_hit() {
+        let bm25 = vec![hit("a", 9.0), hit("b", 8.0), hit("c", 7.0), hit("d", 6.0)];
+        // 只有 c 有向量 → 融合结果只有 c
+        let fused = vec![("c".to_string(), 7.0, 0.91, 0.88)];
+        let out = merge_fused_order(&bm25, &fused);
+        assert_eq!(out.len(), bm25.len(), "非向量命中被丢掉了: {out:?}");
+        assert_eq!(out[0].file_id, "c", "有向量的命中应排在最前");
+        let rest: Vec<&str> = out[1..].iter().map(|h| h.file_id.as_str()).collect();
+        assert_eq!(rest, vec!["a", "b", "d"], "其余保持原 BM25 次序");
+    }
+
+    #[test]
+    fn no_embeddings_at_all_keeps_order() {
+        let bm25 = vec![hit("a", 9.0), hit("b", 8.0)];
+        let out = merge_fused_order(&bm25, &[]);
+        let ids: Vec<&str> = out.iter().map(|h| h.file_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn does_not_duplicate_hits() {
+        let bm25 = vec![hit("a", 9.0), hit("b", 8.0)];
+        let fused = vec![("a".to_string(), 9.0, 0.8, 0.8), ("b".to_string(), 8.0, 0.5, 0.4)];
+        let out = merge_fused_order(&bm25, &fused);
+        let ids: Vec<&str> = out.iter().map(|h| h.file_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+}
+
 /// Reciprocal Rank Fusion: score = Σ 1/(k + rank) summed over two
 /// pre-sorted lists (best-first). Lists must be ordered by score descending;
 /// fusion uses position as rank (0‑based → 1/(k+0), 1/(k+1), …).
@@ -503,26 +552,41 @@ fn semantic_fuse(
         .map(|(h, b, c)| (h.file_id.clone(), *b, *c))
         .collect();
     let fused = weighted_mix(pairs, semantic_weight.clamp(0.0, 1.0));
-    Some(
-        fused
-            .iter()
-            .filter_map(|(fid, _, c, mix)| {
-                scored
-                    .iter()
-                    .find(|(h, _, _)| h.file_id == *fid)
-                    .map(|(h, b, _)| ScoredHit {
-                        file_id: h.file_id.clone(),
-                        path: h.path.clone(),
-                        bm25_score: Some(*b),
-                        semantic_score: Some(*c),
-                        rrf_score: Some(*mix),
-                        from_history: false,
-                        from_chunk: false,
-                        hit_chunks: Vec::new(),
-                    })
-            })
-            .collect(),
-    )
+    Some(merge_fused_order(bm25_hits, &fused))
+}
+
+/// 把「语义融合后的顺序」套回**完整的** BM25 名单：有向量的按融合分在前，
+/// 没有向量的按原 BM25 名次随后。
+///
+/// 单独抽出来是为了能被单测锁住 —— 这里一旦退化成"只保留交集"，词法通道
+/// 会随"库里有多少向量"塌陷（2026-11-02 实测：4899 → 1）。
+fn merge_fused_order(
+    bm25_hits: &[ScoredHit],
+    fused: &[(String, f64, f64, f64)],
+) -> Vec<ScoredHit> {
+    let mut out: Vec<ScoredHit> = Vec::with_capacity(bm25_hits.len());
+    let mut placed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (fid, _b, c, mix) in fused {
+        if let Some(h) = bm25_hits.iter().find(|h| h.file_id == *fid) {
+            out.push(ScoredHit {
+                file_id: h.file_id.clone(),
+                path: h.path.clone(),
+                bm25_score: h.bm25_score,
+                semantic_score: Some(*c),
+                rrf_score: Some(*mix),
+                from_history: false,
+                from_chunk: false,
+                hit_chunks: Vec::new(),
+            });
+            placed.insert(h.file_id.as_str());
+        }
+    }
+    for h in bm25_hits {
+        if !placed.contains(h.file_id.as_str()) {
+            out.push(h.clone());
+        }
+    }
+    out
 }
 
 /// Reorder permutation from reranker scores. Given the full hit list, the
