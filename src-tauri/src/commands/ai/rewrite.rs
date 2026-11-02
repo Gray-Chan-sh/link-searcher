@@ -103,26 +103,21 @@ mod pronoun_followup_tests {
     use super::*;
 
     #[test]
-    fn detects_person_pronouns() {
-        assert!(has_person_pronoun("那他涉及哪些案件？"));
-        assert!(has_person_pronoun("她的合同呢"));
-        assert!(!has_person_pronoun("这个合同的金额是多少"));
-    }
-
-    #[test]
     fn keeps_person_name_and_drops_topic_words() {
         let entities = parent_person_entities("陈正先的身份证号是多少？");
         assert!(entities.iter().any(|e| e == "陈正先"), "{entities:?}");
         assert!(!entities.iter().any(|e| e == "身份证号"), "{entities:?}");
     }
 
+    /// 规则兜底：父问句的关键词必须是**专名**，不能是主题词。
+    /// 2026-11-02 实测：取前 3 个词会把 `身份证号` 带进「那他涉及哪些案件」。
     #[test]
-    fn pronoun_query_uses_entity_not_parent_topic() {
-        let q = pronoun_binding_query("那他涉及哪些案件？", "陈正先的身份证号是多少？")
-            .expect("should bind");
-        assert!(q.contains("陈正先"), "{q}");
-        assert!(!q.contains("身份证号"), "{q}");
-        assert!(!q.contains("多少"), "{q}");
+    fn fallback_parent_keywords_prefer_proper_nouns() {
+        let kws = parent_keywords("陈正先的身份证号是多少？", 3);
+        assert_eq!(kws, vec!["陈正先".to_string()], "{kws:?}");
+
+        let kws = parent_keywords("万城公司人员列表", 3);
+        assert_eq!(kws, vec!["万城公司".to_string()], "{kws:?}");
     }
 
     /// 回归（2026-11-02 实测）：`标的最大的呢？` 被判成自足问题，只拿"标的最大的"
@@ -133,6 +128,69 @@ mod pronoun_followup_tests {
         assert!(needs_history_rewrite("那个案子的结果吧？") || needs_history_rewrite("结果吧？"));
         // 已点名具体对象 → 自足，不该继承上一轮。
         assert!(!needs_history_rewrite("汪均益案的最终结果呢？"));
+    }
+}
+
+#[cfg(test)]
+mod history_backed_entity_tests {
+    use super::*;
+
+    fn msg(role: &str, content: &str) -> ChatMessage {
+        ChatMessage { role: role.into(), content: content.into() }
+    }
+
+    /// 核心回归（2026-11-02 实测）：模型把「今天是2026年11月12日，各人的年龄是多少」
+    /// 正确改写成 `陈秀芳 家庭成员 年龄`，`陈秀芳` 来自上一轮对话 → **必须放行**。
+    #[test]
+    fn entity_from_history_is_allowed() {
+        let msgs = vec![
+            msg("user", "陈秀芳的家庭成员有哪些？"),
+            msg("assistant", "陈秀芳的父亲是陈贤文，哥哥是陈正先……"),
+            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
+        ];
+        let hist = recent_history_text(&msgs, "今天是2026年11月12日，各人的年龄是多少");
+        assert!(
+            entities_backed_by_history("陈秀芳 家庭成员 年龄", "今天是2026年11月12日，各人的年龄是多少", &hist),
+            "{hist}"
+        );
+    }
+
+    /// 历史里根本没有的实体（模型编的）仍然要拦。
+    #[test]
+    fn entity_absent_from_history_is_rejected() {
+        let msgs = vec![
+            msg("user", "陈秀芳的家庭成员有哪些？"),
+            msg("user", "今天是2026年11月12日，各人的年龄是多少"),
+        ];
+        let hist = recent_history_text(&msgs, "今天是2026年11月12日，各人的年龄是多少");
+        assert!(!entities_backed_by_history(
+            "张三 家庭成员 年龄",
+            "今天是2026年11月12日，各人的年龄是多少",
+            &hist
+        ));
+    }
+
+    /// 本轮问句自带的实体不需要历史出处。
+    #[test]
+    fn entity_typed_in_question_needs_no_history() {
+        assert!(entities_backed_by_history(
+            "汪均益案 最终结果 判决",
+            "汪均益案的最终结果是什么？",
+            ""
+        ));
+    }
+
+    /// 改写历史要包含助手回答（仅用于解析指代），且标注不得当事实。
+    #[test]
+    fn rewrite_history_includes_reference_only_answers() {
+        let msgs = vec![
+            msg("user", "陈秀芳今年多少岁"),
+            msg("assistant", "她 1956 年出生"),
+            msg("user", "她的哥哥今年多少岁了"),
+        ];
+        let h = rewrite_history(&msgs, &[], "她的哥哥今年多少岁了");
+        assert!(h.contains("1956"), "上一轮回答应进改写历史: {h}");
+        assert!(h.contains("不得作为事实依据"), "必须标注仅供参考: {h}");
     }
 }
 
@@ -179,14 +237,33 @@ pub(super) fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
     Some(t.to_string())
 }
 
-/// 构建检索改写用对话历史字符串。只包含用户消息——助手回答
-/// （尤其是否定结论）回灌会导致自相矛盾的检索查询。
-pub(super) fn rewrite_history(messages: &[ChatMessage], context_paths: &[String]) -> String {
-    let users: Vec<&ChatMessage> = messages.iter().filter(|m| m.role == "user").collect();
+/// 构建检索改写用的对话历史。
+///
+/// 2026-11-02 起**包含助手回答**（最近 2 轮、截断 800 字，并显式标注"仅供参考"）：
+/// 「她的哥哥今年多少岁了」这类追问必须靠上一轮答案里的家庭成员表才能解析指代。
+/// 旧实现只喂 user 消息，怕"没有找到"这类否定结论污染检索 —— 折中办法是标注
+/// 用途（仅解析指代，不得当事实），而不是把它们完全排除。
+pub(super) fn rewrite_history(
+    messages: &[ChatMessage],
+    context_paths: &[String],
+    last_q: &str,
+) -> String {
+    let prior: Vec<&ChatMessage> = messages
+        .iter()
+        .filter(|m| !m.content.trim().is_empty() && m.content.trim() != last_q.trim())
+        .collect();
+    // 最近 4 条（≈2 轮）足够解析指代，再往前只会稀释注意力。
+    let start = prior.len().saturating_sub(4);
     let mut history_str = String::from("对话历史：\n");
-    let start = users.len().saturating_sub(8);
-    for m in &users[start..] {
-        history_str.push_str(&format!("用户：{}\n", truncate_text(&m.content, 300)));
+    for m in &prior[start..] {
+        if m.role == "assistant" {
+            history_str.push_str(&format!(
+                "助手回答（仅供参考、仅用于解析指代，不得作为事实依据）：{}\n",
+                truncate_text(&m.content, 800)
+            ));
+        } else {
+            history_str.push_str(&format!("用户：{}\n", truncate_text(&m.content, 300)));
+        }
     }
     if !context_paths.is_empty() {
         history_str.push_str("会话已涉及的文件（可用于绑定指代）：\n");
@@ -197,74 +274,125 @@ pub(super) fn rewrite_history(messages: &[ChatMessage], context_paths: &[String]
     history_str
 }
 
-/// Try an LLM query rewrite within a strict time budget. Returns `None`
-/// (and the caller falls back to the rule-based rewrite) on any failure:
-/// gateway disabled, timeout, empty/garbage output.
+/// Try an LLM query rewrite within a generous time budget.
+///
+/// 超时默认 **60 秒**（`LINK_SEARCHER_REWRITE_TIMEOUT_SECS` 可调）：这个网关的改写
+/// 请求常态 4–6 秒，旧的 5 秒上限会把关键的指代消解直接打死（2026-11-02 实测）。
 pub async fn llm_rewrite_query(
     last_q: &str,
     messages: &[ChatMessage],
     context_paths: &[String],
-) -> Option<String> {
+) -> RewriteAttempt {
     if !crate::ai::llm_enabled() {
-        return None;
+        return RewriteAttempt::Unavailable;
     }
-    let history_str = rewrite_history(messages, context_paths);
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的追问改写成一条可独立检索的中文查询：补全指代（它/这/那/刚才/上面等）与省略，当问句缺乏区分性实体词（人名/公司名/案名/主题名）时从对话历史中继承主题实体。**继承的前提是当前问题确实需要借历史才能读懂**（有指代词、过短、或没有任何可检索的实体词）；若当前问题本身已经是一个完整、独立的新问题，就只围绕它改写，**绝不**引入历史里的人物 / 机构 / 案件 / 主题。要求：输出最小必要关键词短语，保留主题实体（具体人名/报告名称/年份/主题词），去掉“报告/文件/呢/吗/的/了”等无区分词。只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”。如果问题本身就完整无需改写，原样输出。";
+    let history_str = rewrite_history(messages, context_paths, last_q);
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的提问改写成一条**可独立检索**的中文查询。\
+规则：\
+1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」），必须从上文找出它真正指向的人名/机构名/案件名补进查询。\
+2) 继承的主题实体必须**来自对话历史**（用户的提问或助手的回答），不得凭空编造。\
+3) 若当前问题本身就是一个完整、独立的新问题（自带明确的人名/机构名/案件名/文件号），就只围绕它改写，**不要**引入历史里的对象。\
+4) 助手的历史回答只用于判断「这句话在说什么」，**不得**把它当作事实写进查询。\
+5) 输出最小必要关键词短语（6～12 个词，空格分隔），去掉“的/了/吗/呢/报告/文件”这类无区分词。\
+只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”，也不要照抄整句问题。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
     let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
-    match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
-        Ok(Ok(Some(s))) => valid_rewrite_output(&s, last_q)
-            .map(|v| strip_inherited_generic_terms(&v, last_q)),
-        _ => None,
+    let budget = rewrite_timeout_secs();
+    let started = std::time::Instant::now();
+    match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
+        Ok(Ok(Some(s))) => match valid_rewrite_output(&s, last_q) {
+            Some(v) => RewriteAttempt::Ok(strip_inherited_generic_terms(&v, last_q)),
+            None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
+        },
+        Ok(Ok(None)) => RewriteAttempt::Invalid("gateway returned no content".into()),
+        Ok(Err(e)) => RewriteAttempt::Invalid(format!("task failed: {e}")),
+        Err(_) => {
+            log::warn!(
+                "[AI]   llm rewrite timeout after {}s（q=\"{}\"）",
+                started.elapsed().as_secs(),
+                truncate_text(last_q, 30)
+            );
+            RewriteAttempt::Timeout(budget)
+        }
     }
 }
 
-/// 本轮问句是否**可以**继承上一轮的实体（人名/案名/机构名）。
-///
-/// 两条准入（任一成立即可）：
-/// 1. 本轮问句**本身就需要借历史**（[`needs_history_rewrite`]：指代词开头/过短/无检索词）
-///    —— 这正是"实体继承"的原始用途（"它的风险有哪些"要靠上轮的主体）；
-/// 2. 否则必须是**与父问句共享检索词**的追问（= 同一话题，如父问"毛弟是否被人辱骂"、
-///    本轮"列出清单，把时间、辱骂人列出"共享"辱骂"）。
-///
-/// 反过来就是 P2 那条规则：**自足问句 + 与父问句关键词零交集 = 新话题** ⇒ 不继承。
-/// 2026-10-16 实测踩到：`汪均益案的最终结果是什么？`（自带实体）被硬塞了上一轮的人名，
-/// 检索被带到旧材料上，模型只能答"材料不足"。
-pub(super) fn may_inherit_parent_entities(current_q: &str, parent_q: &str) -> bool {
-    if needs_history_rewrite(current_q) {
-        return true;
-    }
-    let cur = extract_retrieval_keywords(current_q);
-    if cur.is_empty() {
-        return true;
-    }
-    let par = extract_retrieval_keywords(parent_q);
-    cur.iter().any(|a| par.iter().any(|b| a == b))
+/// Outcome of one LLM rewrite attempt. The caller must be able to tell
+/// "模型没答" 与 "模型答了但不可用" 与 "超时" —— 三者以前都塌成 `None`，
+/// 日志里只剩 `method=rule`，查不出是网关慢还是守卫拦的（2026-11-02 实测：
+/// 一次 5.0s 超时与一次被守卫弃用，现象完全相同）。
+pub enum RewriteAttempt {
+    /// 可用（已通过 `valid_rewrite_output` + 泛词清洗）。
+    Ok(String),
+    /// 模型返回了，但内容不可用（空/超长/无检索词/原样回显）。
+    Invalid(String),
+    /// 超时。
+    Timeout(u64),
+    /// 未启用（无 LLM 配置或显式跳过）。
+    Unavailable,
 }
 
-/// 自足问句的改写结果里**不得出现本轮问句没有的实体**。
+/// 改写超时（秒）。默认 60 —— 这个网关的改写请求常态 4–6 秒，旧值 5 秒会
+/// 直接把「她的哥哥今年多少岁了」这类关键改写打死（2026-11-02 实测）。
+fn rewrite_timeout_secs() -> u64 {
+    std::env::var("LINK_SEARCHER_REWRITE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|v| *v >= 5)
+        .unwrap_or(60)
+}
+
+/// 最近若干条消息的**纯文本**（含助手回答），供"改写引入的实体是否被历史支持"判定。
 ///
-/// 与 [`may_inherit_parent_entities`] 成对：不许继承的场合（新话题），改写只能围绕本轮
-/// 问句做取舍（去泛词、换同义词），**不能引入**上一轮的人名/案名 —— 那会把检索引到
-/// 无关材料上，"材料里没有"的假象正是这么来的（2026-10-16 实测：新话题被 LLM 加上
-/// 上一轮的人名，三通道都被带偏）。
+/// 与 [`rewrite_history`] 的区别：这里不带格式、不做角色筛选，只用来做**存在性**
+/// 检查 —— 改写里出现的人名/机构名只要在历史里出现过就允许继承。
+pub(super) fn recent_history_text(messages: &[ChatMessage], last_q: &str) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let c = m.content.trim();
+        if c.is_empty() || c == last_q.trim() {
+            continue;
+        }
+        out.push_str(c);
+        out.push('\n');
+    }
+    out
+}
+
+/// 改写结果里**本轮问句没出现**的实体，是否都能在对话历史里找到出处。
 ///
-/// 返回 `true` 表示这份改写应当**弃用**（回退规则链）。
-///
-/// 注意判据是"实体词"（`extract_retrieval_keywords`，已滤掉"判决/裁定/材料"这类泛词），
-/// 所以重跑扩查刻意补的结论性词**不会**被误判违规。
-pub(super) fn rewrite_adds_foreign_entity(rewritten: &str, current_q: &str, parent_q: &str) -> bool {
-    let cur = current_q.trim();
-    if cur.is_empty() || may_inherit_parent_entities(cur, parent_q) {
+/// 这才是"结合之前的提问和回答改写"的正确守卫：以前用「本轮问句之外的实体一律
+/// 弃用」（[`may_inherit_parent_entities`] 那套），它分不清**新话题**和**指代消解** ——
+/// 而指代消解恰恰**必须**引入本轮问句里没有的实体。2026-11-02 实测：
+/// 模型把「今天是2026年11月12日，各人的年龄是多少」正确改写成
+/// `陈秀芳 家庭成员 年龄`（陈秀芳来自上一轮对话），却被守卫弃用，退回原句后
+/// 整轮检索跑偏，模型只能拒答。
+pub(super) fn entities_backed_by_history(
+    rewritten: &str,
+    current_q: &str,
+    history_text: &str,
+) -> bool {
+    let cur = current_q.to_lowercase();
+    let hist = history_text.to_lowercase();
+    for kw in extract_retrieval_keywords(rewritten) {
+        let k = kw.to_lowercase();
+        if k.chars().count() < 2 {
+            continue;
+        }
+        // 本轮问句已有（含包含关系）→ 无需历史
+        if cur.contains(&k) {
+            continue;
+        }
+        if hist.contains(&k) {
+            continue;
+        }
+        log::info!("[AI]   llm rewrite 引入了历史里不存在的实体：{kw}");
         return false;
     }
-    let lower = cur.to_lowercase();
-    extract_retrieval_keywords(rewritten)
-        .iter()
-        .any(|kw| !lower.contains(&kw.to_lowercase()))
+    true
 }
-
+///
 /// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
 /// 的材料，这次换一组**不一样**但更可能命中的检索词。
 ///
@@ -460,15 +588,12 @@ pub(super) fn extract_retrieval_keywords(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Person pronouns that must bind to a person/org entity from the parent turn,
-/// not to the parent's topic words (e.g. "身份证号/多少").
-pub(super) fn has_person_pronoun(text: &str) -> bool {
-    person_pronoun_surface(text).is_some()
-}
-
 /// The pronoun surface itself (longest match first, so "他们" wins over "他").
 /// Needed to feed a binding into the clarify engine: we already resolved "他"
 /// to a concrete person, so the engine must not report it as ambiguous.
+///
+/// 注：这里只服务 clarify，不再决定检索词 —— 检索词由 LLM 结合对话改写
+/// （2026-11-02 起，规则链只在 LLM 不可用时兜底）。
 pub(super) fn person_pronoun_surface(text: &str) -> Option<&'static str> {
     ["他们", "她们", "他", "她", "该人", "此人", "当事人"]
         .iter()
@@ -476,42 +601,56 @@ pub(super) fn person_pronoun_surface(text: &str) -> Option<&'static str> {
         .copied()
 }
 
-/// Parent entities suitable for a pronoun follow-up. Uses jieba POS tags so
-/// "陈正先" (nr) survives while "身份证号/多少" do not.
+/// 父问句里适合继承的实体：人名 / 地名 / 机构名 / 专名（jieba `nr|ns|nt|nz`）。
+///
+/// 机构后缀会与前面的专名**拼接**：`万城`(ns) + `公司`(n) → `万城公司`。
+/// 不拼的话「万城公司人员列表」只能取出 `万城`，而"办公室"这类省略式追问真正
+/// 需要的是整个机构名（2026-11-02 实测）。
 pub(super) fn parent_person_entities(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    for token in crate::search::schema::JIEBA
+    const ORG_SUFFIX: &[&str] = &[
+        "公司", "事务所", "集团", "银行", "法院", "委员会", "中心", "医院", "学校", "大学", "局",
+        "厂", "店",
+    ];
+    let tokens: Vec<(String, String)> = crate::search::schema::JIEBA
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .tag(text, true)
-    {
-        let w = token.word.trim();
-        let tag = token.tag.to_string();
-        if w.chars().count() < 2
-            || !(tag.starts_with("nr") || tag.starts_with("nt") || tag.starts_with("nz"))
-        {
+        .iter()
+        .map(|t| (t.word.to_string(), t.tag.to_string()))
+        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, (w, tag)) in tokens.iter().enumerate() {
+        if w.chars().count() < 2 {
             continue;
         }
-        if !out.iter().any(|k: &String| k == w) {
-            out.push(w.to_string());
+        let next_org_suffix = tokens.get(i + 1).and_then(|(next, ntag)| {
+            (ntag.starts_with('n') && ORG_SUFFIX.contains(&next.as_str())).then_some(next.as_str())
+        });
+        let is_proper = tag.starts_with("nr")
+            || tag.starts_with("ns")
+            || tag.starts_with("nt")
+            || tag.starts_with("nz");
+        // 专名直接收；普通名词**只有**在后接机构后缀时才收（"万城"+"公司"）。
+        // 后者是因为 jieba 对"万城"这类未登录专名可能只给 `n`，但它显然是机构名的一部分。
+        let accepted = is_proper || (next_org_suffix.is_some() && tag.starts_with('n'));
+        if !accepted {
+            continue;
+        }
+        let mut entity = w.clone();
+        if let Some(suffix) = next_org_suffix {
+            entity.push_str(suffix);
+        }
+        if !out.contains(&entity) {
+            out.push(entity);
         }
     }
     out
 }
 
-/// Query for a pronoun follow-up: parent person/org entities + the current
-/// question, deliberately excluding the parent's topic words.
-pub(super) fn pronoun_binding_query(current_q: &str, parent_q: &str) -> Option<String> {
-    if !has_person_pronoun(current_q) || parent_q.trim().is_empty() {
-        return None;
-    }
-    let entities = parent_person_entities(parent_q);
-    if entities.is_empty() {
-        None
-    } else {
-        Some(format!("{} {}", entities.join(" "), current_q.trim()))
-    }
-}
+/// 检索级规则兜底：父问句的实体 + 本轮问句（无实体时用父问句关键词）。
+///
+/// 注：代词不再单独短路检索 —— 那会跳过"结合对话改写"这一步，把上一轮的
+/// 主题词（身份证号/多少）带进来（2026-11-02 实测）。这里只作为 LLM 不可用时的兜底。
 
 /// Scrubs verbs/quantifiers that an LLM rewrite copied over from the parent
 /// turn but that the current question never asked for.
@@ -539,7 +678,17 @@ pub(super) fn strip_inherited_generic_terms(rewritten: &str, current_q: &str) ->
     }
 }
 
+/// 规则兜底用的"父问句关键词"。
+///
+/// **优先专有名词**（人名/地名/机构名/专名 `nr|ns|nt|nz`）：追问真正需要继承的是
+/// "在说谁/说哪家公司"，而不是父问句的整串主题词。2026-11-02 实测：父问句
+/// `陈正先的身份证号是多少？` 取前 3 个关键词会把 `身份证号` 带进「那他涉及哪些案件」，
+/// 而 `万城公司人员列表` → 只取 `万城公司`，正好是「办公室」这类省略式追问缺的那一半。
 fn parent_keywords(text: &str, max: usize) -> Vec<String> {
+    let entities = parent_person_entities(text);
+    if !entities.is_empty() {
+        return entities.into_iter().take(max).collect();
+    }
     let mut out = Vec::new();
     for t in crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner()).cut(text, false) {
         let w = t.word.trim();
@@ -561,18 +710,27 @@ fn parent_keywords(text: &str, max: usize) -> Vec<String> {
     out
 }
 
-/// Hard fallback for entity inheritance: after LLM/rule-based query rewrite,
-/// ensure that core entity keywords from the parent question are present in
-/// the rewritten query. When the LLM rewrite drops a distinguishing entity
-/// (e.g. a person name or case name), prepend the missing entities so BM25,
-/// vector, and path channels can still hit the correct documents.
+/// 规则兜底的继承准入：**只**在 LLM 改写不可用/无效时使用。
 ///
-/// Uses `extract_retrieval_keywords` (Search tokenization mode) on the
-/// parent to capture proper nouns like "毛弟" / "常宏" / "万城" that jieba
-/// cut mode may split.
+/// 两条准入（任一成立）：① 本轮问句本身要借历史（[`needs_history_rewrite`]）；
+/// ② 与父问句共享检索词（同一话题）。反过来就是 P2：自足 + 零交集 = 新话题 ⇒ 不继承。
+pub(super) fn may_inherit_parent_entities(current_q: &str, parent_q: &str) -> bool {
+    if needs_history_rewrite(current_q) {
+        return true;
+    }
+    let cur = extract_retrieval_keywords(current_q);
+    if cur.is_empty() {
+        return true;
+    }
+    let par = extract_retrieval_keywords(parent_q);
+    cur.iter().any(|a| par.iter().any(|b| a == b))
+}
+
+/// 规则兜底：LLM 不可用时，把父问句的核心实体补进检索词。
+///
+/// 只在 `rewrite_method == "rule"` 时调用 —— LLM 改写成功的场合不要再补，
+/// 否则会把上一轮的主题词（"身份证号"）又加回去（2026-11-02 实测）。
 pub(super) fn ensure_parent_entities(search_q: &str, parent_q: &str, current_q: &str) -> String {
-    // 只能是"可以继承"的场合：新话题（自足问句 + 与父问句零交集）**不**硬塞父问句实体，
-    // 否则这条兜底会把 LLM 那侧刚修掉的"继承上一轮实体"重新加回去（P2）。
     if !may_inherit_parent_entities(current_q, parent_q) {
         return search_q.to_string();
     }

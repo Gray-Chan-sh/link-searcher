@@ -630,10 +630,10 @@ mod topic_shift_tests {
 }
 
 mod rewrite;
-pub use rewrite::{RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
-use rewrite::{carry_forward_source, ensure_parent_entities, extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity, rewrite_adds_foreign_entity};
+pub use rewrite::{RewriteAttempt, RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
+use rewrite::{carry_forward_source, extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity};
 #[cfg(test)]
-use rewrite::{rewrite_history, valid_rewrite_output, may_inherit_parent_entities};
+use rewrite::{rewrite_history, valid_rewrite_output, entities_backed_by_history, recent_history_text};
 
 mod retrieval;
 #[allow(dead_code)] // Staged for P4.3: wired into progressive retrieval next.
@@ -2262,21 +2262,10 @@ mod retrieval_keyword_tests {
     }
 
     #[test]
-    fn rewrite_history_ignores_assistant_turns() {
-        let msgs = vec![
-            ChatMessage { role: "user".into(), content: "关于外联发的股权转让".into() },
-            ChatMessage { role: "assistant".into(), content: "根据材料，没有相关记录".into() },
-        ];
-        let h = rewrite_history(&msgs, &[]);
-        assert!(h.contains("股权转让"), "user content missing: {h}");
-        assert!(!h.contains("没有相关记录"), "assistant content leaked: {h}");
-    }
-
-    #[test]
     fn rewrite_history_includes_context_file_names() {
         let msgs = vec![ChatMessage { role: "user".into(), content: "为什么认定他是利害关系人".into() }];
         let paths = vec!["案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx".to_string()];
-        let h = rewrite_history(&msgs, &paths);
+        let h = rewrite_history(&msgs, &paths, "为什么认定他是利害关系人");
         assert!(h.contains("汪均益行政上诉案.docx"), "context file missing: {h}");
     }
 
@@ -2483,88 +2472,6 @@ mod chunk_budget_tests {
 
         let short = "短文本";        let (_, whole) = chunked_or_truncated_with_budget(&conn, "md5-w", short, "q", 10_000, &[]);
         assert_eq!(whole, vec![(0, short.chars().count())]);
-    }
-
-    /// 追问泛词（检索关键词为空）时，LLM 重写丢失父问句核心实体 → 硬性兜底补全。
-    /// 对应缺陷 1：首问"毛弟是否被人辱骂？"，追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"
-    /// 改写后 query 若不包含"毛弟"，必须把父问句实体合并进去。
-    /// （本轮问句与父问句共享"辱骂"⇒ 同一话题 ⇒ 允许继承。）
-    #[test]
-    fn ensure_parent_entities_reinjects_missing_core_entity() {
-        let parent = "毛弟是否被人辱骂？";
-        let current = "列出清单，把时间、辱骂人以及完整的辱骂内容列出";
-        let rewritten = "辱骂清单 时间 辱骂人 完整辱骂内容"; // 假设 LLM 丢了"毛弟"
-        let merged = ensure_parent_entities(rewritten, parent, current);
-        assert!(merged.contains("毛弟"), "父问句核心实体必须补回: {merged}");
-        assert!(merged.contains("辱骂清单"), "原改写 query 内容应保留: {merged}");
-        // 顺序：父实体在前
-        assert!(merged.starts_with("毛弟"), "父实体应前置: {merged}");
-    }
-
-    /// 改写 query 已包含父实体 → 兜底不动，避免重复。
-    #[test]
-    fn ensure_parent_entities_noop_when_entity_present() {
-        let parent = "毛弟是否被人辱骂？";
-        let current = "把辱骂清单列出来";
-        let rewritten = "毛弟 辱骂清单";
-        assert_eq!(ensure_parent_entities(rewritten, parent, current), rewritten);
-    }
-
-    /// 父消息为空 / 与当前问句相同 → 兜底跳过。
-    #[test]
-    fn ensure_parent_entities_skips_empty_or_same_parent() {
-        assert_eq!(ensure_parent_entities("abc", "", "abc"), "abc");
-        assert_eq!(ensure_parent_entities("问句", "问句", "问句"), "问句");
-    }
-
-    /// P2：**新话题**（自足问句 + 与父问句零交集）不得继承上一轮实体。
-    /// 2026-10-16 实测：`汪均益案的最终结果是什么？` 被塞进了上一轮的"陈正先"，
-    /// 检索被带到旧材料上，模型只能答"材料不足"。
-    #[test]
-    fn ensure_parent_entities_skips_new_topic() {
-        let parent = "陈正先的身份证号是多少？";
-        let current = "汪均益案的最终结果是什么？";
-        let merged = ensure_parent_entities(current, parent, current);
-        assert_eq!(merged, current, "新话题不得被塞入上一轮的人名: {merged}");
-        assert!(!merged.contains("陈正先"), "{merged}");
-    }
-
-    /// 继承准入的唯一判据：需要借历史（指代/过短/无检索词）**或**与父问句共享检索词。
-    #[test]
-    fn parent_entity_inheritance_requires_shared_topic_or_history_need() {
-        // ① 与父问句共享"辱骂"⇒ 同一话题 ⇒ 可继承
-        assert!(may_inherit_parent_entities(
-            "列出清单，把时间、辱骂人以及完整的辱骂内容列出",
-            "毛弟是否被人辱骂？",
-        ));
-        // ② 指代追问 ⇒ 必须借历史 ⇒ 可继承
-        assert!(may_inherit_parent_entities("它的风险有哪些", "季度报告的主要结论是什么"));
-        // ③ 过短追问（<4 字）⇒ 可继承
-        assert!(may_inherit_parent_entities("增量呢", "如何配置索引目录"));
-        // ④ 自足问句 + 与父问句零交集 ⇒ 新话题 ⇒ 不可继承
-        assert!(!may_inherit_parent_entities("汪均益案的最终结果是什么？", "陈正先的身份证号是多少？"));
-    }
-
-    /// 新话题的改写里凭空多出上一轮实体 ⇒ 弃用（回退规则链）；
-    /// 只做同义/结论性扩展（判决/裁定这类泛词不算实体）不违规。
-    #[test]
-    fn rewrite_adds_foreign_entity_flags_stale_entity_only_for_new_topics() {
-        let parent = "陈正先的身份证号是多少？";
-        let current = "汪均益案的最终结果是什么？";
-        assert!(
-            rewrite_adds_foreign_entity("陈正先 汪均益案 最终结果", current, parent),
-            "新话题带入上一轮实体必须被拦下"
-        );
-        assert!(
-            !rewrite_adds_foreign_entity("汪均益案 最终结果 判决 裁定", current, parent),
-            "同义/结论性泛词不算违规（它们会在停用词过滤里被丢掉）"
-        );
-        // 需要借历史的追问允许继承 → 不拦
-        assert!(!rewrite_adds_foreign_entity(
-            "季度 报告 风险",
-            "它的风险有哪些",
-            "季度报告的主要结论是什么"
-        ));
     }
 
     /// 重跑扩查的守卫与"新话题守卫"相反：扩查**必须**保住本轮问句的锚点实体，

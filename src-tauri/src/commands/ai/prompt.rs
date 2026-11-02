@@ -2,7 +2,7 @@
 //! retrieval, evidence selection, budget packing and clarify handling.
 
 use super::*;
-use super::rewrite::{parent_person_entities, person_pronoun_surface, pronoun_binding_query};
+use super::rewrite::{parent_person_entities, person_pronoun_surface};
 use super::sufficiency::{
     check_sufficiency, expand_neighbor_chunks, expansion_queries, is_specific_entity, missing_slots,
     SufficiencySignals,
@@ -359,45 +359,49 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             None => log::info!("[AI]   retry 扩查未产出（回退规则链）：\"{}\"", truncate_text(&last_q, 30)),
         }
     }
-    // Pronoun follow-ups bind to the parent's person/org entity, never to the
-    // parent's topic words. The LLM rewrite previously turned
-    // "那他涉及哪些案件？" into "陈正先 身份证号 多少 那他涉及哪些案件？".
-    let pronoun_query = pronoun_binding_query(&last_q, parent_q);
-    let pronoun_binding: Option<(String, String)> = if pronoun_query.is_some() {
-        person_pronoun_surface(&last_q)
-            .zip(parent_person_entities(parent_q).into_iter().next())
-            .map(|(surface, entity)| (surface.to_string(), entity))
-    } else {
-        None
-    };
-    let pronoun_bound = pronoun_binding.is_some();
-    let (search_q_raw, rewrite_method) = if let Some(q) = retry_q {
+    // 代词绑定只用于**给 clarify 引擎提供绑定**（避免回答前多一句"指代不明确"提示），
+    // 不再短路检索：检索词一律交给 LLM 结合"之前的提问和回答"改写，
+    // 规则链只在 LLM 不可用时兜底（2026-11-02 调整）。
+    let pronoun_binding: Option<(String, String)> = person_pronoun_surface(&last_q)
+        .zip(parent_person_entities(parent_q).into_iter().next())
+        .map(|(surface, entity)| (surface.to_string(), entity));
+    let (search_q, rewrite_method) = if let Some(q) = retry_q {
         (q, "retry")
-    } else if let Some(q) = pronoun_query {
-        (q, "pronoun")
-    } else if skip_llm_rewrite {
+    } else if skip_llm_rewrite || !crate::ai::llm_enabled() {
         (rule.query.clone(), "rule")
     } else {
         let context_paths = prior_evidence_paths(&ctx, session_id);
+        let history_text = super::rewrite::recent_history_text(messages, &last_q);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
-            // 不许继承的场合（新话题）改写不得引入本轮问句之外的实体（见 rewrite_adds_foreign_entity）
-            Some(llm) if llm != rule.query && !rewrite_adds_foreign_entity(&llm, &last_q, parent_q) => (llm, "llm"),
-            Some(llm) if llm != rule.query => {
-                log::warn!("[AI]   llm rewrite 引入了本轮问句之外的实体，弃用：{:?}", truncate_text(&llm, 40));
+            // 守卫从"不得引入本轮之外的实体"改成"引入的实体必须有历史出处"：
+            // 指代消解本来就必须引入本轮问句里没有的人名/机构名。
+            super::rewrite::RewriteAttempt::Ok(llm)
+                if !super::rewrite::entities_backed_by_history(&llm, &last_q, &history_text) =>
+            {
+                log::warn!(
+                    "[AI]   llm rewrite 引入了历史里没有的实体，弃用：{:?}",
+                    truncate_text(&llm, 40)
+                );
                 (rule.query.clone(), "rule")
             }
-            _ => (rule.query.clone(), "rule"),
+            super::rewrite::RewriteAttempt::Ok(llm) => (llm, "llm"),
+            super::rewrite::RewriteAttempt::Invalid(why) => {
+                log::info!("[AI]   llm rewrite 无效（回退规则链）：{why}");
+                (rule.query.clone(), "rule")
+            }
+            super::rewrite::RewriteAttempt::Timeout(secs) => {
+                log::warn!("[AI]   llm rewrite 超时 {secs}s（回退规则链）");
+                (rule.query.clone(), "rule")
+            }
+            super::rewrite::RewriteAttempt::Unavailable => (rule.query.clone(), "rule"),
         }
     };
-    // 硬性兜底：LLM 重写可能丢失上一轮问句的核心实体（人名/案名/项目名）。
-    // 把父问句缺失的实体词补进检索 query，保证三通道能命中正确的实体文档。
-    // 只对"可以继承"的追问生效 —— 新话题继承实体反而跑偏（P2）。
-    // 代词已确定绑定到具体人物时**跳过**：`pronoun_query` 里已经只有"实体 + 本轮问句"，
-    // 这条兜底会再把父问句的主题词（"身份证号"）加回来（2026-11-02 实测）。
-    let search_q = if pronoun_bound {
-        search_q_raw
+    // 规则兜底才补父问句实体：LLM 改写成功时它已经是"结合对话"的产物，
+    // 再补会把上一轮主题词（身份证号/多少）加回来。
+    let search_q = if rewrite_method == "rule" {
+        super::rewrite::ensure_parent_entities(&search_q, parent_q, &last_q)
     } else {
-        ensure_parent_entities(&search_q_raw, parent_q, &last_q)
+        search_q
     };
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
