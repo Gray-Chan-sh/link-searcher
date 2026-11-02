@@ -1,3 +1,21 @@
+## 2026-11-03（第八十二轮）：改写断连重试 + strict 下追问沿用上轮材料（v1.5.2）
+
+> 第三次复测仍然失败，但这次与守卫无关 —— 日志显示网关把连接掐了：
+> `chat request failed: https://apihub.agnes-ai.com/v1/chat/completions: Network Error:
+> peer closed connection without sending TLS close_notify`，1 秒即失败 → 改写退回原句
+> → 检索到无关材料 → 模型答"本轮材料里没有陈秀芳"，而出生年其实就在上一轮引用的
+> 户籍/判决书里。
+
+- **① 改写失败重试一次**：`llm_rewrite_query` 在网关无返回/任务失败时重试一次（间隔 300ms），
+  仍失败才回退规则链；超时不重试（避免 2×60s）。（`commands/ai/rewrite.rs`）
+- **② strict 模式下追问轮沿用上一轮已引用材料**：原条件 `!strict_docs && is_follow_up && …`
+  改为只要求"追问轮"，并新增触发条件 `context_dependent = !has_proper_noun(本轮问句)`
+  —— 本轮问句没有专名（依赖上文，如「各人的年龄」「办公室」「她的哥哥」）时才沿用，
+  避免把旧话题硬塞进自足的新问题。strict 的原意是"不许用**范围外**材料"，而上一轮
+  已引用的文件已通过范围校验，沿用不算越界。（`commands/ai/prompt.rs`）
+- **③ 可观测**：`query_rewrite` 事件新增 `fallback_reason`（`llm disabled` / `invalid: …` /
+  `timeout …s` / `entity not in history`），以后"为什么没走 LLM 改写"不用再翻日志。
+
 ## 2026-11-02（第八十一轮）：改写守卫只校验实体，不拦同义改写（v1.5.1）
 
 - **问题（v1.5.0 实测暴露）**：`entities_backed_by_history()` 把**所有**改写关键词都当实体校验。

@@ -365,9 +365,11 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     let pronoun_binding: Option<(String, String)> = person_pronoun_surface(&last_q)
         .zip(parent_person_entities(parent_q).into_iter().next())
         .map(|(surface, entity)| (surface.to_string(), entity));
+    let mut rewrite_fallback: Option<String> = None;
     let (search_q, rewrite_method) = if let Some(q) = retry_q {
         (q, "retry")
     } else if skip_llm_rewrite || !crate::ai::llm_enabled() {
+        rewrite_fallback = Some("llm disabled".into());
         (rule.query.clone(), "rule")
     } else {
         let context_paths = prior_evidence_paths(&ctx, session_id);
@@ -382,18 +384,24 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
                     "[AI]   llm rewrite 引入了历史里没有的实体，弃用：{:?}",
                     truncate_text(&llm, 40)
                 );
+                rewrite_fallback = Some("entity not in history".into());
                 (rule.query.clone(), "rule")
             }
             super::rewrite::RewriteAttempt::Ok(llm) => (llm, "llm"),
             super::rewrite::RewriteAttempt::Invalid(why) => {
                 log::info!("[AI]   llm rewrite 无效（回退规则链）：{why}");
+                rewrite_fallback = Some(format!("invalid: {why}"));
                 (rule.query.clone(), "rule")
             }
             super::rewrite::RewriteAttempt::Timeout(secs) => {
                 log::warn!("[AI]   llm rewrite 超时 {secs}s（回退规则链）");
+                rewrite_fallback = Some(format!("timeout {secs}s"));
                 (rule.query.clone(), "rule")
             }
-            super::rewrite::RewriteAttempt::Unavailable => (rule.query.clone(), "rule"),
+            super::rewrite::RewriteAttempt::Unavailable => {
+                rewrite_fallback = Some("llm unavailable".into());
+                (rule.query.clone(), "rule")
+            }
         }
     };
     // 规则兜底才补父问句实体：LLM 改写成功时它已经是"结合对话"的产物，
@@ -412,6 +420,8 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         "was_rewritten": rewritten,
         "rewrite_method": if rewritten { rewrite_method } else { "none" },
         "retry": is_retry,
+        // 为什么没走 LLM 改写：以前这里静默成 method=rule，网关断连与守卫弃用看起来一样。
+        "fallback_reason": rewrite_fallback,
     })));
 
     // ── 检索 + 组装：同步重活，整体挪出 async worker ─────────────────────
@@ -1419,7 +1429,17 @@ fn assemble_conversation_prompt(
     // 仅在 strict 模式（要求严格依据当前范围）下不自动保留，避免越界引用。
     let is_follow_up = messages.len() > 1;
     let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
-    if !strict_docs && is_follow_up && all_hits.len() < MAX_CONTENT_INJECT {
+    // 追问轮沿用上一轮**已引用**的材料。
+    //
+    // 2026-11-02/03 实测两次翻车：`陈秀芳的家庭成员有哪些？` → `今天是…各人的年龄是多少`，
+    // 一轮因为改写被守卫误杀、一轮因为网关断连，两次都退化成原句检索到无关材料，
+    // 模型只能答"本轮材料里没有陈秀芳" —— 而出生年其实就在上一轮引用的户籍/判决书里。
+    //
+    // strict 的原意是"不许用**范围外**材料"；上一轮已引用的文件本就通过了范围校验，
+    // 沿用它们不算越界。为避免把旧话题硬塞进新话题，只在**本轮问句没有专名**（= 依赖上文）
+    // 或点名了文件、或本轮零命中时才沿用。
+    let context_dependent = !super::rewrite::has_proper_noun(&last_q);
+    if is_follow_up && all_hits.len() < MAX_CONTENT_INJECT {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
         for fid in source_ids.iter().rev() {
             if all_hits.len() >= MAX_CONTENT_INJECT { break; }
@@ -1431,7 +1451,7 @@ fn assemble_conversation_prompt(
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 !stem.is_empty() && message_text.contains(stem.as_str())
             };
-            if carry_forward_source(named, all_hits.is_empty()) {
+            if context_dependent || carry_forward_source(named, all_hits.is_empty()) {
                 all_seen.insert(fid.clone());
                 // 记入 history_resolved，稍后随 Layer 0.5 注入为实际材料
                 if !history_resolved.iter().any(|(id, _)| id == fid) {

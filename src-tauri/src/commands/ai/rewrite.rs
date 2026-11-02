@@ -59,7 +59,7 @@ fn is_ellipsis_followup(q: &str) -> bool {
 }
 
 /// 问句里是否出现人名 / 地名 / 机构名 / 专有名词（jieba `nr|ns|nt|nz`，长度 ≥2）。
-fn has_proper_noun(text: &str) -> bool {
+pub(super) fn has_proper_noun(text: &str) -> bool {
     crate::search::schema::JIEBA
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -316,25 +316,45 @@ pub async fn llm_rewrite_query(
 只输出改写后的查询本身，不要解释、不要加引号、不要写“改写为”，也不要照抄整句问题。";
     let user = format!("{history_str}\n当前问题：{last_q}\n改写后的查询：");
     let sys = system.to_string();
-    let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys, &user));
     let budget = rewrite_timeout_secs();
     let started = std::time::Instant::now();
-    match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
-        Ok(Ok(Some(s))) => match valid_rewrite_output(&s, last_q) {
-            Some(v) => RewriteAttempt::Ok(strip_inherited_generic_terms(&v, last_q)),
-            None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
-        },
-        Ok(Ok(None)) => RewriteAttempt::Invalid("gateway returned no content".into()),
-        Ok(Err(e)) => RewriteAttempt::Invalid(format!("task failed: {e}")),
-        Err(_) => {
-            log::warn!(
-                "[AI]   llm rewrite timeout after {}s（q=\"{}\"）",
-                started.elapsed().as_secs(),
-                truncate_text(last_q, 30)
-            );
-            RewriteAttempt::Timeout(budget)
+    let mut last_err = String::new();
+    // 网关偶发断连（实测 `peer closed connection without sending TLS close_notify`，
+    // 1 秒内就失败）会让整轮改写退化成原句 —— 对指代型追问等于直接答错。
+    // 一次失败不足以判定网关不可用，重试一次。
+    for attempt in 0..2u32 {
+        let sys_c = sys.clone();
+        let user_c = user.clone();
+        let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys_c, &user_c));
+        match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
+            Ok(Ok(Some(s))) => {
+                return match valid_rewrite_output(&s, last_q) {
+                    Some(v) => RewriteAttempt::Ok(strip_inherited_generic_terms(&v, last_q)),
+                    None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
+                };
+            }
+            Ok(Ok(None)) => {
+                last_err = "gateway returned no content".to_string();
+                log::warn!("[AI]   llm rewrite attempt {} failed: {last_err}", attempt + 1);
+            }
+            Ok(Err(e)) => {
+                last_err = format!("task failed: {e}");
+                log::warn!("[AI]   llm rewrite attempt {} failed: {last_err}", attempt + 1);
+            }
+            Err(_) => {
+                log::warn!(
+                    "[AI]   llm rewrite timeout after {}s（q=\"{}\"）",
+                    started.elapsed().as_secs(),
+                    truncate_text(last_q, 30)
+                );
+                return RewriteAttempt::Timeout(budget);
+            }
+        }
+        if attempt == 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         }
     }
+    RewriteAttempt::Invalid(last_err)
 }
 
 /// Outcome of one LLM rewrite attempt. The caller must be able to tell
