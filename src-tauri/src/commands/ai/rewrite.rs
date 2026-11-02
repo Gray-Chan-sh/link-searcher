@@ -58,6 +58,18 @@ fn is_ellipsis_followup(q: &str) -> bool {
     ends_with_particle && !has_proper_noun(t)
 }
 
+/// 亲属/角色名词：jieba 常把「哥哥/父亲」标成 `nr`，但它们**不是具体对象**，
+/// 不能当作"问句已自带锚点"，也不能当继承实体。封闭小表，随用随补。
+const ROLE_NOUNS: &[&str] = &[
+    "哥哥", "姐姐", "弟弟", "妹妹", "兄弟", "姐妹", "父亲", "母亲", "爸爸", "妈妈", "爷爷",
+    "奶奶", "外公", "外婆", "儿子", "女儿", "妻子", "丈夫", "前妻", "前夫", "配偶", "家属",
+    "家人", "亲戚", "本人", "对方", "当事人",
+];
+
+fn is_role_noun(word: &str) -> bool {
+    ROLE_NOUNS.contains(&word)
+}
+
 /// 问句里是否出现人名 / 地名 / 机构名 / 专有名词（jieba `nr|ns|nt|nz`，长度 ≥2）。
 pub(super) fn has_proper_noun(text: &str) -> bool {
     crate::search::schema::JIEBA
@@ -67,7 +79,9 @@ pub(super) fn has_proper_noun(text: &str) -> bool {
         .iter()
         .any(|t| {
             let tag = t.tag.to_string();
-            t.word.chars().count() >= 2
+            let w = t.word.trim();
+            w.chars().count() >= 2
+                && !is_role_noun(w)
                 && (tag.starts_with("nr")
                     || tag.starts_with("ns")
                     || tag.starts_with("nt")
@@ -210,6 +224,24 @@ mod history_backed_entity_tests {
         let h = rewrite_history(&msgs, &[], "她的哥哥今年多少岁了");
         assert!(h.contains("1956"), "上一轮回答应进改写历史: {h}");
         assert!(h.contains("不得作为事实依据"), "必须标注仅供参考: {h}");
+    }
+
+    /// 依赖上文的追问必须被识别为"无专名"，否则沿用上一轮证据的开关不会打开。
+    /// 2026-11-03 实测：`今天是2026年11月12日，各人的年龄是多少` 大多被误判成"有专名"。
+    #[test]
+    fn context_dependent_followups_have_no_proper_noun() {
+        for q in [
+            "今天是2026年11月12日，各人的年龄是多少",
+            "今天是2026年11月12日",
+            "她的哥哥今年多少岁了",
+            "各人的年龄是多少",
+            "办公室",
+        ] {
+            assert!(!has_proper_noun(q), "{q} 不该被判为含专名");
+        }
+        // 反例：自带具体对象 ⇒ 不是依赖上文的追问
+        assert!(has_proper_noun("汪均益案的最终结果是什么？"));
+        assert!(has_proper_noun("陈秀芳的家庭成员有哪些？"));
     }
 
     /// 回归（2026-11-03）：旧实现的沿用闸门要求"本轮命中 < 30"，而正常检索动辄数千命中
@@ -711,7 +743,7 @@ pub(super) fn parent_person_entities(text: &str) -> Vec<String> {
         // 专名直接收；普通名词**只有**在后接机构后缀时才收（"万城"+"公司"）。
         // 后者是因为 jieba 对"万城"这类未登录专名可能只给 `n`，但它显然是机构名的一部分。
         let accepted = is_proper || (next_org_suffix.is_some() && tag.starts_with('n'));
-        if !accepted {
+        if !accepted || is_role_noun(w) {
             continue;
         }
         let mut entity = w.clone();
