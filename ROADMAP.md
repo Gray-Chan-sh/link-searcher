@@ -29,6 +29,7 @@
 
 ## P0 — 已知缺陷（应尽快修）
 
+- [ ] **重回答后 UI 卡死（2026-11-02，v1.4.0）**：19 篇/138K 上下文回答完成后窗口 `Responding=False`，后端已落库、DB 未锁、无 panic；判断卡在 `auto_cite`/`ai_events`/`ai-done` IPC 或 WebView 消息循环。修复方案见 `docs/INCIDENT_2026-11-02_UI_HANG.md`：加后处理检查点、`ai-done` 不等分析型后处理、前端看门狗、`handleDone` try/finally、事件时间线懒加载。**必须修复**。
 - [x] **PdfExtractor trait impl 硬编码 `"eng"`**：`extract()` 改读全局 `ocr_lang` 设置（OnceLock 缓存 DB 池）
 - [x] **LoBackgroundGuard 死代码清理**：struct 已删除
 - [x] **Semgrep WARNING**：生产代码 `unwrap`/`expect` 已清零——4 处修复（3 处 nosemgrep 标注修正 + 1 处 webapi 地址解析改优雅降级）；测试代码 494 处保留（AGENTS.md 允许测试路径）（2026-08-25）
