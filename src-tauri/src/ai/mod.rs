@@ -968,13 +968,17 @@ pub fn vector_scan_with_query_emb(
         // 没有可用的 embedding 模型 → 语义通道没有任何可比对象。
         return Ok(Vec::new());
     };
+    let t_load = std::time::Instant::now();
     let all = crate::db::tracker::get_all_embeddings(conn, Some(&fp))
         .map_err(|e| e.to_string())?;
+    let load_ms = t_load.elapsed().as_millis();
     let all_count = all.len();
+    let t_score = std::time::Instant::now();
     let mut scored: Vec<(String, f32)> = all
         .into_iter()
         .map(|(fid, vec)| (fid, cosine(query_emb, &vec)))
         .collect();
+    let score_ms = t_score.elapsed().as_millis();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let max_sim = scored.first().map(|(_, s)| *s).unwrap_or(0.0);
     let (strong, weak): (Vec<_>, Vec<_>) =
@@ -985,8 +989,10 @@ pub fn vector_scan_with_query_emb(
         results.extend(weak.into_iter().take(release_top_k));
     }
     let released = results.len() - strong_count;
+    // 耗时分解：`load` 是整表反序列化（每查询一次、无缓存），`score` 是余弦循环。
+    // 这是判断"该换数据结构还是该缩候选集"的唯一依据，别删。
     log::info!(
-        "[AI]   vector: {all_count} emb, {strong_count} above {threshold:.2} (+{released} released, max_sim={max_sim:.4})"
+        "[AI]   vector: {all_count} emb, {strong_count} above {threshold:.2} (+{released} released, max_sim={max_sim:.4}) timing: load={load_ms}ms score={score_ms}ms"
     );
     Ok(results)
 }
@@ -1020,12 +1026,16 @@ pub fn chunk_vector_scan_with_query_emb(
     let Some(fp) = crate::ai::identity::active_embedding_fp() else {
         return Ok(Vec::new());
     };
+    let t_load = std::time::Instant::now();
     let all = crate::db::tracker::get_all_chunk_embeddings(conn, Some(&fp))
         .map_err(|e| e.to_string())?;
+    let load_ms = t_load.elapsed().as_millis();
     let all_count = all.len();
+    let t_score = std::time::Instant::now();
     let results = chunk_vector_scan_impl(query_emb, &all, threshold, top_k, release_top_k);
+    let score_ms = t_score.elapsed().as_millis();
     let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
-    log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (+{} released, top {top_k})",
+    log::info!("[AI]   chunk_vector: {} emb, {} above {:.2} (+{} released, top {top_k}) timing: load={load_ms}ms score={score_ms}ms",
         all_count, above, threshold, results.len() - above);
     Ok(results)
 }
@@ -1071,13 +1081,17 @@ pub fn chunk_vector_scan_for_md5s(
     let Some(fp) = crate::ai::identity::active_embedding_fp() else {
         return Ok(Vec::new());
     };
+    let t_load = std::time::Instant::now();
     let rows = crate::db::tracker::get_chunk_embeddings_by_md5s(conn, md5s, &fp)
         .map_err(|e| e.to_string())?;
+    let load_ms = t_load.elapsed().as_millis();
     let scanned = rows.len();
+    let t_score = std::time::Instant::now();
     let results = chunk_vector_scan_impl(query_emb, &rows, threshold, top_k, release_top_k);
+    let score_ms = t_score.elapsed().as_millis();
     let above = results.iter().filter(|(_, _, s)| *s >= threshold).count();
     log::info!(
-        "[AI]   chunk_vector(funnel): {} md5s -> {} chunk emb scanned, {} above {:.2} (+{} released, top {top_k})",
+        "[AI]   chunk_vector(funnel): {} md5s -> {} chunk emb scanned, {} above {:.2} (+{} released, top {top_k}) timing: load={load_ms}ms score={score_ms}ms",
         md5s.len(), scanned, above, threshold, results.len() - above
     );
     Ok(results)

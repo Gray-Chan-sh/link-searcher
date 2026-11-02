@@ -771,8 +771,10 @@ fn assemble_conversation_prompt(
             // cached_embed：同一/近似查询追问直接命中，跳过本地 BGE 推理。
             // 超时兜底：本地嵌入池被后台回填占满时最多等 20s，之后退回 BM25，
             // 绝不把整轮聊天卡在"语义扫描中"（见 ai::cached_embed_with_timeout）。
+            let t_embed = std::time::Instant::now();
             let query_emb =
                 crate::ai::cached_embed_with_timeout(&vec_query, QUERY_EMBED_TIMEOUT_SECS);
+            log::info!("[AI]   query embed timing: {}ms (hit={})", t_embed.elapsed().as_millis(), query_emb.is_some());
             if query_emb.is_none() {
                 log::warn!(
                     "[AI]   query embedding timed out (>{QUERY_EMBED_TIMEOUT_SECS}s); skipping vector channels, falling back to BM25"
