@@ -246,7 +246,52 @@ const NON_ENTITY_WORDS: &[&str] = &[
     "进行",
     "出现",
     "存在",
+    // 时间/程度/过程类词：字面遍布全库，一旦被当成"缺失实体"去补查，
+    // 会把"只是写了这个词"的文档前置到重排结果之前（2026-11-02 实测：
+    // `最早` added=17、`来龙去脉` added=2、`实控` added=3）。
+    "最早",
+    "最晚",
+    "最后",
+    "最终",
+    "首次",
+    "最新",
+    "来龙去脉",
+    "来龙",
+    "去脉",
+    "实控",
+    "沿革",
+    "经过",
+    "大概",
+    "大约",
+    "左右",
+    "以前",
+    "以后",
+    "目前",
+    "现在",
+    "当时",
+    "后来",
+    "能否",
 ];
+
+/// 非实体词性：副词、形容词、连词、代词、数词、量词、助词、叹词、拟声、
+/// 时间词、方位词、成语、状态词、动词（`vn` 动名词除外）。
+///
+/// 词表总有漏网的（实测漏了 最早 / 来龙去脉 / 实控），所以再加一道**词性**闸门：
+/// 只要关键词里有一个词属于上述词性，就不是实体。
+fn has_non_entity_pos(word: &str) -> bool {
+    let jieba = crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner());
+    jieba.tag(word, true).iter().any(|t| {
+        let tag = t.tag.to_string();
+        if tag == "vn" {
+            return false; // 动名词（投资/变更/转让）常是主题词，保留
+        }
+        matches!(
+            tag.chars().next(),
+            Some('a' | 'b' | 'c' | 'd' | 'e' | 'f' | 'i' | 'm' | 'o' | 'p' | 'q' | 'r' | 't' | 'u'
+                | 'v' | 'y' | 'z')
+        )
+    })
+}
 
 /// Whether a keyword is specific enough to justify an entity-targeted retry.
 pub(crate) fn is_specific_entity(keyword: &str) -> bool {
@@ -254,6 +299,7 @@ pub(crate) fn is_specific_entity(keyword: &str) -> bool {
     keyword.chars().count() >= 2
         && !GENERIC_NOUN_TERMS.contains(&keyword)
         && !NON_ENTITY_WORDS.contains(&keyword)
+        && !has_non_entity_pos(keyword)
 }
 
 /// Whether a single inherited token is a verb/quantifier rather than a topic
@@ -500,6 +546,23 @@ mod tests {
         assert!(is_specific_entity("常宏"));
         assert!(is_specific_entity("北京公司"));
         assert!(is_specific_entity("申洲大通"));
+    }
+
+    /// 回归（2026-11-02 实测）：`最早 / 来龙去脉 / 实控` 被当成缺失实体去补查，
+    /// 字面命中 17 / 2 / 3 篇并被**前置**到重排结果之前 —— 精度损失，不是无害噪音。
+    #[test]
+    fn temporal_and_process_words_are_not_entities() {
+        for w in ["最早", "来龙去脉", "实控", "沿革", "最后", "首次", "大概"] {
+            assert!(!is_specific_entity(w), "{w} 不应被当成实体");
+        }
+    }
+
+    /// 词性闸门不能误伤正常实体。
+    #[test]
+    fn noun_phrases_survive_pos_filter() {
+        for w in ["陈骥", "汪均益案", "天缘富达", "万城公司", "申洲大通"] {
+            assert!(is_specific_entity(w), "{w} 应保留为实体");
+        }
     }
 
     #[test]

@@ -35,6 +35,44 @@ pub(super) fn needs_history_rewrite(q: &str) -> bool {
     q.chars().count() < 4
         || DEICTIC.iter().any(|p| q.starts_with(p))
         || extract_retrieval_keywords(q).is_empty()
+        || is_ellipsis_followup(q)
+}
+
+/// 省略式追问：以「呢 / 吧 / 吗 / 么」收尾，且**整句没有任何专有名词**。
+///
+/// 2026-11-02 实测：`标的最大的呢？` 在「陈骥代理的案子」之后被问出来，老判据三条
+/// 都不成立（有 6 个字、不以指代词开头、有检索词）→ 判成自足问题 → 只拿
+/// `标的最大的` 去检索，候选池从 5 040 掉到 1 710，等于丢掉了上下文主体。
+///
+/// 判据里"无专有名词"是关键：`汪均益案的最终结果呢？` 已经点名了对象，不该继承；
+/// `标的最大的呢？` 没有任何可锚定的专名，只能回上一轮找。
+fn is_ellipsis_followup(q: &str) -> bool {
+    let t = q
+        .trim()
+        .trim_end_matches(['？', '?', '。', '！', '!', '，', ',', ' ', '～', '~']);
+    if t.is_empty() {
+        return false;
+    }
+    let ends_with_particle =
+        t.ends_with('呢') || t.ends_with('吧') || t.ends_with('吗') || t.ends_with('么');
+    ends_with_particle && !has_proper_noun(t)
+}
+
+/// 问句里是否出现人名 / 地名 / 机构名 / 专有名词（jieba `nr|ns|nt|nz`，长度 ≥2）。
+fn has_proper_noun(text: &str) -> bool {
+    crate::search::schema::JIEBA
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .tag(text, true)
+        .iter()
+        .any(|t| {
+            let tag = t.tag.to_string();
+            t.word.chars().count() >= 2
+                && (tag.starts_with("nr")
+                    || tag.starts_with("ns")
+                    || tag.starts_with("nt")
+                    || tag.starts_with("nz"))
+        })
 }
 
 /// Query rewrite for follow-up questions: when the current question needs history
@@ -85,6 +123,16 @@ mod pronoun_followup_tests {
         assert!(q.contains("陈正先"), "{q}");
         assert!(!q.contains("身份证号"), "{q}");
         assert!(!q.contains("多少"), "{q}");
+    }
+
+    /// 回归（2026-11-02 实测）：`标的最大的呢？` 被判成自足问题，只拿"标的最大的"
+    /// 去检索，候选池 5 040 → 1 710，丢了上一轮的主体。
+    #[test]
+    fn trailing_particle_followup_needs_history() {
+        assert!(needs_history_rewrite("标的最大的呢？"));
+        assert!(needs_history_rewrite("那个案子的结果吧？") || needs_history_rewrite("结果吧？"));
+        // 已点名具体对象 → 自足，不该继承上一轮。
+        assert!(!needs_history_rewrite("汪均益案的最终结果呢？"));
     }
 }
 
