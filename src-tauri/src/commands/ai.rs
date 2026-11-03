@@ -638,6 +638,7 @@ use rewrite::{carry_forward_source, rewrite_history, valid_rewrite_output};
 mod retrieval;
 #[allow(dead_code)] // Staged for P4.3: wired into progressive retrieval next.
 mod sufficiency;
+mod verify;
 pub use retrieval::{merge_scope_prefixes, weighted_mix};
 pub(crate) use retrieval::{bm25_relevant_hits, rrf_add};
 use retrieval::{apply_rerank_order, char_cooccur_candidates, hit_in_scope, trace_rank, trace_target_ids};
@@ -921,6 +922,18 @@ pub async fn conversation_ask_stream(
     log::info!("[AI] post: emit_done_start");
     let event_session_id = session_id.clone();
     let event_db = state.db.clone();
+    // 旁路依据核验：作答完成后异步把带引用的陈述拿回原文核对。
+    // 绝不阻塞 `ai-done`（2026-11-02 UI 卡死的教训），所以只留副本，done 之后再跑。
+    let verify_input = if result.cancelled || cited_text.trim().is_empty() {
+        None
+    } else {
+        Some((
+            cited_text.clone(),
+            evidence.clone(),
+            session_id.clone(),
+            trace_id.clone(),
+        ))
+    };
     let _ = app.emit("ai-done", AiDone {
         session_id,
         full_text: cited_text,
@@ -958,6 +971,15 @@ pub async fn conversation_ask_stream(
         }
         log::info!("[AI] post: events_done");
     });
+    // 依据核验放在最后、独立 spawn：它要等 LLM（最长 30s），绝不能拖住
+    // `conversation_ask_stream` 的返回，也不能占着上面那条事件的连接池许可。
+    if let Some((answer, ev, sid, tid)) = verify_input {
+        let verify_app = app.clone();
+        let verify_db = state.db.clone();
+        tokio::spawn(async move {
+            verify::run(verify_app, verify_db, sid, turn_number, tid, answer, ev).await;
+        });
+    }
     Ok(())
 }
 

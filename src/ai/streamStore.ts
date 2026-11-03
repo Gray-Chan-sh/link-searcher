@@ -6,9 +6,37 @@ import { buildSessionFromDone } from './applyDone'
 
 type StreamState = { text: string; reasoning: string }
 
+/** 单条陈述的核验结论（后端 `answer_verify` 事件）。 */
+export type VerifyVerdict = 'supported' | 'contradicted' | 'absent' | 'derived' | 'unchecked'
+
+export type VerifyItem = {
+  id: number
+  sentence: string
+  cites: number[]
+  verdict: VerifyVerdict
+  correct?: string
+  note?: string
+}
+
+export type AnswerVerifyPayload = {
+  session_id: string
+  trace_id?: string
+  checked: number
+  supported: number
+  contradicted: number
+  absent: number
+  derived: number
+  unchecked: number
+  took_ms: number
+  /** 只含非 `supported` 的明细（`supported` 用计数表示）。 */
+  items: VerifyItem[]
+}
+
 const active = new Set<string>()
 const streams = new Map<string, StreamState>()
 const dones = new Map<string, AiDonePayload>()
+// 依据核验是作答之后的旁路结果，可能比 `ai-done` 晚数秒，单独保存供面板渲染。
+const verifies = new Map<string, AnswerVerifyPayload>()
 const listeners = new Map<string, Set<() => void>>()
 // 正在由 store 代为落库的会话：期间挂载的 ChatPanel 不得清 pending（会同文件竞争写）
 const persisting = new Set<string>()
@@ -43,6 +71,11 @@ function armWatchdog(sessionId: string): void {
 
 export function isPersisting(sessionId: string): boolean {
   return persisting.has(sessionId)
+}
+
+/** 最近一次依据核验结果（未核验过则 `undefined`）。 */
+export function getAnswerVerify(sessionId: string): AnswerVerifyPayload | undefined {
+  return verifies.get(sessionId)
 }
 
 /**
@@ -119,6 +152,10 @@ function ensureStarted(): Promise<void> {
       await client.listen<AiDonePayload>('ai-done', e => {
         void handleDone(e)
       })
+      await client.listen<AnswerVerifyPayload>('answer_verify', e => {
+        verifies.set(e.session_id, e)
+        notify(e.session_id)
+      })
     })().catch(err => {
       console.error('[streamStore] listen failed:', err)
     })
@@ -140,6 +177,8 @@ export function subscribeAiStream(sessionId: string, onChange: () => void): () =
 }
 
 export function markStreamStarted(sessionId: string): void {
+  // 新一轮开始 ⇒ 上一轮的核验结论作废，否则答案已经换掉、徽标还挂在旧结果上。
+  verifies.delete(sessionId)
   void ensureStarted()
   active.add(sessionId)
   armWatchdog(sessionId)

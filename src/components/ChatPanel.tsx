@@ -12,7 +12,7 @@ import { mergeScopePrefixes } from '../utils/scopeMerge'
 import { parseScope, type TurnScope } from '../utils/scopeParser'
 import { translateErr } from '../utils/translateErr'
 import { basename, dirname, disambiguate } from '../utils/materialLabel'
-import { getStreamReasoning, getStreamText, hasAiDone, isPersisting, isStreamInFlight, markStreamEnded, markStreamStarted, subscribeAiStream, takeAiDone } from '../ai/streamStore'
+import { getAnswerVerify, getStreamReasoning, getStreamText, hasAiDone, isPersisting, isStreamInFlight, markStreamEnded, markStreamStarted, subscribeAiStream, takeAiDone, type AnswerVerifyPayload } from '../ai/streamStore'
 import { buildSessionFromDone } from '../ai/applyDone'
 import MentionPicker from './MentionPicker'
 import AiEventTimeline from './AiEventTimeline'
@@ -76,6 +76,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [scopeActionPreview, setScopeActionPreview] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string; reasoning: string } | null>(null)
+  // 依据核验是作答之后的旁路结果，晚于 ai-done 若干秒才到。
+  const [verify, setVerify] = useState<AnswerVerifyPayload | null>(null)
   // 引用悬浮卡（跟随鼠标，fixed 定位，pointer-events-none 不拦截 hover 移出）
   const [hoverCite, setHoverCite] = useState<{ x: number; y: number; path: string; snippet: string; terms: string[] } | null>(null)
   // 就地展开的引用卡：{ m: 消息下标, n: 材料编号(1-based) }
@@ -228,6 +230,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       }
       const done = takeAiDone(sid)
       if (done) applyDone(done)
+      setVerify(getAnswerVerify(sid) ?? null)
     }
 
     sync()
@@ -667,6 +670,53 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
             </div>
           </div>
         ))}
+        {verify && !loading && verify.checked > 0 && (
+          <div className="text-xs">
+            <details className="rounded-md border border-gray-200 dark:border-gray-700 px-2.5 py-1.5 text-gray-500 dark:text-gray-400">
+              <summary className="cursor-pointer select-none">
+                {verify.contradicted + verify.absent > 0 ? '⚠️' : '✅'} 依据核验：
+                {verify.checked} 条陈述中 {verify.supported} 条有原文依据
+                {verify.contradicted > 0 && `，${verify.contradicted} 条与原文不符`}
+                {verify.absent > 0 && `，${verify.absent} 条无依据`}
+                {verify.derived > 0 && `，${verify.derived} 条为推算`}
+                {verify.unchecked > 0 && `，${verify.unchecked} 条无法自动核验`}
+              </summary>
+              {verify.items.length > 0 && (
+                <ul className="mt-1 space-y-1">
+                  {verify.items.slice(0, 8).map(item => (
+                    <li key={item.id} className="flex items-start gap-1.5">
+                      <span className={`shrink-0 rounded px-1 ${
+                        item.verdict === 'contradicted'
+                          ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                          : item.verdict === 'absent'
+                            ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
+                            : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
+                      }`}>
+                        {item.verdict === 'contradicted'
+                          ? '与原文不符'
+                          : item.verdict === 'absent'
+                            ? '原文无依据'
+                            : item.verdict === 'derived'
+                              ? '推算'
+                              : '未核验'}
+                      </span>
+                      <span className="text-gray-600 dark:text-gray-400 break-all">
+                        {item.sentence.length > 120 ? item.sentence.slice(0, 120) + '…' : item.sentence}
+                        {item.correct && (
+                          <span className="text-red-600 dark:text-red-400">（原文为 {item.correct}）</span>
+                        )}
+                        {item.note && <span className="text-gray-400">（{item.note}）</span>}
+                      </span>
+                    </li>
+                  ))}
+                  {verify.items.length > 8 && (
+                    <li className="text-gray-400">… 另有 {verify.items.length - 8} 条</li>
+                  )}
+                </ul>
+              )}
+            </details>
+          </div>
+        )}
         {loading && (
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <LoadingSpinner className="size-3.5" />

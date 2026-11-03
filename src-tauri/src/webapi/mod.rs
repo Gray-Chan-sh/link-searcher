@@ -36,6 +36,9 @@ const BRIDGED_EVENTS: &[&str] = &[
     "ai-chunk",
     "ai-progress",
     "ai-done",
+    // 作答之后的旁路依据核验（`commands/ai/verify.rs`）。Web 端靠它显示核验徽标；
+    // 漏了它只会在浏览器里静默缺失（桌面端走 Tauri IPC，不受影响）。
+    "answer_verify",
     "migration-progress",
     "migration-warning",
     "bge-install-done",
