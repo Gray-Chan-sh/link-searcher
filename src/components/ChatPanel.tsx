@@ -676,7 +676,7 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               <summary className="cursor-pointer select-none">
                 {verify.contradicted + verify.absent > 0 ? '⚠️' : '✅'} 依据核验：
                 {verify.checked} 条陈述中 {verify.supported} 条有原文依据
-                {verify.contradicted > 0 && `，${verify.contradicted} 条与原文不符`}
+                {verify.contradicted > 0 && `，${verify.contradicted} 条与原文不一致`}
                 {verify.absent > 0 && `，${verify.absent} 条无依据`}
                 {verify.derived > 0 && `，${verify.derived} 条为推算`}
                 {verify.unchecked > 0 && `，${verify.unchecked} 条无法自动核验`}
@@ -685,15 +685,20 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                 <ul className="mt-1 space-y-1">
                   {verify.items.slice(0, 8).map(item => (
                     <li key={item.id} className="flex items-start gap-1.5">
+                      {/* 数值型的不符是确定性结论（原文里就是没有那个数），标红；
+                          叙述型只是"模型认为不一致"，标黄并且不展示 correct ——
+                          实测模型对叙述句给过 `correct="陈秀芳"` 这种胡话。 */}
                       <span className={`shrink-0 rounded px-1 ${
                         item.verdict === 'contradicted'
-                          ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                          ? item.numeric
+                            ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300'
+                            : 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
                           : item.verdict === 'absent'
                             ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300'
                             : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400'
                       }`}>
                         {item.verdict === 'contradicted'
-                          ? '与原文不符'
+                          ? item.numeric ? '与原文不符' : '表述待确认'
                           : item.verdict === 'absent'
                             ? '原文无依据'
                             : item.verdict === 'derived'

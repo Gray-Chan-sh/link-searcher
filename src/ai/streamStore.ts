@@ -14,6 +14,8 @@ export type VerifyItem = {
   sentence: string
   cites: number[]
   verdict: VerifyVerdict
+  /** 含可核对数值（日期/金额/文号）。`false` ＝ 叙述型，结论仅供参考。 */
+  numeric: boolean
   correct?: string
   note?: string
 }

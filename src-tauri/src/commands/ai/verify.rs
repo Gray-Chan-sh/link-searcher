@@ -67,6 +67,13 @@ pub struct VerifiedClaim {
     pub sentence: String,
     pub cites: Vec<usize>,
     pub verdict: Verdict,
+    /// 这条陈述含**可核对的数值**（日期/金额/文号…）。
+    ///
+    /// 决定结论的可信度：数值型的不符是**确定性**结论（原文里找不到那个数），
+    /// 叙述型（人物关系、结论）只能算"模型认为不稳"，UI 用不同措辞区分。
+    /// 2026-11-03 实测：模型对叙述型陈述给过 `contradicted` + `correct="陈秀芳"`
+    /// 这种无意义更正 —— 不能当权威结论展示。
+    pub numeric: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correct: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,6 +250,7 @@ fn prepare(
     let pending = pending
         .into_iter()
         .map(|c| VerifiedClaim {
+            numeric: !c.values.is_empty(),
             id: c.id,
             sentence: c.sentence,
             cites: c.cites,
@@ -615,6 +623,7 @@ pub fn prefilter(
             .collect();
         if available.is_empty() {
             decided.push(VerifiedClaim {
+                numeric: !claim.values.is_empty(),
                 id: claim.id,
                 sentence: claim.sentence.clone(),
                 cites: claim.cites.clone(),
@@ -624,15 +633,12 @@ pub fn prefilter(
             });
             continue;
         }
+        // 没有数值的陈述（人物关系、归属、结论）**也送 LLM**：这类句子的错误
+        // 恰恰最常见（引错文档 / 张冠李戴），而机械层对它们无能为力。
+        // 2026-11-03 实测：「陈秀芳的家庭成员有哪些」的答案 12 条全是人名关系，
+        // 若在此处判 unchecked，等于这个场景完全没有核验。
         if claim.values.is_empty() {
-            decided.push(VerifiedClaim {
-                id: claim.id,
-                sentence: claim.sentence.clone(),
-                cites: claim.cites.clone(),
-                verdict: Verdict::Unchecked,
-                correct: None,
-                note: Some("陈述中没有可核验的数值".into()),
-            });
+            pending.push(claim.clone());
             continue;
         }
         let hit = claim
@@ -641,6 +647,7 @@ pub fn prefilter(
             .any(|v| available.iter().any(|s| s.contains(v.as_str())));
         if hit {
             decided.push(VerifiedClaim {
+                numeric: true,
                 id: claim.id,
                 sentence: claim.sentence.clone(),
                 cites: claim.cites.clone(),
@@ -657,11 +664,13 @@ pub fn prefilter(
 
 const SYSTEM: &str = "你是事实核验助手。用户会给你若干条**待核验陈述**和它们引用的**原文片段**。\
 你的任务：只依据给定原文片段，判断每条陈述是否被支持。\
+陈述可以是数值（出生日期、金额、文号），也可以是**人物关系或归属**（谁是谁的父母、谁是谁的配偶、某文件涉及谁）。两类都要判断。\
 结论只能是下面四种之一：\
-- supported：原文明确支持（允许改写、单位换算、中文数字与阿拉伯数字等价）；\
+- supported：原文明确支持（允许改写、单位换算、中文数字与阿拉伯数字等价、同义称谓）；\
 - contradicted：原文里有这项事实，但数值或表述不符（此时必须给出 correct 字段，填原文的值）；\
 - absent：原文片段里根本没有这项事实；\
 - derived：陈述里的数字是由原文事实推算得出（例如由出生日期算出年龄），且推算依据在原文中。\
+⚠️ 若给定片段明显不完整（被截断、只截到一半、缺少必要上下文），用 \"unchecked\"，**不要猜成 absent**。\
 只输出 JSON 数组，不要解释、不要加代码块标记。格式：\
 [{\"id\":1,\"verdict\":\"supported\"},{\"id\":2,\"verdict\":\"contradicted\",\"correct\":\"1923\"}]";
 
@@ -678,10 +687,12 @@ pub fn build_llm_input(pending: &[Claim], spans: &HashMap<usize, String>) -> Opt
     let mut s = String::from("待核验陈述：\n");
     for c in capped {
         let nums: Vec<String> = c.cites.iter().map(|n| n.to_string()).collect();
+        // 单条截到 120 字：陈述清单必须排在片段前面，不能被长句挤掉，
+        // 否则 40 条 × 200 字就把 6k 预算吃光，模型一条原文都看不到。
         s.push_str(&format!(
             "{}. {}（引用材料：{}）\n",
             c.id,
-            c.sentence,
+            super::truncate_text(&c.sentence, 120),
             nums.join("、")
         ));
     }
@@ -738,11 +749,13 @@ fn apply_verdicts(pending: &mut [VerifiedClaim], parsed: &[(usize, Verdict, Opti
     for item in pending.iter_mut() {
         if let Some((verdict, correct)) = by_id.get(&item.id) {
             item.verdict = *verdict;
-            item.correct = correct.clone();
-            item.note = if *verdict == Verdict::Unchecked {
-                Some("模型未能判定".into())
-            } else {
-                None
+            // 叙述型陈述没有可核对的数值，模型给的 `correct` 是自由文本，
+            // 实测出现过 `correct="陈秀芳"` 这类无意义更正 → 一律不采纳。
+            item.correct = if item.numeric { correct.clone() } else { None };
+            item.note = match verdict {
+                Verdict::Unchecked => Some("模型未能判定".into()),
+                Verdict::Contradicted if !item.numeric => Some("模型认为表述不一致，仅供参考".into()),
+                _ => None,
             };
         }
     }
@@ -837,13 +850,15 @@ mod tests {
         assert_eq!(decided[0].verdict, Verdict::Unchecked);
     }
 
+    /// 没有数值的陈述（人物关系 / 结论）必须送 LLM —— 机械层帮不上忙，
+    /// 而这类句子的「引错文档」恰恰最常见。
     #[test]
-    fn prefilter_marks_prose_only_claim_as_unchecked() {
-        let claims = extract_claims("法院认为双方感情确已破裂 [3]。");
-        let sp = spans(&[(3, "本院认为，双方感情确已破裂。")]);
+    fn prefilter_escalates_prose_only_claim() {
+        let claims = extract_claims("陈贤文是陈秀芳的父亲 [8]。");
+        let sp = spans(&[(8, "陈贤文与陈秀芳系父女关系。")]);
         let (decided, pending) = prefilter(&claims, &sp);
-        assert!(pending.is_empty());
-        assert_eq!(decided[0].verdict, Verdict::Unchecked);
+        assert!(decided.is_empty(), "不应在这里下结论");
+        assert_eq!(pending.len(), 1);
     }
 
     #[test]
@@ -868,6 +883,46 @@ mod tests {
         assert_eq!(parsed[0].1, Verdict::Absent);
 
         assert!(parse_verdicts("模型没有按格式回").is_none());
+    }
+
+    /// 叙述型陈述的 `correct` 不可信（实测出现过 `"陈秀芳"`），必须丢弃。
+    #[test]
+    fn prose_contradiction_drops_model_correct_value() {
+        let mut pending = vec![VerifiedClaim {
+            id: 1,
+            sentence: "陈贤文是陈秀芳的父亲".into(),
+            cites: vec![8],
+            verdict: Verdict::Unchecked,
+            numeric: false,
+            correct: None,
+            note: None,
+        }];
+        apply_verdicts(
+            &mut pending,
+            &[(1, Verdict::Contradicted, Some("陈秀芳".into()))],
+        );
+        assert_eq!(pending[0].verdict, Verdict::Contradicted);
+        assert!(pending[0].correct.is_none(), "叙述型不得采纳 correct");
+        assert!(pending[0].note.is_some(), "需要标注仅供参考");
+    }
+
+    /// 数值型陈述的 `correct` 保留（"原文为 1923" 是有用的信息）。
+    #[test]
+    fn numeric_contradiction_keeps_correct_value() {
+        let mut pending = vec![VerifiedClaim {
+            id: 2,
+            sentence: "丁玉英（1938年出生）".into(),
+            cites: vec![18],
+            verdict: Verdict::Unchecked,
+            numeric: true,
+            correct: None,
+            note: None,
+        }];
+        apply_verdicts(
+            &mut pending,
+            &[(2, Verdict::Contradicted, Some("1923".into()))],
+        );
+        assert_eq!(pending[0].correct.as_deref(), Some("1923"));
     }
 
     #[test]
