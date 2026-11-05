@@ -1,3 +1,30 @@
+## 2026-11-06（第八十八轮）：LLM 是检索改写的唯一裁决者，删掉词表；聊天前预检三个通道
+
+> 起因：同一问题「王会芹的案件始末」连问两次都答"材料未提供"，而库里王会芹有 33 份卷宗
+> （一审/二审判决书、上诉状、答辩状…）。用户换成「案件**情况**」就答对了 —— 差别只在
+> `is_retrieval_stopword` 里有「情况」、没有「始末」。**用户得先猜对程序的词表**，这正是
+> "只让用户说程序能听懂的话"。
+
+- **病灶 1：LLM 写完，词表再审一遍**。删掉 `extract_retrieval_keywords` /
+  `is_retrieval_stopword` / `rewrite_query`（规则改写）/ `ensure_parent_entities` /
+  `strip_inherited_generic_terms` / `retry_expansion_*` / `is_specific_entity` /
+  `GENERIC_NOUN_TERMS` / `NON_ENTITY_WORDS`。检索关键词改为**模型输出的 `entities`**；
+  模型没给（超时/旧格式）就用**用户原话**检索，不再替用户换词（`rewrite.rs`、`prompt.rs`、
+  `sufficiency.rs`）。
+- **病灶 2：补查命中无条件前置**。`new_hits.extend(all_hits.drain(..))` 把 158 份只含泛词
+  「案件」的文书插到最前，注入上限 30 全被占满，BM25 第 1~28 名的王会芹卷宗被挤到 158 名
+  之后。改为 `merge_supplementary_hits`：**只有路径里真的含缺失实体**的补查命中可前置，
+  且封顶 10 份；其余追加队尾（新增 `supplementary_merge_tests` 三条回归）。
+- **结构化改写**：`llm_rewrite_query` 改为输出一行 JSON
+  `{"query","entities","self_contained"}`；prompt 明确「始末/情况/经过/来龙去脉/最早」
+  这类描述性词**不是实体**。旧的两行格式（`QUERY:`/`SELF_CONTAINED:`）仍可解析。
+- **聊天前预检三个通道**：此前只判 `llm_enabled()`（纯配置），embeddings/rerank 网关 404
+  时每轮静默降级、日志刷 404。新增 `ai::preflight_channels()`（embedding / rerank 各发一次
+  最小真实请求，失败也说清楚，结果缓存 120s），失败时本轮直接跳过向量/重排阶段并推一条
+  `capability` 进度提示（`ai/mod.rs`、`prompt.rs`）。
+- 预检**不阻断**聊天：embedding/rerank 是增强通道；LLM 是否可用仍由聊天请求本身验证
+  （本地模型冷加载可达 15s，预检会误判）。
+
 ## 2026-11-03（第八十七轮）：关系型陈述也送 LLM 裁定（v1.5.7）
 
 > 起因：真会话 E2E（`e2e-verify-1`）跑通后发现，问「陈秀芳的家庭成员有哪些」时
@@ -17,6 +44,8 @@
   `correct`，前端标黄显示「表述待确认」而不是标红「与原文不符」；只有数值型的不符
   才是确定性结论（原文里就是没有那个数）。
 - 新增两条单测守住这条：叙述型丢弃 `correct`、数值型保留 `correct`。
+- 归一化的字符剔除表里 `'，'` 与 `'\u{FF0C}'` 是同一个码位，删掉重复项（消除
+  `unreachable pattern` 警告）。
 
 ## 2026-11-03（第八十六轮）：答案依据核验（机械预筛 + LLM 批量裁定）（v1.5.6）
 

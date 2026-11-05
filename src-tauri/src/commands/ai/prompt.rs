@@ -4,7 +4,7 @@
 use super::*;
 use super::rewrite::{parent_person_entities, person_pronoun_surface};
 use super::sufficiency::{
-    check_sufficiency, expand_neighbor_chunks, expansion_queries, is_specific_entity, missing_slots,
+    check_sufficiency, expand_neighbor_chunks, expansion_queries, missing_slots,
     SufficiencySignals,
 };
 
@@ -250,9 +250,11 @@ struct AssembleJob {
     clarify_reply: Option<ClarifyReply>,
     last_q: String,
     search_q: String,
+    /// 模型判定的专名实体（检索关键词与补查判据的唯一来源）。
+    entities: Vec<String>,
     search_terms: Vec<String>,
     rewritten: bool,
-    /// 本轮是否依赖上文（模型自评；模型没给时用离线启发式）。决定是否沿用上一轮材料。
+    /// 本轮是否依赖上文（模型自评；模型没给时按"有历史"处理）。决定是否沿用上一轮材料。
     context_dependent: bool,
     /// Pronoun follow-up already bound to a parent person entity
     /// (surface, entity). Handed to the clarify engine so it does not report
@@ -262,6 +264,93 @@ struct AssembleJob {
     material_order: Vec<String>,
     app: Option<tauri::AppHandle>,
     cancel: Option<std::sync::Arc<crate::ai::CancelToken>>,
+}
+
+/// 合并"补查新增命中"与已有排序，返回 `(前置份数, 合并后的列表)`。
+///
+/// 补查是**补召回**，不是重排：只有路径里真的含缺失实体的命中可以前置（封顶
+/// `front_max`），其余一律追加到队尾 —— 已有的排序（BM25 名次 + 重排结果）优先。
+///
+/// 2026-11-06 实测：原先无条件 `new_hits.extend(all_hits.drain(..))`，158 个只含
+/// 泛词「案件」的文书被整体前置，注入上限 30 全被它们占满，而 BM25 第 1~28 名的
+/// 王会芹卷宗被挤到 158 名之后，模型只能答"材料未提供"。
+pub(super) fn merge_supplementary_hits(
+    existing: Vec<ScoredHit>,
+    new_hits: Vec<ScoredHit>,
+    entities: &[String],
+    front_max: usize,
+) -> (usize, Vec<ScoredHit>) {
+    let mut front: Vec<ScoredHit> = Vec::new();
+    let mut tail: Vec<ScoredHit> = Vec::new();
+    for hit in new_hits {
+        let path_hit =
+            !entities.is_empty() && entities.iter().any(|e| hit.path.contains(e.as_str()));
+        if path_hit && front.len() < front_max {
+            front.push(hit);
+        } else {
+            tail.push(hit);
+        }
+    }
+    let promoted = front.len();
+    front.extend(existing);
+    front.extend(tail);
+    (promoted, front)
+}
+
+#[cfg(test)]
+mod supplementary_merge_tests {
+    use super::*;
+
+    fn hit(id: &str, path: &str) -> ScoredHit {
+        ScoredHit {
+            file_id: id.to_string(),
+            path: path.to_string(),
+            bm25_score: None,
+            semantic_score: None,
+            rrf_score: None,
+            from_history: false,
+            from_chunk: false,
+            hit_chunks: Vec::new(),
+        }
+    }
+
+    /// 回归（2026-11-06）：补查命中里没有实体命中时，已有排序必须原封不动。
+    #[test]
+    fn supplementary_hits_never_displace_existing_order() {
+        let existing = vec![hit("a", "案件/WHQ/判决书.pdf"), hit("b", "案件/WHQ/上诉状.pdf")];
+        let new = vec![hit("x", "案件/未结案清单.txt"), hit("y", "其他案件/受理通知书.pdf")];
+        let (promoted, merged) =
+            merge_supplementary_hits(existing, new, &["王会芹".to_string()], 10);
+        assert_eq!(promoted, 0);
+        assert_eq!(
+            merged.iter().map(|h| h.file_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "x", "y"]
+        );
+    }
+
+    /// 路径真的含实体的补查命中可以前置，但封顶，且不能吃掉已有排序。
+    #[test]
+    fn entity_path_hits_promoted_but_capped() {
+        let existing = vec![hit("a", "案件/WHQ/判决书.pdf")];
+        let new: Vec<_> = (0..15)
+            .map(|i| hit(&format!("p{i}"), "案件/WHQ 王会芹/材料.pdf"))
+            .collect();
+        let (promoted, merged) =
+            merge_supplementary_hits(existing, new, &["王会芹".to_string()], 10);
+        assert_eq!(promoted, 10);
+        assert_eq!(merged.len(), 16);
+        assert_eq!(merged[10].file_id, "a", "已有结果必须排在前置命中之后、其余补查之前");
+    }
+
+    /// 模型没给实体时，任何补查命中都不允许前置。
+    #[test]
+    fn no_entities_promotes_nothing() {
+        let existing = vec![hit("a", "p/a")];
+        let new = vec![hit("x", "王会芹/判决.pdf")];
+        let (promoted, merged) = merge_supplementary_hits(existing, new, &[], 10);
+        assert_eq!(promoted, 0);
+        assert_eq!(merged[0].file_id, "a");
+    }
 }
 
 /// [`prepare_conversation_prompt`] plus a per-generation [`CancelToken`], so a
@@ -321,9 +410,31 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     );
     let mut events: Vec<(String, serde_json::Value)> = Vec::new();
     let material_order = prior_material_order(&ctx, session_id);
+    // 聊天前连通性预检：embedding / rerank 各发一次最小请求（结果缓存 2 分钟）。
+    // 失败不阻断回答，但**必须说出来**并让本轮跳过该通道 ——
+    // 否则网关 404 会表现成"答案总是缺东西"，而日志里只有每几秒一条的 404。
+    if !skip_llm_rewrite
+        && crate::ai::llm_enabled()
+        && let Ok(health) = tokio::task::spawn_blocking(crate::ai::preflight_channels).await
+    {
+        for (name, st) in [("embedding", &health.embedding), ("rerank", &health.rerank)] {
+            if !st.ok {
+                emit_progress(
+                    "capability",
+                    &format!("{name} 通道不可用，本轮跳过（{}）", st.detail),
+                    0,
+                    0,
+                );
+            }
+        }
+        events.push(("capability".into(), serde_json::json!({
+            "llm": { "ok": health.llm.ok, "detail": health.llm.detail },
+            "embedding": { "ok": health.embedding.ok, "detail": health.embedding.detail },
+            "rerank": { "ok": health.rerank.ok, "detail": health.rerank.detail },
+        })));
+    }
     emit_progress("query_rewrite", "查询改写中...", 0, 0);
-    let rule = rewrite_query(&last_q, messages);
-    // 上一条 user 消息（父问句）：实体继承与"新话题"判定的参照物。
+    // 上一条 user 消息（父问句）：只用于把代词绑定给 clarify 引擎。
     let parent_q = messages
         .iter()
         .rev()
@@ -334,52 +445,45 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     let is_retry = retry_prior_answer.is_some_and(|s| !s.trim().is_empty());
     // 重跑（卡片「换一批证据」）：问题仍是**原问题**（`question_from_messages` 保证），
     // 但检索词要换一批 —— 首轮用原词没找到能回答的材料，重跑的意义就在"换组词再搜"。
-    // 扩展失败一律回退规则链（宁可答得少，也不能不答；更不能原词再搜一遍假装重跑）。
+    // 扩展失败一律用原问句检索（宁可答得少，也不能不答；更不能原词再搜一遍假装重跑）。
     let retry_q = if is_retry {
         let prior = retry_prior_answer.unwrap_or("").trim().to_string();
-        match llm_expand_retry_query(&last_q, &prior).await {
-            // 扩查守卫与"新话题守卫"相反：这里只要求**锚点实体还在**（补词是目的，见函数注释）
-            Some(q) if !retry_expansion_keeps_question_entity(&q, &last_q) => {
-                log::warn!("[AI]   retry 扩查丢了本轮问句的锚点实体，弃用：{:?}", truncate_text(&q, 40));
-                None
-            }
-            // 且必须**真换词**：词集与首轮完全相同 = 原词再搜一遍，用户点了等于白发
-            // （2026-10-16 实测：LLM 把原句删几个虚词后回显，"换一批"给出同一批材料）。
-            Some(q) if !retry_expansion_adds_new_terms(&q, &last_q) => {
-                log::warn!("[AI]   retry 扩查没有新增检索词（= 原词再搜），弃用：{:?}", truncate_text(&q, 40));
-                None
-            }
-            Some(q) => Some(q),
-            None => None,
-        }
+        llm_expand_retry_query(&last_q, &prior).await
     } else {
         None
     };
     if is_retry {
         match &retry_q {
             Some(q) => log::info!("[AI]   retry 扩查：\"{}\" → \"{}\"", truncate_text(&last_q, 30), truncate_text(q, 40)),
-            None => log::info!("[AI]   retry 扩查未产出（回退规则链）：\"{}\"", truncate_text(&last_q, 30)),
+            None => log::info!("[AI]   retry 扩查未产出（用原问句检索）：\"{}\"", truncate_text(&last_q, 30)),
         }
     }
     // 代词绑定只用于**给 clarify 引擎提供绑定**（避免回答前多一句"指代不明确"提示），
-    // 不再短路检索：检索词一律交给 LLM 结合"之前的提问和回答"改写，
-    // 规则链只在 LLM 不可用时兜底（2026-11-02 调整）。
+    // 不短路检索：检索词一律交给 LLM 结合"之前的提问和回答"改写。
     let pronoun_binding: Option<(String, String)> = person_pronoun_surface(&last_q)
         .zip(parent_person_entities(parent_q).into_iter().next())
         .map(|(surface, entity)| (surface.to_string(), entity));
     let mut rewrite_fallback: Option<String> = None;
-    // 模型自评「这句话离开上文读不懂」；None = 模型没给（旧格式/回退规则链）。
+    // 模型自评「这句话离开上文读不懂」；None = 模型没给（旧格式/没走改写）。
     let mut self_contained: Option<bool> = None;
+    // 模型判定的专名实体：检索关键词与"要不要补查"都以它为准，不再用任何词表。
+    let mut llm_entities: Vec<String> = Vec::new();
     let (search_q, rewrite_method) = if let Some(q) = retry_q {
         (q, "retry")
     } else if skip_llm_rewrite || !crate::ai::llm_enabled() {
-        rewrite_fallback = Some("llm disabled".into());
-        (rule.query.clone(), "rule")
+        rewrite_fallback = Some(if skip_llm_rewrite {
+            "llm rewrite skipped".into()
+        } else {
+            "llm unavailable".into()
+        });
+        // 不改写就用用户原话检索：这是"用户怎么说就怎么搜"，不是用词典替他换词。
+        (last_q.clone(), "none")
     } else {
         let context_paths = prior_evidence_paths(&ctx, session_id);
         match llm_rewrite_query(&last_q, messages, &context_paths).await {
             super::rewrite::RewriteAttempt::Ok(ok) => {
                 self_contained = ok.self_contained;
+                llm_entities = ok.entities;
                 // 用**语料事实**过滤改写词：正文里一次都没出现过的词直接丢弃
                 // （编造的人名自动出局；「兄长/家兄」等同义词只要语料有就保留）。
                 match super::rewrite::strip_nonexistent_terms(&ok.query, &last_q, |t| {
@@ -387,44 +491,38 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
                 }) {
                     Some(q) => (q, "llm"),
                     None => {
-                        log::warn!("[AI]   llm rewrite 的词在语料里全不存在，回退规则链");
+                        log::warn!("[AI]   llm rewrite 的词在语料里全不存在，改用原问句检索");
                         rewrite_fallback = Some("no term exists in corpus".into());
-                        (rule.query.clone(), "rule")
+                        (last_q.clone(), "none")
                     }
                 }
             }
             super::rewrite::RewriteAttempt::Invalid(why) => {
-                log::info!("[AI]   llm rewrite 无效（回退规则链）：{why}");
+                log::info!("[AI]   llm rewrite 无效（改用原问句检索）：{why}");
                 rewrite_fallback = Some(format!("invalid: {why}"));
-                (rule.query.clone(), "rule")
+                (last_q.clone(), "none")
             }
             super::rewrite::RewriteAttempt::Timeout(secs) => {
-                log::warn!("[AI]   llm rewrite 超时 {secs}s（回退规则链）");
+                log::warn!("[AI]   llm rewrite 超时 {secs}s（改用原问句检索）");
                 rewrite_fallback = Some(format!("timeout {secs}s"));
-                (rule.query.clone(), "rule")
+                (last_q.clone(), "none")
             }
             super::rewrite::RewriteAttempt::Unavailable => {
                 rewrite_fallback = Some("llm unavailable".into());
-                (rule.query.clone(), "rule")
+                (last_q.clone(), "none")
             }
         }
     };
-    // 规则兜底才补父问句实体：LLM 改写成功时它已经是"结合对话"的产物，
-    // 再补会把上一轮主题词（身份证号/多少）加回来。
-    let search_q = if rewrite_method == "rule" {
-        super::rewrite::ensure_parent_entities(&search_q, parent_q, &last_q)
-    } else {
-        search_q
-    };
     // 是否需要沿用上一轮材料：**以模型自评为准**（它看得到完整对话，
-    // 兄长/家兄/各人/办公室 对它都是普通语义）；模型没给时才退回离线启发式。
+    // 兄长/家兄/各人/办公室 对它都是普通语义）；模型没给时按结构判断 ——
+    // 有历史就沿用（不涉及任何词表）。
     let context_dependent = match self_contained {
         Some(v) => !v,
-        None => super::rewrite::needs_history_rewrite(&last_q),
+        None => messages.iter().filter(|m| m.role == "user").count() > 1,
     };
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
-    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={}, method={})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten, rewrite_method);
+    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={}, method={}, entities={:?})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten, rewrite_method, llm_entities);
     events.push(("query_rewrite".into(), serde_json::json!({
         "original": last_q,
         "rewritten": search_q,
@@ -449,6 +547,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         clarify_reply: clarify_reply.cloned(),
         last_q,
         search_q,
+        entities: llm_entities,
         search_terms,
         rewritten,
         context_dependent,
@@ -470,8 +569,8 @@ fn assemble_conversation_prompt(
 ) -> Result<PreparedConversation, String> {
     let AssembleJob {
         messages, source_ids, scope, session_retrieval_scope, strict_docs, full_recall,
-        session_id, clarify_reply, last_q, search_q, search_terms, rewritten,
-        context_dependent, pronoun_binding, mut events, mut material_order, app, cancel,
+        session_id, clarify_reply, last_q, search_q, entities: llm_entities, search_terms,
+        rewritten, context_dependent, pronoun_binding, mut events, mut material_order, app, cancel,
     } = job;
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = &app {
@@ -672,48 +771,39 @@ fn assemble_conversation_prompt(
     let inner_semantic_fuse = std::env::var("LINK_SEARCHER_INNER_SEMANTIC_FUSE")
         .map(|v| !v.eq_ignore_ascii_case("off"))
         .unwrap_or(true)
-        && crate::ai::embedding_enabled();
+        && crate::ai::embedding_enabled()
+        && crate::ai::embedding_reachable();
     let use_rrf = std::env::var("LINK_SEARCHER_FUSION")
         .map(|v| !v.eq_ignore_ascii_case("mix"))
         .unwrap_or(true);
     let mut rrf_acc: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     let trace_ids_v = trace_target_ids(&ctx, &std::env::var("LINK_SEARCHER_TRACE_TARGET").unwrap_or_default());
-    // 从问句提炼核心实体词（如"常宏"），三通道共用：
-    // 完整问句含大量泛词（民事/案件/多少），会稀释 BM25/向量信号并把
-    // 精准文件挤出注入前 30；实体词让"常宏"这类专有名词直接命中。
-    let retrieval_kws = extract_retrieval_keywords(&search_q);
+    // 检索关键词 = **模型判定的专名实体**（2026-11-06 起）。
+    //
+    // 这里不再用 jieba + 停用词表二次加工：此前 LLM 写出「王会芹 案件 始末」，
+    // 代码又把它切成 ["王会芹","始末"]，于是"用户能不能得到答案"取决于某个词
+    // 恰好在不在停用词表里（「情况」在、「始末」不在）。谁有区分度由模型决定。
+    let entity_kws = llm_entities.clone();
+    let mut final_kws = entity_kws.clone();
     let vocab_rewrite_enabled = std::env::var("LINK_SEARCHER_VOCAB_REWRITE")
         .map(|v| !v.eq_ignore_ascii_case("off"))
         .unwrap_or(false);
-    let final_kws = if vocab_rewrite_enabled {
-        match ctx.db.get() {
-            Ok(c) => match crate::ai::vocabulary_rewrite(&search_q, &c) {
-                Some(llm_kws) => {
-                    let mut merged = retrieval_kws.clone();
-                    for k in llm_kws {
-                        if !merged.contains(&k) {
-                            merged.push(k);
-                        }
+    if vocab_rewrite_enabled
+        && let Ok(c) = ctx.db.get()
+            && let Some(llm_kws) = crate::ai::vocabulary_rewrite(&search_q, &c) {
+                for k in llm_kws {
+                    if !final_kws.contains(&k) {
+                        final_kws.push(k);
                     }
-                    log::info!("[AI]   vocab_rewrite merged kws: {:?}", merged);
-                    merged
                 }
-                None => retrieval_kws,
-            },
-            Err(e) => {
-                log::warn!("[AI] vocab_rewrite: db error: {e}");
-                retrieval_kws
+                log::info!("[AI]   vocab_rewrite merged kws: {:?}", final_kws);
             }
-        }
-    } else {
-        retrieval_kws
-    };
     let bm25_query = if final_kws.is_empty() {
         search_q.clone()
     } else {
         final_kws.join(" OR ")
     };
-    log::info!("[AI]   final_kws={:?} bm25_query=\"{}\"", final_kws, truncate_text(&bm25_query, 60));
+    log::info!("[AI]   final_kws={:?} (entities={:?}) bm25_query=\"{}\"", final_kws, entity_kws, truncate_text(&bm25_query, 60));
     // 语义通道里「强相关」（过阈值）的命中数：字符集兜底的触发条件之一。
     let mut strong_vector_hits = 0usize;
     if !last_q.trim().is_empty() {
@@ -784,7 +874,7 @@ fn assemble_conversation_prompt(
         trace_rank("2. 仅 BM25 入池", all_hits.iter().map(|h| h.file_id.as_str()), &trace_ids_v);
         emit_progress("bm25", &format!("BM25 完成，命中 {} 份", bm25_count), bm25_count, bm25_count);
         let has_locked_scope = mention_file_ids.is_some() && mention_file_ids.as_ref().is_some_and(|ids| !ids.is_empty());
-        if crate::ai::embedding_enabled() && !has_locked_scope {
+        if crate::ai::embedding_enabled() && crate::ai::embedding_reachable() && !has_locked_scope {
             emit_progress("vector", "语义扫描中...", 0, 0);
             log::info!("[AI]   about to call vector_full_scan");
             let c = ctx.db.get().map_err(|e| format!("db error: {e}"))?;
@@ -1137,7 +1227,7 @@ fn assemble_conversation_prompt(
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .unwrap_or(50);
-        if rerank_enabled && all_hits.len() > 10 {
+        if rerank_enabled && crate::ai::rerank_reachable() && all_hits.len() > 10 {
             let top_n = rerank_top_n.min(all_hits.len());
             // 重排是最长的**静默**阶段：远程 /rerank 一次要传 50 份片段，实测
             // 17s（debug）且此前一行日志/事件都不发 —— 用户只看到"语义扫描完成"
@@ -1275,9 +1365,12 @@ fn assemble_conversation_prompt(
                     evidence_text.push_str(text);
                     evidence_text.push('\n');
                 }
-                for kw in final_kws.iter().take(3) {
+                // 只在**模型判定为专名**的词上做定向补查：哪个词值得补查由模型决定，
+                // 不再用 GENERIC_NOUN_TERMS / jieba 词性判断（「始末」正是被那套
+                // 词表当成实体，才触发了一轮把正确答案冲掉的补查，2026-11-06）。
+                for kw in entity_kws.iter().take(3) {
                     let kw = kw.trim();
-                    if !is_specific_entity(kw) || DOC_TYPE_NOUNS.contains(&kw) {
+                    if kw.is_empty() {
                         continue;
                     }
                     let in_text = evidence_text.contains(kw);
@@ -1357,10 +1450,23 @@ fn assemble_conversation_prompt(
                         }
                         if !new_hits.is_empty() {
                             let added = new_hits.len();
-                            // Entity-targeted hits go in front; existing rerank
-                            // order is preserved behind them.
-                            new_hits.extend(all_hits.drain(..));
-                            all_hits = new_hits;
+                            // 补查是**补召回**，不是重排：绝不把已经排好的正确结果顶下去。
+                            //
+                            // 2026-11-06 实测：这里原先无条件 `new_hits.extend(all_hits.drain(..))`
+                            // 把 158 个只含泛词「案件」的文书插到最前，注入上限 30 全被它们占满，
+                            // 而王会芹本人的 33 份卷宗（BM25 第 1~28 名）被挤到 158 名之后 ——
+                            // 模型只能看到未结案清单里那一行，答"材料未提供"。
+                            //
+                            // 现在只有「路径里真的含有缺失实体」的命中可以前置，且封顶
+                            // ENTITY_FRONT_MAX 份；其余一律追加到队尾，等预算有空位才用。
+                            const ENTITY_FRONT_MAX: usize = 10;
+                            let (promoted, merged) = merge_supplementary_hits(
+                                std::mem::take(&mut all_hits),
+                                new_hits,
+                                &missing_entities,
+                                ENTITY_FRONT_MAX,
+                            );
+                            all_hits = merged;
                             all_hits.retain(|h| {
                                 hit_in_scope(
                                     &h.file_id,
@@ -1375,6 +1481,7 @@ fn assemble_conversation_prompt(
                                 "phase": "post_rerank",
                                 "queries": variants,
                                 "added": added,
+                                "promoted": promoted,
                                 "hit_count": all_hits.len(),
                                 "missing_entities": &missing_entities,
                                 "missing_slots": &missing_slots_found,

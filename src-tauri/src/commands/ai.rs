@@ -630,8 +630,8 @@ mod topic_shift_tests {
 }
 
 mod rewrite;
-pub use rewrite::{RewriteAttempt, RewriteOutcome, llm_rewrite_query, llm_expand_retry_query, rewrite_query};
-use rewrite::{extract_retrieval_keywords, question_from_messages, retry_expansion_adds_new_terms, retry_expansion_keeps_question_entity};
+pub use rewrite::{RewriteAttempt, RewriteOk, llm_rewrite_query, llm_expand_retry_query};
+use rewrite::question_from_messages;
 #[cfg(test)]
 use rewrite::{carry_forward_source, rewrite_history, valid_rewrite_output};
 
@@ -1647,78 +1647,19 @@ mod history_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 改写结果必须携带可检索词，否则视为无效（回退规则链 + 范围兜底），
-    /// 避免"LLM 改成泛词 → 过滤后仍为空"。
+    /// 改写结果的合法性只看**结构**：空、原样回显、超长。哪些词有区分度由模型
+    /// 决定，不再用停用词表判断（否则答案取决于用户挑的同义词在不在词表里）。
     #[test]
-    fn valid_rewrite_output_requires_retrievable_term() {
-        // 带实体：有效
+    fn valid_rewrite_output_checks_structure_only() {
         assert_eq!(
             valid_rewrite_output("毛弟 辱骂 聊天记录", "列出表格").as_deref(),
             Some("毛弟 辱骂 聊天记录")
         );
-        // 全是停用词/泛词：无效
-        assert!(valid_rewrite_output("文档 内容 材料", "这是什么文档").is_none());
         // 空 / 回显原句：无效
         assert!(valid_rewrite_output("", "这是什么文档").is_none());
         assert!(valid_rewrite_output("这是什么文档", "这是什么文档").is_none());
-    }
-
-    #[test]
-    fn rewrite_query_expands_demonstrative_followup_with_parent_keywords() {
-        let history = vec![
-            msg("user", "季度报告的主要结论是什么"),
-            msg("assistant", "结论是营收增长 20%。"),
-            msg("user", "它的风险有哪些"),
-        ];
-        let out = rewrite_query("它的风险有哪些", &history);
-        assert_ne!(out.query, "它的风险有哪些", "deictic follow-up must be rewritten");
-        let rewritten = &out.query;
-        assert!(!rewritten.starts_with("它"), "deictic head must be replaced: {rewritten}");
-        assert!(rewritten.contains("季度"), "must carry parent keywords: {rewritten}");
-        assert!(rewritten.contains("报告"), "must carry parent keywords: {rewritten}");
-    }
-
-    #[test]
-    fn rewrite_query_returns_original_for_self_contained_question() {
-        let history = vec![msg("user", "季度报告")];
-        let rewritten = rewrite_query("为什么营收下降", &history);
-        assert_eq!(rewritten.query, "为什么营收下降");
-    }
-
-    #[test]
-    fn rewrite_query_short_question_borrows_parent_keywords() {
-        let history = vec![
-            msg("user", "如何配置索引目录"),
-            msg("assistant", "在设置页添加目录即可。"),
-            msg("user", "增量呢"),
-        ];
-        let out = rewrite_query("增量呢", &history);
-        assert_ne!(out.query, "增量呢");
-        assert!(out.query.contains("索引"), "short follow-up must borrow parent keywords: {}", out.query);
-    }
-
-    #[test]
-    fn rewrite_query_triggers_on_referential_time_preface() {
-        let history = vec![
-            msg("user", "请总结这份年度财务报告"),
-            msg("assistant", "报告显示营收增长 20%。"),
-            msg("user", "刚才提到的那份报告呢"),
-        ];
-        let out = rewrite_query("刚才提到的那份报告呢", &history);
-        assert_ne!(out.query, "刚才提到的那份报告呢", "referential preface must trigger rewrite");
-        assert!(out.query.contains("年度"), "must carry parent keywords: {}", out.query);
-        assert!(out.query.contains("报告"), "must carry parent keywords: {}", out.query);
-    }
-
-    #[test]
-    fn valid_rewrite_output_rejects_garbage_and_echoes() {
-        assert!(valid_rewrite_output("", "原问题").is_none());
-        assert!(valid_rewrite_output("  原问题  ", "原问题").is_none());
-        // 无检索词（单字符）同样无效：不会比原句更有用。
-        assert!(valid_rewrite_output("x", "原问题").is_none());
-        assert!(valid_rewrite_output("营收", "原问题").is_some());
-        let good = valid_rewrite_output("季度报告的风险有哪些", "它的风险有哪些");
-        assert_eq!(good.as_deref(), Some("季度报告的风险有哪些"));
+        // 泛词化**不再**由词典否决：模型说它有用就用它（语料存在性过滤是下一道闸）。
+        assert!(valid_rewrite_output("文档 内容 材料", "这是什么文档").is_some());
     }
 
     #[test]
@@ -2210,78 +2151,8 @@ mod auto_cite_md_tests {
 }
 
 #[cfg(test)]
-mod retrieval_keyword_tests {
+mod rewrite_history_tests {
     use super::*;
-
-    #[test]
-    fn extracts_person_name_from_full_question() {
-        // 完整问句中"常宏"是核心实体，泛词（民事/案件/多少）必须被过滤
-        let kws = extract_retrieval_keywords("涉及常宏的民事案件一共有多少，请列表");
-        assert_eq!(kws, vec!["常宏"], "got: {kws:?}");
-    }
-
-    #[test]
-    fn extracts_company_and_topic() {
-        let kws = extract_retrieval_keywords("万城的股东资格确认纠纷");
-        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
-        assert!(kws.contains(&"股东".to_string()), "got: {kws:?}");
-    }
-
-    #[test]
-    fn keeps_topic_word_for_generic_question() {
-        // 无专有实体时保留主题词（"纪要"），调用方用该词检索
-        let kws = extract_retrieval_keywords("上周会议纪要");
-        assert!(kws.contains(&"纪要".to_string()), "got: {kws:?}");
-    }
-
-    #[test]
-    fn single_person_name_kept_whole() {
-        assert_eq!(extract_retrieval_keywords("常宏"), vec!["常宏"]);
-    }
-
-    #[test]
-    fn full_word_survives_positional_cutoff() {
-        // 回归：MAX_KEYWORDS=3 时"不动产"（排在子词"不动"/"动产"之后）被截断丢弃
-        let kws = extract_retrieval_keywords("律师委托查询不动产手续材料");
-        assert!(kws.contains(&"不动产".to_string()), "got: {kws:?}");
-        assert!(!kws.contains(&"不动".to_string()), "sub-word leaked: {kws:?}");
-        assert!(!kws.contains(&"动产".to_string()), "sub-word leaked: {kws:?}");
-    }
-
-    #[test]
-    fn sub_word_fragments_deduped_to_full_word() {
-        let kws = extract_retrieval_keywords("不动产权证书遗失声明");
-        assert!(kws.contains(&"不动产".to_string()), "got: {kws:?}");
-        assert!(!kws.contains(&"不动".to_string()), "sub-word leaked: {kws:?}");
-        assert!(!kws.contains(&"动产".to_string()), "sub-word leaked: {kws:?}");
-    }
-
-    #[test]
-    fn proper_nouns_kept_whole_by_search_mode() {
-        // 守护：切词模式切回 Default 会把人名拆成单字并被 <2 chars 过滤丢弃
-        let kws = extract_retrieval_keywords("涉及常宏的民事案件一共有多少，请列表");
-        assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
-        let kws = extract_retrieval_keywords("万城的股东资格确认纠纷");
-        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
-        let kws = extract_retrieval_keywords("联嵘公司的工商变更沿革");
-        assert!(kws.contains(&"联嵘".to_string()), "got: {kws:?}");
-    }
-
-    #[test]
-    fn new_function_word_stopwords_filtered() {
-        let kws = extract_retrieval_keywords("请根据工商登记材料说明情况");
-        assert!(!kws.contains(&"根据".to_string()), "got: {kws:?}");
-    }
-
-    #[test]
-    fn no_positional_keyword_cap() {
-        let kws = extract_retrieval_keywords("常宏 郑坚敏 万城 违约金 比例 审计");
-        for want in ["常宏", "郑坚敏", "万城", "违约金", "审计"] {
-            assert!(kws.contains(&want.to_string()), "missing {want}, got: {kws:?}");
-        }
-        assert!(!kws.contains(&"违约".to_string()), "sub-word leaked: {kws:?}");
-        assert!(!kws.contains(&"约金".to_string()), "sub-word leaked: {kws:?}");
-    }
 
     #[test]
     fn rewrite_history_includes_context_file_names() {
@@ -2289,52 +2160,6 @@ mod retrieval_keyword_tests {
         let paths = vec!["案件/WJY 汪均益/行政诉讼/汪均益行政上诉案.docx".to_string()];
         let h = rewrite_history(&msgs, &paths, "为什么认定他是利害关系人");
         assert!(h.contains("汪均益行政上诉案.docx"), "context file missing: {h}");
-    }
-
-    #[test]
-    fn keeps_case_numbers_but_drops_short_numbers() {
-        let kws = extract_retrieval_keywords("41833号案件 常宏");
-        assert!(kws.iter().any(|k| k == "41833"), "案号是文件名锚点，不应丢弃: {kws:?}");
-        assert!(kws.contains(&"常宏".to_string()), "got: {kws:?}");
-        let short = extract_retrieval_keywords("第 12 号");
-        assert!(short.iter().all(|k| k != "12"), "短数字无区分度，应丢弃: {short:?}");
-    }
-
-    #[test]
-    fn case_suffix_keeps_entity_name() {
-        // 回归（2026-10-16 汪均益案）：jieba 把"案"粘在实体后（"汪均益案"），
-        // 而语料里没有该写法（实测全库零命中）—— 必须补回实体"汪均益"，
-        // 否则 BM25/路径/向量三通道全部丢锚点，首轮 30 份材料全是噪声。
-        let kws = extract_retrieval_keywords("汪均益案的最终结果是什么？");
-        assert!(kws.contains(&"汪均益".to_string()), "got: {kws:?}");
-
-        let kws = extract_retrieval_keywords("万城案的仲裁结果");
-        assert!(kws.contains(&"万城".to_string()), "got: {kws:?}");
-
-        // "X案件" 形式同样取回 X。
-        let kws = extract_retrieval_keywords("汪均益案件的最终结果");
-        assert!(kws.contains(&"汪均益".to_string()), "got: {kws:?}");
-    }
-
-    #[test]
-    fn case_suffix_strip_rejects_action_phrases() {
-        // 动作短语（立案/结案/撤案…）去尾会得到"已立""未结"这类碎片，必须放弃。
-        // 注意只断言**去尾路径才会产生**的碎片；"该案/结案/已经"是改动前就有的普通
-        // 分词结果，不在本测试范围内。
-        for q in ["本案是否已立案", "该案已经结案", "撤回撤案申请", "已立案"] {
-            let kws = extract_retrieval_keywords(q);
-            for frag in ["已立", "未立", "已结", "未结"] {
-                assert!(!kws.contains(&frag.to_string()), "fragment leaked in {q:?}: {kws:?}");
-            }
-        }
-        // 短词/泛词不产出碎片："立案/本案/方案/专案" 去尾 <2 字或本身是泛词。
-        for q in ["请给出方案", "专案组名单"] {
-            let kws = extract_retrieval_keywords(q);
-            assert!(
-                !kws.iter().any(|k| k == "方" || k == "专"),
-                "fragment leaked in {q:?}: {kws:?}"
-            );
-        }
     }
 }
 
@@ -2496,40 +2321,6 @@ mod chunk_budget_tests {
         assert_eq!(whole, vec![(0, short.chars().count())]);
     }
 
-    /// 重跑扩查的守卫与"新话题守卫"相反：扩查**必须**保住本轮问句的锚点实体，
-    /// 但**允许**补同义/结论性词 —— 否则"换一批证据"就退化成"原词再搜一遍"。
-    #[test]
-    fn retry_expansion_keeps_anchor_but_allows_added_terms() {
-        let q = "汪均益案的最终结果是什么？";
-        assert!(
-            retry_expansion_keeps_question_entity("汪均益 判决书 裁定书 结案 调解", q),
-            "补同义/结论性词是扩查的目的，不算违规"
-        );
-        assert!(retry_expansion_keeps_question_entity("汪均益案 最终结果 判决", q));
-        assert!(
-            !retry_expansion_keeps_question_entity("陈正先 判决 裁定", q),
-            "把本轮的人名换掉 = 搜的已经不是同一个问题"
-        );
-        // 问句本身没有锚点实体 ⇒ 无从判定，放行（空/泛输出由 valid_rewrite_output 挡）；
-        // 用退化问句构造"检索词为空"这一分支（`<2` 字即空）。
-        assert!(retry_expansion_keeps_question_entity("任何东西", "？"));
-    }
-
-    /// 「真换词」守卫：扩查必须新增检索词；把原句删几个虚词后回显（词集与首轮相同）
-    /// 视为无效 —— 否则"换一批"会给出同一批材料（2026-10-16 实测踩到）。
-    #[test]
-    fn retry_expansion_requires_new_terms() {
-        let q = "汪均益案的最终结果是什么？";
-        // 补结论性词/新锚点是扩查的目的 → 通过
-        assert!(retry_expansion_adds_new_terms("汪均益案 判决 裁定 结案 调解 处理结果 结论", q));
-        assert!(retry_expansion_adds_new_terms("汪均益 歙县 自然资源 判决", q));
-        // 删虚词回显 / 同词集重组 → 弃用
-        assert!(!retry_expansion_adds_new_terms("汪均益案 最终结果", q), "删虚词回显不算换词");
-        assert!(!retry_expansion_adds_new_terms("汪均益案的结果", q), "同词集重组不算换词");
-        // 问句本身没有检索词可对比 → 放行（空/泛输出由 valid_rewrite_output 挡）
-        assert!(retry_expansion_adds_new_terms("把时间列出来", "？"));
-    }
-
     /// P1：本轮问题 = **最后一条 user 消息**。重跑时会话最后一条是上一轮回答，
     /// 曾经因此把"重跑"变成"对上一条回答再问一遍"（查询都跑偏了）。
     #[test]
@@ -2566,9 +2357,9 @@ mod chunk_budget_tests {
 
     /// 端到端回归：复现导出的"毛弟被辱骂"会话（首问"毛弟是否被人辱骂？" →
     /// 追问"列出清单，把时间、辱骂人以及完整的辱骂内容列出"），走真实
-    /// `prepare_conversation_prompt` 管线，验证三处缺陷均已修复：
-    /// 1) 改写后的 search_q 保留父问句实体"毛弟"（缺陷 1）
-    /// 2) 逻辑范围"案件/和嘉案/聊天记录"解析为真实前缀"案件/HJ 和嘉 名誉权案/…"（缺陷 2）
+    /// `prepare_conversation_prompt` 管线，验证：
+    /// 1) 未经 LLM 改写时检索词就是用户原话（不再有词典兜底）
+    /// 2) 逻辑范围"案件/和嘉案/聊天记录"解析为真实前缀（缺陷 2）
     /// 3) 上轮引用证据随追问带入本轮 evidence（缺陷 3）
     #[tokio::test]
     async fn e2e_hejia_followup_retains_entity_scope_and_history() {
@@ -2640,10 +2431,10 @@ mod chunk_budget_tests {
 
         let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None, None).await.unwrap();
 
-        // 缺陷 1：改写 query 必须保留父问句实体"毛弟"
-        assert!(prep.search_query.contains("毛弟"), "改写 query 必须含毛弟: {:?}", prep.search_query);
-        // 缺陷 3：上一轮证据文件已注入为本轮材料（缺陷 1 补全的实体词使它们可被命中，
-        // 或在本轮检索 0 命中时经 Layer 0.5 历史注入）。
+        // 不再改写 ⇒ 检索词就是用户原话（2026-11-06：删除词典兜底，不再替用户换词）。
+        // 这条断言反过来守护"未经 LLM 改写时不做任何词表加工"。
+        assert_eq!(prep.search_query, "列出清单，把时间、辱骂人以及完整的辱骂内容列出");
+        // 缺陷 3：上一轮证据文件已注入为本轮材料（本轮检索无词重叠时经 Layer 0.5 历史注入）。
         assert!(prep.evidence.iter().any(|e| e.file_id == f1), "上轮聊天记录证据必须带入: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
         assert!(prep.evidence.iter().any(|e| e.file_id == f2), "上轮辱骂摘要证据必须带入: {:?}", prep.evidence.iter().map(|e| &e.path).collect::<Vec<_>>());
         // 目录纪律：范围外目录（HJ 和嘉 名誉权案 / WC 万城）不得泄漏进 evidence——
@@ -2710,8 +2501,8 @@ mod chunk_budget_tests {
         let session_scope = vec![];
         let strict = false;
 
-        // skip_llm_rewrite=true 走规则改写（无 LLM 网关）→ 追问"帮我整理一下摘要"检索关键词为空，
-        // 父实体经 rewrite 补入 → 但父文件内容无词重叠 → BM25 0 命中 → 历史注入兜底。
+        // skip_llm_rewrite=true（无 LLM 网关）→ 检索词就是原话"帮我整理一下摘要"，
+        // 与父文件内容无词重叠 → BM25 0 命中 → 历史注入兜底。
         let prep = prepare_conversation_prompt(&state, &messages, &source_ids, &scope, &session_scope, strict, false, true, None, "", None, None).await.unwrap();
         assert!(
             prep.evidence.iter().any(|e| e.from_history && e.file_id == f1),

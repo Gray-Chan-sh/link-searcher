@@ -1,16 +1,10 @@
-//! Follow-up query rewriting: deictic expansion, LLM rewrite, stopwords and
-//! retrieval keyword extraction.
+//! 追问改写：LLM 结合对话把提问改写成可独立检索的查询，并给出专名实体。
+//!
+//! 2026-11-06 起**没有"规则改写"这条分支**：哪些词有区分度、哪个词是实体，一律由
+//! 模型裁决。此前用 jieba + 停用词表在 LLM 之后再"审"一遍，导致同一问题的答案
+//! 取决于用户挑哪个同义词（「情况」在词表里 → 答对；「始末」不在 → 答不出）。
 
 use super::{ChatMessage, truncate_text};
-/// Outcome of a follow-up query rewrite: the query to actually retrieve
-/// with (may equal the original when no rewrite applied).
-pub struct RewriteOutcome {
-    pub query: String,
-}
-
-/// 指代词：以它们开头的追问在检索上基本无从落地，必须借历史补全。
-const DEICTIC: &[&str] =
-    &["它", "这个", "那个", "上述", "上文", "该", "那", "此", "刚才", "上面", "之前", "前面"];
 
 /// 本轮问题 = **最后一条 user 消息**（不是"最后一条消息"）。
 ///
@@ -26,40 +20,8 @@ pub(super) fn question_from_messages(messages: &[ChatMessage]) -> String {
         .unwrap_or_default()
 }
 
-/// 本轮问句是否**需要借历史才能检索**：过短、以指代词开头、或过滤后一个检索词都不剩。
-///
-/// 两处共用：`rewrite_query` 用它决定是否前置父问句关键词；
-/// [`may_inherit_parent_entities`] 用它判定"必须借历史"的场合。
-pub(super) fn needs_history_rewrite(q: &str) -> bool {
-    let q = q.trim();
-    q.chars().count() < 4
-        || DEICTIC.iter().any(|p| q.starts_with(p))
-        || extract_retrieval_keywords(q).is_empty()
-        || is_ellipsis_followup(q)
-}
-
-/// 省略式追问：以「呢 / 吧 / 吗 / 么」收尾，且**整句没有任何专有名词**。
-///
-/// 2026-11-02 实测：`标的最大的呢？` 在「陈骥代理的案子」之后被问出来，老判据三条
-/// 都不成立（有 6 个字、不以指代词开头、有检索词）→ 判成自足问题 → 只拿
-/// `标的最大的` 去检索，候选池从 5 040 掉到 1 710，等于丢掉了上下文主体。
-///
-/// 判据里"无专有名词"是关键：`汪均益案的最终结果呢？` 已经点名了对象，不该继承；
-/// `标的最大的呢？` 没有任何可锚定的专名，只能回上一轮找。
-fn is_ellipsis_followup(q: &str) -> bool {
-    let t = q
-        .trim()
-        .trim_end_matches(['？', '?', '。', '！', '!', '，', ',', ' ', '～', '~']);
-    if t.is_empty() {
-        return false;
-    }
-    let ends_with_particle =
-        t.ends_with('呢') || t.ends_with('吧') || t.ends_with('吗') || t.ends_with('么');
-    ends_with_particle && !has_proper_noun(t)
-}
-
-/// 亲属/角色名词：jieba 常把「哥哥/父亲」标成 `nr`，但它们**不是具体对象**，
-/// 不能当作"问句已自带锚点"，也不能当继承实体。封闭小表，随用随补。
+/// 继承父问句实体时用的角色/亲属名词：jieba 常把「哥哥/父亲」标成 `nr`，但它们
+/// **不是具体对象**，不能当作可继承的锚点实体。
 const ROLE_NOUNS: &[&str] = &[
     "哥哥", "姐姐", "弟弟", "妹妹", "兄弟", "姐妹", "父亲", "母亲", "爸爸", "妈妈", "爷爷",
     "奶奶", "外公", "外婆", "儿子", "女儿", "妻子", "丈夫", "前妻", "前夫", "配偶", "家属",
@@ -70,48 +32,6 @@ fn is_role_noun(word: &str) -> bool {
     ROLE_NOUNS.contains(&word)
 }
 
-/// 问句里是否出现人名 / 地名 / 机构名 / 专有名词（jieba `nr|ns|nt|nz`，长度 ≥2）。
-pub(super) fn has_proper_noun(text: &str) -> bool {
-    crate::search::schema::JIEBA
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .tag(text, true)
-        .iter()
-        .any(|t| {
-            let tag = t.tag.to_string();
-            let w = t.word.trim();
-            w.chars().count() >= 2
-                && !is_role_noun(w)
-                && (tag.starts_with("nr")
-                    || tag.starts_with("ns")
-                    || tag.starts_with("nt")
-                    || tag.starts_with("nz"))
-        })
-}
-
-/// Query rewrite for follow-up questions: when the current question needs history
-/// (see [`needs_history_rewrite`]) prepend keywords from the most recent *previous*
-/// user message so BM25 sees the referents the pronoun points back to.
-/// The LLM branch (see [`llm_rewrite_query`]) replaces pronouns contextually when
-/// the gateway is available.
-pub fn rewrite_query(last_q: &str, messages: &[ChatMessage]) -> RewriteOutcome {
-    let q = last_q.trim();
-    if !needs_history_rewrite(q) {
-        return RewriteOutcome { query: q.to_string() };
-    }
-    let parent = messages
-        .iter()
-        .rev()
-        .filter(|m| m.role == "user")
-        .map(|m| m.content.trim())
-        .find(|c| !c.is_empty() && *c != q);
-    let Some(parent) = parent else { return RewriteOutcome { query: q.to_string() } };
-    let kws = parent_keywords(parent, 3);
-    if kws.is_empty() {
-        return RewriteOutcome { query: q.to_string() };
-    }
-    RewriteOutcome { query: format!("{} {}", kws.join(" "), q) }
-}
 #[cfg(test)]
 mod pronoun_followup_tests {
     use super::*;
@@ -121,27 +41,6 @@ mod pronoun_followup_tests {
         let entities = parent_person_entities("陈正先的身份证号是多少？");
         assert!(entities.iter().any(|e| e == "陈正先"), "{entities:?}");
         assert!(!entities.iter().any(|e| e == "身份证号"), "{entities:?}");
-    }
-
-    /// 规则兜底：父问句的关键词必须是**专名**，不能是主题词。
-    /// 2026-11-02 实测：取前 3 个词会把 `身份证号` 带进「那他涉及哪些案件」。
-    #[test]
-    fn fallback_parent_keywords_prefer_proper_nouns() {
-        let kws = parent_keywords("陈正先的身份证号是多少？", 3);
-        assert_eq!(kws, vec!["陈正先".to_string()], "{kws:?}");
-
-        let kws = parent_keywords("万城公司人员列表", 3);
-        assert_eq!(kws, vec!["万城公司".to_string()], "{kws:?}");
-    }
-
-    /// 回归（2026-11-02 实测）：`标的最大的呢？` 被判成自足问题，只拿"标的最大的"
-    /// 去检索，候选池 5 040 → 1 710，丢了上一轮的主体。
-    #[test]
-    fn trailing_particle_followup_needs_history() {
-        assert!(needs_history_rewrite("标的最大的呢？"));
-        assert!(needs_history_rewrite("那个案子的结果吧？") || needs_history_rewrite("结果吧？"));
-        // 已点名具体对象 → 自足，不该继承上一轮。
-        assert!(!needs_history_rewrite("汪均益案的最终结果呢？"));
     }
 }
 
@@ -153,24 +52,34 @@ mod history_backed_entity_tests {
         ChatMessage { role: role.into(), content: content.into() }
     }
 
-    /// 改写输出解析：两行格式（QUERY / SELF_CONTAINED）。
+    /// 改写输出解析：JSON（query / entities / self_contained）是主格式。
     #[test]
-    fn parses_two_line_rewrite_reply() {
-        let (q, sc) = parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
-        assert_eq!(q, "陈秀芳 兄长 出生日期");
-        assert_eq!(sc, Some(false));
-
-        let (q, sc) = parse_rewrite_reply("QUERY: 汪均益案 判决\nSELF_CONTAINED: yes");
-        assert_eq!(q, "汪均益案 判决");
+    fn parses_json_rewrite_reply() {
+        let raw = r#"{"query":"王会芹 一审 二审 判决","entities":["王会芹"],"self_contained":"yes"}"#;
+        let (q, ents, sc) = parse_rewrite_reply(raw);
+        assert_eq!(q, "王会芹 一审 二审 判决");
+        assert_eq!(ents, vec!["王会芹".to_string()]);
         assert_eq!(sc, Some(true));
     }
 
-    /// 兼容旧格式（模型只回一行查询）：self_contained 未知，交给调用方回退启发式。
+    /// 模型常把 JSON 包在 ```json 代码块里，或前后带一句解释。
     #[test]
-    fn parses_legacy_single_line_reply() {
-        let (q, sc) = parse_rewrite_reply("陈秀芳 家庭成员");
-        assert_eq!(q, "陈秀芳 家庭成员");
-        assert_eq!(sc, None);
+    fn parses_json_inside_fences() {
+        let raw = "```json\n{\"query\":\"陈秀芳 兄长 出生日期\",\"entities\":[\"陈秀芳\"],\"self_contained\":\"no\"}\n```";
+        let (q, ents, sc) = parse_rewrite_reply(raw);
+        assert_eq!(q, "陈秀芳 兄长 出生日期");
+        assert_eq!(ents, vec!["陈秀芳".to_string()]);
+        assert_eq!(sc, Some(false));
+    }
+
+    /// 旧格式（两行 QUERY / SELF_CONTAINED）仍要能解析：网关/model 换版时不能让整轮
+    /// 改写直接失效。entities 缺失 ⇒ 空表，检索退回"模型给的查询串本身"。
+    #[test]
+    fn parses_legacy_two_line_reply() {
+        let (q, ents, sc) = parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
+        assert_eq!(q, "陈秀芳 兄长 出生日期");
+        assert!(ents.is_empty(), "{ents:?}");
+        assert_eq!(sc, Some(false));
     }
 
     /// 用**语料事实**过滤改写词：语料里不存在的词被丢弃，同义词只要存在就保留。
@@ -218,24 +127,6 @@ mod history_backed_entity_tests {
         assert!(h.contains("不得作为事实依据"), "必须标注仅供参考: {h}");
     }
 
-    /// 依赖上文的追问必须被识别为"无专名"，否则沿用上一轮证据的开关不会打开。
-    /// 2026-11-03 实测：`今天是2026年11月12日，各人的年龄是多少` 大多被误判成"有专名"。
-    #[test]
-    fn context_dependent_followups_have_no_proper_noun() {
-        for q in [
-            "今天是2026年11月12日，各人的年龄是多少",
-            "今天是2026年11月12日",
-            "她的哥哥今年多少岁了",
-            "各人的年龄是多少",
-            "办公室",
-        ] {
-            assert!(!has_proper_noun(q), "{q} 不该被判为含专名");
-        }
-        // 反例：自带具体对象 ⇒ 不是依赖上文的追问
-        assert!(has_proper_noun("汪均益案的最终结果是什么？"));
-        assert!(has_proper_noun("陈秀芳的家庭成员有哪些？"));
-    }
-
     /// 回归（2026-11-03）：旧实现的沿用闸门要求"本轮命中 < 30"，而正常检索动辄数千命中
     /// ⇒ 追问轮从不沿用上一轮证据（实测 `from_history=0`），模型据此编出错误的出生年。
     #[test]
@@ -252,38 +143,20 @@ mod history_backed_entity_tests {
     }
 }
 
-#[cfg(test)]
-mod inherited_term_tests {
-    use super::*;
-
-    #[test]
-    fn drops_parent_verbs_and_quantifiers() {
-        let llm = "申洲 大通 会计师 事务所 做过 多份 验资 报告 所有 这些文号里有没有重复的？";
-        let out = strip_inherited_generic_terms(llm, "这些文号里有没有重复的？");
-        assert!(!out.contains("做过"), "{out}");
-        assert!(!out.contains("多份"), "{out}");
-        assert!(!out.contains("所有"), "{out}");
-        assert!(out.contains("验资"), "{out}");
-        assert!(out.contains("这些文号"), "{out}");
-    }
-
-    #[test]
-    fn keeps_terms_the_user_actually_typed() {
-        // "所有" is part of the current question here → must survive.
-        let out = strip_inherited_generic_terms("万城公司 所有 工商变更", "万城公司所有工商变更");
-        assert!(out.contains("所有"), "{out}");
-    }
-}
-
-/// 解析改写的两行输出：
+/// 解析改写输出。
 ///
-/// ```text
-/// QUERY: 陈秀芳 兄长 出生日期
-/// SELF_CONTAINED: no
+/// 主格式是**一行 JSON**（模型据此同时给出查询串、实体表与"是否依赖上文"）：
+///
+/// ```json
+/// {"query":"王会芹 一审 二审 判决","entities":["王会芹"],"self_contained":"yes"}
 /// ```
 ///
-/// 兼容旧格式（模型只回一行查询）：此时 `self_contained = None`，调用方退回离线启发式。
-fn parse_rewrite_reply(raw: &str) -> (String, Option<bool>) {
+/// 兼容旧格式（`QUERY:` / `SELF_CONTAINED:` 两行、或只回一行查询串）：此时 `entities`
+/// 为空表，检索只用 `query` 本身。
+fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>) {
+    if let Some((query, entities, self_contained)) = parse_rewrite_json(raw) {
+        return (query, entities, self_contained);
+    }
     let mut query: Option<String> = None;
     let mut self_contained: Option<bool> = None;
     for line in raw.lines() {
@@ -302,11 +175,51 @@ fn parse_rewrite_reply(raw: &str) -> (String, Option<bool>) {
             };
         }
     }
-    match query {
-        Some(q) if !q.is_empty() => (q, self_contained),
+    let q = match query {
+        Some(q) if !q.is_empty() => q,
         // 没有 QUERY: 前缀 → 视为旧格式，整段就是查询
-        _ => (raw.trim().to_string(), self_contained),
+        _ => raw.trim().to_string(),
+    };
+    (q, Vec::new(), self_contained)
+}
+
+/// 从模型回复里抠出第一个 JSON 对象（允许 ```json 围栏、前后解释文字）。
+fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>)> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
     }
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        query: String,
+        #[serde(default)]
+        entities: Vec<String>,
+        #[serde(default)]
+        self_contained: Option<serde_json::Value>,
+    }
+    let reply: Reply = serde_json::from_str(&raw[start..=end]).ok()?;
+    let query = reply.query.trim().to_string();
+    if query.is_empty() {
+        return None;
+    }
+    let self_contained = match reply.self_contained {
+        Some(serde_json::Value::Bool(b)) => Some(b),
+        Some(serde_json::Value::String(s)) => match s.trim().to_lowercase().as_str() {
+            "yes" | "true" | "1" | "是" => Some(true),
+            "no" | "false" | "0" | "否" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    let entities = reply
+        .entities
+        .into_iter()
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+        .collect();
+    Some((query, entities, self_contained))
 }
 
 /// 用**语料事实**过滤改写词：正文索引里一次都没出现过的词直接丢弃。
@@ -315,7 +228,7 @@ fn parse_rewrite_reply(raw: &str) -> (String, Option<bool>) {
 /// 而「兄长 / 家兄」这类同义词只要语料里出现过就保留 —— 不需要任何封闭词表。
 ///
 /// 本轮问句里用户自己写的词**不校验**（用户可能故意用生僻写法）。
-/// 全部被丢光 ⇒ 返回 `None`，调用方回退规则链。
+/// 全部被丢光 ⇒ 返回 `None`，调用方退回原问句（不使用任何词典）。
 pub(super) fn strip_nonexistent_terms(
     rewritten: &str,
     current_q: &str,
@@ -343,21 +256,15 @@ pub(super) fn strip_nonexistent_terms(
     }
 }
 
-/// Validate an LLM rewrite response: non-empty, not longer than the input
-/// query's practical retrieval ceiling, not echoing the original, and — the
-/// key point — carrying at least one *retrievable* term.
+/// Validate an LLM rewrite response: non-empty, not echoing the original, and
+/// not absurdly long.
 ///
-/// 「先改写再做停用词过滤」的前置保证就在这里：若改写结果经停用词过滤后
-/// 一个检索词都不剩（例如 LLM 只把问题换成"文档 内容"这类泛词），它并不比
-/// 原句更有用，视为无效 → 回退规则链（再由目录/范围兜底接手），避免把一次
-/// 无效的 LLM 往返当成有效改写继续往下走。
+/// 这里**不再**用停用词表判断"是否还剩检索词"：哪些词有区分度由模型决定
+/// （2026-11-06：词典裁决把「始末」当实体、把「情况」当泛词，同一问题的答案
+/// 取决于用户挑哪个同义词）。空输出/原样回显这类**结构性**问题仍在此拦截。
 pub(super) fn valid_rewrite_output(s: &str, original: &str) -> Option<String> {
     let t = s.trim().trim_matches(['"', '\'', '“', '”']);
     if t.is_empty() || t == original.trim() || t.chars().count() > 80 {
-        return None;
-    }
-    if extract_retrieval_keywords(t).is_empty() {
-        log::info!("[AI]   llm rewrite rejected: no retrievable term in {:?}", truncate_text(t, 40));
         return None;
     }
     Some(t.to_string())
@@ -413,17 +320,20 @@ pub async fn llm_rewrite_query(
         return RewriteAttempt::Unavailable;
     }
     let history_str = rewrite_history(messages, context_paths, last_q);
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的提问改写成一条**可独立检索**的中文查询。\
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的提问改写成**一条可独立检索的中文查询**，\
+并同时判断这条查询依赖哪些实体。\
 规则：\
-1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」「兄长呢」），必须从上文找出它真正指向的人名/机构名/案件名补进查询。\
-2) 继承的主题实体必须**来自对话历史**（用户的提问或助手的回答），不得凭空编造。\
+1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」「兄长呢」），必须从上文找出它真正指向的人名/机构名/案件名补进检索词。\
+2) 继承的实体必须**来自对话历史**（用户的提问或助手的回答），不得凭空编造。\
 3) 若当前问题本身就是一个完整、独立的新问题（自带明确的人名/机构名/案件名/文件号），就只围绕它改写，**不要**引入历史里的对象。\
-4) 助手的历史回答只用于判断「这句话在说什么」，**不得**把它当作事实写进查询。\
-5) 查询用最小必要关键词（6～12 个词，空格分隔），去掉“的/了/吗/呢/报告/文件”这类无区分词。\
-输出格式（两行，不要解释、不要引号）：\
-QUERY: <改写后的检索词>\
-SELF_CONTAINED: yes 或 no\
-其中 SELF_CONTAINED 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
+4) 助手的历史回答只用于判断「这句话在说什么」，**不得**把它当作事实写进检索词。\
+5) query 用最小必要检索词（4～12 个，空格分隔），保留有区分度的词，去掉「的/了/吗/呢」这类虚词；\
+不要堆同义词，也不要把「案件/文件/材料/情况/结果」这类在语料里到处都是的词当主检索词。\
+6) entities 只填**能在语料里定位到具体对象的专名**：人名、机构名、案号、项目名、地点。\
+「始末 / 情况 / 经过 / 来龙去脉 / 最早 / 结果」这类**描述性/过程性词不是实体，禁止写进 entities** —— 它们不会出现在卷宗正文里，写进去会把检索带偏。没有专名时给空数组。\
+输出**一行 JSON**（不要代码块、不要解释）：\
+{\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"self_contained\":\"yes|no\"}\
+self_contained 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
     let user = format!("{history_str}\n当前问题：{last_q}");
     let sys = system.to_string();
     let budget = rewrite_timeout_secs();
@@ -438,10 +348,11 @@ SELF_CONTAINED: yes 或 no\
         let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys_c, &user_c));
         match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
             Ok(Ok(Some(s))) => {
-                let (query_raw, self_contained) = parse_rewrite_reply(&s);
+                let (query_raw, entities, self_contained) = parse_rewrite_reply(&s);
                 return match valid_rewrite_output(&query_raw, last_q) {
                     Some(v) => RewriteAttempt::Ok(RewriteOk {
-                        query: strip_inherited_generic_terms(&v, last_q),
+                        query: v,
+                        entities,
                         self_contained,
                     }),
                     None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
@@ -476,9 +387,9 @@ SELF_CONTAINED: yes 或 no\
 /// 日志里只剩 `method=rule`，查不出是网关慢还是守卫拦的（2026-11-02 实测：
 /// 一次 5.0s 超时与一次被守卫弃用，现象完全相同）。
 pub enum RewriteAttempt {
-    /// 可用（已通过 `valid_rewrite_output` + 泛词清洗 + 语料存在性过滤）。
+    /// 可用（已通过 `valid_rewrite_output` + 语料存在性过滤）。
     Ok(RewriteOk),
-    /// 模型返回了，但内容不可用（空/超长/无检索词/原样回显）。
+    /// 模型返回了，但内容不可用（空/超长/原样回显）。
     Invalid(String),
     /// 超时。
     Timeout(u64),
@@ -489,11 +400,16 @@ pub enum RewriteAttempt {
 /// 一次成功的改写。
 pub struct RewriteOk {
     pub query: String,
+    /// 模型判定的**专名实体**（人名/机构名/案号/项目名）。检索与"要不要补查"
+    /// 都以它为准 —— 这是替换掉 jieba + 停用词表的唯一裁决点（2026-11-06）。
+    ///
+    /// 为空表是合法结果（问题里没有专名，比如"合同违约金上限是多少"）。
+    pub entities: Vec<String>,
     /// 模型自己判断「这句话离开上文读不懂」。
     ///
     /// 这是"要不要沿用上一轮材料"的**主判据**：模型看得到完整对话，
     /// `兄长 / 家兄 / 各人 / 办公室` 这类说法对它都是普通语义，不需要我们列词表。
-    /// `None` 表示模型没给这个字段（老格式/解析失败）→ 调用方退回离线启发式。
+    /// `None` 表示模型没给这个字段（老格式/解析失败）→ 调用方按"有历史就沿用"处理。
     pub self_contained: Option<bool>,
 }
 
@@ -507,23 +423,6 @@ fn rewrite_timeout_secs() -> u64 {
         .unwrap_or(60)
 }
 
-/// 最近若干条消息的**纯文本**（含助手回答），供"改写引入的实体是否被历史支持"判定。
-///
-/// 与 [`rewrite_history`] 的区别：这里不带格式、不做角色筛选，只用来做**存在性**
-/// 检查 —— 改写里出现的人名/机构名只要在历史里出现过就允许继承。
-pub(super) fn recent_history_text(messages: &[ChatMessage], last_q: &str) -> String {
-    let mut out = String::new();
-    for m in messages {
-        let c = m.content.trim();
-        if c.is_empty() || c == last_q.trim() {
-            continue;
-        }
-        out.push_str(c);
-        out.push('\n');
-    }
-    out
-}
-
 ///
 /// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
 /// 的材料，这次换一组**不一样**但更可能命中的检索词。
@@ -533,10 +432,10 @@ pub(super) fn recent_history_text(messages: &[ChatMessage], last_q: &str) -> Str
 /// - 任务不是"补全指代"，而是"换词"：首轮没答上多半是检索词过于具体、或用了语料里
 ///   没有的说法，所以要求保留区分性实体（人名/案号/年份），补上同义词、上位词与
 ///   结论性词（判决/裁定/调解/结案…看问题而定）；
-/// - 仍走 [`valid_rewrite_output`]：泛词化、空输出、原样回显一律视为无效。
+/// - 仍走 [`valid_rewrite_output`]：空输出、原样回显一律视为无效。
 ///
-/// 返回 `None` ⇒ 调用方回退规则链：**"换一批"绝不能退化成"同一个查询再搜一次"
-/// （那就是白点一次），但更不能因为扩展失败就不回答。**
+/// 返回 `None` ⇒ 调用方用原问句检索：**"换一批"绝不能退化成"同一个查询再搜一次"**
+/// （那就是白点一次），但更不能因为扩展失败就不回答。
 pub async fn llm_expand_retry_query(question: &str, prior_answer: &str) -> Option<String> {
     let q = question.trim();
     if q.is_empty() || !crate::ai::llm_enabled() {
@@ -554,178 +453,11 @@ pub async fn llm_expand_retry_query(question: &str, prior_answer: &str) -> Optio
     }
 }
 
-/// 重跑扩查的守卫：**本轮问句的锚点实体必须还在**。
-///
-/// 与 [`rewrite_adds_foreign_entity`] 防的是**相反**的两件事，判据也相反：
-/// - 新话题守卫防"**多**出上一轮的人名/案名"；
-/// - 这里防"**丢**掉本轮问句的人名/案号"。
-///
-/// 扩查**本来就该补词**（判决书 / 裁定书 / 结案 / 调解…这些正是首轮没命中的原因），
-/// 若把"补词"当违规拦下来，重跑就退化成"原词再搜一遍" —— 用户点了等于白发
-/// （2026-10-16 实测踩到：`汪均益案 最终结果` 被这条判据之外的守卫拦掉，`retry` 标记
-/// 变成 true 但 `rewritten` 与原问题一模一样）。故只要求"至少保住一个锚点实体"。
-pub(super) fn retry_expansion_keeps_question_entity(expanded: &str, question: &str) -> bool {
-    let anchors = extract_retrieval_keywords(question);
-    if anchors.is_empty() {
-        // 问句本身没有区分性实体（如"把时间列出来"）→ 无从判定；空输出/泛词由
-        // `valid_rewrite_output` 挡住。
-        return true;
-    }
-    let lower_expanded = expanded.to_lowercase();
-    if anchors.iter().any(|a| lower_expanded.contains(&a.to_lowercase())) {
-        return true;
-    }
-    // 反向包含也要认：锚点常是**复合词**（"汪均益案"），而扩查可能只用其中的人名
-    // （"汪均益"）—— 那同样是锚定在本轮问句的实体上，不能判成"丢了锚点"。
-    let lower_anchors: Vec<String> = anchors.iter().map(|a| a.to_lowercase()).collect();
-    extract_retrieval_keywords(expanded)
-        .iter()
-        .any(|t| t.chars().count() >= 2 && lower_anchors.iter().any(|a| a.contains(&t.to_lowercase())))
-}
-
-/// 重跑扩查的「真换词」守卫：扩查结果必须引入**本轮问句之外的新检索词**。
-///
-/// 与 [`retry_expansion_keeps_question_entity`] 互补：那条保"不丢锚点"，这条防"没换词"。
-/// 只挡"与原句相同"不够 —— LLM 常把原句删几个虚词后回显，词集与首轮完全相同，
-/// 用户点了「换一批」却还是同一批材料（2026-10-16 实测：
-/// `汪均益案的最终结果是什么？` → `汪均益案 最终结果`，两轮的 `final_kws` 一模一样）。
-///
-/// 判据：扩查结果里存在至少一个检索词，与问句的每个检索词**都无包含关系**
-/// （"汪均益案" 与 "汪均益" 互为包含 → 视为同词，不算新词）。词集无新增即弃用
-/// （调用方回退常规链）。
-pub(super) fn retry_expansion_adds_new_terms(expanded: &str, question: &str) -> bool {
-    let q_kws = extract_retrieval_keywords(question);
-    if q_kws.is_empty() {
-        // 问句本身没有检索词可对比 → 无从判定；空输出/泛词由 `valid_rewrite_output` 挡住。
-        return true;
-    }
-    let q_lower: Vec<String> = q_kws.iter().map(|k| k.to_lowercase()).collect();
-    extract_retrieval_keywords(expanded).iter().any(|k| {
-        let kl = k.to_lowercase();
-        !q_lower
-            .iter()
-            .any(|q| q == &kl || q.contains(kl.as_str()) || kl.contains(q.as_str()))
-    })
-}
-
-fn is_rewrite_stopword(w: &str) -> bool {
-    matches!(w,
-        "它" | "这个" | "那个" | "上述" | "上文" | "该" | "那" | "此"
-        | "的" | "了" | "吗" | "呢" | "啊" | "什么" | "如何" | "怎么" | "怎样"
-        | "请" | "一下" | "我" | "你" | "是" | "在" | "有" | "和" | "与" | "及"
-        | "对" | "于" | "一个" | "会" | "能" | "让")
-}
-
-/// 检索级停用词：问句中无区分度的泛词。它们会稀释 BM25/向量信号，
-/// 把"常宏"这类核心实体挤到检索排序后面。
-fn is_retrieval_stopword(w: &str) -> bool {
-    is_rewrite_stopword(w)
-        || matches!(w,
-            // 疑问/数量泛词
-            "多少" | "几个" | "哪些" | "什么" | "是否" | "有无" | "怎么" | "如何"
-            | "一共" | "总共" | "合计" | "数量" | "数目" | "份" | "个" | "几"
-            // 动作/主题泛词
-            | "涉及" | "相关" | "有关" | "关于" | "涉及到的" | "需要" | "知道" | "看看"
-            | "告诉" | "查询" | "搜索" | "查找" | "列出" | "列表" | "列举" | "汇总" | "整理"
-            // 连接/引导泛词（问句开头的高频虚词，无检索区分度）
-            | "根据" | "依据" | "按照" | "依照" | "说明" | "表明" | "请问" | "指明" | "指出"
-            // 领域泛词（检索全库时无区分度）
-            | "案件" | "案子" | "民事" | "民事案件" | "刑事案件" | "刑事" | "行政" | "行政诉讼"
-            | "诉讼" | "起诉" | "判决" | "裁定" | "案由"
-            | "文件" | "文档" | "资料" | "材料" | "内容" | "信息" | "情况" | "问题"
-            | "公司" | "单位" | "部门" | "人员" | "时间" | "日期" | "地点" | "会议纪要")
-}
-
-/// 从检索问句中提炼核心实体词（专有名词优先，如人名/地名/机构名），
-/// 用于 BM25/路径/向量三通道的精准检索。
-///
-/// 用 `TokenizeMode::Search` 而非词性标注：jieba 默认词典不收录人名
-/// （"常宏"会被 tag 拆成 常+宏 两个单字），而 Search 模式能保留
-/// "常宏"/"万城" 这类专有名词为整体词。
-///
-/// Search 模式会先输出子词片段（如"不动产"→"不动"/"动产"/"不动产"），
-/// 这里在收集后丢弃被更长候选包含的子词片段，只保留完整词。
-///
-/// 例："涉及常宏的民事案件一共有多少，请列表" → ["常宏"]
-///      "万城的股东资格确认纠纷" → ["万城", "股东资格"]
-///      "上周会议纪要" → []（无实体，调用方回退完整问句）
-pub(super) fn extract_retrieval_keywords(query: &str) -> Vec<String> {
-    let q = query.trim();
-    if q.chars().count() < 2 {
-        return Vec::new();
-    }
-    let mut out: Vec<String> = Vec::new();
-    for t in crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner()).tokenize(q, jieba_rs::TokenizeMode::Search, true) {
-        // jieba-rs 的 Token 直接带 word（&str），无需手动切片
-        let w = t.word.trim();
-        if w.is_empty() || w.chars().count() < 2 || is_retrieval_stopword(w) {
-            continue;
-        }
-        // 4 位以上的纯数字保留：案号/编号（如 "22963"）是文件名里的强锚点，
-        // 丢弃它会让"22963 号判决…"这类提问匹配不到目标文件。
-        let digits = w.chars().filter(|c| c.is_ascii_digit()).count();
-        if digits < 4
-            && w.chars().all(|c| c.is_ascii_digit() || c.is_ascii_punctuation() || c.is_whitespace())
-        {
-            continue;
-        }
-        if out.iter().any(|k: &String| k == w) {
-            continue;
-        }
-        out.push(w.to_string());
-    }
-    // 「X案」补回实体 X：jieba 会把类别后缀"案"粘在实体后（"汪均益案的最终结果"
-    // → "汪均益案"），而语料里通常没有"X案"这种写法（正文写"汪均益"、"汪均益诉…"），
-    // 该词就是**零命中词**；只保留它的话，实体将从 BM25/路径/向量三通道全部消失
-    // （2026-10-16 实测："汪均益案的最终结果是什么？"首轮 30 份材料全噪声、答"材料不足"；
-    // 同一条管线只要带上"汪均益"就能注入一审判决书/48号裁定并答对）。
-    // 只对去尾后 ≥2 字、非泛词、非动作短语（"已立案"→"已立"）的词生效。
-    for w in out.clone() {
-        let prefix: Option<String> = if let Some(p) = w.strip_suffix("案件") {
-            Some(p.to_string())
-        } else {
-            w.strip_suffix('案').map(|p| p.to_string())
-        };
-        let Some(prefix) = prefix else { continue };
-        if prefix.chars().count() < 2 || is_retrieval_stopword(&prefix) {
-            continue;
-        }
-        // 动作短语（立案/结案/撤案/办案/受案…）不得产出"已立"这类碎片。
-        if prefix
-            .chars()
-            .last()
-            .is_some_and(|c| matches!(c, '立' | '诉' | '审' | '结' | '撤' | '办' | '受' | '查' | '处'))
-        {
-            continue;
-        }
-        if !out.contains(&prefix) {
-            out.push(prefix);
-        }
-    }
-    // 丢弃被更长候选包含的子词片段（"不动"/"动产" ⊆ "不动产"）；例外：**"X案"/"X案件"
-    // 不覆盖实体"X"** —— 前者可能根本不在语料里，让"X"活下来才有召回锚点（见上）。
-    out
-        .iter()
-        .filter(|a| {
-            !out.iter().any(|b| {
-                b.as_str() != a.as_str()
-                    && b.chars().count() > a.chars().count()
-                    && b.contains(a.as_str())
-                    && !(b.ends_with('案')
-                        && (b.trim_end_matches('案') == a.as_str()
-                            || b.trim_end_matches("案件") == a.as_str()))
-            })
-        })
-        .cloned()
-        .collect()
-}
-
 /// The pronoun surface itself (longest match first, so "他们" wins over "他").
 /// Needed to feed a binding into the clarify engine: we already resolved "他"
 /// to a concrete person, so the engine must not report it as ambiguous.
 ///
-/// 注：这里只服务 clarify，不再决定检索词 —— 检索词由 LLM 结合对话改写
-/// （2026-11-02 起，规则链只在 LLM 不可用时兜底）。
+/// 注：这里只服务 clarify，不决定检索词 —— 检索词由 LLM 结合对话改写。
 pub(super) fn person_pronoun_surface(text: &str) -> Option<&'static str> {
     ["他们", "她们", "他", "她", "该人", "此人", "当事人"]
         .iter()
@@ -735,9 +467,9 @@ pub(super) fn person_pronoun_surface(text: &str) -> Option<&'static str> {
 
 /// 父问句里适合继承的实体：人名 / 地名 / 机构名 / 专名（jieba `nr|ns|nt|nz`）。
 ///
+/// 仅供 clarify 的代词绑定使用（把"他"绑定成上一轮的人名），**不再决定检索词**。
+///
 /// 机构后缀会与前面的专名**拼接**：`万城`(ns) + `公司`(n) → `万城公司`。
-/// 不拼的话「万城公司人员列表」只能取出 `万城`，而"办公室"这类省略式追问真正
-/// 需要的是整个机构名（2026-11-02 实测）。
 pub(super) fn parent_person_entities(text: &str) -> Vec<String> {
     const ORG_SUFFIX: &[&str] = &[
         "公司", "事务所", "集团", "银行", "法院", "委员会", "中心", "医院", "学校", "大学", "局",
@@ -777,112 +509,6 @@ pub(super) fn parent_person_entities(text: &str) -> Vec<String> {
         }
     }
     out
-}
-
-/// 检索级规则兜底：父问句的实体 + 本轮问句（无实体时用父问句关键词）。
-///
-/// 注：代词不再单独短路检索 —— 那会跳过"结合对话改写"这一步，把上一轮的
-/// 主题词（身份证号/多少）带进来（2026-11-02 实测）。这里只作为 LLM 不可用时的兜底。
-
-/// Scrubs verbs/quantifiers that an LLM rewrite copied over from the parent
-/// turn but that the current question never asked for.
-///
-/// 2026-11-02 实测：追问 `这些文号里有没有重复的？` 的 LLM 改写是
-/// `申洲 大通 会计师 事务所 做过 多份 验资 报告 所有 这些文号里有没有重复的？`
-/// —— `做过/多份/所有` 是上一轮的动词量词，只会稀释 BM25（hits 从 7239 涨到 9873）。
-///
-/// 只删**本轮问句里没有的**词：用户自己写的"所有"必须保留。
-pub(super) fn strip_inherited_generic_terms(rewritten: &str, current_q: &str) -> String {
-    let kept: Vec<&str> = rewritten
-        .split_whitespace()
-        .filter(|t| {
-            let t = t.trim();
-            if t.is_empty() || current_q.contains(t) {
-                return true;
-            }
-            !super::sufficiency::is_non_entity_word(t)
-        })
-        .collect();
-    if kept.is_empty() {
-        rewritten.to_string()
-    } else {
-        kept.join(" ")
-    }
-}
-
-/// 规则兜底用的"父问句关键词"。
-///
-/// **优先专有名词**（人名/地名/机构名/专名 `nr|ns|nt|nz`）：追问真正需要继承的是
-/// "在说谁/说哪家公司"，而不是父问句的整串主题词。2026-11-02 实测：父问句
-/// `陈正先的身份证号是多少？` 取前 3 个关键词会把 `身份证号` 带进「那他涉及哪些案件」，
-/// 而 `万城公司人员列表` → 只取 `万城公司`，正好是「办公室」这类省略式追问缺的那一半。
-fn parent_keywords(text: &str, max: usize) -> Vec<String> {
-    let entities = parent_person_entities(text);
-    if !entities.is_empty() {
-        return entities.into_iter().take(max).collect();
-    }
-    let mut out = Vec::new();
-    for t in crate::search::schema::JIEBA.lock().unwrap_or_else(|e| e.into_inner()).cut(text, false) {
-        let w = t.word.trim();
-        if w.chars().count() < 2 || is_rewrite_stopword(w) {
-            continue;
-        }
-        // 继承父问句关键词时也要滤掉动词/量词（"做过/多份/所有"），
-        // 否则规则改写路径会把上一轮的问法带进本轮检索。
-        if super::sufficiency::is_non_entity_word(w) {
-            continue;
-        }
-        if !out.iter().any(|k: &String| k == w) {
-            out.push(w.to_string());
-        }
-        if out.len() >= max {
-            break;
-        }
-    }
-    out
-}
-
-/// 规则兜底的继承准入：**只**在 LLM 改写不可用/无效时使用。
-///
-/// 两条准入（任一成立）：① 本轮问句本身要借历史（[`needs_history_rewrite`]）；
-/// ② 与父问句共享检索词（同一话题）。反过来就是 P2：自足 + 零交集 = 新话题 ⇒ 不继承。
-pub(super) fn may_inherit_parent_entities(current_q: &str, parent_q: &str) -> bool {
-    if needs_history_rewrite(current_q) {
-        return true;
-    }
-    let cur = extract_retrieval_keywords(current_q);
-    if cur.is_empty() {
-        return true;
-    }
-    let par = extract_retrieval_keywords(parent_q);
-    cur.iter().any(|a| par.iter().any(|b| a == b))
-}
-
-/// 规则兜底：LLM 不可用时，把父问句的核心实体补进检索词。
-///
-/// 只在 `rewrite_method == "rule"` 时调用 —— LLM 改写成功的场合不要再补，
-/// 否则会把上一轮的主题词（"身份证号"）又加回去（2026-11-02 实测）。
-pub(super) fn ensure_parent_entities(search_q: &str, parent_q: &str, current_q: &str) -> String {
-    if !may_inherit_parent_entities(current_q, parent_q) {
-        return search_q.to_string();
-    }
-    if parent_q.trim().is_empty() || parent_q.trim() == search_q.trim() {
-        return search_q.to_string();
-    }
-    let parent_entities = extract_retrieval_keywords(parent_q);
-    if parent_entities.is_empty() {
-        return search_q.to_string();
-    }
-    let lower = search_q.to_lowercase();
-    let missing: Vec<&str> = parent_entities
-        .iter()
-        .filter(|kw| !lower.contains(&kw.to_lowercase()))
-        .map(|s| s.as_str())
-        .collect();
-    if missing.is_empty() {
-        return search_q.to_string();
-    }
-    format!("{} {}", missing.join(" "), search_q)
 }
 
 /// Whether a prior turn's source file should be carried forward as evidence

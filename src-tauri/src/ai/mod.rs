@@ -105,6 +105,11 @@ pub fn clear_query_embed_cache() {
             cache.clear();
         }
     }
+    // 改了网关/模型，聊天前预检的结论同样失效：不清的话最长 2 分钟内仍按旧结论
+    // 跳过语义/重排通道。
+    if let Some(cache) = PREFLIGHT.get() {
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// [`cached_embed`] with a wall-clock cap. Interactive retrieval must never
@@ -399,6 +404,159 @@ pub fn llm_enabled() -> bool {
 /// 只做配置判断（零网络），真实可用性仍由设置页的探测负责。
 pub fn rerank_enabled() -> bool {
     resolve_active_endpoint(&crate::config::load_config(), ModelType::Reranker).is_some()
+}
+
+/// 聊天前连通性预检结果（三个通道各一条）。
+///
+/// 背景（2026-11-06）：此前聊天前只判断 `llm_enabled()`（**纯配置、零网络**），
+/// 而 embeddings / rerank 网关 404 时每一轮都在**静默降级** —— 语义通道全灭、
+/// 重排不可用，用户只看到"答案不对"，日志里每几秒一条 404。现在三个通道都过一遍：
+/// embedding / rerank 各发一次最小真实请求，失败就**说出来**并让本轮直接跳过该阶段。
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChannelStatus {
+    pub ok: bool,
+    pub detail: String,
+}
+
+impl ChannelStatus {
+    fn pass(detail: impl Into<String>) -> Self {
+        Self { ok: true, detail: detail.into() }
+    }
+    fn fail(detail: impl Into<String>) -> Self {
+        Self { ok: false, detail: detail.into() }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct ChannelHealth {
+    /// 是否已配置可用（**不代**表网关可达：LLM 的真实可用性由聊天请求本身验证 ——
+    /// 本地模型冷加载可达 15s，在这里做网络探测只会误判为"不可用"）。
+    pub llm: ChannelStatus,
+    pub embedding: ChannelStatus,
+    pub rerank: ChannelStatus,
+}
+
+/// 预检结果缓存：`Duration` 内复用，避免每条消息都发 3 个请求。
+const PREFLIGHT_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+/// 单个通道的探测超时：只是"端口通不通/模型在不在"，不是真的推理。
+const PREFLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+static PREFLIGHT: OnceLock<Mutex<Option<(std::time::Instant, ChannelHealth)>>> = OnceLock::new();
+
+/// 聊天前预检（会发网络请求，缓存 [`PREFLIGHT_TTL`]）。
+///
+/// 失败**不阻断**聊天：embedding / rerank 是可选的增强通道，缺了仍能答；
+/// 但必须让本轮跳过它们（不再每轮重试三次、刷几秒日志），并把原因暴露给用户。
+pub fn preflight_channels() -> ChannelHealth {
+    let cache = PREFLIGHT.get_or_init(|| Mutex::new(None));
+    {
+        let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, health)) = guard.as_ref()
+            && at.elapsed() < PREFLIGHT_TTL
+        {
+            return health.clone();
+        }
+    }
+    let health = ChannelHealth {
+        llm: match llm_unavailable_reason() {
+            None => ChannelStatus::pass("已配置"),
+            Some(why) => ChannelStatus::fail(why),
+        },
+        embedding: quick_probe_embedding(),
+        rerank: quick_probe_rerank(),
+    };
+    for (kind, st) in [("embedding", &health.embedding), ("rerank", &health.rerank)] {
+        if st.ok {
+            log::info!("[AI] 预检 {kind}: OK（{}）", st.detail);
+        } else {
+            log::warn!("[AI] 预检 {kind}: 不可用 —— {}", st.detail);
+        }
+    }
+    *cache.lock().unwrap_or_else(|e| e.into_inner()) = Some((std::time::Instant::now(), health.clone()));
+    health
+}
+
+/// 读取**已缓存**的预检结论，不发网络请求；未预检过时返回 `None`。
+fn cached_health() -> Option<ChannelHealth> {
+    let cache = PREFLIGHT.get_or_init(|| Mutex::new(None));
+    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    guard.as_ref().map(|(_, h)| h.clone())
+}
+
+/// 本轮是否值得尝试语义（向量）通道：未预检/未配置 ⇒ 交给原逻辑判断。
+pub fn embedding_reachable() -> bool {
+    cached_health().map(|h| h.embedding.ok).unwrap_or(true)
+}
+
+/// 本轮是否值得尝试重排：未预检/未配置 ⇒ 交给原逻辑判断。
+pub fn rerank_reachable() -> bool {
+    cached_health().map(|h| h.rerank.ok).unwrap_or(true)
+}
+
+fn quick_probe_embedding() -> ChannelStatus {
+    let cfg = crate::config::load_config();
+    if crate::config::is_local_embedding_model(&cfg.active_embedding_model_id) {
+        let model_name =
+            local_embed::local_model_dir_name(&cfg.active_embedding_model_id).unwrap_or("bge-large-zh-v1.5");
+        return if local_embed::bge_model_ready(&cfg.data_dir, model_name) {
+            ChannelStatus::pass(format!("内置 {model_name}"))
+        } else {
+            ChannelStatus::fail(format!("内置 {model_name} 模型未下载"))
+        };
+    }
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Embedding) else {
+        return ChannelStatus::fail("未配置 embedding 模型");
+    };
+    let url = format!("{}/embeddings", ep.base_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "model": ep.model_id, "input": ["ping"] });
+    let target = probe_target(&ep);
+    match ping_post(&url, &ep.api_key, &body, PREFLIGHT_TIMEOUT) {
+        Ok(raw) => {
+            // 200 但空向量/坏 JSON 也算不可用（否则"语义通道"看起来是通的）。
+            let dim = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.pointer("/data/0/embedding").and_then(|e| e.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            if dim == 0 {
+                ChannelStatus::fail(format!("响应异常：{target} 未返回向量"))
+            } else {
+                ChannelStatus::pass(format!("{target}（{dim} 维）"))
+            }
+        }
+        Err(e) => ChannelStatus::fail(format!("{e}（{target}）")),
+    }
+}
+
+fn quick_probe_rerank() -> ChannelStatus {
+    let cfg = crate::config::load_config();
+    if let Some(model_name) = local_embed::local_model_dir_name(&cfg.active_reranker_model_id) {
+        return if local_rerank::rerank_model_ready(&cfg.data_dir, model_name) {
+            ChannelStatus::pass(format!("内置 {model_name}"))
+        } else {
+            ChannelStatus::fail(format!("内置 {model_name} 模型未下载"))
+        };
+    }
+    let Some(ep) = resolve_active_endpoint(&cfg, ModelType::Reranker) else {
+        return ChannelStatus::fail("未配置 rerank 模型");
+    };
+    let url = format!("{}/rerank", ep.base_url.trim_end_matches('/'));
+    let documents = ["alpha", "beta"];
+    let body = serde_json::json!({ "model": ep.model_id, "query": "ping", "documents": documents });
+    let target = probe_target(&ep);
+    match ping_post(&url, &ep.api_key, &body, PREFLIGHT_TIMEOUT) {
+        Ok(raw) => {
+            let n = serde_json::from_str::<serde_json::Value>(&raw)
+                .ok()
+                .and_then(|v| v.get("results").and_then(|r| r.as_array()).map(|a| a.len()))
+                .unwrap_or(0);
+            if n == documents.len() {
+                ChannelStatus::pass(format!("{target}（{n} 条打分）"))
+            } else {
+                ChannelStatus::fail(format!("响应异常：{target} 返回 {n} 条，期望 {}", documents.len()))
+            }
+        }
+        Err(e) => ChannelStatus::fail(format!("{e}（{target}）")),
+    }
 }
 
 /// 区分"未配置"与"已配置但当前模型不可用"（active 指向被删 provider /
@@ -1905,6 +2063,11 @@ pub struct ProbeOptions {
 /// **顺序执行**（embedding → llm → rerank）：三者通常挂在同一台机器/同一个网关背后，
 /// 并行会互相抢显存与排期，谁的失败都说不清。
 pub fn test_gateways() -> Vec<GatewayTest> {
+    // 用户刚点了"测试"：预检缓存必须作废，否则修好网关后聊天仍按旧结论跳过通道
+    // （最长要等 120s 的 TTL）。
+    if let Some(cache) = PREFLIGHT.get() {
+        *cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     probe_gateways(ProbeOptions { unload_after: true })
 }
 
