@@ -84,6 +84,9 @@ pub struct PerTurnEvidence {
     /// Number of BM25 hits returned (before merge with @mention files).
     #[serde(default)]
     pub hits: usize,
+    /// 本轮依据：`history` / `both` / `docs`（空 = 旧会话，未记录）。
+    #[serde(default)]
+    pub basis: String,
 }
 
 /// 每轮最终的 @mention 生效集合（含继承解析后），持久化供 `@第N轮` 引用。
@@ -654,6 +657,14 @@ pub fn export_chat_session_impl(
                 }
                 if ev.hits > 0 {
                     md.push_str(&format!("- **BM25 命中数**: {}\n", ev.hits));
+                }
+                if !ev.basis.is_empty() {
+                    let label = match ev.basis.as_str() {
+                        "history" => "上几轮结论（本轮未检索）",
+                        "both" => "上几轮结论 + 材料",
+                        _ => "材料",
+                    };
+                    md.push_str(&format!("- **本轮依据**: {}（`{}`）\n", label, ev.basis));
                 }
             }
             // 找下一条 assistant 消息

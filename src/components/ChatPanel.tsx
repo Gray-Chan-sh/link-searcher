@@ -269,6 +269,19 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
     const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
     return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.clarify_blocking ?? false
   }
+  /** 本轮依据（history / both / docs）—— 让用户一眼看出答案是"凭上文"还是"凭材料"。 */
+  const basisFor = (msgIndex: number) => {
+    const userBefore = messages.slice(0, msgIndex).filter(m => m.role === 'user').length
+    return (session?.per_turn_evidence ?? []).find(e => e.turn_index === userBefore - 1)?.basis ?? ''
+  }
+  const basisLabelFor = (msgIndex: number) => {
+    const b = basisFor(msgIndex)
+    const n = evidenceFor(msgIndex).length
+    if (b === 'history') return t('basis_history')
+    if (b === 'both') return t('basis_both', { n })
+    if (b === 'docs' && n > 0) return t('basis_docs', { n })
+    return ''
+  }
   const turnNumberFor = (msgIndex: number) => {
     return messages.slice(0, msgIndex).filter(m => m.role === 'user').length - 1
   }
@@ -618,6 +631,11 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
                             className="text-gray-500 dark:text-gray-400 hover:underline"
                           >关闭</button>
                         </div>
+                      </div>
+                    )}
+                    {basisLabelFor(i) && (
+                      <div className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        📎 {basisLabelFor(i)}
                       </div>
                     )}
                     {evidenceFor(i).length > 0 && (

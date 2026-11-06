@@ -44,6 +44,7 @@ export function buildSessionFromDone(
       clarify_slots: p.clarify_slots ?? [],
       clarify_blocking: p.clarify_blocking ?? false,
       hits: p.hits ?? 0,
+      basis: p.basis ?? '',
     }],
   }
   return {

@@ -343,6 +343,9 @@ struct AiDone {
     llm_model: String,
     #[serde(default)]
     embedding_model: String,
+    /// 本轮依据：history / both / docs（空 = 旧数据）。
+    #[serde(default)]
+    basis: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -492,6 +495,7 @@ pub async fn smart_search_stream(
         total_match_count: 0,
         llm_model: String::new(),
         embedding_model: String::new(),
+        basis: "docs".into(),
     });
     Ok(())
 }
@@ -779,7 +783,7 @@ pub async fn conversation_ask_stream(
         Ok(p) => log::info!("[AI]   prepare ok: system_chars={} user_chars={} sources={} evidence={}", p.system.chars().count(), p.user_msg.chars().count(), p.source_ids.len(), p.evidence.len()),
         Err(e) => log::warn!("[AI]   prepare failed: {}", e),
     }
-    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, total_match_count, has_evidence, visible_nums, mut events } =
+    let PreparedConversation { system, user_msg, source_ids, source_files, evidence, search_query, search_terms, basis, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, total_match_count, has_evidence, visible_nums, mut events } =
         prepared?;
     let visible_evidence: Vec<EvidenceItem> = evidence.iter().filter(|e| visible_nums.contains(&e.material_no)).cloned().collect();
     let trace_id = format!("{session_id}#t{}", messages.iter().filter(|m| m.role == "user").count());
@@ -824,6 +828,7 @@ pub async fn conversation_ask_stream(
             total_match_count,
             llm_model: cfg.active_llm_model_id,
             embedding_model: cfg.active_embedding_model_id,
+            basis: basis.clone(),
         });
         return Ok(());
     }
@@ -952,6 +957,7 @@ pub async fn conversation_ask_stream(
         total_match_count,
         llm_model: cfg.active_llm_model_id,
         embedding_model: cfg.active_embedding_model_id,
+        basis,
     });
     log::info!("[AI] post: emit_done_done");
     // Analytics must never keep the UI in "streaming". Record after the done
@@ -1293,6 +1299,7 @@ mod history_tests {
                 embedding_model: "p1:bge-m3".into(),
                 search_query: "克虏伯 项目背景".into(),
                 hits: 3,
+                basis: "docs".into(),
             }],
             per_turn_scopes: vec![PerTurnScope {
                 turn_index: 0,

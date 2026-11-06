@@ -38,9 +38,9 @@ const EVENT_KEYS: Record<string, string> = {
 function formatPayload(type: string, payload: Record<string, unknown>): string {
   switch (type) {
     case 'query_rewrite': {
-      const p = payload as { original?: string; rewritten?: string; was_rewritten?: boolean; rewrite_method?: string }
-      if (!p.was_rewritten) return `${p.original}`
-      return `${p.original} → ${p.rewritten} (${p.rewrite_method})`
+      const p = payload as { original?: string; rewritten?: string; was_rewritten?: boolean; rewrite_method?: string; basis?: string }
+      const base = !p.was_rewritten ? `${p.original}` : `${p.original} → ${p.rewritten} (${p.rewrite_method})`
+      return p.basis ? `${base} · basis=${p.basis}` : base
     }
     case 'scope_resolved': {
       const p = payload as { dir_ids_count?: number; path_prefixes?: string[]; mention_files_count?: number; ext_filter?: string[] | null; date_from?: number | null; date_to?: number | null }

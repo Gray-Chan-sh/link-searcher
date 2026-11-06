@@ -119,6 +119,9 @@ pub(crate) struct PreparedConversation {
     /// 指代未绑定 **且** 提问里没有任何具名实体 → 无锚点可依。此时硬答会用错误
     /// 的案件作答（RAG_PIPELINE.md 所称"自信地答错"），故改为只问不答、不调用 LLM。
     pub(crate) clarify_blocking: bool,
+    /// 「这轮凭什么答的」：`history` / `both` / `docs`（空串 = 旧数据/未判定）。
+    /// 前端据此在回答上方显示「依据：第 N 轮结论 / N 份材料」。
+    pub(crate) basis: String,
     /// Number of BM25 hits before merge with @mention files.
     pub(crate) hits: usize,
     pub(crate) total_match_count: usize,
@@ -2056,7 +2059,12 @@ fn assemble_conversation_prompt(
     // 「有依据」= 有材料 **或** 有可用的历史结论。旧实现只看 docs，
     // 于是"纯追问 + 本轮检索空"会直接拒答，连 LLM 都不调（2026-11-06 修）。
     let has_evidence = !context.trim().is_empty() || !chat_recall.is_empty();
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence, visible_nums })
+    let basis_tag = match basis {
+        super::rewrite::AnswerBasis::History => "history",
+        super::rewrite::AnswerBasis::Both => "both",
+        super::rewrite::AnswerBasis::Docs => "docs",
+    };
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, basis: basis_tag.to_string(), clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence, visible_nums })
 }
 /// 是否应「只问不答」：指代未绑定 **且** 提问里没有任何具名实体 —— 无锚点可依时
 /// 硬答会用错误的案件作答（RAG_PIPELINE.md 所称"自信地答错"），不如先问清楚。
