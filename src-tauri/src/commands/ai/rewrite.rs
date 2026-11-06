@@ -52,34 +52,54 @@ mod history_backed_entity_tests {
         ChatMessage { role: role.into(), content: content.into() }
     }
 
-    /// 改写输出解析：JSON（query / entities / self_contained）是主格式。
+    /// 改写输出解析：JSON（query / entities / self_contained / basis）是主格式。
     #[test]
     fn parses_json_rewrite_reply() {
-        let raw = r#"{"query":"王会芹 一审 二审 判决","entities":["王会芹"],"self_contained":"yes"}"#;
-        let (q, ents, sc) = parse_rewrite_reply(raw);
+        let raw = r#"{"query":"王会芹 一审 二审 判决","entities":["王会芹"],"self_contained":"yes","basis":"docs"}"#;
+        let (q, ents, sc, basis) = parse_rewrite_reply(raw);
         assert_eq!(q, "王会芹 一审 二审 判决");
         assert_eq!(ents, vec!["王会芹".to_string()]);
         assert_eq!(sc, Some(true));
+        assert_eq!(basis, AnswerBasis::Docs);
+    }
+
+    /// 「这些人谁年龄最大」这类纯追问：模型应判 history。
+    #[test]
+    fn parses_history_basis() {
+        let raw = r#"{"query":"刘兴芳 周传华 金纯熙 年龄","entities":[],"self_contained":"no","basis":"history"}"#;
+        let (_, _, sc, basis) = parse_rewrite_reply(raw);
+        assert_eq!(sc, Some(false));
+        assert_eq!(basis, AnswerBasis::History);
+    }
+
+    /// 模型漏给 basis ⇒ 保守退回 docs（宁可多检索，不少检索）。
+    #[test]
+    fn missing_basis_defaults_to_docs() {
+        let raw = r#"{"query":"陈秀芳 家庭成员","entities":["陈秀芳"]}"#;
+        assert_eq!(parse_rewrite_reply(raw).3, AnswerBasis::Docs);
     }
 
     /// 模型常把 JSON 包在 ```json 代码块里，或前后带一句解释。
     #[test]
     fn parses_json_inside_fences() {
-        let raw = "```json\n{\"query\":\"陈秀芳 兄长 出生日期\",\"entities\":[\"陈秀芳\"],\"self_contained\":\"no\"}\n```";
-        let (q, ents, sc) = parse_rewrite_reply(raw);
+        let raw = "```json\n{\"query\":\"陈秀芳 兄长 出生日期\",\"entities\":[\"陈秀芳\"],\"self_contained\":\"no\",\"basis\":\"both\"}\n```";
+        let (q, ents, sc, basis) = parse_rewrite_reply(raw);
         assert_eq!(q, "陈秀芳 兄长 出生日期");
         assert_eq!(ents, vec!["陈秀芳".to_string()]);
         assert_eq!(sc, Some(false));
+        assert_eq!(basis, AnswerBasis::Both);
     }
 
     /// 旧格式（两行 QUERY / SELF_CONTAINED）仍要能解析：网关/model 换版时不能让整轮
-    /// 改写直接失效。entities 缺失 ⇒ 空表，检索退回"模型给的查询串本身"。
+    /// 改写直接失效。entities 缺失 ⇒ 空表，basis 缺失 ⇒ docs。
     #[test]
     fn parses_legacy_two_line_reply() {
-        let (q, ents, sc) = parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
+        let (q, ents, sc, basis) =
+            parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
         assert_eq!(q, "陈秀芳 兄长 出生日期");
         assert!(ents.is_empty(), "{ents:?}");
         assert_eq!(sc, Some(false));
+        assert_eq!(basis, AnswerBasis::Docs);
     }
 
     /// 用**语料事实**过滤改写词：语料里不存在的词被丢弃，同义词只要存在就保留。
@@ -143,6 +163,31 @@ mod history_backed_entity_tests {
     }
 }
 
+/// 本轮回答应以什么为依据（由模型在改写时判定，2026-11-06）。
+///
+/// - `History`：只靠前几轮已给出的信息就能回答（排序/求年龄/算平均/比较/汇总）
+///   → **跳过整条检索**，把上文升格为材料；
+/// - `Both`：需要前几轮的对象 + 少量新事实 → 检索但收窄注入量；
+/// - `Docs`：新问题 → 完整 RAG（原有行为）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AnswerBasis {
+    History,
+    Both,
+    #[default]
+    Docs,
+}
+
+impl AnswerBasis {
+    fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "history" => Some(Self::History),
+            "both" => Some(Self::Both),
+            "docs" | "documents" => Some(Self::Docs),
+            _ => None,
+        }
+    }
+}
+
 /// 解析改写输出。
 ///
 /// 主格式是**一行 JSON**（模型据此同时给出查询串、实体表与"是否依赖上文"）：
@@ -153,9 +198,9 @@ mod history_backed_entity_tests {
 ///
 /// 兼容旧格式（`QUERY:` / `SELF_CONTAINED:` 两行、或只回一行查询串）：此时 `entities`
 /// 为空表，检索只用 `query` 本身。
-fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>) {
-    if let Some((query, entities, self_contained)) = parse_rewrite_json(raw) {
-        return (query, entities, self_contained);
+fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>, AnswerBasis) {
+    if let Some((query, entities, self_contained, basis)) = parse_rewrite_json(raw) {
+        return (query, entities, self_contained, basis);
     }
     let mut query: Option<String> = None;
     let mut self_contained: Option<bool> = None;
@@ -180,11 +225,12 @@ fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>) {
         // 没有 QUERY: 前缀 → 视为旧格式，整段就是查询
         _ => raw.trim().to_string(),
     };
-    (q, Vec::new(), self_contained)
+    // 旧格式没有 basis 字段 ⇒ 退回完整 RAG（保守，不会少检索）。
+    (q, Vec::new(), self_contained, AnswerBasis::Docs)
 }
 
 /// 从模型回复里抠出第一个 JSON 对象（允许 ```json 围栏、前后解释文字）。
-fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>)> {
+fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>, AnswerBasis)> {
     let start = raw.find('{')?;
     let end = raw.rfind('}')?;
     if end <= start {
@@ -198,6 +244,8 @@ fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>)> 
         entities: Vec<String>,
         #[serde(default)]
         self_contained: Option<serde_json::Value>,
+        #[serde(default)]
+        basis: Option<String>,
     }
     let reply: Reply = serde_json::from_str(&raw[start..=end]).ok()?;
     let query = reply.query.trim().to_string();
@@ -219,7 +267,12 @@ fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>)> 
         .map(|e| e.trim().to_string())
         .filter(|e| !e.is_empty())
         .collect();
-    Some((query, entities, self_contained))
+    let basis = reply
+        .basis
+        .as_deref()
+        .and_then(AnswerBasis::parse)
+        .unwrap_or_default();
+    Some((query, entities, self_contained, basis))
 }
 
 /// 用**语料事实**过滤改写词：正文索引里一次都没出现过的词直接丢弃。
@@ -320,8 +373,12 @@ pub async fn llm_rewrite_query(
         return RewriteAttempt::Unavailable;
     }
     let history_str = rewrite_history(messages, context_paths, last_q);
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务是把他的提问改写成**一条可独立检索的中文查询**，\
-并同时判断这条查询依赖哪些实体。\
+    // 关键新增（2026-11-06）：让模型判断这一轮**要不要再看文档**。
+    // 多轮会话里大量追问只是对上一轮结论做比较/换算/汇总（"这些人谁最大"
+    // "各人年龄多少"），再跑一遍全库检索既慢又会让事实来源漂移。
+    let has_history = messages.iter().filter(|m| m.role == "user").count() > 1;
+    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务有三件：\
+① 把提问改写成一条可独立检索的中文查询；② 判断这条查询依赖哪些专名实体；③ 判断这一轮**还需不需要看文档**。\
 规则：\
 1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」「兄长呢」），必须从上文找出它真正指向的人名/机构名/案件名补进检索词。\
 2) 继承的实体必须**来自对话历史**（用户的提问或助手的回答），不得凭空编造。\
@@ -331,8 +388,13 @@ pub async fn llm_rewrite_query(
 不要堆同义词，也不要把「案件/文件/材料/情况/结果」这类在语料里到处都是的词当主检索词。\
 6) entities 只填**能在语料里定位到具体对象的专名**：人名、机构名、案号、项目名、地点。\
 「始末 / 情况 / 经过 / 来龙去脉 / 最早 / 结果」这类**描述性/过程性词不是实体，禁止写进 entities** —— 它们不会出现在卷宗正文里，写进去会把检索带偏。没有专名时给空数组。\
+7) basis 判断这一轮该以什么为依据：\
+   - \"history\"：**只靠前几轮已经给出的信息就能回答** —— 例如对上一轮列出的名单/金额/日期做排序、求年龄、算平均、比较、汇总、换一种说法重述。不需要任何新文档。\
+   - \"both\"：需要前几轮的对象，但还缺少量事实（如某人的身份证号、某个金额），要再查一点文档。\
+   - \"docs\"：新问题/换了对象/前几轮没有相关结论，需要重新检索文档。\
+   拿不准时填 \"docs\"；**这是第一轮（没有历史）时必须填 \"docs\"**。\
 输出**一行 JSON**（不要代码块、不要解释）：\
-{\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"self_contained\":\"yes|no\"}\
+{\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"self_contained\":\"yes|no\",\"basis\":\"history|docs|both\"}\
 self_contained 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
     let user = format!("{history_str}\n当前问题：{last_q}");
     let sys = system.to_string();
@@ -348,12 +410,15 @@ self_contained 表示**这句话离开上文还能不能读懂**：依赖指代/
         let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys_c, &user_c));
         match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
             Ok(Ok(Some(s))) => {
-                let (query_raw, entities, self_contained) = parse_rewrite_reply(&s);
+                let (query_raw, entities, self_contained, basis) = parse_rewrite_reply(&s);
+                // 首轮（没有历史）不可能"只靠上文" —— 模型偶发误判时兜底为 docs。
+                let basis = if has_history { basis } else { AnswerBasis::Docs };
                 return match valid_rewrite_output(&query_raw, last_q) {
                     Some(v) => RewriteAttempt::Ok(RewriteOk {
                         query: v,
                         entities,
                         self_contained,
+                        basis,
                     }),
                     None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
                 };
@@ -411,6 +476,8 @@ pub struct RewriteOk {
     /// `兄长 / 家兄 / 各人 / 办公室` 这类说法对它都是普通语义，不需要我们列词表。
     /// `None` 表示模型没给这个字段（老格式/解析失败）→ 调用方按"有历史就沿用"处理。
     pub self_contained: Option<bool>,
+    /// 本轮该以什么为依据（history / both / docs），决定要不要跳过检索。
+    pub basis: AnswerBasis,
 }
 
 /// 改写超时（秒）。默认 60 —— 这个网关的改写请求常态 4–6 秒，旧值 5 秒会

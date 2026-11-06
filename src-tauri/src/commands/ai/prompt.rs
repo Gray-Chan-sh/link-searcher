@@ -252,6 +252,8 @@ struct AssembleJob {
     search_q: String,
     /// 模型判定的专名实体（检索关键词与补查判据的唯一来源）。
     entities: Vec<String>,
+    /// 本轮依据：History ⇒ 跳过检索；Both ⇒ 检索但收窄；Docs ⇒ 完整 RAG。
+    basis: super::rewrite::AnswerBasis,
     search_terms: Vec<String>,
     rewritten: bool,
     /// 本轮是否依赖上文（模型自评；模型没给时按"有历史"处理）。决定是否沿用上一轮材料。
@@ -468,6 +470,8 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     let mut self_contained: Option<bool> = None;
     // 模型判定的专名实体：检索关键词与"要不要补查"都以它为准，不再用任何词表。
     let mut llm_entities: Vec<String> = Vec::new();
+    // 本轮依据：由模型在改写时判定；任何回退路径都退回 Docs（完整检索，宁可多查）。
+    let mut basis = super::rewrite::AnswerBasis::Docs;
     let (search_q, rewrite_method) = if let Some(q) = retry_q {
         (q, "retry")
     } else if skip_llm_rewrite || !crate::ai::llm_enabled() {
@@ -484,11 +488,18 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
             super::rewrite::RewriteAttempt::Ok(ok) => {
                 self_contained = ok.self_contained;
                 llm_entities = ok.entities;
+                basis = ok.basis;
                 // 用**语料事实**过滤改写词：正文里一次都没出现过的词直接丢弃
                 // （编造的人名自动出局；「兄长/家兄」等同义词只要语料有就保留）。
-                match super::rewrite::strip_nonexistent_terms(&ok.query, &last_q, |t| {
-                    super::retrieval::term_doc_freq(&ctx, t)
-                }) {
+                // 纯追问（basis=history）不需要可检索词，跳过这道闸。
+                let filtered = if basis == super::rewrite::AnswerBasis::History {
+                    Some(ok.query.clone())
+                } else {
+                    super::rewrite::strip_nonexistent_terms(&ok.query, &last_q, |t| {
+                        super::retrieval::term_doc_freq(&ctx, t)
+                    })
+                };
+                match filtered {
                     Some(q) => (q, "llm"),
                     None => {
                         log::warn!("[AI]   llm rewrite 的词在语料里全不存在，改用原问句检索");
@@ -522,12 +533,13 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     };
     let rewritten = search_q != last_q.trim();
     let search_terms = query_terms(&search_q);
-    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={}, method={}, entities={:?})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten, rewrite_method, llm_entities);
+    log::info!("[AI]   rewrite: \"{}\" → \"{}\" (rewritten={}, method={}, basis={:?}, entities={:?})", truncate_text(&last_q, 30), truncate_text(&search_q, 30), rewritten, rewrite_method, basis, llm_entities);
     events.push(("query_rewrite".into(), serde_json::json!({
         "original": last_q,
         "rewritten": search_q,
         "was_rewritten": rewritten,
         "rewrite_method": if rewritten { rewrite_method } else { "none" },
+        "basis": format!("{basis:?}").to_lowercase(),
         "retry": is_retry,
         // 为什么没走 LLM 改写：以前这里静默成 method=rule，网关断连与守卫弃用看起来一样。
         "fallback_reason": rewrite_fallback,
@@ -548,6 +560,7 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         last_q,
         search_q,
         entities: llm_entities,
+        basis,
         search_terms,
         rewritten,
         context_dependent,
@@ -569,8 +582,9 @@ fn assemble_conversation_prompt(
 ) -> Result<PreparedConversation, String> {
     let AssembleJob {
         messages, source_ids, scope, session_retrieval_scope, strict_docs, full_recall,
-        session_id, clarify_reply, last_q, search_q, entities: llm_entities, search_terms,
-        rewritten, context_dependent, pronoun_binding, mut events, mut material_order, app, cancel,
+        session_id, clarify_reply, last_q, search_q, entities: llm_entities, basis,
+        search_terms, rewritten, context_dependent, pronoun_binding, mut events,
+        mut material_order, app, cancel,
     } = job;
     let emit_progress = |phase: &str, message: &str, current: usize, total: usize| {
         if let Some(a) = &app {
@@ -804,9 +818,18 @@ fn assemble_conversation_prompt(
         final_kws.join(" OR ")
     };
     log::info!("[AI]   final_kws={:?} (entities={:?}) bm25_query=\"{}\"", final_kws, entity_kws, truncate_text(&bm25_query, 60));
+    // 纯追问（basis=history）：模型判定"只靠前几轮的信息就能答"，
+    // 跳过整条检索（BM25/向量/chunk/路径/渐进补查/重排），把上文升格为材料。
+    // 2026-11-06 实测：4 轮会话里 t2/t3 都是纯追问，却各跑了 1171/1256 份候选，
+    // 单轮 14~38s，而 t2 的回答里已经列出全部出生日期。
+    let skip_retrieval = basis == super::rewrite::AnswerBasis::History;
+    if skip_retrieval {
+        log::info!("[AI]   basis=history → skip retrieval (no BM25/vector/rerank this turn)");
+        emit_progress("retrieval", "本轮复用上文结论，跳过检索", 0, 0);
+    }
     // 语义通道里「强相关」（过阈值）的命中数：字符集兜底的触发条件之一。
     let mut strong_vector_hits = 0usize;
-    if !last_q.trim().is_empty() {
+    if !skip_retrieval && !last_q.trim().is_empty() {
         check_cancel!();
         emit_progress("bm25", "BM25 检索中...", 0, 0);
         let total_files = {
@@ -1552,13 +1575,17 @@ fn assemble_conversation_prompt(
     // 本轮注入的全是无关案件材料，模型只能把"1958/1938"编出来（材料里的正确值是 1928）。
     //
     // 现在改为：追问轮 + **依赖上文**（问句没有专名）⇒ 沿用上一轮引用材料，
-    // 数量上限 `MAX_HISTORY_CARRY`（不抢占本轮材料预算），且必须仍在本轮 scope 内。
+    // 数量上限随 basis 调整（纯追问要更多），且必须仍在本轮 scope 内。
     let is_follow_up = messages.len() > 1;
-    const MAX_HISTORY_CARRY: usize = 10;
+    let history_cap = match basis {
+        super::rewrite::AnswerBasis::History => 20,
+        super::rewrite::AnswerBasis::Both => 12,
+        super::rewrite::AnswerBasis::Docs => 10,
+    };
     let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
     if is_follow_up {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-        for fid in source_ids.iter().rev().take(MAX_HISTORY_CARRY) {
+        for fid in source_ids.iter().rev().take(history_cap) {
             if all_seen.contains(fid) { continue; }
             let Some(rec) = rec_by_id.get(fid) else { continue };
             if rec.status != "active" || rec.md5.is_none() { continue; }
@@ -1576,12 +1603,15 @@ fn assemble_conversation_prompt(
                 let stem = std::path::Path::new(&rec.path).file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
                 !stem.is_empty() && message_text.contains(stem.as_str())
             };
-            if super::rewrite::should_carry_history(
-                is_follow_up,
-                context_dependent,
-                named,
-                all_hits.is_empty(),
-            ) {
+            // 模型已判定 history/both ⇒ 明确要沿用上文，不再让启发式否决。
+            if matches!(basis, super::rewrite::AnswerBasis::History | super::rewrite::AnswerBasis::Both)
+                || super::rewrite::should_carry_history(
+                    is_follow_up,
+                    context_dependent,
+                    named,
+                    all_hits.is_empty(),
+                )
+            {
                 all_seen.insert(fid.clone());
                 // 记入 history_resolved，稍后随 Layer 0.5 注入为实际材料
                 if !history_resolved.iter().any(|(id, _)| id == fid) {
@@ -1648,7 +1678,12 @@ fn assemble_conversation_prompt(
 
     // Layer 0.5: 上一轮引用的证据随追问带入本轮为保底材料（缺陷 3 修复）。
     // 与 mention 共摊 Layer0 预算，按文件份数均分；证据条目标记 from_history=true。
-    let history_total_budget = CONTEXT_BUDGET / 3;
+    // 纯追问（history）时这是本轮**唯一**材料来源，预算翻倍。
+    let history_total_budget = if basis == super::rewrite::AnswerBasis::History {
+        CONTEXT_BUDGET / 2
+    } else {
+        CONTEXT_BUDGET / 3
+    };
     let history_files_with_content: Vec<(String, String, String, String)> = history_resolved
         .iter()
         .filter_map(|(fid, path)| {
@@ -1693,7 +1728,18 @@ fn assemble_conversation_prompt(
     // （Layer 0 已注入，且可能不在前缀内）除外。全库范围（无前缀）不过滤。
     // strict_docs 不再硬性跳过注入——改为始终用 scoped 过滤，确保严格模式
     // 下目录范围内的命中也能注入（否则目录引用 + strict = 零材料 = 无法回答）。
-    let inject_limit = if full_recall { all_hits.len().max(1) } else { MAX_CONTENT_INJECT };
+    // basis=both（上文 + 少量新事实）：检索只用来补细节，注入量收窄，
+    // 把上下文预算留给上几轮的结论，避免 30 份材料再次盖过历史。
+    const BOTH_CONTENT_INJECT: usize = 12;
+    let inject_limit = if full_recall {
+        all_hits.len().max(1)
+    } else if basis == super::rewrite::AnswerBasis::Both {
+        BOTH_CONTENT_INJECT
+    } else if skip_retrieval {
+        0
+    } else {
+        MAX_CONTENT_INJECT
+    };
     let scoped = |h: &ScoredHit| -> bool {
         hit_in_scope(&h.file_id, &h.path, path_prefixes_opt.as_deref(), mention_file_ids.as_deref())
     };
@@ -1836,23 +1882,30 @@ fn assemble_conversation_prompt(
     let max_context_chars = CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE;
     let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
 
-    // Layer 2: Chat history recall — keyword-match previous AI responses.
-    // 不走 Tantivy（聊天消息未索引），在内存中对历史回答做关键词匹配，
-    // 命中的回答注入 2000 字摘录到"对话回忆"段，让 LLM 能回忆之前讨论过的内容。
+    // Layer 2: Chat history recall — previous AI responses become usable context.
+    //
+    // 纯追问（basis=history）时它就是本轮的主要答案来源：**不再按关键词筛选**
+    // （"这些人/各人/平均"这类词本来就不会出现在上一轮回答里），且每条放宽到 8k。
+    // 其他情况仍按关键词命中筛选，避免把无关旧结论灌进上下文。
+    let recall_all = basis == super::rewrite::AnswerBasis::History;
     const CHAT_RECALL_BUDGET: usize = 20_000;
     const CHAT_RECALL_PER_MSG: usize = 2_000;
+    const CHAT_RECALL_PER_MSG_HISTORY: usize = 8_000;
+    let per_msg_cap = if recall_all { CHAT_RECALL_PER_MSG_HISTORY } else { CHAT_RECALL_PER_MSG };
     let mut chat_recall: Vec<String> = Vec::new();
     let mut recall_budget = CHAT_RECALL_BUDGET;
-    if messages.len() > 1 && !final_kws.is_empty() {
+    if messages.len() > 1 && (recall_all || !final_kws.is_empty()) {
         for (i, m) in messages.iter().enumerate().take(messages.len().saturating_sub(1)) {
             if m.role != "assistant" || m.content.trim().is_empty() { continue; }
-            let content_lower = m.content.to_lowercase();
-            let match_count = final_kws.iter()
-                .filter(|kw| content_lower.contains(&kw.to_lowercase()))
-                .count();
-            if match_count == 0 { continue; }
+            if !recall_all {
+                let content_lower = m.content.to_lowercase();
+                let match_count = final_kws.iter()
+                    .filter(|kw| content_lower.contains(&kw.to_lowercase()))
+                    .count();
+                if match_count == 0 { continue; }
+            }
             let turn = (i + 1) / 2;
-            let limit = recall_budget.min(CHAT_RECALL_PER_MSG);
+            let limit = recall_budget.min(per_msg_cap);
             let excerpt = truncate_text(&m.content, limit);
             recall_budget = recall_budget.saturating_sub(excerpt.chars().count());
             chat_recall.push(format!("【第{turn}轮回答片段】\n{excerpt}"));
@@ -1881,10 +1934,8 @@ fn assemble_conversation_prompt(
             return Err("未在与当前范围匹配的文档中找到依据".into());
         }
     }
-    // 材料编号每轮从 [1] 重新计数（随命中变化），模型若引用对话历史里的
-    // 旧编号会错位。明确告知本轮范围 + 历史编号已失效，杜绝跨轮引用。
-    // 上限按"截断后实际可见"的材料编号计算——context 可能被 50k 截断，
-    // 尾部材料并未进入 prompt，声明范围过大同样会造成悬空引用。
+    // 材料编号在整个会话内稳定（按首次出现顺序分配），引用可以跨轮沿用；
+    // 本轮只声明"实际进入提示词"的编号，避免截断后出现悬空引用。
     let visible_nums = visible_material_numbers(&context);
     let material_note = if visible_nums.is_empty() {
         String::new()
@@ -1893,7 +1944,11 @@ fn assemble_conversation_prompt(
         format!("本轮提供材料编号：{}。", list)
     };
     let system = format!(
-        "你是严谨的文档分析助手。仅基于以下材料回答，不臆造事实。如果材料不足以回答，请明确说明。\n{material_note}引用材料时在对应内容后标注 [N]（N 为材料编号）。只允许引用本轮列出的编号，未列出的编号一律不得引用。\n\n材料：\n{}{}",
+        "你是严谨的文档分析助手。优先依据以下材料回答，不臆造事实。\n\
+{material_note}引用材料时在对应内容后标注 [N]（N 为本轮材料编号）；只引用本轮列出的编号。\n\
+前几轮已经给出的事实（名单/金额/日期/结论）可以直接沿用：需要据此排序、换算、汇总时，\
+说明依据哪一轮（如「基于第 2 轮列出的出生日期」）即可，不必重新从材料推导；\
+沿用旧结论时不要为它编造 [N]。材料与上文都不足以回答时，明确说明缺什么。\n\n材料：\n{}{}",
         context, recall_section
     );
     let last_n = messages.len().saturating_sub(1);
@@ -1998,7 +2053,10 @@ fn assemble_conversation_prompt(
     if let Some(n) = &clarify_note {
         log::info!("[AI]   clarify note: {}", truncate_text(n, 60));
     }
-    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence: !context.trim().is_empty(), visible_nums })
+    // 「有依据」= 有材料 **或** 有可用的历史结论。旧实现只看 docs，
+    // 于是"纯追问 + 本轮检索空"会直接拒答，连 LLM 都不调（2026-11-06 修）。
+    let has_evidence = !context.trim().is_empty() || !chat_recall.is_empty();
+    Ok(PreparedConversation { system, user_msg, source_ids: source_ids_final, source_files: source_files_final, evidence, search_query: search_q, search_terms, clarify_note, clarify_candidates, clarify_slots, clarify_blocking, hits, events, total_match_count: all_hits.len(), has_evidence, visible_nums })
 }
 /// 是否应「只问不答」：指代未绑定 **且** 提问里没有任何具名实体 —— 无锚点可依时
 /// 硬答会用错误的案件作答（RAG_PIPELINE.md 所称"自信地答错"），不如先问清楚。
