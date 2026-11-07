@@ -1152,6 +1152,37 @@ pub async fn get_ai_events(
     .map_err(|e| format!("会话任务异常退出: {e}"))?
 }
 
+/// 设置页展示的系统提示词（只读）。返回**实际生效**的那几份，而不是文档里另抄的。
+///
+/// 材料正文每轮不同、且已在「推理过程 → 提示词快照」里留痕，所以这里只给模板。
+#[derive(Debug, Serialize)]
+pub struct PromptTemplate {
+    pub id: &'static str,
+    pub text: String,
+}
+
+#[tauri::command]
+pub fn get_system_prompts() -> Vec<PromptTemplate> {
+    vec![
+        PromptTemplate {
+            id: "query_rewrite",
+            text: rewrite::REWRITE_SYSTEM_PROMPT.to_string(),
+        },
+        PromptTemplate {
+            id: "rewrite_retry",
+            text: rewrite::REWRITE_RETRY_SYSTEM_PROMPT.to_string(),
+        },
+        PromptTemplate {
+            id: "gap_check",
+            text: prompt::GAP_CHECK_SYSTEM_PROMPT.to_string(),
+        },
+        PromptTemplate {
+            id: "answer",
+            text: prompt::answer_system_template_display(),
+        },
+    ]
+}
+
 /// Structured RAG pipeline events for one turn of a session.
 #[tauri::command]
 pub async fn get_turn_ai_events(
@@ -1173,6 +1204,20 @@ pub async fn get_turn_ai_events(
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    #[test]
+    fn system_prompts_are_all_present_and_non_empty() {
+        let prompts = get_system_prompts();
+        let ids: Vec<&str> = prompts.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec!["query_rewrite", "rewrite_retry", "gap_check", "answer"]);
+        for p in &prompts {
+            assert!(!p.text.trim().is_empty(), "{} 的提示词为空", p.id);
+        }
+        // 改写提示词必须带上 2026-11-07 那条"材料会写出来的词"判据，
+        // 否则说明有人把那条规则删了却没意识到设置页也会跟着变。
+        let rewrite = &prompts[0].text;
+        assert!(rewrite.contains("那份文档会不会写出这个词"));
+    }
 
     #[test]
     fn legacy_history_migrates_once_and_keeps_stable_id() {

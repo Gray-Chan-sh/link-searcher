@@ -362,22 +362,9 @@ pub(super) fn rewrite_history(
 
 /// Try an LLM query rewrite within a generous time budget.
 ///
-/// 超时默认 **60 秒**（`LINK_SEARCHER_REWRITE_TIMEOUT_SECS` 可调）：这个网关的改写
-/// 请求常态 4–6 秒，旧的 5 秒上限会把关键的指代消解直接打死（2026-11-02 实测）。
-pub async fn llm_rewrite_query(
-    last_q: &str,
-    messages: &[ChatMessage],
-    context_paths: &[String],
-) -> RewriteAttempt {
-    if !crate::ai::llm_enabled() {
-        return RewriteAttempt::Unavailable;
-    }
-    let history_str = rewrite_history(messages, context_paths, last_q);
-    // 关键新增（2026-11-06）：让模型判断这一轮**要不要再看文档**。
-    // 多轮会话里大量追问只是对上一轮结论做比较/换算/汇总（"这些人谁最大"
-    // "各人年龄多少"），再跑一遍全库检索既慢又会让事实来源漂移。
-    let has_history = messages.iter().filter(|m| m.role == "user").count() > 1;
-    let system = "你是检索查询改写助手。用户在与本地文档对话，你的任务有三件：\
+/// 改写提示词。**静态、无插值**，放在模块级是为了让设置页能展示"实际生效的那一份"，
+/// 而不是让文档另抄一份（抄的那份迟早漂移）。
+pub(crate) const REWRITE_SYSTEM_PROMPT: &str = "你是检索查询改写助手。用户在与本地文档对话，你的任务有三件：\
 ① 把提问改写成一条可独立检索的中文查询；② 判断这条查询依赖哪些专名实体；③ 判断这一轮**还需不需要看文档**。\
 规则：\
 1) 补全指代与省略：代词（他/她/它/他们/这个/那个/该/上述/前者/后者）和**省略主语**的追问（例如上一轮问「万城公司人员列表」，本轮只问「办公室」「公司办公室」「各人的年龄」「标的最大的呢」「兄长呢」），必须从上文找出它真正指向的人名/机构名/案件名补进检索词。\
@@ -400,6 +387,23 @@ query 里每个词都要能通过一个检验：**如果答案在那份文档里
 输出**一行 JSON**（不要代码块、不要解释）：\
 {\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"self_contained\":\"yes|no\",\"basis\":\"history|docs|both\"}\
 self_contained 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
+
+/// 超时默认 **60 秒**（`LINK_SEARCHER_REWRITE_TIMEOUT_SECS` 可调）：这个网关的改写
+/// 请求常态 4–6 秒，旧的 5 秒上限会把关键的指代消解直接打死（2026-11-02 实测）。
+pub async fn llm_rewrite_query(
+    last_q: &str,
+    messages: &[ChatMessage],
+    context_paths: &[String],
+) -> RewriteAttempt {
+    if !crate::ai::llm_enabled() {
+        return RewriteAttempt::Unavailable;
+    }
+    let history_str = rewrite_history(messages, context_paths, last_q);
+    // 关键新增（2026-11-06）：让模型判断这一轮**要不要再看文档**。
+    // 多轮会话里大量追问只是对上一轮结论做比较/换算/汇总（"这些人谁最大"
+    // "各人年龄多少"），再跑一遍全库检索既慢又会让事实来源漂移。
+    let has_history = messages.iter().filter(|m| m.role == "user").count() > 1;
+    let system = REWRITE_SYSTEM_PROMPT;
     let user = format!("{history_str}\n当前问题：{last_q}");
     let sys = system.to_string();
     let budget = rewrite_timeout_secs();
@@ -494,6 +498,9 @@ fn rewrite_timeout_secs() -> u64 {
         .unwrap_or(60)
 }
 
+/// 「换一批证据」用的查询扩展提示词（静态、无插值），同 [`REWRITE_SYSTEM_PROMPT`] 的理由放在模块级。
+pub(crate) const REWRITE_RETRY_SYSTEM_PROMPT: &str = "你在为本地文档检索**换一批检索词**。上一轮用问题原词检索失败（材料里找不到能回答的内容），现在必须换一组**不同的**词再搜。硬性要求：1) 只围绕同一个问题，不换话题，不引入问题之外的人名/机构名/案名；2) **必须保留**问题里的区分性实体（人名/机构/案号/年份/项目名），一个字都不能改；3) **必须换词**：不许只把原句删掉“的/是/什么”变短一点就交差，要补上同义表述、上位词，以及这类问题在文档里通常出现的**结论性词** —— 例如问结果的补：判决/裁定/调解/结案/结论/处理结果；问时间的补：签订/履行/起止；问金额的补：金额/结算/付款（按问题类型自己判断）；4) 输出 6～12 个检索词，用空格分隔；不要解释、不要引号、不要照抄上一轮回答。";
+
 ///
 /// 重跑（卡片「换一批证据」）专用的**查询扩展**：上一轮用问题原词没能找到能直接回答
 /// 的材料，这次换一组**不一样**但更可能命中的检索词。
@@ -512,7 +519,7 @@ pub async fn llm_expand_retry_query(question: &str, prior_answer: &str) -> Optio
     if q.is_empty() || !crate::ai::llm_enabled() {
         return None;
     }
-    let system = "你在为本地文档检索**换一批检索词**。上一轮用问题原词检索失败（材料里找不到能回答的内容），现在必须换一组**不同的**词再搜。硬性要求：1) 只围绕同一个问题，不换话题，不引入问题之外的人名/机构名/案名；2) **必须保留**问题里的区分性实体（人名/机构/案号/年份/项目名），一个字都不能改；3) **必须换词**：不许只把原句删掉“的/是/什么”变短一点就交差，要补上同义表述、上位词，以及这类问题在文档里通常出现的**结论性词** —— 例如问结果的补：判决/裁定/调解/结案/结论/处理结果；问时间的补：签订/履行/起止；问金额的补：金额/结算/付款（按问题类型自己判断）；4) 输出 6～12 个检索词，用空格分隔；不要解释、不要引号、不要照抄上一轮回答。";
+    let system = REWRITE_RETRY_SYSTEM_PROMPT;
     let user = format!(
         "问题：{q}\n上一轮回答（供参考，不要照抄）：{}\n新的检索词：",
         truncate_text(prior_answer.trim(), 300)

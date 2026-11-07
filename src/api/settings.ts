@@ -1,5 +1,15 @@
 import * as client from './client'
 
+export interface PromptTemplate {
+  id: string
+  text: string
+}
+
+/** 只读：后端**实际生效**的系统提示词（不含每轮材料）。 */
+export async function getSystemPrompts(): Promise<PromptTemplate[]> {
+  return client.invoke<PromptTemplate[]>('get_system_prompts')
+}
+
 export async function getSettings(): Promise<Record<string, string>> {
   return client.invoke<Record<string, string>>('get_settings')
 }

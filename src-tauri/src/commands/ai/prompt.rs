@@ -156,6 +156,43 @@ const HEAD_MIN_BUDGET: usize = 6_000;
 const PROMPT_SNAPSHOT_HEAD: usize = 2_000;
 /// 提示词留痕：user 段首尾各留多少字（头部是对话历史，尾部是当前问题）。
 const PROMPT_SNAPSHOT_TAIL: usize = 1_000;
+
+/// 回答提示词的**分段模板**（不含材料本体）：`[指令, 材料编号说明与沿用规则 + 材料头]`。
+///
+/// 用分段常量而不是 `format!` 字面量，是为了让设置页展示的模板与真正拼出来的提示词
+/// **同源** —— 另抄一份到文档里，迟早会漂移。拼接顺序：
+/// `PARTS[0] + 材料编号说明 + PARTS[1] + 材料正文 + 对话回忆`。
+pub(crate) const ANSWER_SYSTEM_PARTS: [&str; 2] = [
+    "你是严谨的文档分析助手。优先依据以下材料回答，不臆造事实。\n",
+    "引用材料时在对应内容后标注 [N]（N 为本轮材料编号）；只引用本轮列出的编号。\n\
+前几轮已经给出的事实（名单/金额/日期/结论）可以直接沿用：需要据此排序、换算、汇总时，\
+说明依据哪一轮（如「基于第 2 轮列出的出生日期」）即可，不必重新从材料推导；\
+沿用旧结论时不要为它编造 [N]。材料与上文都不足以回答时，明确说明缺什么。\n\n材料：\n",
+];
+
+fn answer_system_prompt(material_note: &str, context: &str, recall: &str) -> String {
+    let mut s = String::with_capacity(
+        ANSWER_SYSTEM_PARTS[0].len() + material_note.len()
+            + ANSWER_SYSTEM_PARTS[1].len() + context.len() + recall.len(),
+    );
+    s.push_str(ANSWER_SYSTEM_PARTS[0]);
+    s.push_str(material_note);
+    s.push_str(ANSWER_SYSTEM_PARTS[1]);
+    s.push_str(context);
+    s.push_str(recall);
+    s
+}
+
+/// 给设置页用的**人类可读**模板：变量部分标成 `{...}`。
+pub(crate) fn answer_system_template_display() -> String {
+    let mut s = String::new();
+    s.push_str(ANSWER_SYSTEM_PARTS[0]);
+    s.push_str("{本轮材料编号说明}");
+    s.push_str(ANSWER_SYSTEM_PARTS[1]);
+    s.push_str("{材料正文}");
+    s.push_str("{对话回忆（可选）}");
+    s
+}
 /// 全库文件级向量相似度阈值。实测标定（bge-small-zh-v1.5，11,679 条向量）：
 /// 真实查询的最高余弦落在 0.61~0.77，中位数 0.26~0.45。原值 0.65 高于部分
 /// 查询的 max（"联嵘"查询 max=0.6111），导致向量通道对该类查询完全失效；
@@ -275,6 +312,14 @@ struct AssembleJob {
     cancel: Option<std::sync::Arc<crate::ai::CancelToken>>,
 }
 
+/// 作答前充分性自检提示词（静态、无插值）。放在模块级是为了让设置页展示
+/// **实际生效**的那一份，而不是另抄一份。
+pub(crate) const GAP_CHECK_SYSTEM_PROMPT: &str = "你是回答前的充分性审查员。你**只判断现有信息够不够**，不要回答问题，也不要解释。\
+给定【问题】【对话历史摘要】【已注入材料摘要】：\
+- 若仅凭这些信息就能完整、准确地回答，输出 {\"answerable\":true,\"missing\":[]}；\
+- 否则输出 {\"answerable\":false,\"missing\":[\"<还缺的事实>\"]}，missing 用 1~3 个**可在文档库里检索到的名词**表示（如 \"汪均晋 死亡证明\"、\"身份证号\"），不要写\"更多材料\"\"相关文件\"这类空话。\
+只输出一行 JSON，不要代码块。";
+
 /// 「先按上文作答、作答前自检」的第二段：判断现有材料/上文是否**足够**回答本轮问题。
 ///
 /// 只做判断，不回答问题；输出一行 JSON：`{"answerable":bool,"missing":[检索词]}`。
@@ -299,11 +344,7 @@ pub(super) fn check_context_gap(
     for (i, s) in snippets.iter().take(12).enumerate() {
         materials.push_str(&format!("[{}] {}\n", i + 1, truncate_text(s, 240)));
     }
-    let system = "你是回答前的充分性审查员。你**只判断现有信息够不够**，不要回答问题，也不要解释。\
-给定【问题】【对话历史摘要】【已注入材料摘要】：\
-- 若仅凭这些信息就能完整、准确地回答，输出 {\"answerable\":true,\"missing\":[]}；\
-- 否则输出 {\"answerable\":false,\"missing\":[\"<还缺的事实>\"]}，missing 用 1~3 个**可在文档库里检索到的名词**表示（如 \"汪均晋 死亡证明\"、\"身份证号\"），不要写\"更多材料\"\"相关文件\"这类空话。\
-只输出一行 JSON，不要代码块。";
+    let system = GAP_CHECK_SYSTEM_PROMPT;
     let user = format!(
         "【问题】{question}\n【对话历史摘要】{}\n【已注入材料摘要】\n{materials}\n只输出一行 JSON：",
         truncate_text(history_text, 4000)
@@ -419,6 +460,19 @@ mod prompt_snapshot_tests {
         assert_ne!(prompt_digest("abc"), prompt_digest("abd"));
         assert_eq!(prompt_digest("abc").chars().count(), 8);
         assert_eq!(prompt_digest(""), "cbf29ce4");
+    }
+
+    #[test]
+    fn answer_template_keeps_every_variable_part() {
+        let s = answer_system_prompt("本轮提供材料编号：1。", "【材料】正文", "\n\n回忆");
+        assert!(s.contains("本轮提供材料编号：1。"));
+        assert!(s.contains("【材料】正文"));
+        assert!(s.ends_with("\n\n回忆"));
+        // 展示用的模板必须把变量位置标出来，否则设置页看到的是"少了东西"的提示词
+        let disp = answer_system_template_display();
+        assert!(disp.contains("{本轮材料编号说明}"));
+        assert!(disp.contains("{材料正文}"));
+        assert!(disp.contains("{对话回忆"));
     }
 }
 
@@ -2217,14 +2271,7 @@ fn assemble_conversation_prompt(
         let list = visible_nums.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", ");
         format!("本轮提供材料编号：{}。", list)
     };
-    let system = format!(
-        "你是严谨的文档分析助手。优先依据以下材料回答，不臆造事实。\n\
-{material_note}引用材料时在对应内容后标注 [N]（N 为本轮材料编号）；只引用本轮列出的编号。\n\
-前几轮已经给出的事实（名单/金额/日期/结论）可以直接沿用：需要据此排序、换算、汇总时，\
-说明依据哪一轮（如「基于第 2 轮列出的出生日期」）即可，不必重新从材料推导；\
-沿用旧结论时不要为它编造 [N]。材料与上文都不足以回答时，明确说明缺什么。\n\n材料：\n{}{}",
-        context, recall_section
-    );
+    let system = answer_system_prompt(&material_note, &context, &recall_section);
     let last_n = messages.len().saturating_sub(1);
     let mut user_msg = if messages.len() > 1 {
         let mut history_str = String::from("对话历史：\n");

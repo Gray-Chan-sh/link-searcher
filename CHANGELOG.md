@@ -1,3 +1,24 @@
+## 2026-11-07（第九十四轮）：设置页可看系统提示词模板（只读）（v1.5.14）
+
+> 起因：v1.5.13 只把**每轮提示词**（含材料）留了痕；改写/自检那几份模板是**另一次
+> 调用**、且是静态的，看不到——而「大小」恰恰出自改写提示词。静态内容没必要每轮存一份，
+> 所以在设置页展示一次即可。
+
+- **新增命令 `get_system_prompts`**：返回四份**实际生效**的模板 ——
+  `query_rewrite`（`REWRITE_SYSTEM_PROMPT`）、`rewrite_retry`
+  （`REWRITE_RETRY_SYSTEM_PROMPT`）、`gap_check`（`GAP_CHECK_SYSTEM_PROMPT`）、
+  `answer`（`ANSWER_SYSTEM_PARTS` 拼出的展示模板）。纯内存、无 I/O，同步命令。
+- **提示词抽成模块级常量**（`rewrite.rs` / `prompt.rs`）：设置页展示的就是源码里
+  那一份，**不再有第二份副本**。回答提示词原本是 `format!` 字面量，改为
+  `ANSWER_SYSTEM_PARTS` 两段常量 + `answer_system_prompt()` 拼接 —— 语义不变，
+  但让"展示"和"实际发送"同源。
+- **设置 → 系统 → 「系统提示词」**（`SystemPromptsSection.tsx`）：四个可折叠块，
+  等宽、可滚动、只读；四语言文案（`system_prompts` / `prompt_*`）。
+- 新增 2 条单测：`get_system_prompts` 四份齐全且非空、改写模板必须仍含
+  「那份文档会不会写出这个词」判据；`answer_system_prompt` 往返保留全部变量段、
+  展示模板把变量位置标出来。
+- 文档：`docs/08-ai-features.md` 补「模板本身在哪看」。
+
 ## 2026-11-07（第九十三轮）：提示词可查（每轮快照进"推理过程"）（v1.5.13）
 
 > 起因：提示词全部硬编码在源码里（`rewrite.rs` / `prompt.rs`），用户看不到、改不了；

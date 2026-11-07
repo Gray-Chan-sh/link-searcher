@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useI18n } from '../../i18n'
 import { Section, TextField, NumberField, TextareaField, ToggleField, SelectField } from './SettingsFields'
+import { SystemPromptsSection } from './SystemPromptsSection'
 import { invoke } from '../../api/client'
 import { MASKED_SECRET } from '../../api/settings'
 
@@ -262,6 +263,7 @@ export function SystemTab({ settings, onFieldChange, onRegenerateToken }: System
           </p>
         )}
       </Section>
+      <SystemPromptsSection />
     </div>
   )
 }
