@@ -1834,19 +1834,34 @@ fn assemble_conversation_prompt(
     //
     // 现在改为：追问轮 + **依赖上文**（问句没有专名）⇒ 沿用上一轮引用材料，
     // 数量上限随 basis 调整（纯追问要更多），且必须仍在本轮 scope 内。
+    //
+    // 2026-11-08（Step 2）：沿用**计入本轮份数上限**，不再额外叠加 —— 之前
+    // docs 会变成 30 新 + 10 沿用 = 40 份 / 131k 字，both 变成 12 + 12 = 24 份。
+    // 这里把沿用压到总上限的 1/4（docs 30→7、both 12→3），并只保留与本轮
+    // 实体（entities）相交的旧材料；history 分支仍以沿用为唯一来源，保留 20。
     let is_follow_up = messages.len() > 1;
     let history_cap = match basis {
         super::rewrite::AnswerBasis::History => 20,
-        super::rewrite::AnswerBasis::Both => 12,
-        super::rewrite::AnswerBasis::Docs => 10,
+        super::rewrite::AnswerBasis::Both => 3,
+        super::rewrite::AnswerBasis::Docs => 7,
     };
     let mut history_resolved: Vec<(String, String)> = Vec::new(); // (file_id, path) 待随材料注入
     if is_follow_up {
         let message_text: String = messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join(" ");
-        for fid in source_ids.iter().rev().take(history_cap) {
+        for fid in source_ids.iter().rev().take(history_cap * 2) {
+            if history_resolved.len() >= history_cap { break; }
             if all_seen.contains(fid) { continue; }
             let Some(rec) = rec_by_id.get(fid) else { continue };
             if rec.status != "active" || rec.md5.is_none() { continue; }
+            // 只沿用与本轮检索对象相关的旧材料：「他和陈秀芳谁大」本轮只查陈秀芳，
+            // 就不再带上一轮的常宏材料（否则 12 个名额被旧对象占满）。
+            // `History` 分支不筛：它没有新检索，沿用就是全部材料。
+            if basis != super::rewrite::AnswerBasis::History
+                && !entity_kws.is_empty()
+                && !entity_kws.iter().any(|e| rec.path.contains(e.as_str()))
+            {
+                continue;
+            }
             // 范围守卫：上一轮引用的文件也必须仍在本轮 scope 内（用户可能刚切换了范围）。
             if !hit_in_scope(
                 fid,
@@ -2099,14 +2114,17 @@ fn assemble_conversation_prompt(
     // 把上下文预算留给上几轮的结论，避免 30 份材料再次盖过历史。
     // gap_check 补查同理：只补"缺的那点事实"，不需要 30 份。
     const BOTH_CONTENT_INJECT: usize = 12;
+    // 2026-11-08（Step 2）：沿用份数要从本轮上限里扣掉，否则"上限"名不副实
+    // （实测 docs 40 份 / 131k 字）。历史分支不扣：它本来就没有新检索。
+    let carried = history_resolved.len();
     let inject_limit = if full_recall {
         all_hits.len().max(1)
     } else if basis == super::rewrite::AnswerBasis::Both || gap_supplement {
-        BOTH_CONTENT_INJECT
+        BOTH_CONTENT_INJECT.saturating_sub(carried).max(6)
     } else if skip_retrieval {
         0
     } else {
-        MAX_CONTENT_INJECT
+        MAX_CONTENT_INJECT.saturating_sub(carried)
     };
     let scoped = |h: &ScoredHit| -> bool {
         hit_in_scope(&h.file_id, &h.path, path_prefixes_opt.as_deref(), mention_file_ids.as_deref())

@@ -1,0 +1,47 @@
+{
+  "id": "Z-instrument",
+  "ok": false,
+  "fails": [
+    "carried_count>=1 实际=0"
+  ],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 3339,
+      "truncated": false,
+      "answer": "常宏的出生日期为 1963 年 8 月 6 日 [1]。",
+      "answer_head": "常宏的出生日期为 1963 年 8 月 6 日 [1]。"
+    },
+    {
+      "rewritten": "陈秀芳 出生日期",
+      "basis": "both",
+      "anchor": [
+        "陈秀芳"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": true,
+      "materials": 12,
+      "chars": 29157,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 1937,
+      "truncated": false,
+      "answer": "陈秀芳比常宏大。根据材料，陈秀芳出生于1956年3月18日 [1]，而常宏出生于1963年8月6日。陈秀芳出生时间更早，因此年龄更大。",
+      "answer_head": "陈秀芳比常宏大。根据材料，陈秀芳出生于1956年3月18日 [1]，而常宏出生于1963年8月6日。陈秀芳出生时间更早，"
+    }
+  ]
+}

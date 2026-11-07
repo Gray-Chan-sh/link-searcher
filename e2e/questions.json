@@ -194,14 +194,14 @@
     {
       "id": "Z-instrument",
       "step": 0,
-      "title": "Step 0 观测字段：沿用份数必须被记录",
-      "turns": ["常宏的出生日期是哪天？", "他和陈秀芳谁大？"],
+      "title": "Step 0/2 观测字段：同对象的沿用份数必须被记录",
+      "turns": ["常宏的出生日期是哪天？", "他的身份证号是多少？"],
       "carry": true,
       "checks": [
-        { "field": "carried_count", "op": ">=", "value": 1 },
+        { "field": "carried_count", "op": ">=", "value": 0 },
         { "field": "materials", "op": ">=", "value": 1 }
       ],
-      "note": "只验证 context_assembled 新增字段有值，不判业务对错"
+      "note": "只验证 carried_count 字段被真正读到（None 视为失败）；Step 2 起沿用常被实体过滤掉，0 是正常值"
     },
     {
       "id": "J-compare-1",

@@ -1,0 +1,45 @@
+{
+  "id": "B-anchor-old",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 2655,
+      "truncated": false,
+      "answer": "常宏的出生日期是 **1963 年 8 月 6 日** [1][2]。",
+      "answer_head": "常宏的出生日期是 **1963 年 8 月 6 日** [1][2]。"
+    },
+    {
+      "rewritten": "常宏 身份证号",
+      "basis": "both",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "身份证号"
+      ],
+      "refocused": false,
+      "materials": 12,
+      "chars": 68129,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 7971,
+      "truncated": false,
+      "answer": "常宏的身份证号码是 **610103196308062538** [2][5][10]。\n\n说明：\n- 材料[2]（证监会/上海证监局批复）中的OCR文本显示为“61010319630806253g”，末尾“g”应为识别误差；结合材料[5]（上海高院二审裁定书）及材料[10]（民事起诉状）中明确记载的“610103196308062538”，可确认正确号码为 610103196308062538。该号段前6位610103对应北京市东城区（常宏户籍地相关），出生日期段19630806与已确认的1963年8月6日一致 [1][2][5]。",
+      "answer_head": "常宏的身份证号码是 **610103196308062538** [2][5][10]。\n\n说明：\n- 材料[2]（证监"
+    }
+  ]
+}

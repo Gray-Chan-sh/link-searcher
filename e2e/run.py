@@ -121,7 +121,10 @@ def evaluate(checks, fields):
         got = fields.get(field)
         ok = False
         try:
-            if op == "eq":
+            if got is None:
+                # 事件没读到 ≠ 通过：以前 None 当 0，会让"没测到"伪装成 PASS。
+                ok = op == "ne" and want is not None
+            elif op == "eq":
                 ok = got == want
             elif op == "ne":
                 ok = got != want
@@ -197,12 +200,15 @@ def main():
         for ev in evaluated:
             checked.append(ev)
             fails += evaluate(case["checks"], ev)
-        ok = error is None and bool(rows) and not fails
+        # 上游限流（重试后仍然 429）不是产品质量问题：单独记为 env，不计入失败。
+        env = any("网关拒绝" in (r.get("answer") or "") for r in rows)
+        ok = error is None and bool(rows) and not fails and not env
         if not rows:
             fails = fails or ["没有任何一轮完成"]
         results.append({"id": case["id"], "title": case["title"], "step": case.get("step", 0),
-                        "ok": ok, "fails": fails, "rows": rows, "error": error})
-        print(f"  => {'PASS' if ok else 'FAIL'}" + (f"  {fails[:2]}" if fails else ""))
+                        "ok": ok, "env": env, "fails": fails, "rows": rows, "error": error})
+        tag = "SKIP(env)" if env else ("PASS" if ok else "FAIL")
+        print(f"  => {tag}" + (f"  {fails[:2]}" if fails and not env else ""))
 
         # 单条用例结束后立刻落盘一份原始数据，避免长跑中断丢证据
         raw_dir = os.path.join(HERE, "reports", "raw")
@@ -212,9 +218,11 @@ def main():
                       f, ensure_ascii=False, indent=2)
 
     passed = sum(1 for r in results if r["ok"])
-    print(f"\n=== 汇总：{passed}/{len(results)} 通过")
+    env_skip = sum(1 for r in results if r.get("env"))
+    counted = len(results) - env_skip
+    print(f"\n=== 汇总：{passed}/{counted} 通过（另有 {env_skip} 条因上游限流跳过）")
     for r in results:
-        if not r["ok"]:
+        if not r["ok"] and not r.get("env"):
             print(f"  FAIL {r['id']}: {'; '.join(r['fails'][:3])}")
 
     if args.report:
