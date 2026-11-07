@@ -121,6 +121,7 @@ const zh: Record<string, string> = {
     run_topic_clusters: '✦ 开始聚类',
     ai_event_llm_call: 'LLM 调用',
     ai_event_turn_complete: '轮次完成',
+    ai_event_prompt_snapshot: '提示词',
     send: '发送',
     ai_summarize: 'AI 摘要',
     ask_ai: '问 AI',

@@ -118,6 +118,7 @@ const ja: Record<string, string> = {
     run_topic_clusters: '✦ クラスタリング開始',
     ai_event_llm_call: 'LLM呼び出し',
     ai_event_turn_complete: 'ターン完了',
+    ai_event_prompt_snapshot: 'プロンプト',
     send: '送信',
     ai_summarize: 'AI要約',
     ask_ai: 'AIに質問',

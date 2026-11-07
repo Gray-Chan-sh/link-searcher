@@ -1,3 +1,23 @@
+## 2026-11-07（第九十三轮）：提示词可查（每轮快照进"推理过程"）（v1.5.13）
+
+> 起因：提示词全部硬编码在源码里（`rewrite.rs` / `prompt.rs`），用户看不到、改不了；
+> 日志里只有 `system_prompt_chars` 长度，导出会话也不含内容。于是"答得怪"时
+> 无法区分是指令让它理解错、还是材料没给对 —— 用户和开发者看的是同一个黑盒。
+
+- **新增 `prompt_snapshot` 事件**（`prompt.rs`，在 `context_assembled` 之后推送）：
+  `system_chars` + `system_head`（前 2000 字，指令在最前、材料在后）+ `system_digest`、
+  `user_chars` + `user_head` / `user_tail`（首尾各 1000 字，尾部才是「当前问题」）+
+  `user_digest`。每轮约 4k 字符，随 `ai_events` 存库、随会话删除，导出 JSON 的
+  `log` 段同样带上。
+- **「推理过程」里可展开**（`AiEventTimeline.tsx`）：`prompt_snapshot` 一行摘要
+  （`system N chars · user M chars · #xxxxxxxx`），点开显示 `system` / `user` 两段
+  原文（等宽、可滚动、长内容折叠）。图标 📜，四语言文案 `ai_event_prompt_snapshot`。
+- **摘要（FNV-1a 8 位）的用途**：两轮答案不同时，摘要一致 ⇒ 差异来自模型采样；
+  摘要不同 ⇒ 提示词（通常是材料构成）变了。**不是安全哈希**。
+- **只读**：不参与任何判断、不影响检索与回答内容；`tail_text` / `prompt_digest`
+  各带单测（尾部保留当前问题、短串原样返回、摘要稳定且随内容变化）。
+- 文档：`docs/08-ai-features.md` 新增「查看本轮提示词」一节。
+
 ## 2026-11-07（第九十二轮）：检索词只写"材料会写出来的词"，不写"回答要做的事"（v1.5.12）
 
 > 起因：真实会话里「他和陈秀芳谁大？」被改写成 `常宏 陈秀芳 出生日期 大小`。

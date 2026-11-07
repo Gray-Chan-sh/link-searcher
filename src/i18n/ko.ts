@@ -118,6 +118,7 @@ const ko: Record<string, string> = {
     run_topic_clusters: '✦ 클러스터링 시작',
     ai_event_llm_call: 'LLM 호출',
     ai_event_turn_complete: '턴 완료',
+    ai_event_prompt_snapshot: '프롬프트',
     send: '전송',
     ai_summarize: 'AI 요약',
     ask_ai: 'AI에게 질문',

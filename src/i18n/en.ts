@@ -121,6 +121,7 @@ const en: Record<string, string> = {
     run_topic_clusters: '✦ Cluster Topics',
     ai_event_llm_call: 'LLM call',
     ai_event_turn_complete: 'Turn complete',
+    ai_event_prompt_snapshot: 'Prompt',
     send: 'Send',
     ai_summarize: 'AI Summary',
     ask_ai: 'Ask AI',

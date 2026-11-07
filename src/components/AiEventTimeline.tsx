@@ -17,6 +17,7 @@ const EVENT_ICONS: Record<string, string> = {
   retrieval_fingerprint: '🧭',
   retrieval_anomaly: '⚠️',
   context_assembled: '📋',
+  prompt_snapshot: '📜',
   llm_call: '🤖',
   turn_complete: '✅',
 }
@@ -31,6 +32,7 @@ const EVENT_KEYS: Record<string, string> = {
   retrieval_fingerprint: 'ai_event_retrieval_fingerprint',
   retrieval_anomaly: 'ai_event_retrieval_anomaly',
   context_assembled: 'ai_event_context_assembled',
+  prompt_snapshot: 'ai_event_prompt_snapshot',
   llm_call: 'ai_event_llm_call',
   turn_complete: 'ai_event_turn_complete',
 }
@@ -115,6 +117,10 @@ function formatPayload(type: string, payload: Record<string, unknown>): string {
       const p = payload as { material_count?: number; total_chars?: number; strict_docs?: boolean }
       return `${p.material_count} materials, ${p.total_chars} chars${p.strict_docs ? ' (strict)' : ''}`
     }
+    case 'prompt_snapshot': {
+      const p = payload as { system_chars?: number; user_chars?: number; system_digest?: string }
+      return `system ${p.system_chars ?? 0} chars · user ${p.user_chars ?? 0} chars · #${p.system_digest ?? ''}`
+    }
     case 'llm_call': {
       const p = payload as { model_id?: string; system_prompt_chars?: number; user_msg_chars?: number; streaming?: boolean }
       return `${p.model_id} · sys=${p.system_prompt_chars} user=${p.user_msg_chars}${p.streaming ? ' (stream)' : ''}`
@@ -148,13 +154,58 @@ export default function AiEventTimeline({ sessionId, turnNumber }: Props) {
 
   return (
     <div className="mt-1 space-y-0.5">
-      {events.map(ev => (
-        <div key={ev.id} className="flex items-start gap-1.5 text-xs text-gray-500 dark:text-gray-400">
-          <span className="shrink-0 mt-px">{EVENT_ICONS[ev.event_type] ?? '•'}</span>
-          <span className="font-medium shrink-0">{t(EVENT_KEYS[ev.event_type] ?? ev.event_type)}</span>
-          <span className="truncate">{formatPayload(ev.event_type, ev.payload)}</span>
-        </div>
-      ))}
+      {events.map(ev => {
+        if (ev.event_type === 'prompt_snapshot') {
+          const p = ev.payload as {
+            system_chars?: number
+            system_head?: string
+            system_digest?: string
+            user_chars?: number
+            user_head?: string
+            user_tail?: string
+            user_digest?: string
+          }
+          return (
+            <details key={ev.id} className="text-xs text-gray-500 dark:text-gray-400">
+              <summary className="cursor-pointer flex items-start gap-1.5">
+                <span className="shrink-0 mt-px">{EVENT_ICONS.prompt_snapshot}</span>
+                <span className="font-medium shrink-0">{t('ai_event_prompt_snapshot')}</span>
+                <span className="truncate">{formatPayload(ev.event_type, ev.payload)}</span>
+              </summary>
+              <div className="mt-1 ml-5 space-y-2">
+                <div>
+                  <div className="font-medium text-gray-600 dark:text-gray-300">
+                    system · #{p.system_digest ?? ''}
+                  </div>
+                  <pre className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 dark:bg-gray-800/60 p-2 text-[11px] leading-relaxed">
+                    {p.system_head}
+                  </pre>
+                </div>
+                <div>
+                  <div className="font-medium text-gray-600 dark:text-gray-300">
+                    user · #{p.user_digest ?? ''}
+                  </div>
+                  <pre className="mt-0.5 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 dark:bg-gray-800/60 p-2 text-[11px] leading-relaxed">
+                    {p.user_head}
+                  </pre>
+                  {p.user_tail && p.user_tail !== p.user_head && (
+                    <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 dark:bg-gray-800/60 p-2 text-[11px] leading-relaxed">
+                      {p.user_tail}
+                    </pre>
+                  )}
+                </div>
+              </div>
+            </details>
+          )
+        }
+        return (
+          <div key={ev.id} className="flex items-start gap-1.5 text-xs text-gray-500 dark:text-gray-400">
+            <span className="shrink-0 mt-px">{EVENT_ICONS[ev.event_type] ?? '•'}</span>
+            <span className="font-medium shrink-0">{t(EVENT_KEYS[ev.event_type] ?? ev.event_type)}</span>
+            <span className="truncate">{formatPayload(ev.event_type, ev.payload)}</span>
+          </div>
+        )
+      })}
     </div>
   )
 }

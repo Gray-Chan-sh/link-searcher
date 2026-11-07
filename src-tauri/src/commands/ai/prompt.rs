@@ -152,6 +152,10 @@ const MIN_PER_FILE: usize = 4_600;
 /// 头块（标题/当事人/案号）仅在预算够放 4 块时才带上；独立于 [`MIN_PER_FILE`]，
 /// 否则抬高后者会顺带禁掉头块。
 const HEAD_MIN_BUDGET: usize = 6_000;
+/// 提示词留痕：system 段只留头部（指令在最前面，材料在后）。
+const PROMPT_SNAPSHOT_HEAD: usize = 2_000;
+/// 提示词留痕：user 段首尾各留多少字（头部是对话历史，尾部是当前问题）。
+const PROMPT_SNAPSHOT_TAIL: usize = 1_000;
 /// 全库文件级向量相似度阈值。实测标定（bge-small-zh-v1.5，11,679 条向量）：
 /// 真实查询的最高余弦落在 0.61~0.77，中位数 0.26~0.45。原值 0.65 高于部分
 /// 查询的 max（"联嵘"查询 max=0.6111），导致向量通道对该类查询完全失效；
@@ -389,6 +393,32 @@ mod gap_check_tests {
     #[test]
     fn gap_query_falls_back_when_nothing_missing() {
         assert_eq!(gap_query(&[], &["汪均晋".to_string()], "原查询"), "原查询");
+    }
+}
+
+#[cfg(test)]
+mod prompt_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn tail_text_keeps_the_question_at_the_end() {
+        let s = format!("{}\n当前问题：他和陈秀芳谁大？", "历史".repeat(500));
+        let t = tail_text(&s, 100);
+        assert!(t.ends_with("当前问题：他和陈秀芳谁大？"));
+        assert_eq!(t.chars().count(), 100);
+    }
+
+    #[test]
+    fn tail_text_returns_short_string_unchanged() {
+        assert_eq!(tail_text("短", 100), "短");
+    }
+
+    #[test]
+    fn digest_is_stable_and_differs_on_change() {
+        assert_eq!(prompt_digest("abc"), prompt_digest("abc"));
+        assert_ne!(prompt_digest("abc"), prompt_digest("abd"));
+        assert_eq!(prompt_digest("abc").chars().count(), 8);
+        assert_eq!(prompt_digest(""), "cbf29ce4");
     }
 }
 
@@ -2237,6 +2267,21 @@ fn assemble_conversation_prompt(
         "strict_docs": strict_docs,
         "truncated_to": max_context_chars,
     })));
+    // ── 提示词留痕（只读审计，2026-11-07） ────────────────────────────────
+    // 提示词全部硬编码在源码里，用户看不到；一旦"答得怪"，无法区分是指令让它
+    // 理解错、还是材料没给对。这里把**指令段**（system 头部 2000 字，材料在后）
+    // 与**问题段**（user 首尾各 1000 字：头部是对话历史，尾部是当前问题）
+    // 连同长度/摘要写进 ai_events，由「推理过程」里的「提示词」一栏展开查看。
+    // 只读、不改行为，也不参与任何判断。
+    events.push(("prompt_snapshot".into(), serde_json::json!({
+        "system_chars": system.chars().count(),
+        "system_head": truncate_text(&system, PROMPT_SNAPSHOT_HEAD),
+        "system_digest": prompt_digest(&system),
+        "user_chars": user_msg.chars().count(),
+        "user_head": truncate_text(&user_msg, PROMPT_SNAPSHOT_TAIL),
+        "user_tail": tail_text(&user_msg, PROMPT_SNAPSHOT_TAIL),
+        "user_digest": prompt_digest(&user_msg),
+    })));
     // 指代消解基于改写后的 search_q：代词已在改写中展开，避免规则管道二次误判歧义。
     let (clarify_note, clarify_candidates, clarify_slots, clarify_blocking) = {
         use crate::commands::clarify;
@@ -2346,6 +2391,26 @@ pub fn truncate_text(s: &str, max_chars: usize) -> String {
     } else {
         chars[..max_chars].iter().collect()
     }
+}
+
+/// 取尾部 N 个字符 —— `user_msg` 的「当前问题」在最后，头截断会正好把它丢掉。
+fn tail_text(s: &str, max_chars: usize) -> String {
+    let n = s.chars().count();
+    if n <= max_chars {
+        return s.to_string();
+    }
+    s.chars().skip(n - max_chars).collect()
+}
+
+/// 8 位十六进制摘要（FNV-1a）。只用于"这一轮与上一轮的提示词是不是同一份"这类
+/// 比对，**不是**安全哈希。
+fn prompt_digest(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")[..8].to_string()
 }
 
 /// jieba-tokenize a retrieval query into matchable terms (len >= 2). Rewrites
