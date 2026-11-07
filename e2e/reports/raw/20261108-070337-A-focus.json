@@ -1,0 +1,45 @@
+{
+  "id": "A-focus",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期 身份证 户籍 登记",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 133577,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 14351,
+      "truncated": false,
+      "answer": "常宏的出生日期是1963年8月6日。\n\n依据：\n- 材料[1]中常宏简历明确记载“出生日期: 1963年08月06日”。\n- 材料[4]和[5]中的开庭笔录及起诉状/案件信息也多次确认常宏为“1963年8月6日出生”。",
+      "answer_head": "常宏的出生日期是1963年8月6日。\n\n依据：\n- 材料[1]中常宏简历明确记载“出生日期: 1963年08月06日”。"
+    },
+    {
+      "rewritten": "陈秀芳 出生日期",
+      "basis": "both",
+      "anchor": [
+        "陈秀芳"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": false,
+      "materials": 12,
+      "chars": 29157,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 5463,
+      "truncated": false,
+      "answer": "要比较常宏和陈秀芳谁大，依据本轮材料：\n\n- 常宏的出生日期为 **1963年8月6日** [1]\n- 陈秀芳的出生日期为 **1956年3月18日** [1]\n\n出生日期越早，年龄越大。由于1956年早于1963年，因此：\n\n**陈秀芳比常宏大。**\n\n- 陈秀芳：1956年3月18日出生\n- 常宏：1963年8月6日出生\n\n陈秀芳比常宏大7年多。",
+      "answer_head": "要比较常宏和陈秀芳谁大，依据本轮材料：\n\n- 常宏的出生日期为 **1963年8月6日** [1]\n- 陈秀芳的出生日期"
+    }
+  ]
+}

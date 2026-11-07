@@ -1,0 +1,46 @@
+{
+  "id": "H-money-needs",
+  "ok": false,
+  "fails": [
+    "answermatches'元|万|款|支付' 实际='❌ AI 网关拒绝（HTTP 429）: {\"error\":{\"code\":\"\",\"message\":\"You’ve reached the API rate limit for free users. Upgrade to a Token Plan to unlock higher limits and continue using the API without interruption. (request id: 202611072'"
+  ],
+  "rows": [
+    {
+      "rewritten": "周锦春 判决 结果",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 56317,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 10133,
+      "truncated": false,
+      "answer": "根据提供的材料，周锦春诉周恒斌等共有物分割纠纷案并未以判决形式结案，而是以**民事调解书**的形式结案 [2]。\n\n具体的调解结果（协议内容）如下：\n\n1.  **被告周恒斌的支付义务：**\n    *   于2022年2月15日前，支付原告周锦春、金纯熙、金钟敏征收补偿款共计 **[200,000] 元**（备注：扣除已支付的200,000元，此处材料原文OCR可能存在识别错误或逻辑矛盾，原文写作“共00元可海市扣已支付的200,000元”，结合上下文通常理解为支付剩余款项或确认总额，但依据现有OCR文本无法完全确定最终净额，仅能引用原文表述） [2]。\n    *   于2022年2月15日前，支付被告周家栋征收补偿款 **249,380** 元 [2]。\n\n2.  **原告方的支付义务：**\n    *   原告周锦春、金钟敏于2022年2月28日前，支付被告周家栋征收补偿款 **205,000** 元 [2]。\n\n3.  **诉讼费负担：**\n    *   本案诉讼费由三方分担：原告周锦春、金钟敏、金纯熙负担236元；被告周家栋负担1062元；其他被告（周恒斌、刘蕾、周瀚、雷章英、刘兴芳、周传华、张冬萍）负担7880元 [2]。\n\n**注意：**\n*   材料[2]中的具体金额部分因OCR识别问题存在乱码（如“共00元”、“1624,460”等），上述金额是基于材料[2]中相对清晰数字的提取。其中“原告要求分得1624,460元”的诉讼请求在调解中并未全额支持，而是通过双方互相支付的方式达成和解 [2]。\n*   该调解书案号为 **(2022)沪0110民初967号**，由上海市杨浦区人民法院于2022年作出 [2]。",
+      "answer_head": "根据提供的材料，周锦春诉周恒斌等共有物分割纠纷案并未以判决形式结案，而是以**民事调解书**的形式结案 [2]。\n\n具体"
+    },
+    {
+      "rewritten": "被告 支付 款项",
+      "basis": "history",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "gap_checked": true,
+      "gap_answerable": true,
+      "gap_error": "ok",
+      "materials": 0,
+      "chars": 0,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 0,
+      "truncated": false,
+      "answer": "❌ AI 网关拒绝（HTTP 429）: {\"error\":{\"code\":\"\",\"message\":\"You’ve reached the API rate limit for free users. Upgrade to a Token Plan to unlock higher limits and continue using the API without interruption. (request id: 202611072",
+      "answer_head": "❌ AI 网关拒绝（HTTP 429）: {\"error\":{\"code\":\"\",\"message\":\"You’ve r"
+    }
+  ]
+}

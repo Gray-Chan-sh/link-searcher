@@ -1,0 +1,47 @@
+{
+  "id": "C-spouse",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 3751,
+      "truncated": false,
+      "answer": "常宏的出生日期是**1963年8月6日** [1][2][4][5][7][11]。",
+      "answer_head": "常宏的出生日期是**1963年8月6日** [1][2][4][5][7][11]。"
+    },
+    {
+      "rewritten": "常宏 陈秀芳 配偶 出生日期",
+      "basis": "both",
+      "anchor": [
+        "常宏",
+        "陈秀芳"
+      ],
+      "needs": [
+        "配偶",
+        "出生日期"
+      ],
+      "refocused": true,
+      "materials": 12,
+      "chars": 59039,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 4179,
+      "truncated": false,
+      "answer": "常宏的爱人（妻子）是**陆霞**，材料中未直接给出陆霞的出生日期，仅在第 11 号材料（侦查卷宗笔录）中提到“妻子陆霞，55岁”（该笔录未标注具体年份，但结合常宏1963年8月6日出生及语境，该“55岁”应为约数或特定时间点年龄，无法精确换算为与陈秀芳可比的准确出生日期）；而陈秀芳的出生日期在材料中明确记载为**1956年3月18日** [3][4][5]。\n\n由于**缺少陆霞的准确出生日期**（仅有“55岁”这一模糊表述，且未说明该年龄对应的时间节点，无法据此可靠换算并与陈秀芳的1956年3月18日进行精确比较），**材料不足以回答“谁大”**。",
+      "answer_head": "常宏的爱人（妻子）是**陆霞**，材料中未直接给出陆霞的出生日期，仅在第 11 号材料（侦查卷宗笔录）中提到“妻子陆霞，"
+    }
+  ]
+}

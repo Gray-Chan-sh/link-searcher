@@ -1,0 +1,49 @@
+{
+  "id": "B-anchor-old",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 14236,
+      "truncated": false,
+      "answer": "常宏的出生日期是1963年8月6日 [1]。",
+      "answer_head": "常宏的出生日期是1963年8月6日 [1]。"
+    },
+    {
+      "rewritten": "常宏 身份证号",
+      "basis": "both",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "身份证号"
+      ],
+      "refocused": false,
+      "materials": 12,
+      "chars": 68129,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 7186,
+      "truncated": false,
+      "answer": "常宏的身份证号码为 **610103196308062538** [7][10]。\n\n不同材料中该号码存在尾数差异：刑事裁定书及证监会批文中记载为“61010319630806253g” [2][5]，而多份民事诉讼材料及庭审笔录中明确记载为“610103196308062538” [7][10][11]。结合上下文，“g”应为“8”的 OCR 识别错误或笔误，实际身份证号应为 **610103196308062538**。",
+      "answer_head": "常宏的身份证号码为 **610103196308062538** [7][10]。\n\n不同材料中该号码存在尾数差异：刑事"
+    }
+  ]
+}

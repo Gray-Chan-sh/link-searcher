@@ -1,0 +1,243 @@
+{
+  "version": 1,
+  "description": "AI 问答管线的可复跑问题集。每个 case 的 checks 在最后一轮求值；step 表示该用例应在哪一步开始通过。",
+  "fields": {
+    "rewritten": "本轮改写后的检索词",
+    "basis": "history / both / docs",
+    "anchor": "both 聚焦：该去谁的材料里找",
+    "needs": "both 聚焦：还缺什么事实",
+    "materials": "本轮注入的材料份数",
+    "chars": "本轮上下文总字符数",
+    "carried_count": "沿用上一轮的份数",
+    "carried_chars": "沿用上一轮的字符数",
+    "dropped": "因预算被丢弃的候选份数",
+    "truncated": "上下文是否被截断",
+    "gap_checked": "作答前自检是否真的跑成功",
+    "gap_answerable": "自检结论：上文够不够",
+    "answer": "回答全文",
+    "answer_head": "回答前 60 字（用于判定是否开头就给错结论）",
+    "took_ms": "本轮耗时"
+  },
+  "cases": [
+    {
+      "id": "A-focus",
+      "step": 0,
+      "title": "对比已知对象：只查新对象",
+      "turns": ["常宏的出生日期是哪天？", "他和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "basis", "op": "eq", "value": "both" },
+        { "field": "anchor", "op": "contains", "value": "陈秀芳" },
+        { "field": "materials", "op": "<=", "value": 12 },
+        { "field": "answer", "op": "contains", "value": "陈秀芳" }
+      ],
+      "note": "2026-11-07 实测：聚焦前 9/12 是旧对象"
+    },
+    {
+      "id": "B-anchor-old",
+      "step": 0,
+      "title": "缺的事实属于旧对象：锚点必须保留",
+      "turns": ["常宏的出生日期是哪天？", "他的身份证号是多少？"],
+      "carry": false,
+      "checks": [
+        { "field": "anchor", "op": "contains", "value": "常宏" },
+        { "field": "answer", "op": "contains", "value": "身份证" }
+      ],
+      "note": "2026-11-07 实测：常宏 610103196308062538"
+    },
+    {
+      "id": "C-spouse",
+      "step": 0,
+      "title": "亲属称谓：姓名未知时保留锚点",
+      "turns": ["常宏的出生日期是哪天？", "他的爱人和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "anchor", "op": "contains", "value": "常宏" },
+        { "field": "answer", "op": "matches", "value": "陆霞|配偶|爱人" }
+      ],
+      "note": "爱人姓名只能从常宏的材料里找到"
+    },
+    {
+      "id": "D-history-max",
+      "step": 0,
+      "title": "纯计算追问：history + 零检索",
+      "turns": ["分析周锦春案中的亲属关系", "这些人里谁年龄最大？"],
+      "carry": false,
+      "checks": [
+        { "field": "basis", "op": "eq", "value": "history" },
+        { "field": "materials", "op": "<=", "value": 12 },
+        { "field": "answer", "op": "contains", "value": "刘兴芳" }
+      ],
+      "note": "零检索是理想态；自检判「不够」时会补查 12 份，同样合格"
+    },
+    {
+      "id": "D-history-money",
+      "step": 0,
+      "title": "金额追问：history",
+      "turns": ["周锦春案的判决结果是什么？", "被告一共要付多少钱？"],
+      "carry": false,
+      "checks": [
+        { "field": "basis", "op": "in", "value": ["history", "both"] },
+        { "field": "answer", "op": "matches", "value": "元|万|,|，" }
+      ],
+      "note": "对上一轮金额求和；basis 判定有波动，history/both 都算合格"
+    },
+    {
+      "id": "E-topic-switch",
+      "step": 0,
+      "title": "换话题：不继承旧实体",
+      "turns": ["常宏的出生日期是哪天？", "陈丽敏案的前因后果是什么？"],
+      "carry": false,
+      "checks": [
+        { "field": "basis", "op": "eq", "value": "docs" },
+        { "field": "rewritten", "op": "not_contains", "value": "常宏" },
+        { "field": "answer", "op": "contains", "value": "陈丽敏" }
+      ],
+      "note": "自带实体的新问题不得继承上一轮对象"
+    },
+    {
+      "id": "F-compare-first",
+      "step": 0,
+      "title": "首轮对比：必走 docs",
+      "turns": ["常宏和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "basis", "op": "eq", "value": "docs" },
+        { "field": "answer", "op": "contains", "value": "陈秀芳" }
+      ],
+      "note": "首轮没有历史，必须完整检索"
+    },
+    {
+      "id": "G-missing-bloodtype",
+      "step": 0,
+      "title": "缺失事实：必须承认查不到",
+      "turns": ["常宏的出生日期是哪天？", "他的血型是什么？"],
+      "carry": false,
+      "checks": [
+        { "field": "answer", "op": "matches", "value": "未记载|没有|无法|未提供|不详|未见|未能找到|未找到|均未|未涉及" }
+      ],
+      "note": "索引核对：含『血型』且含『常宏』的文档 = 0"
+    },
+    {
+      "id": "H-money-needs",
+      "step": 0,
+      "title": "金额类追问：needs 应落在金额/补偿款",
+      "turns": ["周锦春案的判决结果是什么？", "被告需要支付哪些款项？"],
+      "carry": false,
+      "checks": [
+        { "field": "answer", "op": "matches", "value": "元|万|款|支付" }
+      ],
+      "note": "观察 needs 与答案是否都落在金额类事实"
+    },
+    {
+      "id": "I-gap-1",
+      "step": 1,
+      "title": "自检可靠性 1/3",
+      "turns": ["周锦春案的判决结果是什么？", "被告一共要付多少钱？"],
+      "carry": true,
+      "checks": [{ "field": "gap_checked", "op": "eq", "value": true }],
+      "note": "2026-11-07 实测：5 次里 2 次 checked=false"
+    },
+    {
+      "id": "I-gap-2",
+      "step": 1,
+      "title": "自检可靠性 2/3",
+      "turns": ["分析周锦春案中的亲属关系", "这些人里谁年龄最小？"],
+      "carry": true,
+      "checks": [{ "field": "gap_checked", "op": "eq", "value": true }],
+      "note": "同上"
+    },
+    {
+      "id": "I-gap-3",
+      "step": 1,
+      "title": "自检可靠性 3/3",
+      "turns": ["常宏的出生日期是哪天？", "他今年多大？"],
+      "carry": true,
+      "checks": [{ "field": "gap_checked", "op": "eq", "value": true }],
+      "note": "同上"
+    },
+    {
+      "id": "K-carry-on",
+      "step": 2,
+      "title": "沿用开启：材料不得超过本轮上限",
+      "turns": ["常宏的出生日期是哪天？", "他和陈秀芳谁大？"],
+      "carry": true,
+      "checks": [
+        { "field": "materials", "op": "<=", "value": 12 }
+      ],
+      "note": "2026-11-07 现状：24 份（12 新 + 12 沿用）"
+    },
+    {
+      "id": "K-carry-off",
+      "step": 2,
+      "title": "沿用关闭：对照",
+      "turns": ["常宏的出生日期是哪天？", "他和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "materials", "op": "<=", "value": 12 }
+      ],
+      "note": "对照组，应始终 ≤12"
+    },
+    {
+      "id": "L-ceiling",
+      "step": 2,
+      "title": "上下文上限：任何一轮 <120k 且未截断",
+      "turns": ["周锦春案的判决结果是什么？", "其中涉及哪些人？"],
+      "carry": true,
+      "check_all_turns": true,
+      "checks": [
+        { "field": "chars", "op": "<", "value": 120000 },
+        { "field": "truncated", "op": "eq", "value": false }
+      ],
+      "note": "2026-11-07 实测：docs 30 + 沿用 10 = 39 份 / 131,581 字"
+    },
+    {
+      "id": "Z-instrument",
+      "step": 0,
+      "title": "Step 0 观测字段：沿用份数必须被记录",
+      "turns": ["常宏的出生日期是哪天？", "他和陈秀芳谁大？"],
+      "carry": true,
+      "checks": [
+        { "field": "carried_count", "op": ">=", "value": 1 },
+        { "field": "materials", "op": ">=", "value": 1 }
+      ],
+      "note": "只验证 context_assembled 新增字段有值，不判业务对错"
+    },
+    {
+      "id": "J-compare-1",
+      "step": 3,
+      "title": "比较类首句结论 1/3",
+      "turns": ["常宏和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "answer_head", "op": "not_contains", "value": "常宏比陈秀芳" },
+        { "field": "answer", "op": "contains", "value": "陈秀芳" }
+      ],
+      "note": "2026-11-07 实测：3/3 首句写错后自我纠正"
+    },
+    {
+      "id": "J-compare-2",
+      "step": 3,
+      "title": "比较类首句结论 2/3",
+      "turns": ["常宏和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "answer_head", "op": "not_contains", "value": "常宏比陈秀芳" },
+        { "field": "answer", "op": "contains", "value": "陈秀芳" }
+      ],
+      "note": "同上"
+    },
+    {
+      "id": "J-compare-3",
+      "step": 3,
+      "title": "比较类首句结论 3/3",
+      "turns": ["常宏和陈秀芳谁大？"],
+      "carry": false,
+      "checks": [
+        { "field": "answer_head", "op": "not_contains", "value": "常宏比陈秀芳" },
+        { "field": "answer", "op": "contains", "value": "陈秀芳" }
+      ],
+      "note": "同上"
+    }
+  ]
+}

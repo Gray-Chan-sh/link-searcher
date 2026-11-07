@@ -331,14 +331,16 @@ pub(super) struct GapCheck {
 
 /// 同步版（在 `assemble_conversation_prompt` 的 blocking 段里调用）。
 ///
-/// 超时 15 秒、任何失败返回 `None` —— **失败必须放行**，绝不能因为一次自检卡住整轮回答。
+/// 超时 15 秒、任何失败都**放行**（返回 `None`），绝不能因为一次自检卡住整轮回答。
+/// 第二个返回值说明失败原因（`ok` / `llm_disabled` / `gateway_or_timeout` / `parse_failed`），
+/// 写进 `gap_check` 事件 —— 此前失败与"判定为够用"在事件里长得一样，无法定位。
 pub(super) fn check_context_gap(
     question: &str,
     history_text: &str,
     snippets: &[String],
-) -> Option<GapCheck> {
+) -> (Option<GapCheck>, &'static str) {
     if !crate::ai::llm_enabled() {
-        return None;
+        return (None, "llm_disabled");
     }
     let mut materials = String::new();
     for (i, s) in snippets.iter().take(12).enumerate() {
@@ -349,8 +351,14 @@ pub(super) fn check_context_gap(
         "【问题】{question}\n【对话历史摘要】{}\n【已注入材料摘要】\n{materials}\n只输出一行 JSON：",
         truncate_text(history_text, 4000)
     );
-    let raw = crate::ai::chat_with_timeout(&system.to_string(), &user, GAP_CHECK_TIMEOUT_SECS)?;
-    parse_gap_reply(&raw)
+    let Some(raw) = crate::ai::chat_with_timeout(&system.to_string(), &user, GAP_CHECK_TIMEOUT_SECS)
+    else {
+        return (None, "gateway_or_timeout");
+    };
+    match parse_gap_reply(&raw) {
+        Some(g) => (Some(g), "ok"),
+        None => (None, "parse_failed"),
+    }
 }
 
 /// 自检超时（秒）。网关常态 4~15s，超过就放弃补查、按上文作答。
@@ -1976,9 +1984,10 @@ fn assemble_conversation_prompt(
             prior_answers.push('\n');
         }
         let snippets: Vec<String> = evidence.iter().map(|e| e.snippet.clone()).collect();
-        let gap = check_context_gap(&last_q, &prior_answers, &snippets);
+        let (gap, gap_error) = check_context_gap(&last_q, &prior_answers, &snippets);
         let mut gap_event = serde_json::json!({
             "checked": gap.is_some(),
+            "error_kind": gap_error,
             "answerable": gap.as_ref().map(|g| g.answerable).unwrap_or(true),
             "missing": gap.as_ref().map(|g| g.missing.clone()).unwrap_or_default(),
             "supplemented": 0,
@@ -2106,6 +2115,7 @@ fn assemble_conversation_prompt(
     log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
     let mut inject_idx = 0usize;
     let mut inject_skipped = 0usize;
+    let mut content_injected = 0usize;
     for hit in &content_hits {
         if inject_idx.is_multiple_of(10) { check_cancel!(); }
         if let Some(rec) = rec_by_id.get(&hit.file_id)
@@ -2145,6 +2155,7 @@ fn assemble_conversation_prompt(
                                 injected_spans,
                             });
                             content_budget = content_budget.saturating_sub(injected.chars().count());
+                            content_injected += 1;
                         }
                         if content_budget < MIN_PER_FILE { break; }
                     } else {
@@ -2237,7 +2248,9 @@ fn assemble_conversation_prompt(
     let source_files_final = evidence.iter().map(|e| e.path.clone()).collect();
 
     let max_context_chars = CONTEXT_BUDGET - SYSTEM_OVERHEAD - ANSWER_RESERVE;
-    let context = truncate_text(&docs.join("\n\n---\n\n"), max_context_chars);
+    let docs_text = docs.join("\n\n---\n\n");
+    let docs_chars = docs_text.chars().count();
+    let context = truncate_text(&docs_text, max_context_chars);
 
     // Layer 2: Chat history recall — previous AI responses become usable context.
     //
@@ -2342,6 +2355,14 @@ fn assemble_conversation_prompt(
         "total_chars": context.chars().count(),
         "strict_docs": strict_docs,
         "truncated_to": max_context_chars,
+        // ── 组装诊断（2026-11-08，Step 0：只观测，不改行为）────────────────
+        // 此前只有 total_chars，出问题无法区分"材料不够""沿用翻倍""触顶丢件"。
+        "carried_count": history_files_with_content.len(),
+        "carried_chars": history_budget_used,
+        "injected": content_injected,
+        "dropped": content_hits.len().saturating_sub(inject_idx),
+        "skipped": inject_skipped,
+        "truncated": docs_chars > max_context_chars,
     })));
     // ── 提示词留痕（只读审计，2026-11-07） ────────────────────────────────
     // 提示词全部硬编码在源码里，用户看不到；一旦"答得怪"，无法区分是指令让它
