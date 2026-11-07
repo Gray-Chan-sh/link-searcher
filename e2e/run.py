@@ -54,7 +54,7 @@ def ask(msgs, sid, source_ids, token):
     return done or {}, time.time() - t0
 
 
-def ask_with_retry(msgs, sid, source_ids, token, attempts=3):
+def ask_with_retry(msgs, sid, source_ids, token, attempts=4):
     """网关限流/断连时重试同一轮。
 
     `ai-done` 里出现「AI 网关拒绝」说明上游失败但应用把错误当正文返回了，
@@ -62,7 +62,7 @@ def ask_with_retry(msgs, sid, source_ids, token, attempts=3):
     """
     last = ({}, 0.0)
     for i in range(attempts):
-        time.sleep(2)
+        time.sleep(5)
         try:
             done, dt = ask(msgs, sid, source_ids, token)
         except Exception as e:
@@ -72,7 +72,7 @@ def ask_with_retry(msgs, sid, source_ids, token, attempts=3):
         text = (done.get("full_text") or "")
         if "网关拒绝" in text or "429" in text:
             print(f"    ! 上游限流（第 {i + 1} 次），等待后重试")
-            time.sleep(30 * (i + 1))
+            time.sleep(20 * (i + 1))
             last = (done, dt)
             continue
         return done, dt
@@ -188,7 +188,8 @@ def main():
             rows.append(ev)
             print(f"  t{i} {dt:5.0f}s basis={ev.get('basis')} q={str(ev.get('rewritten'))[:30]!r} "
                   f"anchor={ev.get('anchor')} mats={ev.get('materials')} "
-                  f"chars={ev.get('chars')} carry={ev.get('carried_count')} gap={ev.get('gap_checked')}")
+                  f"chars={ev.get('chars')} carry={ev.get('carried_count')} "
+                  f"gap={ev.get('gap_checked')}/{ev.get('gap_error')}")
             msgs.append({"role": "assistant", "content": ans})
 
         evaluated = rows if case.get("check_all_turns") else rows[-1:]

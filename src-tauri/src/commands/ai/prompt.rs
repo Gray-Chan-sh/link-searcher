@@ -351,8 +351,21 @@ pub(super) fn check_context_gap(
         "【问题】{question}\n【对话历史摘要】{}\n【已注入材料摘要】\n{materials}\n只输出一行 JSON：",
         truncate_text(history_text, 4000)
     );
-    let Some(raw) = crate::ai::chat_with_timeout(&system.to_string(), &user, GAP_CHECK_TIMEOUT_SECS)
-    else {
+    let mut raw: Option<String> = None;
+    for attempt in 0..2u8 {
+        // 第一次用正常超时；失败后再给一次机会（网关限流/瞬时断连很常见，
+        // 一枚 429 就放弃自检等于这道保险形同虚设）。重试用更短超时，避免最坏 30s。
+        let budget = if attempt == 0 { GAP_CHECK_TIMEOUT_SECS } else { 6 };
+        if let Some(r) = crate::ai::chat_with_timeout(&system.to_string(), &user, budget) {
+            raw = Some(r);
+            break;
+        }
+        if attempt == 0 {
+            log::warn!("[AI]   gap_check 第一次失败（限流/断连/超时），重试一次");
+            std::thread::sleep(std::time::Duration::from_millis(1200));
+        }
+    }
+    let Some(raw) = raw else {
         return (None, "gateway_or_timeout");
     };
     match parse_gap_reply(&raw) {

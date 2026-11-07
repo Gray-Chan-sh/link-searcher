@@ -1,0 +1,48 @@
+{
+  "id": "I-gap-3",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 5329,
+      "truncated": false,
+      "answer": "常宏的出生日期是 **1963年8月6日**。\n\n这一信息在多个材料中均有记载：\n1.  简历材料中明确记载“出生日期: 1963年08月06日” [1] [2] [4]。\n2.  案件证据摘要及判决书中记载为“1963年8月出生”或“1963年8月6日” [5] [7] [11] [16]。\n\n引用来源：[1], [2], [4], [7], [11]",
+      "answer_head": "常宏的出生日期是 **1963年8月6日**。\n\n这一信息在多个材料中均有记载：\n1.  简历材料中明确记载“出生日期:"
+    },
+    {
+      "rewritten": "常宏 出生日期 年龄",
+      "basis": "history",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "gap_checked": true,
+      "gap_answerable": true,
+      "gap_error": "ok",
+      "materials": 20,
+      "chars": 48474,
+      "carried_count": 20,
+      "carried_chars": 47071,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 6077,
+      "truncated": false,
+      "answer": "基于第 1 轮确定的常宏出生日期为 **1963年8月6日**，计算其 2026 年的年龄如下：\n\n1.  **2026年8月6日之前**：常宏周岁为 **62岁**。\n2.  **2026年8月6日及之后**：常宏周岁为 **63岁**。\n\n若按 2026 年初计算，通常表述为 **62岁**（即将满 63 岁）。",
+      "answer_head": "基于第 1 轮确定的常宏出生日期为 **1963年8月6日**，计算其 2026 年的年龄如下：\n\n1.  **2026"
+    }
+  ]
+}
