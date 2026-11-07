@@ -271,6 +271,127 @@ struct AssembleJob {
     cancel: Option<std::sync::Arc<crate::ai::CancelToken>>,
 }
 
+/// 「先按上文作答、作答前自检」的第二段：判断现有材料/上文是否**足够**回答本轮问题。
+///
+/// 只做判断，不回答问题；输出一行 JSON：`{"answerable":bool,"missing":[检索词]}`。
+/// `missing` 要求是能在卷宗里检索到的名词（人名/文件类型/事项），不是"更多材料"这类空话。
+pub(super) struct GapCheck {
+    pub answerable: bool,
+    pub missing: Vec<String>,
+}
+
+/// 同步版（在 `assemble_conversation_prompt` 的 blocking 段里调用）。
+///
+/// 超时 15 秒、任何失败返回 `None` —— **失败必须放行**，绝不能因为一次自检卡住整轮回答。
+pub(super) fn check_context_gap(
+    question: &str,
+    history_text: &str,
+    snippets: &[String],
+) -> Option<GapCheck> {
+    if !crate::ai::llm_enabled() {
+        return None;
+    }
+    let mut materials = String::new();
+    for (i, s) in snippets.iter().take(12).enumerate() {
+        materials.push_str(&format!("[{}] {}\n", i + 1, truncate_text(s, 240)));
+    }
+    let system = "你是回答前的充分性审查员。你**只判断现有信息够不够**，不要回答问题，也不要解释。\
+给定【问题】【对话历史摘要】【已注入材料摘要】：\
+- 若仅凭这些信息就能完整、准确地回答，输出 {\"answerable\":true,\"missing\":[]}；\
+- 否则输出 {\"answerable\":false,\"missing\":[\"<还缺的事实>\"]}，missing 用 1~3 个**可在文档库里检索到的名词**表示（如 \"汪均晋 死亡证明\"、\"身份证号\"），不要写\"更多材料\"\"相关文件\"这类空话。\
+只输出一行 JSON，不要代码块。";
+    let user = format!(
+        "【问题】{question}\n【对话历史摘要】{}\n【已注入材料摘要】\n{materials}\n只输出一行 JSON：",
+        truncate_text(history_text, 4000)
+    );
+    let raw = crate::ai::chat_with_timeout(&system.to_string(), &user, GAP_CHECK_TIMEOUT_SECS)?;
+    parse_gap_reply(&raw)
+}
+
+/// 自检超时（秒）。网关常态 4~15s，超过就放弃补查、按上文作答。
+const GAP_CHECK_TIMEOUT_SECS: u64 = 15;
+
+fn parse_gap_reply(raw: &str) -> Option<GapCheck> {
+    let start = raw.find('{')?;
+    let end = raw.rfind('}')?;
+    if end <= start {
+        return None;
+    }
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        answerable: bool,
+        #[serde(default)]
+        missing: Vec<String>,
+    }
+    let reply: Reply = serde_json::from_str(&raw[start..=end]).ok()?;
+    let missing = reply
+        .missing
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .take(3)
+        .collect();
+    Some(GapCheck { answerable: reply.answerable, missing })
+}
+
+/// 补查查询串：缺失事实优先，实体做锚点；都没有就用原查询。
+fn gap_query(missing: &[String], entities: &[String], fallback: &str) -> String {
+    if missing.is_empty() {
+        fallback.to_string()
+    } else {
+        format!("{} {}", entities.join(" "), missing.join(" "))
+            .trim()
+            .to_string()
+    }
+}
+
+#[cfg(test)]
+mod gap_check_tests {
+    use super::*;
+
+    #[test]
+    fn parses_answerable() {
+        let g = parse_gap_reply(r#"{"answerable":true,"missing":[]}"#).expect("json");
+        assert!(g.answerable);
+        assert!(g.missing.is_empty());
+    }
+
+    #[test]
+    fn parses_missing_terms_and_caps_three() {
+        let g = parse_gap_reply(
+            "```json\n{\"answerable\":false,\"missing\":[\"汪均晋 死亡证明\",\" \",\"户口注销\",\"身份证号\",\"多余\"]}\n```",
+        )
+        .expect("json");
+        assert!(!g.answerable);
+        assert_eq!(g.missing.len(), 3);
+        assert_eq!(g.missing[0], "汪均晋 死亡证明");
+    }
+
+    #[test]
+    fn invalid_reply_is_none() {
+        // 没有 JSON 对象 → 判不了 → 调用方按"放行"处理
+        assert!(parse_gap_reply("答案够用").is_none());
+        // 空对象是合法 JSON：answerable=false、missing 为空 → 会用原查询补查
+        assert!(parse_gap_reply("{}").is_some());
+    }
+
+    #[test]
+    fn gap_query_uses_missing_terms_with_entities_as_anchor() {
+        let q = gap_query(
+            &["死亡证明".to_string()],
+            &["汪均晋".to_string()],
+            "无关的原查询",
+        );
+        assert_eq!(q, "汪均晋 死亡证明");
+    }
+
+    #[test]
+    fn gap_query_falls_back_when_nothing_missing() {
+        assert_eq!(gap_query(&[], &["汪均晋".to_string()], "原查询"), "原查询");
+    }
+}
+
 /// 合并"补查新增命中"与已有排序，返回 `(前置份数, 合并后的列表)`。
 ///
 /// 补查是**补召回**，不是重排：只有路径里真的含缺失实体的命中可以前置（封顶
@@ -825,7 +946,7 @@ fn assemble_conversation_prompt(
     // 跳过整条检索（BM25/向量/chunk/路径/渐进补查/重排），把上文升格为材料。
     // 2026-11-06 实测：4 轮会话里 t2/t3 都是纯追问，却各跑了 1171/1256 份候选，
     // 单轮 14~38s，而 t2 的回答里已经列出全部出生日期。
-    let skip_retrieval = basis == super::rewrite::AnswerBasis::History;
+    let mut skip_retrieval = basis == super::rewrite::AnswerBasis::History;
     if skip_retrieval {
         log::info!("[AI]   basis=history → skip retrieval (no BM25/vector/rerank this turn)");
         emit_progress("retrieval", "本轮复用上文结论，跳过检索", 0, 0);
@@ -1725,6 +1846,80 @@ fn assemble_conversation_prompt(
         log::info!("[AI]   Layer0.5 history: {} files carried forward, {:.1}k/{}k budget used", history_files_with_content.len(), history_budget_used as f64 / 1000.0, history_total_budget as f64 / 1000.0);
     }
 
+    // ── Layer 0.6: 「先按上文、作答前自检」的第二段（方案 3） ─────────────
+    //
+    // basis=history 是模型在**还没看过文档**时下的判断：它只能看到最近 2 轮、
+    // 每条 800 字的历史摘要，很容易高估上文（"上一轮的所有人口 / 生日"结论段
+    // 常被截掉）。只靠一次前置判断决定"不检索"，错了就是直接答错或答"不确定"。
+    //
+    // 这里在组装完上文之后、把材料交给回答模型之前，再做一次**带上下文的自检**：
+    // 不够就按缺失项补一次定向检索。自检失败/超时一律放行（不阻塞回答）。
+    let mut gap_supplement = false;
+    if skip_retrieval {
+        check_cancel!();
+        let mut prior_answers = String::new();
+        for m in messages.iter().rev().filter(|m| m.role == "assistant").take(2) {
+            prior_answers.push_str(&truncate_text(&m.content, 2000));
+            prior_answers.push('\n');
+        }
+        let snippets: Vec<String> = evidence.iter().map(|e| e.snippet.clone()).collect();
+        let gap = check_context_gap(&last_q, &prior_answers, &snippets);
+        let mut gap_event = serde_json::json!({
+            "checked": gap.is_some(),
+            "answerable": gap.as_ref().map(|g| g.answerable).unwrap_or(true),
+            "missing": gap.as_ref().map(|g| g.missing.clone()).unwrap_or_default(),
+            "supplemented": 0,
+        });
+        if let Some(g) = &gap
+            && !g.answerable
+        {
+            let gap_q = gap_query(&g.missing, &entity_kws, &search_q);
+            log::info!(
+                "[AI]   gap_check: not answerable (missing={:?}) → supplementary retrieval q=\"{}\"",
+                g.missing,
+                truncate_text(&gap_q, 40)
+            );
+            let supplement = super::retrieval::bm25_relevant_hits(
+                &ctx,
+                &gap_q,
+                200,
+                false,
+                dir_ids_opt.clone(),
+                ext_filter.clone(),
+                date_from,
+                date_to,
+                path_prefixes_opt.clone(),
+                mention_file_ids.clone(),
+            );
+            match supplement {
+                Ok(hits) => {
+                    let before = all_hits.len();
+                    for hit in hits {
+                        if all_seen.insert(hit.file_id.clone()) {
+                            all_hits.push(hit);
+                        }
+                    }
+                    let added = all_hits.len() - before;
+                    if added > 0 {
+                        bm25_returned += added;
+                        skip_retrieval = false;
+                        gap_supplement = true;
+                        emit_progress(
+                            "retrieval",
+                            &format!("上文不足，补查 {added} 份材料"),
+                            added,
+                            added,
+                        );
+                        gap_event["supplemented"] = serde_json::json!(added);
+                        log::info!("[AI]   gap_check supplement: +{added} candidates");
+                    }
+                }
+                Err(e) => log::warn!("[AI]   gap_check supplement failed: {e}"),
+            }
+        }
+        events.push(("gap_check".into(), gap_event));
+    }
+
     // Layer 1: Additional retrieval hits (not already in scope).
     // 范围过滤：向量/chunk 通道是全库扫描，会把范围外无关文件混进 all_hits。
     // 注入前按 path_prefixes 前缀过滤（与 BM25 安全网一致），mention 文件
@@ -1733,10 +1928,11 @@ fn assemble_conversation_prompt(
     // 下目录范围内的命中也能注入（否则目录引用 + strict = 零材料 = 无法回答）。
     // basis=both（上文 + 少量新事实）：检索只用来补细节，注入量收窄，
     // 把上下文预算留给上几轮的结论，避免 30 份材料再次盖过历史。
+    // gap_check 补查同理：只补"缺的那点事实"，不需要 30 份。
     const BOTH_CONTENT_INJECT: usize = 12;
     let inject_limit = if full_recall {
         all_hits.len().max(1)
-    } else if basis == super::rewrite::AnswerBasis::Both {
+    } else if basis == super::rewrite::AnswerBasis::Both || gap_supplement {
         BOTH_CONTENT_INJECT
     } else if skip_retrieval {
         0
