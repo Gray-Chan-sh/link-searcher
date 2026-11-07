@@ -678,6 +678,10 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
     let mut self_contained: Option<bool> = None;
     // 模型判定的专名实体：检索关键词与"要不要补查"都以它为准，不再用任何词表。
     let mut llm_entities: Vec<String> = Vec::new();
+    // `both` 聚焦字段：本轮还缺的事实 / 该去谁的材料里找（模型判定）。
+    let mut llm_needs: Vec<String> = Vec::new();
+    let mut llm_anchor: Vec<String> = Vec::new();
+    let mut refocused = false;
     // 本轮依据：由模型在改写时判定；任何回退路径都退回 Docs（完整检索，宁可多查）。
     let mut basis = super::rewrite::AnswerBasis::Docs;
     let (search_q, rewrite_method) = if let Some(q) = retry_q {
@@ -697,13 +701,33 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
                 self_contained = ok.self_contained;
                 llm_entities = ok.entities;
                 basis = ok.basis;
+                llm_needs = ok.needs;
+                llm_anchor = ok.anchor;
+                // ── both 聚焦（2026-11-07） ──────────────────────────────
+                // 「他和陈秀芳谁大」这类追问，改写会把两个名字都放进 entities，
+                // 而 BM25 用 entities 做 OR 查询 —— 旧对象是超高频实体，实测 12 个
+                // 注入名额被它占掉 9 个。模型给的 anchor（该去谁的材料里找）+ needs
+                // （还缺什么）把检索收窄到"真正缺的那点事实"；anchor 为空则不动。
+                let mut q_for_search = ok.query.clone();
+                if let Some((focused, anchor_kws)) = super::rewrite::refocus_query(
+                    basis, &q_for_search, &llm_needs, &llm_anchor)
+                {
+                    log::info!(
+                        "[AI]   refocus(both): \"{}\" → \"{}\" (anchor={:?}, needs={:?})",
+                        truncate_text(&q_for_search, 40), truncate_text(&focused, 40),
+                        llm_anchor, llm_needs
+                    );
+                    q_for_search = focused;
+                    llm_entities = anchor_kws;
+                    refocused = true;
+                }
                 // 用**语料事实**过滤改写词：正文里一次都没出现过的词直接丢弃
                 // （编造的人名自动出局；「兄长/家兄」等同义词只要语料有就保留）。
                 // 纯追问（basis=history）不需要可检索词，跳过这道闸。
                 let filtered = if basis == super::rewrite::AnswerBasis::History {
-                    Some(ok.query.clone())
+                    Some(q_for_search.clone())
                 } else {
-                    super::rewrite::strip_nonexistent_terms(&ok.query, &last_q, |t| {
+                    super::rewrite::strip_nonexistent_terms(&q_for_search, &last_q, |t| {
                         super::retrieval::term_doc_freq(&ctx, t)
                     })
                 };
@@ -749,6 +773,11 @@ pub(crate) async fn prepare_conversation_prompt_with_cancel(
         "rewrite_method": if rewritten { rewrite_method } else { "none" },
         "basis": format!("{basis:?}").to_lowercase(),
         "retry": is_retry,
+        // both 聚焦：needs=还缺什么，anchor=该去谁的材料里找；refocused=true 表示
+        // 检索词与 BM25 实体已被收窄（旧对象不再重查）。
+        "needs": llm_needs,
+        "anchor": llm_anchor,
+        "refocused": refocused,
         // 为什么没走 LLM 改写：以前这里静默成 method=rule，网关断连与守卫弃用看起来一样。
         "fallback_reason": rewrite_fallback,
     })));

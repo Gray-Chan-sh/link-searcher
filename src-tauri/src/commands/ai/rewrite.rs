@@ -52,54 +52,109 @@ mod history_backed_entity_tests {
         ChatMessage { role: role.into(), content: content.into() }
     }
 
-    /// 改写输出解析：JSON（query / entities / self_contained / basis）是主格式。
+    /// 改写输出解析：JSON（query / entities / needs / anchor / self_contained / basis）是主格式。
     #[test]
     fn parses_json_rewrite_reply() {
-        let raw = r#"{"query":"王会芹 一审 二审 判决","entities":["王会芹"],"self_contained":"yes","basis":"docs"}"#;
-        let (q, ents, sc, basis) = parse_rewrite_reply(raw);
-        assert_eq!(q, "王会芹 一审 二审 判决");
-        assert_eq!(ents, vec!["王会芹".to_string()]);
-        assert_eq!(sc, Some(true));
-        assert_eq!(basis, AnswerBasis::Docs);
+        let raw = r#"{"query":"王会芹 一审 二审 判决","entities":["王会芹"],"needs":[],"anchor":[],"self_contained":"yes","basis":"docs"}"#;
+        let r = parse_rewrite_reply(raw);
+        assert_eq!(r.query, "王会芹 一审 二审 判决");
+        assert_eq!(r.entities, vec!["王会芹".to_string()]);
+        assert_eq!(r.self_contained, Some(true));
+        assert_eq!(r.basis, AnswerBasis::Docs);
+        assert!(r.needs.is_empty() && r.anchor.is_empty());
+    }
+
+    /// `both` 的聚焦字段：缺什么事实、该去谁的材料里找。
+    #[test]
+    fn parses_focus_fields_for_both() {
+        let raw = r#"{"query":"常宏 陈秀芳 出生日期","entities":["常宏","陈秀芳"],"needs":["出生日期"],"anchor":["陈秀芳"],"self_contained":"no","basis":"both"}"#;
+        let r = parse_rewrite_reply(raw);
+        assert_eq!(r.needs, vec!["出生日期".to_string()]);
+        assert_eq!(r.anchor, vec!["陈秀芳".to_string()]);
+        assert_eq!(r.basis, AnswerBasis::Both);
     }
 
     /// 「这些人谁年龄最大」这类纯追问：模型应判 history。
     #[test]
     fn parses_history_basis() {
         let raw = r#"{"query":"刘兴芳 周传华 金纯熙 年龄","entities":[],"self_contained":"no","basis":"history"}"#;
-        let (_, _, sc, basis) = parse_rewrite_reply(raw);
-        assert_eq!(sc, Some(false));
-        assert_eq!(basis, AnswerBasis::History);
+        let r = parse_rewrite_reply(raw);
+        assert_eq!(r.self_contained, Some(false));
+        assert_eq!(r.basis, AnswerBasis::History);
     }
 
-    /// 模型漏给 basis ⇒ 保守退回 docs（宁可多检索，不少检索）。
+    /// 模型漏给 basis ⇒ 保守退回 docs（宁可多检索，不少检索）；漏给聚焦字段 ⇒ 空表。
     #[test]
     fn missing_basis_defaults_to_docs() {
         let raw = r#"{"query":"陈秀芳 家庭成员","entities":["陈秀芳"]}"#;
-        assert_eq!(parse_rewrite_reply(raw).3, AnswerBasis::Docs);
+        let r = parse_rewrite_reply(raw);
+        assert_eq!(r.basis, AnswerBasis::Docs);
+        assert!(r.needs.is_empty() && r.anchor.is_empty());
     }
 
     /// 模型常把 JSON 包在 ```json 代码块里，或前后带一句解释。
     #[test]
     fn parses_json_inside_fences() {
         let raw = "```json\n{\"query\":\"陈秀芳 兄长 出生日期\",\"entities\":[\"陈秀芳\"],\"self_contained\":\"no\",\"basis\":\"both\"}\n```";
-        let (q, ents, sc, basis) = parse_rewrite_reply(raw);
-        assert_eq!(q, "陈秀芳 兄长 出生日期");
-        assert_eq!(ents, vec!["陈秀芳".to_string()]);
-        assert_eq!(sc, Some(false));
-        assert_eq!(basis, AnswerBasis::Both);
+        let r = parse_rewrite_reply(raw);
+        assert_eq!(r.query, "陈秀芳 兄长 出生日期");
+        assert_eq!(r.entities, vec!["陈秀芳".to_string()]);
+        assert_eq!(r.self_contained, Some(false));
+        assert_eq!(r.basis, AnswerBasis::Both);
     }
 
     /// 旧格式（两行 QUERY / SELF_CONTAINED）仍要能解析：网关/model 换版时不能让整轮
     /// 改写直接失效。entities 缺失 ⇒ 空表，basis 缺失 ⇒ docs。
     #[test]
     fn parses_legacy_two_line_reply() {
-        let (q, ents, sc, basis) =
-            parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
-        assert_eq!(q, "陈秀芳 兄长 出生日期");
-        assert!(ents.is_empty(), "{ents:?}");
-        assert_eq!(sc, Some(false));
-        assert_eq!(basis, AnswerBasis::Docs);
+        let r = parse_rewrite_reply("QUERY: 陈秀芳 兄长 出生日期\nSELF_CONTAINED: no");
+        assert_eq!(r.query, "陈秀芳 兄长 出生日期");
+        assert!(r.entities.is_empty(), "{:?}", r.entities);
+        assert!(r.needs.is_empty() && r.anchor.is_empty());
+        assert_eq!(r.self_contained, Some(false));
+        assert_eq!(r.basis, AnswerBasis::Docs);
+    }
+
+    /// `both` 聚焦：上一轮已答过的对象不再占检索词。
+    #[test]
+    fn refocus_drops_already_answered_entity() {
+        let got = refocus_query(
+            AnswerBasis::Both,
+            "常宏 陈秀芳 出生日期",
+            &["出生日期".to_string()],
+            &["陈秀芳".to_string()],
+        )
+        .expect("both + anchor 应当聚焦");
+        assert_eq!(got.0, "陈秀芳 出生日期");
+        assert_eq!(got.1, vec!["陈秀芳".to_string()]);
+    }
+
+    /// 锚点必须保留：要查的事实属于旧对象时（爱人的名字只能从常宏的材料里找），
+    /// 不能把常宏从检索词里删掉。
+    #[test]
+    fn refocus_keeps_anchor_needed_to_locate_new_person() {
+        let got = refocus_query(
+            AnswerBasis::Both,
+            "常宏 陈秀芳 爱人 出生日期",
+            &["配偶".to_string(), "出生日期".to_string()],
+            &["常宏".to_string(), "陈秀芳".to_string()],
+        )
+        .expect("both + anchor 应当聚焦");
+        assert_eq!(got.0, "常宏 陈秀芳 配偶 出生日期");
+        assert_eq!(got.1, vec!["常宏".to_string(), "陈秀芳".to_string()]);
+    }
+
+    /// 只在 both 生效：docs / history 的检索词一个字都不动。
+    #[test]
+    fn refocus_is_off_for_docs_and_history() {
+        assert!(refocus_query(AnswerBasis::Docs, "q", &["n".into()], &["a".into()]).is_none());
+        assert!(refocus_query(AnswerBasis::History, "q", &["n".into()], &["a".into()]).is_none());
+    }
+
+    /// 模型没给 anchor ⇒ 不聚焦（与旧行为一致）。
+    #[test]
+    fn refocus_is_noop_without_anchor() {
+        assert!(refocus_query(AnswerBasis::Both, "q", &["n".into()], &[]).is_none());
     }
 
     /// 用**语料事实**过滤改写词：语料里不存在的词被丢弃，同义词只要存在就保留。
@@ -198,9 +253,41 @@ impl AnswerBasis {
 ///
 /// 兼容旧格式（`QUERY:` / `SELF_CONTAINED:` 两行、或只回一行查询串）：此时 `entities`
 /// 为空表，检索只用 `query` 本身。
-fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>, AnswerBasis) {
-    if let Some((query, entities, self_contained, basis)) = parse_rewrite_json(raw) {
-        return (query, entities, self_contained, basis);
+/// 改写输出的解析结果。
+///
+/// `needs` / `anchor` 是 2026-11-07 新增的**聚焦字段**（只在 `basis=both` 时起作用）：
+/// - `needs`：本轮还缺的事实词（出生日期 / 身份证号 / 金额 / 签订日期…）；
+/// - `anchor`：必须去哪些对象的材料里找这些事实（只填专名）。
+///
+/// 没有这两个字段是合法的（老格式/模型没给）→ 空表，行为与之前完全一致。
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(super) struct RewriteParse {
+    pub query: String,
+    pub entities: Vec<String>,
+    pub needs: Vec<String>,
+    pub anchor: Vec<String>,
+    pub self_contained: Option<bool>,
+    pub basis: AnswerBasis,
+}
+
+/// 清洗模型给的词表：去空白、去空串、封顶 6 个（防止模型把整句塞进来）。
+fn clean_terms(v: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for t in v {
+        let t = t.trim().to_string();
+        if !t.is_empty() && !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() >= 6 {
+            break;
+        }
+    }
+    out
+}
+
+fn parse_rewrite_reply(raw: &str) -> RewriteParse {
+    if let Some(r) = parse_rewrite_json(raw) {
+        return r;
     }
     let mut query: Option<String> = None;
     let mut self_contained: Option<bool> = None;
@@ -226,11 +313,18 @@ fn parse_rewrite_reply(raw: &str) -> (String, Vec<String>, Option<bool>, AnswerB
         _ => raw.trim().to_string(),
     };
     // 旧格式没有 basis 字段 ⇒ 退回完整 RAG（保守，不会少检索）。
-    (q, Vec::new(), self_contained, AnswerBasis::Docs)
+    RewriteParse {
+        query: q,
+        entities: Vec::new(),
+        needs: Vec::new(),
+        anchor: Vec::new(),
+        self_contained,
+        basis: AnswerBasis::Docs,
+    }
 }
 
 /// 从模型回复里抠出第一个 JSON 对象（允许 ```json 围栏、前后解释文字）。
-fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>, AnswerBasis)> {
+fn parse_rewrite_json(raw: &str) -> Option<RewriteParse> {
     let start = raw.find('{')?;
     let end = raw.rfind('}')?;
     if end <= start {
@@ -242,6 +336,10 @@ fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>, A
         query: String,
         #[serde(default)]
         entities: Vec<String>,
+        #[serde(default)]
+        needs: Vec<String>,
+        #[serde(default)]
+        anchor: Vec<String>,
         #[serde(default)]
         self_contained: Option<serde_json::Value>,
         #[serde(default)]
@@ -261,18 +359,19 @@ fn parse_rewrite_json(raw: &str) -> Option<(String, Vec<String>, Option<bool>, A
         },
         _ => None,
     };
-    let entities = reply
-        .entities
-        .into_iter()
-        .map(|e| e.trim().to_string())
-        .filter(|e| !e.is_empty())
-        .collect();
     let basis = reply
         .basis
         .as_deref()
         .and_then(AnswerBasis::parse)
         .unwrap_or_default();
-    Some((query, entities, self_contained, basis))
+    Some(RewriteParse {
+        query,
+        entities: clean_terms(reply.entities),
+        needs: clean_terms(reply.needs),
+        anchor: clean_terms(reply.anchor),
+        self_contained,
+        basis,
+    })
 }
 
 /// 用**语料事实**过滤改写词：正文索引里一次都没出现过的词直接丢弃。
@@ -384,8 +483,14 @@ query 里每个词都要能通过一个检验：**如果答案在那份文档里
    - \"both\"：需要前几轮的对象，但还缺少量事实（如某人的身份证号、某个金额），要再查一点文档。\
    - \"docs\"：新问题/换了对象/前几轮没有相关结论，需要重新检索文档。\
    拿不准时填 \"docs\"；**这是第一轮（没有历史）时必须填 \"docs\"**。\
+8) needs / anchor 只在 basis=\"both\" 时起作用，用来指明\"这一轮到底还缺什么、该去谁的材料里找\"：\
+   needs 填 1~3 个**还缺的事实词**（出生日期 / 身份证号 / 金额 / 签订日期…），仍按规则 5 的\"材料会不会写\"检验；\
+   anchor 填**必须去查的对象**（只填专名）—— **已经答过、本轮不再需要的事实所属对象，不要写进 anchor。**\
+   例1：上一轮已答过常宏的生日，本轮问「他和陈秀芳谁大」→ needs=[\"出生日期\"]、anchor=[\"陈秀芳\"]（常宏不用再查）。\
+   例2：本轮问「他的爱人和陈秀芳谁大」（爱人姓名未知）→ needs=[\"配偶\",\"出生日期\"]、anchor=[\"常宏\",\"陈秀芳\"]（爱人只能从常宏的材料里找，必须保留常宏）。\
+   basis 是 history / docs 时给空数组。\
 输出**一行 JSON**（不要代码块、不要解释）：\
-{\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"self_contained\":\"yes|no\",\"basis\":\"history|docs|both\"}\
+{\"query\":\"<检索词>\",\"entities\":[\"<专名>\", ...],\"needs\":[\"<还缺的事实>\"],\"anchor\":[\"<要查谁的材料>\"],\"self_contained\":\"yes|no\",\"basis\":\"history|docs|both\"}\
 self_contained 表示**这句话离开上文还能不能读懂**：依赖指代/省略（他、它、各人、办公室、兄长呢…）填 no；自带完整对象（陈秀芳的生日是哪天）填 yes。";
 
 /// 超时默认 **60 秒**（`LINK_SEARCHER_REWRITE_TIMEOUT_SECS` 可调）：这个网关的改写
@@ -418,14 +523,16 @@ pub async fn llm_rewrite_query(
         let fut = tokio::task::spawn_blocking(move || crate::ai::chat(&sys_c, &user_c));
         match tokio::time::timeout(std::time::Duration::from_secs(budget), fut).await {
             Ok(Ok(Some(s))) => {
-                let (query_raw, entities, self_contained, basis) = parse_rewrite_reply(&s);
+                let r = parse_rewrite_reply(&s);
                 // 首轮（没有历史）不可能"只靠上文" —— 模型偶发误判时兜底为 docs。
-                let basis = if has_history { basis } else { AnswerBasis::Docs };
-                return match valid_rewrite_output(&query_raw, last_q) {
+                let basis = if has_history { r.basis } else { AnswerBasis::Docs };
+                return match valid_rewrite_output(&r.query, last_q) {
                     Some(v) => RewriteAttempt::Ok(RewriteOk {
                         query: v,
-                        entities,
-                        self_contained,
+                        entities: r.entities,
+                        needs: r.needs,
+                        anchor: r.anchor,
+                        self_contained: r.self_contained,
                         basis,
                     }),
                     None => RewriteAttempt::Invalid(truncate_text(s.trim(), 60)),
@@ -478,6 +585,12 @@ pub struct RewriteOk {
     ///
     /// 为空表是合法结果（问题里没有专名，比如"合同违约金上限是多少"）。
     pub entities: Vec<String>,
+    /// 本轮**还缺的事实词**（只在 `basis=both` 时参与聚焦检索）：出生日期 / 身份证号 /
+    /// 金额 / 签订日期这类"材料里会写出来"的词。
+    pub needs: Vec<String>,
+    /// 必须**去哪些对象的材料里**找 `needs`（只填专名）。`both` 时检索只查这些对象，
+    /// 避免上一轮已答过的对象继续霸占注入名额（2026-11-07 实测 9/12 是旧对象）。
+    pub anchor: Vec<String>,
     /// 模型自己判断「这句话离开上文读不懂」。
     ///
     /// 这是"要不要沿用上一轮材料"的**主判据**：模型看得到完整对话，
@@ -486,6 +599,50 @@ pub struct RewriteOk {
     pub self_contained: Option<bool>,
     /// 本轮该以什么为依据（history / both / docs），决定要不要跳过检索。
     pub basis: AnswerBasis,
+}
+
+/// `basis=both` 时的**聚焦检索词**：只查"还缺的事实 + 该去哪找"。
+///
+/// 起因（2026-11-07 实测）：上一轮答过常宏的生日，本轮问「他和陈秀芳谁大」，
+/// 改写给出 `entities=[常宏,陈秀芳]`，而 BM25 用 `entities` 做 OR 查询 —— 常宏是
+/// 超高频实体（1375 命中），12 个注入名额被它占掉 9 个。
+///
+/// `needs` / `anchor` 是模型对"缺什么、去哪找"的判断：
+/// - `anchor=[陈秀芳]` + `needs=[出生日期]` → `陈秀芳 出生日期`（旧对象不再重查）；
+/// - `anchor=[常宏,陈秀芳]` + `needs=[配偶, 出生日期]` → 保留常宏（爱人的名字
+///   只能从他的材料里找到）。
+///
+/// 只有 `both` 且 `anchor` 非空才生效；其余情况返回 `None`（行为与之前完全一致）。
+pub(super) fn refocus_query(
+    basis: AnswerBasis,
+    query: &str,
+    needs: &[String],
+    anchor: &[String],
+) -> Option<(String, Vec<String>)> {
+    if basis != AnswerBasis::Both || anchor.is_empty() {
+        return None;
+    }
+    let mut terms: Vec<String> = Vec::new();
+    for t in anchor.iter().chain(needs.iter()) {
+        let t = t.trim();
+        if t.is_empty() || terms.iter().any(|x| x == t) {
+            continue;
+        }
+        terms.push(t.to_string());
+    }
+    if terms.is_empty() {
+        return None;
+    }
+    let focused = terms.join(" ");
+    if focused == query.trim() {
+        return None;
+    }
+    let anchor_kws = anchor
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some((focused, anchor_kws))
 }
 
 /// 改写超时（秒）。默认 60 —— 这个网关的改写请求常态 4–6 秒，旧值 5 秒会
