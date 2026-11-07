@@ -1874,6 +1874,7 @@ fn assemble_conversation_prompt(
             && !g.answerable
         {
             let gap_q = gap_query(&g.missing, &entity_kws, &search_q);
+            gap_event["query"] = serde_json::json!(gap_q);
             log::info!(
                 "[AI]   gap_check: not answerable (missing={:?}) → supplementary retrieval q=\"{}\"",
                 g.missing,
@@ -1901,6 +1902,39 @@ fn assemble_conversation_prompt(
                     }
                     let added = all_hits.len() - before;
                     if added > 0 {
+                        // ⚠️ 补查新增的命中**不在**上面那批预取里：`rec_by_id` /
+                        // `md5_to_text` 是开跑前按 source/mention/all_hits 一次性取好的。
+                        // 不补进来，注入循环会因取不到路径与正文而整份跳过 —— 表现为
+                        // `supplemented=189` 但 `injected=0`、`material_count=0`，
+                        // 模型只能回"材料未提及"（2026-11-07 实测，v1.5.11 的静默失效）。
+                        let new_ids: Vec<String> = all_hits[before..]
+                            .iter()
+                            .map(|h| h.file_id.clone())
+                            .filter(|id| !rec_by_id.contains_key(id))
+                            .collect();
+                        if !new_ids.is_empty() {
+                            let recs = crate::db::tracker::get_files_by_ids(&conn, &new_ids)
+                                .unwrap_or_default();
+                            let mut md5s: Vec<String> = Vec::new();
+                            for (id, rec) in new_ids.iter().zip(recs.iter()) {
+                                if let Some(rec) = rec {
+                                    rec_by_id.insert(id.clone(), rec.clone());
+                                    if let Some(md5) = &rec.md5 {
+                                        md5s.push(md5.clone());
+                                    }
+                                }
+                            }
+                            md5s.sort();
+                            md5s.dedup();
+                            md5s.retain(|m| !md5_to_text.contains_key(m));
+                            let contents = crate::db::tracker::get_contents(&conn, &md5s)
+                                .unwrap_or_default();
+                            for (m, c) in md5s.iter().zip(contents.iter()) {
+                                if let Some(text) = c {
+                                    md5_to_text.insert(m.clone(), text.clone());
+                                }
+                            }
+                        }
                         bm25_returned += added;
                         skip_retrieval = false;
                         gap_supplement = true;
@@ -1958,6 +1992,7 @@ fn assemble_conversation_prompt(
     emit_progress("injection", "注入文件内容中...", 0, content_hits.len());
     log::info!("[AI]   injection: content_hits={} mention_has_content={}", content_hits.len(), mention_has_content);
     let mut inject_idx = 0usize;
+    let mut inject_skipped = 0usize;
     for hit in &content_hits {
         if inject_idx.is_multiple_of(10) { check_cancel!(); }
         if let Some(rec) = rec_by_id.get(&hit.file_id)
@@ -1999,11 +2034,21 @@ fn assemble_conversation_prompt(
                             content_budget = content_budget.saturating_sub(injected.chars().count());
                         }
                         if content_budget < MIN_PER_FILE { break; }
+                    } else {
+                    // 命中没有记录/正文缓存 → 整份跳过。**静默跳过 == 检索到了却等于没检索**：
+                    // v1.5.11 的补查失效就是这样（189 命中、注入 0 份、无任何告警）。
+                    inject_skipped += 1;
                     }
         inject_idx += 1;
         if inject_idx.is_multiple_of(10) || inject_idx == content_hits.len() {
             emit_progress("injection", &format!("注入中 {}/{}", inject_idx, content_hits.len()), inject_idx, content_hits.len());
         }
+    }
+    if inject_skipped > 0 {
+        log::warn!(
+            "[AI]   injection: {inject_skipped}/{} candidates skipped (no record or no cached text)",
+            content_hits.len()
+        );
     }
 
     // ── strict + 目录引用兜底 ──────────────────────────────────────────
