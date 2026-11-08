@@ -1,0 +1,45 @@
+{
+  "id": "Z-instrument",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 2796,
+      "truncated": false,
+      "answer": "根据材料，常宏的出生日期是**1963年8月6日**。\n\n[1]",
+      "answer_head": "根据材料，常宏的出生日期是**1963年8月6日**。\n\n[1]"
+    },
+    {
+      "rewritten": "常宏 身份证号",
+      "basis": "both",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "身份证号"
+      ],
+      "refocused": false,
+      "materials": 12,
+      "chars": 68129,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 4403,
+      "truncated": false,
+      "answer": "常宏的身份证号码是 **610103196308062538**（或写作 61010319630806253g，g 应为 OCR/录入偏差，实际号码末位为 8）。\n\n- 材料 [2] 中列明常宏身份证号码为 61010319630806253g，资格编码 ND130007。[2]\n- 材料 [5] 及 [9][10][11] 中在当事人身份信息处均记载常宏身份证号码为 610103196308062538。[5][9][10][11]\n\n综合本轮材料，可确认常宏的身份证号码为 610103196308062538。",
+      "answer_head": "常宏的身份证号码是 **610103196308062538**（或写作 61010319630806253g，g 应为"
+    }
+  ]
+}

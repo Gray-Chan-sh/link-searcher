@@ -1,0 +1,45 @@
+{
+  "id": "K-carry-off",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 17396,
+      "truncated": false,
+      "answer": "常宏的出生日期是**1963年8月6日** [1]。\n\n依据：\n- 简历（常宏-简历-200905.doc）中明确记载：“出生日期: 1963年08月06日” [1]。\n- 多份应聘及背景材料（如 A04 常宏应聘文件及原创业传上来简介-2009.pdf）中也一致记载为 1963 年 08 月 06 日 [2]。",
+      "answer_head": "常宏的出生日期是**1963年8月6日** [1]。\n\n依据：\n- 简历（常宏-简历-200905.doc）中明确记载："
+    },
+    {
+      "rewritten": "陈秀芳 出生日期",
+      "basis": "both",
+      "anchor": [
+        "陈秀芳"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": true,
+      "materials": 12,
+      "chars": 29157,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 3494,
+      "truncated": false,
+      "answer": "基于前几轮确认的事实（常宏的出生日期）以及本轮提供的材料：\n\n1.  **常宏**：出生日期为 **1963年8月6日**（依据：前轮确认的简历及背景材料 [1][2]，注：此处引用前轮结论，本轮材料未涉及常宏）。\n2.  **陈秀芳**：出生日期为 **1956年3月18日**（依据：[1] 判决书原告信息、[2] 申请执行人信息、[3] 户籍信息、[7][8] 起诉状等）。\n\n**结论**：**陈秀芳大**。\n\n（注：陈秀芳出生于1956年，常宏出生于1963年，按年龄计算，陈秀芳比常宏年长7岁。）",
+      "answer_head": "基于前几轮确认的事实（常宏的出生日期）以及本轮提供的材料：\n\n1.  **常宏**：出生日期为 **1963年8月6日*"
+    }
+  ]
+}

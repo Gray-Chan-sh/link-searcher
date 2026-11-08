@@ -1,0 +1,47 @@
+{
+  "id": "I-gap-3",
+  "ok": false,
+  "fails": [
+    "gap_checkedeqTrue 实际=None"
+  ],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期 生日",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132371,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 0,
+      "truncated": false,
+      "answer": "❌ 网络错误: https://apihub.agnes-ai.com/v1/chat/completions: Network Error: Network Error: Error encountered in the status line: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof",
+      "answer_head": "❌ 网络错误: https://apihub.agnes-ai.com/v1/chat/completions: Net"
+    },
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "both",
+      "anchor": [
+        "常宏"
+      ],
+      "needs": [
+        "出生日期"
+      ],
+      "refocused": true,
+      "materials": 12,
+      "chars": 77281,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 14451,
+      "truncated": false,
+      "answer": "常宏今年 **62 周岁**（按 2026 年计算）。\n\n依据：\n\n- 常宏的出生日期为 **1963 年 8 月 6 日** [1][2][4][5][7][11]。\n- 今年为 **2026 年**，且 2026 年 8 月 6 日尚未到来或刚过，按周岁计算：2026 − 1963 = **63**，但因生日未至或按“今年生日前”口径通常计为 **62 周岁**；若按“已满 63 岁”口径则为 **63 岁**。按常规“今年多大”指周岁，且 2026 年 8 月 6 日已过（当前日期 2026 年 7 月 10 日未到生日），故准确周岁为 **62 周岁**。",
+      "answer_head": "常宏今年 **62 周岁**（按 2026 年计算）。\n\n依据：\n\n- 常宏的出生日期为 **1963 年 8 月 6 "
+    }
+  ]
+}
