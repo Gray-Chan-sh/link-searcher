@@ -365,13 +365,13 @@ pub(crate) fn do_upgrade(data_dir: &std::path::Path, dep: &str, on_progress: &do
     }
 
     // 冒烟：真正跑一遍推理，而不只是校验 sha256（历史教训：v6 在 tract 0.20 上
-    // 校验全对、但输出全 blank）。
+    // 校验全对、但输出全 blank —— 所以这里要求至少识别出 1 个字符）。
     if dep == "paddleocr" {
         match crate::extractor::paddleocr::verify_model_dir(&staging) {
             Ok(n) if n > 0 => {}
             Ok(_) => {
                 let _ = std::fs::remove_dir_all(&staging);
-                return Err("新模型自检没有检出任何文本区域，已放弃切换（旧版本保持不变）".into());
+                return Err("新模型自检没有识别出任何文字，已放弃切换（旧版本保持不变）".into());
             }
             Err(e) => {
                 let _ = std::fs::remove_dir_all(&staging);

@@ -271,12 +271,12 @@ pub fn health_check() -> Result<(), String> {
 
 /// 校验**指定目录**里的模型能否真正跑起来（升级后的冒烟测试）。
 ///
-/// 不复用全局引擎池（池是 `OnceLock`，缓存的是旧模型），而是新建一条流水线：
-/// 只用于"装完先验一遍"，成功后才把 `state.json` 切到新版本。
+/// 不复用全局引擎池（池里可能是旧模型），而是新建一条流水线：只用于
+/// "装完先验一遍"，成功后才把 `state.json` 切到新版本。
 ///
-/// 为什么不能用空白图：检测框数为 0 时同样"没报错"，但模型其实可能是坏的
-/// （tract 0.20 上 v6 就是这样：能跑、结果全 blank）。这里画几条黑色横条当作
-/// "文字行"，要求至少检出 1 个区域。
+/// 为什么不用空白图：检测框数为 0 时同样"没报错"，但模型其实可能是坏的
+/// （tract 0.20 上 v6 就是这样：能跑、结果全 blank）。这里用仓库里 6.6KB 的
+/// 真实文字图（"测试文本 ABC"）跑一遍，返回**识别出的字符数**，为 0 即判失败。
 pub fn verify_model_dir(dir: &Path) -> Result<usize, String> {
     let det = dir.join("det.onnx");
     let rec = dir.join("rec.onnx");
@@ -290,27 +290,16 @@ pub fn verify_model_dir(dir: &Path) -> Result<usize, String> {
     };
     let dict = dict_with_space_token(&dir.join(dict_name))?;
     let pipeline = pipeline::OcrPipeline::load(&det, &rec, &dict, 1280)?;
-    let run = pipeline.run_from_image(&synthetic_text_page())?;
-    Ok(run.results.len())
+    let img = image::load_from_memory(SMOKE_PNG)
+        .map_err(|e| format!("自检图片解码失败: {e}"))?;
+    let run = pipeline.run_from_image(&img)?;
+    Ok(run.results.iter().map(|r| r.text.chars().count()).sum())
 }
+
+/// 自检用的小图（"测试文本 ABC"，6627 字节，来自 `scripts/eval/ocr_fixtures/synthetic/`）。
+const SMOKE_PNG: &[u8] = include_bytes!("paddleocr/smoke_text.png");
 
 /// 生成一张"像文字行"的合成图：白底 + 若干条长短不一的黑色横条。
-fn synthetic_text_page() -> image::DynamicImage {
-    let (w, h) = (800u32, 600u32);
-    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
-    let ink = image::Rgb([20, 20, 20]);
-    for row in 0..8u32 {
-        let y0 = 40 + row * 65;
-        let len = 300 + (row * 97) % 380;
-        for y in y0..(y0 + 26).min(h) {
-            for x in 40..(40 + len).min(w) {
-                img.put_pixel(x, y, ink);
-            }
-        }
-    }
-    image::DynamicImage::ImageRgb8(img)
-}
-
 pub fn recognize_from_path_enriched(
     path: &Path,
 ) -> Result<(String, OcrStats), String> {
