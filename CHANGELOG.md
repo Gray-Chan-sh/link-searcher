@@ -158,6 +158,22 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十二轮）：新增可选 ONNX Runtime 后端（实测 det 快 21×、rec 快 60×），缺库自动回退 tract
+
+> 起因：C 路线的落地。`ort` 实测（同形状同机）：det 1589→75ms、rec(8×48×320) 667→11ms，
+> 端到端小图 4.7s→0.63s。难点不是速度，是**不把原生库变成硬依赖**。
+
+- **后端可切换**（`paddleocr/ort_pipeline.rs` + `Engine` 枚举）：`config.json: ocr_backend`
+  = `auto`（默认）/ `tract` / `ort`。`auto` 时找到动态库就用 ORT，找不到/版本不符/初始化失败
+  **自动回退 tract**，应用照常启动；`ort` 为强制模式（失败即报错，便于排查）。
+- **动态加载**：`ort` 用 `load-dynamic` 编译（不链接 ORT），DLL 查找顺序
+  `ORT_DYLIB_PATH` → `<数据目录>/runtime/onnxruntime/` → exe 同级；启动日志打印实际后端。
+- **前后处理完全复用**：`pure-onnx-ocr` 的检测后处理（DB/unclip/scaler）、字典与 CTC 解码都是纯
+  Rust，只是把"跑模型"换成 ORT —— 换后端**不改变识别结果**（同一张自检图两边都出 7 字符）。
+- **自检/升级链路同步**：`verify_model_dir` 也走同一套后端选择，模型升级冒烟与线上行为一致。
+- 提供了 `last_backend_name()` 供诊断/后续设置页展示。
+- 说明：本轮只做"能跑 + 可回退"，**DLL 的随包分发/自动下载**属于下一步（`load-dynamic` 让它不阻塞）。
+
 ## 2026-11-09（第九十一轮）：模型可在线升级（远端清单 + 版本目录 + 一键回退），不发版换 OCR 模型
 
 > 起因：想换 PP-OCRv6 tiny（体积 20MB→6MB、速度约 4 倍），但模型文件名/sha256/Release tag

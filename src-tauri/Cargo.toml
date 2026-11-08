@@ -77,6 +77,10 @@ image = "0.25"
 imageproc = "0.25"
 pure-onnx-ocr = "0.1"
 tract-onnx = "0.20"
+# OCR 的可选后端：ONNX Runtime（动态加载，缺 DLL 时自动回退 tract）
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "load-dynamic", "api-31"] }
+# 与 pure-onnx-ocr 使用同一代 ndarray（它输出 Array2/Array3）
+ndarray = "0.15"
 tokenizers = "0.20"
 ab_glyph = "0.2"
 encoding_rs = "0.8"

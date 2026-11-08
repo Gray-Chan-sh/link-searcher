@@ -405,6 +405,13 @@ pub struct AppConfig {
     /// `deps::commands::upgrade_dep`）。
     #[serde(default)]
     pub auto_update_models: bool,
+    /// OCR 推理后端：`auto`（默认，DLL 在就用 ORT）/ `tract` / `ort`
+    #[serde(default = "default_ocr_backend")]
+    pub ocr_backend: String,
+}
+
+fn default_ocr_backend() -> String {
+    "auto".to_string()
 }
 
 fn default_semantic_weight() -> f64 {
@@ -435,6 +442,7 @@ impl Default for AppConfig {
             webui_base_url: String::new(),
             integrations: Integrations::default(),
             auto_update_models: false,
+            ocr_backend: default_ocr_backend(),
         }
     }
 }
@@ -763,6 +771,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "webui_base_url",
     "integrations",
     "auto_update_models",
+    "ocr_backend",
 ];
 
 /// 手改了 `config.json` 但键名拼错时给出告警。`$schema` 是唯一允许的例外

@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Result;
 use log;
 use md5::Digest;
+mod ort_pipeline;
 mod pipeline;
 
 use pipeline::OcrPipeline;
@@ -56,7 +57,29 @@ pub fn models_present() -> bool {
     resolve_model_dir(resolved_model_dir()).is_some()
 }
 
-struct SendEngine(Mutex<OcrPipeline>);
+/// 引擎后端：tract（纯 Rust，默认）或 ONNX Runtime（可选，需要动态库）。
+enum Engine {
+    Tract(OcrPipeline),
+    Ort(ort_pipeline::OrtPipeline),
+}
+
+impl Engine {
+    fn run_from_path(&self, path: &Path) -> Result<pipeline::RunOutput, String> {
+        match self {
+            Engine::Tract(e) => e.run_from_path(path),
+            Engine::Ort(e) => e.run_from_path(path),
+        }
+    }
+
+    fn run_from_image(&self, img: &image::DynamicImage) -> Result<pipeline::RunOutput, String> {
+        match self {
+            Engine::Tract(e) => e.run_from_image(img),
+            Engine::Ort(e) => e.run_from_image(img),
+        }
+    }
+}
+
+struct SendEngine(Mutex<Engine>);
 // SAFETY: OcrPipeline 内部的 tract 会话带 RefCell 缓存（非 Send/Sync），
 // 每个引擎由自己的 Mutex 串行化访问，因此跨线程共享是安全的。
 unsafe impl Send for SendEngine {}
@@ -87,7 +110,7 @@ impl EnginePool {
 
     fn with_engine<F, T>(&self, f: F) -> Result<T, String>
     where
-        F: FnOnce(&OcrPipeline) -> Result<T, String>,
+        F: FnOnce(&Engine) -> Result<T, String>,
     {
         #[cfg(target_os = "macos")]
         unsafe {
@@ -143,12 +166,20 @@ fn resolved_model_dir() -> Option<&'static Path> {
     MODEL_DIR.get().map(|p| p.as_path())
 }
 
-fn try_build_engine() -> Result<SendEngine, String> {
-    let dir = resolve_model_dir(resolved_model_dir())
-        .ok_or_else(|| {
-            "PaddleOCR 模型未找到。请在首次启动引导或设置页「依赖中心」下载 OCR 模型。".to_string()
-        })?;
+/// `init()` 传进来的 **数据目录**（不是模型目录）—— 用于找 ORT 动态库。
+fn data_dir() -> Option<&'static Path> {
+    MODEL_DIR.get().map(|p| p.as_path())
+}
 
+/// 在给定模型目录上构建引擎，按配置选择后端（`auto` 时 ORT 可用则用 ORT）。
+/// 最近一次构建引擎用的后端（`ort` / `tract`）—— 诊断/设置页展示用。
+static LAST_BACKEND: Mutex<String> = Mutex::new(String::new());
+
+pub fn last_backend_name() -> String {
+    LAST_BACKEND.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+fn build_engine_at(dir: &Path) -> Result<Engine, String> {
     let det = dir.join("det.onnx");
     let rec = dir.join("rec.onnx");
     // 版本目录里新版模型用 `dict.txt`；老的平铺安装是 `ppocrv5_dict.txt`。
@@ -159,8 +190,40 @@ fn try_build_engine() -> Result<SendEngine, String> {
     };
     let dict = dict_with_space_token(&dir.join(dict_name))?;
 
-    let inner = OcrPipeline::load(&det, &rec, &dict, 1280)?;
+    let configured = crate::config::load_config().ocr_backend;
+    let want_ort = match configured.trim() {
+        "ort" => true,
+        "tract" => false,
+        _ => ort_pipeline::available(data_dir()),
+    };
 
+    if want_ort {
+        match ort_pipeline::OrtPipeline::load(&det, &rec, &dict, 1280, data_dir()) {
+            Ok(p) => {
+                log::info!("[OCR] 后端 = ONNX Runtime（{}）", ort_pipeline::api_hint());
+                *LAST_BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = "ort".into();
+                return Ok(Engine::Ort(p));
+            }
+            Err(e) => {
+                if configured.trim() == "ort" {
+                    return Err(format!("已强制使用 ORT 后端，但加载失败: {e}"));
+                }
+                log::warn!("[OCR] ORT 后端不可用，回退 tract: {e}");
+            }
+        }
+    }
+
+    log::info!("[OCR] 后端 = tract（纯 Rust）");
+    *LAST_BACKEND.lock().unwrap_or_else(|e| e.into_inner()) = "tract".into();
+    Ok(Engine::Tract(OcrPipeline::load(&det, &rec, &dict, 1280)?))
+}
+
+fn try_build_engine() -> Result<SendEngine, String> {
+    let dir = resolve_model_dir(resolved_model_dir())
+        .ok_or_else(|| {
+            "PaddleOCR 模型未找到。请在首次启动引导或设置页「依赖中心」下载 OCR 模型。".to_string()
+        })?;
+    let inner = build_engine_at(&dir)?;
     Ok(SendEngine(Mutex::new(inner)))
 }
 
@@ -204,7 +267,7 @@ fn dict_with_space_token(dict_path: &Path) -> Result<PathBuf, String> {
 
 fn with_engine<F, T>(f: F) -> Result<T, String>
 where
-    F: FnOnce(&OcrPipeline) -> Result<T, String>,
+    F: FnOnce(&Engine) -> Result<T, String>,
 {
     // 自适应并发闸门：一次调用 = 一张页图的整轮推理，正是内存/CPU 的大头。
     // 压力升高时这里排队（而不是失败），暂停档则等待恢复。
@@ -283,13 +346,7 @@ pub fn verify_model_dir(dir: &Path) -> Result<usize, String> {
     if !det.is_file() || !rec.is_file() {
         return Err("模型目录缺少 det.onnx / rec.onnx".to_string());
     }
-    let dict_name = if dir.join("dict.txt").is_file() {
-        "dict.txt"
-    } else {
-        "ppocrv5_dict.txt"
-    };
-    let dict = dict_with_space_token(&dir.join(dict_name))?;
-    let pipeline = pipeline::OcrPipeline::load(&det, &rec, &dict, 1280)?;
+    let pipeline = build_engine_at(dir)?;
     let img = image::load_from_memory(SMOKE_PNG)
         .map_err(|e| format!("自检图片解码失败: {e}"))?;
     let run = pipeline.run_from_image(&img)?;
@@ -299,7 +356,6 @@ pub fn verify_model_dir(dir: &Path) -> Result<usize, String> {
 /// 自检用的小图（"测试文本 ABC"，6627 字节，来自 `scripts/eval/ocr_fixtures/synthetic/`）。
 const SMOKE_PNG: &[u8] = include_bytes!("paddleocr/smoke_text.png");
 
-/// 生成一张"像文字行"的合成图：白底 + 若干条长短不一的黑色横条。
 pub fn recognize_from_path_enriched(
     path: &Path,
 ) -> Result<(String, OcrStats), String> {
@@ -439,7 +495,7 @@ pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), 
 /// Prevents the global Mutex from being held indefinitely if OCR hangs.
 fn with_engine_timed<F, T>(f: F) -> Result<T, String>
 where
-    F: FnOnce(&OcrPipeline) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&Engine) -> Result<T, String> + Send + 'static,
     T: Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::channel();

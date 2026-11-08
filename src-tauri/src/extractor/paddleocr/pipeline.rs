@@ -30,16 +30,16 @@ use pure_onnx_ocr::{
 };
 
 /// 识别输入高度（PP-OCR 固定 48）。
-const REC_HEIGHT: u32 = 48;
+pub(crate) const REC_HEIGHT: u32 = 48;
 /// 单块宽度分桶：按自然宽度落到最小够用的桶。
 ///
 /// 固定 320 会把长行压缩丢字；实测（样例库 45 张）：
 /// `[320]` 16037 字 / 5991ms，`[320,480]` 18835 字（+17.5%）/ 6191ms（+3.3%），
 /// `[320,480,640]` 19326 字（+20.5%）/ 7408ms（+23.6%），`[…,800]` 19492 字 / 8700ms。
 /// 480 是拐点：拿到约 96% 的收益、只多 3% 时间；更宽的桶留给需要时再开。
-const REC_WIDTH_BUCKETS: [u32; 2] = [320, 480];
+pub(crate) const REC_WIDTH_BUCKETS: [u32; 2] = [320, 480];
 /// 识别批大小（与上游默认一致）。
-const REC_BATCH: usize = 8;
+pub(crate) const REC_BATCH: usize = 8;
 /// 竖排判定阈值：高/宽 >= 1.5 视为竖排，需要旋转 90°。
 const VERTICAL_RATIO: f32 = 1.5;
 
@@ -296,7 +296,7 @@ impl OcrPipeline {
 }
 
 /// 多边形 → 外接矩形（x, y, w, h），并夹到图片范围内。
-fn bounds(poly: &pure_onnx_ocr::Polygon<f64>, dims: (u32, u32)) -> (u32, u32, u32, u32) {
+pub(crate) fn bounds(poly: &pure_onnx_ocr::Polygon<f64>, dims: (u32, u32)) -> (u32, u32, u32, u32) {
     let (mut x0, mut y0) = (f64::INFINITY, f64::INFINITY);
     let (mut x1, mut y1) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
     for p in &poly.exterior().0 {
@@ -319,7 +319,7 @@ fn bounds(poly: &pure_onnx_ocr::Polygon<f64>, dims: (u32, u32)) -> (u32, u32, u3
 ///
 /// 缓冲区固定为 `3 * 48 * 320`，右侧未使用部分填 `-1.0`（即原图 0 黑，
 /// 与上游 `pad_value = [0,0,0]` 归一化后的值一致）。
-fn prepare_crop(
+pub(crate) fn prepare_crop(
     image: &DynamicImage,
     region: (u32, u32, u32, u32),
     bucket: u32,
@@ -366,7 +366,7 @@ fn prepare_crop(
 ///
 /// 竖排块会先旋转 90°，此时宽高互换，直接按互换后的比例算，
 /// 省掉一次真正的旋转/裁剪。
-fn natural_width(region: (u32, u32, u32, u32)) -> u32 {
+pub(crate) fn natural_width(region: (u32, u32, u32, u32)) -> u32 {
     let (_, _, w, h) = region;
     if h == 0 {
         return 1;
@@ -378,7 +378,7 @@ fn natural_width(region: (u32, u32, u32, u32)) -> u32 {
 }
 
 /// 选宽度桶：取第一个装得下自然宽度的桶，超出的按最大桶处理。
-fn bucket_for(natural: u32) -> u32 {
+pub(crate) fn bucket_for(natural: u32) -> u32 {
     let max = *REC_WIDTH_BUCKETS.last().unwrap_or(&320);
     REC_WIDTH_BUCKETS
         .iter()

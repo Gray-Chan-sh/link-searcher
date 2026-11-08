@@ -113,6 +113,15 @@
 
 「依赖中心」集中列出所有可安装的运行依赖（PaddleOCR 模型、BGE 语义模型、重排模型、SenseVoice 音频模型、说话人分离模型等），显示每项的安装状态（✓ 已安装 / ✗ 未安装）、说明与体积，并提供「立即安装」按钮和下载进度。本地语义模型为**三选一**：BGE 行内有一个单选下拉框（`bge-small` 512 维 / `bge-base` 768 维 / `bge-large` 1024 维），选好维度后点「立即安装」；安装完成会自动设为当前 embedding 模型并**删除其它维度的模型文件**（切换后需重建语义向量，见索引状态页横幅）。**重排模型**同样是单选下拉框（可选）：`bge-reranker-base`（中英）/ `ms-marco-MiniLM-L-6-v2`（英文/快），安装后自动设为当前重排模型。顶部缺依赖提示条会直接跳转到此页。
 
+### OCR 推理后端（可选加速）
+
+默认用纯 Rust 的 tract（零原生依赖）。如果机器上有 **ONNX Runtime 1.31.x** 的动态库，可以切到 ORT 后端，实测快 3~20 倍（det `1589→75ms`、rec `667→11ms`）：
+
+1. 把 `onnxruntime.dll`（Windows）/ `libonnxruntime.so`（Linux）/ `libonnxruntime.dylib`（macOS）放到 `<数据目录>/runtime/onnxruntime/`，或设置环境变量 `ORT_DYLIB_PATH` 指向它；
+2. `config.json` 里把 `ocr_backend` 设为 `"auto"`（默认，检测到就用）/ `"ort"`（强制，失败即报错）/ `"tract"`（强制纯 Rust）。
+
+`auto` 模式下库缺失或版本不符会**自动回退 tract**，不影响使用；启动日志会打印当前后端（`[OCR] 后端 = ...`）。
+
 ### 模型在线升级（不发版换模型）
 
 PaddleOCR 模型支持**在线升级**，不用等新版本安装包：
