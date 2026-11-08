@@ -7,7 +7,9 @@ use std::time::Duration;
 use anyhow::Result;
 use log;
 use md5::Digest;
-use pure_onnx_ocr::{OcrEngine, OcrEngineBuilder};
+mod pipeline;
+
+use pipeline::OcrPipeline;
 use super::ocr::OcrStats;
 
 const MIN_CONFIDENCE: f32 = 0.5;
@@ -49,9 +51,9 @@ pub fn models_present() -> bool {
     resolve_model_dir(resolved_model_dir()).is_some()
 }
 
-struct SendEngine(Mutex<OcrEngine>);
-// SAFETY: OcrEngine contains non-Send interior mutability (RefCell-backed ONNX session).
-// Each engine's Mutex serializes all access, so SendEngine is safe to share across threads.
+struct SendEngine(Mutex<OcrPipeline>);
+// SAFETY: OcrPipeline 内部的 tract 会话带 RefCell 缓存（非 Send/Sync），
+// 每个引擎由自己的 Mutex 串行化访问，因此跨线程共享是安全的。
 unsafe impl Send for SendEngine {}
 unsafe impl Sync for SendEngine {}
 
@@ -80,7 +82,7 @@ impl EnginePool {
 
     fn with_engine<F, T>(&self, f: F) -> Result<T, String>
     where
-        F: FnOnce(&OcrEngine) -> Result<T, String>,
+        F: FnOnce(&OcrPipeline) -> Result<T, String>,
     {
         #[cfg(target_os = "macos")]
         unsafe {
@@ -116,13 +118,7 @@ fn try_build_engine() -> Result<SendEngine, String> {
     let rec = dir.join("rec.onnx");
     let dict = dict_with_space_token(&dir.join("ppocrv5_dict.txt"))?;
 
-    let inner = OcrEngineBuilder::new()
-        .det_model_path(&det)
-        .rec_model_path(&rec)
-        .dictionary_path(&dict)
-        .det_limit_side_len(1280)
-        .build()
-        .map_err(|e| format!("PaddleOCR 引擎初始化失败: {e}"))?;
+    let inner = OcrPipeline::load(&det, &rec, &dict, 1280)?;
 
     Ok(SendEngine(Mutex::new(inner)))
 }
@@ -167,7 +163,7 @@ fn dict_with_space_token(dict_path: &Path) -> Result<PathBuf, String> {
 
 fn with_engine<F, T>(f: F) -> Result<T, String>
 where
-    F: FnOnce(&OcrEngine) -> Result<T, String>,
+    F: FnOnce(&OcrPipeline) -> Result<T, String>,
 {
     // 自适应并发闸门：一次调用 = 一张页图的整轮推理，正是内存/CPU 的大头。
     // 压力升高时这里排队（而不是失败），暂停档则等待恢复。
@@ -211,8 +207,9 @@ pub fn recognize_from_path_enriched(
 ) -> Result<(String, OcrStats), String> {
     with_engine(|eng| {
         eng.run_from_path(path)
-            .map(|results| {
-                let filtered: Vec<_> = results
+            .map(|run| {
+                let filtered: Vec<_> = run
+                    .results
                     .into_iter()
                     .filter(|r| r.confidence >= MIN_CONFIDENCE)
                     .collect();
@@ -321,7 +318,7 @@ pub fn active_pool_size() -> usize {
 pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), String> {
     with_engine(|eng| {
         let run = eng
-            .run_with_metrics_from_path(path)
+            .run_from_path(path)
             .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))?;
         let filtered: Vec<_> = run
             .results
@@ -343,7 +340,7 @@ pub fn recognize_from_path_with_regions(path: &Path) -> Result<(String, usize), 
 /// Prevents the global Mutex from being held indefinitely if OCR hangs.
 fn with_engine_timed<F, T>(f: F) -> Result<T, String>
 where
-    F: FnOnce(&OcrEngine) -> Result<T, String> + Send + 'static,
+    F: FnOnce(&OcrPipeline) -> Result<T, String> + Send + 'static,
     T: Send + 'static,
 {
     let (tx, rx) = std::sync::mpsc::channel();
@@ -372,11 +369,11 @@ where
 pub fn recognize_with_metrics_from_path(path: &Path) -> Result<String, String> {
     with_engine(|eng| {
         let run = eng
-            .run_with_metrics_from_path(path)
+            .run_from_path(path)
             .map_err(|e| format!("无法识别图片 {}: {}", path.display(), e))?;
         let t = &run.timings;
         Ok(format!(
-            "decode={:.2}s det(pre={:.2}s inf={:.2}s post={:.2}s) rec(pre={:.2}s inf={:.2}s post={:.2}s) total={:.2}s regions={}",
+            "decode={:.2}s det(pre={:.2}s inf={:.2}s post={:.2}s) rec(pre={:.2}s inf={:.2}s post={:.2}s) total={:.2}s regions={} rotated={}",
             t.image_decode.as_secs_f64(),
             t.detection.preprocess.as_secs_f64(),
             t.detection.inference.as_secs_f64(),
@@ -386,6 +383,7 @@ pub fn recognize_with_metrics_from_path(path: &Path) -> Result<String, String> {
             t.recognition.postprocess.as_secs_f64(),
             t.total.as_secs_f64(),
             run.results.len(),
+            t.rotated_regions,
         ))
     })
     .map_err(|e| e.to_string())
@@ -396,8 +394,8 @@ pub fn recognize_from_image(image: &image::DynamicImage) -> Result<String> {
     let image = image.clone();
     with_engine_timed(move |eng| {
         eng.run_from_image(&image)
-            .map(|results| {
-                results
+            .map(|run| {
+                run.results
                     .into_iter()
                     .filter(|r| r.confidence >= MIN_CONFIDENCE)
                     .map(|r| r.text)
