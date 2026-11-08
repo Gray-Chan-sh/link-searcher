@@ -1,0 +1,24 @@
+{
+  "id": "J-compare-1",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 陈秀芳 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 129794,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 4980,
+      "truncated": false,
+      "answer": "**事实依据：**\n*   **常宏**：出生于 1963 年 08 月 06 日 [1][7][10]。\n*   **陈秀芳**：出生于 1956 年 03 月 18 日 [2][3][4]。\n\n**结论：**\n按出生年份比较，陈秀芳",
+      "answer_head": "**事实依据：**\n*   **常宏**：出生于 1963 年 08 月 06 日 [1][7][10]。\n*   **"
+    }
+  ]
+}

@@ -238,6 +238,51 @@
         { "field": "answer", "op": "contains", "value": "陈秀芳" }
       ],
       "note": "同上"
+    },
+    {
+      "id": "N-basis-max",
+      "step": 5,
+      "title": "纯计算判定 1/5：谁年龄最大",
+      "turns": ["分析周锦春案中的亲属关系", "这些人里谁年龄最大？"],
+      "carry": false,
+      "checks": [{ "field": "basis", "op": "eq", "value": "history" }],
+      "note": "2026-11-08 实测：4 次运行 history/history/docs/both"
+    },
+    {
+      "id": "N-basis-min",
+      "step": 5,
+      "title": "纯计算判定 2/5：谁年龄最小",
+      "turns": ["分析周锦春案中的亲属关系", "这些人里谁年龄最小？"],
+      "carry": false,
+      "checks": [{ "field": "basis", "op": "eq", "value": "history" }],
+      "note": "同上"
+    },
+    {
+      "id": "N-basis-age",
+      "step": 5,
+      "title": "纯计算判定 3/5：今年多大",
+      "turns": ["常宏的出生日期是哪天？", "他今年多大？"],
+      "carry": false,
+      "checks": [{ "field": "basis", "op": "eq", "value": "history" }],
+      "note": "只需当年年份，不需要新事实"
+    },
+    {
+      "id": "N-basis-sum",
+      "step": 5,
+      "title": "纯计算判定 4/5：一共要付多少钱",
+      "turns": ["周锦春案的判决结果是什么？", "被告一共要付多少钱？"],
+      "carry": false,
+      "checks": [{ "field": "basis", "op": "eq", "value": "history" }],
+      "note": "对上一轮金额求和"
+    },
+    {
+      "id": "N-basis-list",
+      "step": 5,
+      "title": "纯计算判定 5/5：需要支付哪些款项",
+      "turns": ["周锦春案的判决结果是什么？", "被告需要支付哪些款项？"],
+      "carry": false,
+      "checks": [{ "field": "basis", "op": "eq", "value": "history" }],
+      "note": "上一轮已列出各项，只需重述/归类"
     }
   ]
 }

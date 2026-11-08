@@ -1,0 +1,44 @@
+{
+  "id": "N-basis-age",
+  "ok": true,
+  "fails": [],
+  "rows": [
+    {
+      "rewritten": "常宏 出生日期",
+      "basis": "docs",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "materials": 30,
+      "chars": 132313,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 14866,
+      "truncated": false,
+      "answer": "常宏的出生日期是 1963年8月6日 [1][2][4]。",
+      "answer_head": "常宏的出生日期是 1963年8月6日 [1][2][4]。"
+    },
+    {
+      "rewritten": "常宏 年龄 出生日期",
+      "basis": "history",
+      "anchor": [],
+      "needs": [],
+      "refocused": false,
+      "gap_checked": true,
+      "gap_answerable": true,
+      "gap_error": "ok",
+      "materials": 0,
+      "chars": 0,
+      "carried_count": 0,
+      "carried_chars": 0,
+      "dropped": 0,
+      "context_truncated": false,
+      "took_ms": 4707,
+      "truncated": false,
+      "answer": "基于第 1 轮列出的出生日期（1963年8月6日），计算他今年的年龄需要知道“今年”的具体年份以及当前的月份和日期。\n\n材料中未提供“今年”的具体年份，也未提供当前的具体日期（以判断是否已过生日）。\n\n因此，无法给出确切的周岁年龄数值。\n缺少的信息：\n1. 当前年份（若假设对话发生在材料所属的时间背景下，通常需依据材料发布时间或默认当前系统时间，但材料中无系统时间标记，仅有历史回答引用了 [1][2][4] 等编号，暗示存在外部文档但未在本轮列出，故无法确定当前年份）。\n2. 当前日期（以确定是否已过 8月6日 的生日）。\n\n若假设当前为 2024 年（基于常见 AI 服务时间），则：\n- 若当前日期在 2024年8月6日 之前，年龄为 2024 - 1963 - 1 = 60 岁。\n- 若当前日期在 2024年8月6日 或之后，年龄为 2024 - 1963 = 61 岁。\n\n但由于缺乏明确的当前时间基准，**无法给出唯一确定的年龄**。请提供当前年份或假设的参照年份。",
+      "answer_head": "基于第 1 轮列出的出生日期（1963年8月6日），计算他今年的年龄需要知道“今年”的具体年份以及当前的月份和日期。\n\n"
+    }
+  ]
+}
