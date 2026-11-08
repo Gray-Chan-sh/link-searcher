@@ -222,6 +222,8 @@ export interface AiDonePayload {
   embedding_model?: string
   /** 本轮依据：history / both / docs */
   basis?: string
+  /** 失败原因（网关限流/断网）。非空表示这一轮**没有答案**，不得写入历史。 */
+  error?: string | null
   /**
    * 仅前端内部使用：true 表示该回答已由 streamStore 在用户切页期间自行落库，
    * ChatPanel 恢复时只需重新拉取会话，无需再追加/保存（避免重复写入）。

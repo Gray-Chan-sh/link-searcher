@@ -86,6 +86,8 @@ export function getAnswerVerify(sessionId: string): AnswerVerifyPayload | undefi
  * 返回是否写入成功。
  */
 async function persistDone(sessionId: string, e: AiDonePayload): Promise<boolean> {
+  // 失败轮次不是回答：不落库，避免把错误句写进历史（2026-11-08）。
+  if (e.error) return false;
   persisting.add(sessionId)
   try {
     const cur = await loadChatSession(sessionId)

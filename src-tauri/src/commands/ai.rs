@@ -346,6 +346,10 @@ struct AiDone {
     /// 本轮依据：history / both / docs（空 = 旧数据）。
     #[serde(default)]
     basis: String,
+    /// 失败原因（网关限流/断网/未配置）。非空时 `full_text` 为空串：
+    /// **错误不是回答**，前端不得把它写进会话历史（2026-11-08）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    error: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -438,6 +442,25 @@ fn stream_text_or_error(
     }
 }
 
+/// conversation 路径的流式结果拆分：`(可展示正文, 失败原因)`。
+///
+/// 失败时正文必须为空 —— 错误不是回答，前端不会把它写进会话历史（2026-11-08）。
+fn split_stream_outcome(
+    text: Option<String>,
+    cancelled: bool,
+    error: Option<String>,
+) -> (String, Option<String>) {
+    match (text, error) {
+        (Some(t), _) => (t, None),
+        (None, _) if cancelled => (String::new(), None),
+        (None, err) => {
+            let reason = err.unwrap_or_else(|| "AI 无回复（原因未知，请查看日志）".to_string());
+            log::error!("[AI] conversation: 流式回答失败：{reason}");
+            (String::new(), Some(reason))
+        }
+    }
+}
+
 /// Streaming variant of [`smart_search`]: emits `ai-chunk` events as the
 /// answer is generated and a final `ai-done`. Frontend renders incrementally.
 #[tauri::command]
@@ -496,6 +519,7 @@ pub async fn smart_search_stream(
         llm_model: String::new(),
         embedding_model: String::new(),
         basis: "docs".into(),
+        error: None,
     });
     Ok(())
 }
@@ -829,6 +853,7 @@ pub async fn conversation_ask_stream(
             llm_model: cfg.active_llm_model_id,
             embedding_model: cfg.active_embedding_model_id,
             basis: basis.clone(),
+            error: None,
         });
         return Ok(());
     }
@@ -889,7 +914,8 @@ pub async fn conversation_ask_stream(
         "evidence_count": evidence.len(),
         "truncated": result.truncated,
     })));
-    let raw_text = stream_text_or_error(result.text, result.cancelled, result.error, "conversation");
+    // 失败时**不再把错误句当回答**：text 为空、原因走 `error` 字段，前端不落库。
+    let (raw_text, stream_error) = split_stream_outcome(result.text, result.cancelled, result.error);
     log::info!("[AI]   raw answer bytes={:?} chars={} trimmed_empty={}", raw_text.as_bytes(), raw_text.chars().count(), raw_text.trim().is_empty());
 
     // auto_cite is intentionally off the critical path: a heavy answer can
@@ -958,6 +984,7 @@ pub async fn conversation_ask_stream(
         llm_model: cfg.active_llm_model_id,
         embedding_model: cfg.active_embedding_model_id,
         basis,
+        error: stream_error,
     });
     log::info!("[AI] post: emit_done_done");
     // Analytics must never keep the UI in "streaming". Record after the done
@@ -1204,6 +1231,24 @@ pub async fn get_turn_ai_events(
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    /// 失败绝不能变成"回答正文"：正文为空、原因走 error 字段。
+    #[test]
+    fn stream_failure_never_becomes_answer_text() {
+        let (text, err) = split_stream_outcome(None, false, Some("AI 网关拒绝（HTTP 429）".into()));
+        assert!(text.is_empty(), "失败时正文必须为空，实际={text:?}");
+        assert!(err.is_some());
+
+        let (text, err) = split_stream_outcome(Some("答案".into()), false, None);
+        assert_eq!(text, "答案");
+        assert!(err.is_none());
+
+        let (text, err) = split_stream_outcome(None, true, None);
+        assert!(text.is_empty() && err.is_none(), "取消不算失败");
+
+        let (_, err) = split_stream_outcome(None, false, None);
+        assert!(err.is_some(), "原因未知也要给出错误，不能变成空回答");
+    }
 
     #[test]
     fn system_prompts_are_all_present_and_non_empty() {

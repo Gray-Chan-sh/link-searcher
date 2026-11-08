@@ -1646,6 +1646,9 @@ pub fn chat_stream_cancellable(
     let mut max_tokens = detected_max_tokens();
     let mut tried: Vec<Option<u32>> = vec![max_tokens];
     let mut upstream_retried = false;
+    // 429 = 上游限流。聚合网关的免费档很常见，等 2 秒再试一次通常就能过；
+    // 之前不重试，直接把「AI 网关拒绝（HTTP 429）」当回答返回（2026-11-08）。
+    let mut rate_limited_retried = false;
     let mut reader = loop {
         let req_body = match serde_json::to_string(&ChatReq {
             model: ep.model_id.clone(),
@@ -1708,6 +1711,13 @@ pub fn chat_stream_cancellable(
                     LlmErrorKind::UpstreamUnavailable if !upstream_retried => {
                         upstream_retried = true;
                         log::warn!("[AI] chat stream upstream unavailable; retrying once");
+                        retry = true;
+                    }
+                    // 429 = 上游限流：等 2 秒重试一次。
+                    _ if code == 429 && !rate_limited_retried => {
+                        rate_limited_retried = true;
+                        log::warn!("[AI] chat stream rate limited (429); retrying once after 2s");
+                        std::thread::sleep(std::time::Duration::from_secs(2));
                         retry = true;
                     }
                     _ => {}

@@ -84,6 +84,8 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
   const [activeCite, setActiveCite] = useState<{ m: number; n: number; path: string; snippet: string } | null>(null)
   const [progress, setProgress] = useState<AiProgressPayload | null>(null)
   const [pendingClarify, setPendingClarify] = useState<{ baseQuestion: string; slots: ClarifySlot[] } | null>(null)
+  /** 本轮失败原因（网关限流/断网）。错误不是回答：只显示，不写进会话历史。 */
+  const [sendError, setSendError] = useState<string | null>(null)
   const [slotValues, setSlotValues] = useState<Record<string, string>>({})
   const [copiedId, setCopiedId] = useState<number | null>(null)
 
@@ -200,6 +202,12 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
       setStreaming(null)
       setProgress(null)
       if (p.cancelled) return
+      // 失败：显示原因，不追加 assistant 消息、不落库（2026-11-08）。
+      if (p.error) {
+        setSendError(p.error)
+        return
+      }
+      setSendError(null)
       if (p.persisted) {
         // 切页期间 streamStore 已代为落库：只需把最新会话拉回视图（不再保存），
         // 避免重复追加回答。拉取的会话已含答案且 pending 已清空。
@@ -925,6 +933,18 @@ export default function ChatPanel({ llmEnabled, session, onSessionChange, pendin
               </div>
             ))}
           </div>
+        </div>
+      )}
+
+      {sendError && (
+        <div className="mx-4 mt-2 px-3 py-2 text-xs rounded border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 flex items-start gap-2">
+          <span className="flex-1 whitespace-pre-wrap break-words">{sendError}</span>
+          <button
+            type="button"
+            onClick={() => setSendError(null)}
+            className="shrink-0 text-red-400 hover:text-red-600 leading-none px-1"
+            aria-label={t('clarify_clear')}
+          >×</button>
         </div>
       )}
 
