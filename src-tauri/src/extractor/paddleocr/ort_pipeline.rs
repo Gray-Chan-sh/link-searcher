@@ -83,6 +83,38 @@ pub fn api_hint() -> &'static str {
     ORT_API_HINT
 }
 
+/// ORT 环境全局唯一：`init_from` **每个进程只能成功一次**。
+/// 引擎池会建 N 个引擎（N=核数），如果每个都初始化一次，从第 2 个开始就会失败、
+/// 被 `build_engine_at` 判为"ORT 不可用"而回退 tract —— 表现是"有的线程用 ORT、
+/// 有的用 tract"（实测：单引擎自检 ok，池化后 backend=tract）。
+static ORT_ENV: std::sync::OnceLock<Arc<ort::environment::Environment>> =
+    std::sync::OnceLock::new();
+static ORT_ENV_INIT: Mutex<()> = Mutex::new(());
+
+fn shared_env(dylib: &Path) -> Result<Arc<ort::environment::Environment>, String> {
+    if let Some(env) = ORT_ENV.get() {
+        return Ok(Arc::clone(env));
+    }
+    let _guard = ORT_ENV_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(env) = ORT_ENV.get() {
+        return Ok(Arc::clone(env));
+    }
+    let env = Arc::new(
+        ort::init_from(dylib)
+            .map_err(|e| {
+                format!(
+                    "加载 {} 失败（需要 ORT {ORT_API_HINT}）: {e}",
+                    dylib.display()
+                )
+            })?
+            .with_name("link-searcher")
+            .build()
+            .map_err(|e| format!("初始化 ONNX Runtime 失败: {e}"))?,
+    );
+    let _ = ORT_ENV.set(Arc::clone(&env));
+    Ok(env)
+}
+
 pub struct OrtPipeline {
     // 必须持有 Environment（Session 借用了它）
     _env: Arc<ort::environment::Environment>,
@@ -108,13 +140,7 @@ impl OrtPipeline {
         let dylib = locate_dylib(data_dir)
             .ok_or_else(|| format!("未找到 {}（可放到 <data_dir>/runtime/onnxruntime/）", dylib_name()))?;
 
-        let env = Arc::new(
-            ort::init_from(&dylib)
-                .map_err(|e| format!("加载 {} 失败（需要 ORT {ORT_API_HINT}）: {e}", dylib.display()))?
-                .with_name("link-searcher")
-                .build()
-                .map_err(|e| format!("初始化 ONNX Runtime 失败: {e}"))?,
-        );
+        let env = shared_env(&dylib)?;
 
         let build = |p: &Path| -> Result<ort::session::Session, String> {
             ort::session::Session::builder(&env)

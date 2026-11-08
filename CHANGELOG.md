@@ -169,7 +169,11 @@
 - **动态加载**：`ort` 用 `load-dynamic` 编译（不链接 ORT），DLL 查找顺序
   `ORT_DYLIB_PATH` → `<数据目录>/runtime/onnxruntime/` → exe 同级；启动日志打印实际后端。
 - **前后处理完全复用**：`pure-onnx-ocr` 的检测后处理（DB/unclip/scaler）、字典与 CTC 解码都是纯
-  Rust，只是把"跑模型"换成 ORT —— 换后端**不改变识别结果**（同一张自检图两边都出 7 字符）。
+  Rust，只是把"跑模型"换成 ORT —— 换后端**不改变识别结果**（样例库 45 张：tract 17925 字符 vs
+  ORT 17924，差 1 个字符；耗时 390.7s → 97.0s，**4.0×**，dev 构建）。
+- **ORT 环境全局共享**：`ort::init_from` 每个进程只能成功一次；引擎池有 N 个引擎（N=核数），
+  逐个初始化会让第 2 个开始失败并回退 tract（表现为"部分线程用 ORT"）。改为
+  `OnceLock<Arc<Environment>>` + 互斥单飞，池内所有引擎共用同一个环境。
 - **自检/升级链路同步**：`verify_model_dir` 也走同一套后端选择，模型升级冒烟与线上行为一致。
 - 提供了 `last_backend_name()` 供诊断/后续设置页展示。
 - 说明：本轮只做"能跑 + 可回退"，**DLL 的随包分发/自动下载**属于下一步（`load-dynamic` 让它不阻塞）。
