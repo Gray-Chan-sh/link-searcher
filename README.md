@@ -315,6 +315,8 @@ npm run tauri build
 
 > **发布版模型不在安装包内**：为控制体积，PaddleOCR（~20MB）/BGE-large（~1.2GB）/SenseVoice（~228MB）/说话人分离（~35MB）等模型均不在包内。首次启动的「初始化依赖」向导按需从国内镜像下载到数据目录（`~/Library/Application Support/link-searcher/models` 等）：PaddleOCR 与说话人分离模型走 GitHub Releases 加速镜像链（ghfast.top → gh-proxy.com → GitHub 直连兜底），SenseVoice 走 hf-mirror.com，BGE-large 走 hf-mirror.com（ModelScope 兜底）。可跳过、可稍后在设置页「依赖中心」补装。
 
+> **模型可在线升级（不发版）**：PaddleOCR 模型由远端清单（`models-catalog.json`，raw 分支文件）驱动，依赖中心可「检查更新 → 升级 → 一键回退」，升级前会跑一次自检推理，失败保持旧版本；也可在依赖中心打开「后台自动升级」。版本化目录为 `models/paddleocr/versions/<ver>/`，老安装首次启动自动登记，不重复下载。清单格式示例见 `docs/models-catalog.example.json`。
+
 ---
 
 ## 技术栈

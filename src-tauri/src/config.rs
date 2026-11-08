@@ -398,6 +398,13 @@ pub struct AppConfig {
     /// 对外集成（飞书机器人等）。见 [`Integrations`]。
     #[serde(default)]
     pub integrations: Integrations,
+    /// 模型是否后台自动升级。
+    ///
+    /// 默认 **false**：只在依赖中心提示"有新版本"，由用户点升级（省流量、可控）。
+    /// 打开后启动 30s 在后台检查并静默升级（失败不影响旧版本，见
+    /// `deps::commands::upgrade_dep`）。
+    #[serde(default)]
+    pub auto_update_models: bool,
 }
 
 fn default_semantic_weight() -> f64 {
@@ -427,6 +434,7 @@ impl Default for AppConfig {
             web_api_token: String::new(),
             webui_base_url: String::new(),
             integrations: Integrations::default(),
+            auto_update_models: false,
         }
     }
 }
@@ -754,6 +762,7 @@ const KNOWN_CONFIG_KEYS: &[&str] = &[
     "web_api_token",
     "webui_base_url",
     "integrations",
+    "auto_update_models",
 ];
 
 /// 手改了 `config.json` 但键名拼错时给出告警。`$schema` 是唯一允许的例外

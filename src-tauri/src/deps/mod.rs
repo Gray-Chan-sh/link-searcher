@@ -16,6 +16,8 @@
 pub mod catalog;
 pub mod commands;
 pub mod download;
+pub mod remote;
+pub mod state;
 
 use std::path::{Path, PathBuf};
 
@@ -39,6 +41,12 @@ pub struct DepStatus {
     pub hint: String,
     /// Files that must exist for this dep to count as ready.
     pub required_files: Vec<String>,
+    /// 当前生效的模型版本（仅版本化安装的依赖，如 paddleocr）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<String>,
+    /// 可回退的上一版本。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<String>,
 }
 
 /// A snapshot of every tracked dependency, plus a global "all recommended
@@ -68,12 +76,17 @@ pub fn current_status(state: &AppState) -> SetupStatus {
         .iter()
         .any(|d| BGE_IDS.contains(&d.id) && catalog::is_ready(d, &data_dir));
 
+    // 版本状态（仅"版本化安装"的依赖有）：用于依赖中心显示当前/上一版，
+    // 以及"回退"按钮。
+    let dep_state = state::load(&data_dir);
+
     for def in &all_defs {
         let available = catalog::is_ready(def, &data_dir);
         let bge_satisfied = BGE_IDS.contains(&def.id) && any_bge_ready;
         if def.recommended && !available && !bge_satisfied {
             all_recommended_ready = false;
         }
+        let entry = dep_state.deps.get(def.id);
         deps.push(DepStatus {
             id: def.id.to_string(),
             name: def.name.to_string(),
@@ -86,6 +99,8 @@ pub fn current_status(state: &AppState) -> SetupStatus {
                 .iter()
                 .map(|f| f.local.to_string())
                 .collect(),
+            current_version: entry.map(|e| e.current.clone()).filter(|s| !s.is_empty()),
+            previous_version: entry.and_then(|e| e.previous.clone()),
         });
     }
 

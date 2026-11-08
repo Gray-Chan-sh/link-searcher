@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
-use crate::deps::catalog::{DepDef, FileSpec, Source};
+use crate::deps::catalog::{DepDef, Source};
 
 /// Progress callback: `(current_file_index_1based, total_files, current_file_bytes)`.
 pub type ProgressFn = dyn Fn(u64, u64, u64) + Send + Sync;
@@ -89,10 +89,10 @@ fn err<T>(msg: impl Into<String>) -> Result<T, DownloadError> {
     Err(DownloadError(msg.into()))
 }
 
-/// Install a dep's files into `data_dir`. Idempotent — already-present files
-/// verified against their SHA-256 are skipped; a truncated/interrupted
-/// download resumes from its `.part` instead of restarting.
-/// `on_progress(current_file, total_files, bytes_downloaded_of_current)`
+/// 一个待下载文件的 (remote 资产名, local 落地名, sha256)。
+pub type FileTuple = (String, String, String);
+
+/// Install a dep's files into `data_dir`（老布局：平铺到 `install_dir`）。
 pub fn install_dep(
     def: &DepDef,
     data_dir: &Path,
@@ -102,30 +102,54 @@ pub fn install_dep(
     if def.files.is_empty() {
         return err(format!("dep '{}' has no downloadable files", def.id));
     }
-
     let dest_dir = crate::deps::catalog::install_dir(def, data_dir);
-    fs::create_dir_all(&dest_dir)
+    let files: Vec<FileTuple> = def
+        .files
+        .iter()
+        .map(|f| (f.remote.to_string(), f.local.to_string(), f.sha256.to_string()))
+        .collect();
+    install_into(&files, &def.sources, &dest_dir, def.id, def.size_bytes, cancel, on_progress)
+}
+
+/// Install an explicit file list into `dest_dir`（版本化目录 / 平铺目录共用）。
+///
+/// Idempotent — already-present files verified against their SHA-256 are
+/// skipped; a truncated/interrupted download resumes from its `.part`.
+pub fn install_into(
+    files: &[FileTuple],
+    sources_in: &[Source],
+    dest_dir: &Path,
+    label: &str,
+    total_bytes_hint: u64,
+    cancel: &AtomicBool,
+    on_progress: &ProgressFn,
+) -> Result<(), DownloadError> {
+    if files.is_empty() {
+        return err(format!("依赖 '{label}' 没有可下载文件"));
+    }
+
+    fs::create_dir_all(dest_dir)
         .map_err(|e| DownloadError(format!("创建目录失败: {e}")))?;
 
     // Files that are missing OR fail their integrity check need (re)fetching.
     // `files_ready` only checks existence/non-empty; here we do the real
     // SHA-256 verification so a corrupt file from a previous crash is redone.
-    let mut pending: Vec<&FileSpec> = Vec::new();
-    for f in def.files {
-        let local_path = dest_dir.join(f.local);
+    let mut pending: Vec<&FileTuple> = Vec::new();
+    for f in files {
+        let local_path = dest_dir.join(&f.1);
         if local_path.is_file() {
             match file_sha256(&local_path) {
-                Ok(digest) if digest == f.sha256 => continue, // verified, skip
+                Ok(digest) if digest == f.2 => continue, // verified, skip
                 Ok(digest) => {
                     log::warn!(
                         "[DEPS] {} 已存在但校验失败 (got {digest}, want {}), 重新下载",
-                        f.local,
-                        f.sha256
+                        f.1,
+                        f.2
                     );
                     let _ = fs::remove_file(&local_path);
                 }
                 Err(e) => {
-                    log::warn!("[DEPS] {} 读取校验失败: {e}, 重新下载", f.local);
+                    log::warn!("[DEPS] {} 读取校验失败: {e}, 重新下载", f.1);
                     let _ = fs::remove_file(&local_path);
                 }
             }
@@ -139,9 +163,9 @@ pub fn install_dep(
 
     log::info!(
         "[DEPS] {}: {} file(s) to fetch (~{:.1} MB total)",
-        def.id,
+        label,
         pending.len(),
-        def.size_bytes as f64 / 1_048_576.0
+        total_bytes_hint as f64 / 1_048_576.0
     );
 
     let total_files = pending.len() as u64;
@@ -151,7 +175,7 @@ pub fn install_dep(
         if cancel.load(Ordering::SeqCst) {
             return err("已取消");
         }
-        let local_path = dest_dir.join(file.local);
+        let local_path = dest_dir.join(&file.1);
         // Nested local paths (e.g. `Qwen3-0.6B/tokenizer.json`) need their
         // parent dir created before the final rename.
         if let Some(parent) = local_path.parent() {
@@ -171,13 +195,13 @@ pub fn install_dep(
         // Deps whose files are all absolute URLs declare no sources; give them
         // one synthetic source so `effective_urls` still yields the URL.
         let fallback_source = Source { label: "上游", base_url: String::new() };
-        let sources: Vec<Source> = if def.sources.is_empty() {
+        let sources: Vec<Source> = if sources_in.is_empty() {
             vec![fallback_source]
         } else {
-            def.sources.clone()
+            sources_in.to_vec()
         };
         for source in &sources {
-            for url in effective_urls(source, file.remote) {
+            for url in effective_urls(source, &file.0) {
                 url_plan.push((source.label.to_string(), url));
             }
         }
@@ -189,7 +213,7 @@ pub fn install_dep(
             let offset = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
             log::info!(
                 "[DEPS] {} ← {} ({}){}",
-                file.local,
+                file.1,
                 label,
                 url,
                 if offset > 0 {
@@ -210,14 +234,14 @@ pub fn install_dep(
                     }
                     // Verify integrity before atomically renaming into place.
                     match file_sha256(&part_path) {
-                        Ok(digest) if digest == file.sha256 => {
+                        Ok(digest) if digest == file.2 => {
                             fs::rename(&part_path, &local_path).map_err(|e| {
                                 DownloadError(format!("写入 {} 失败: {e}", local_path.display()))
                             })?;
                             succeeded = true;
                             log::info!(
                                 "[DEPS] {} 完成 ({:.1} MB, sha256 ✓)",
-                                file.local,
+                                file.1,
                                 n as f64 / 1_048_576.0
                             );
                             break;
@@ -249,7 +273,7 @@ pub fn install_dep(
         if !succeeded {
             return err(format!(
                 "下载 {} 失败：所有镜像源均不可用。{}",
-                file.remote,
+                file.0,
                 last_error.unwrap_or_else(|| "未知错误".into())
             ));
         }
@@ -260,7 +284,7 @@ pub fn install_dep(
 }
 
 /// Compute the lowercase hex SHA-256 of a file.
-fn file_sha256(path: &Path) -> Result<String, DownloadError> {
+pub(crate) fn file_sha256(path: &Path) -> Result<String, DownloadError> {
     let mut file = fs::File::open(path)
         .map_err(|e| DownloadError(format!("打开失败: {e}")))?;
     let mut hasher = Sha256::new();

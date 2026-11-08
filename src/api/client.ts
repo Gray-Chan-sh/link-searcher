@@ -238,6 +238,9 @@ const MAPPINGS: Record<string, Mapping> = {
   install_dep: (a) => ({ method: 'POST', path: '/api/setup/install', body: a }),
   cancel_dep_install: { method: 'POST', path: '/api/setup/cancel' },
   dep_install_status: { method: 'GET', path: '/api/setup/install-status' },
+  check_dep_updates: { method: 'GET', path: '/api/setup/updates' },
+  upgrade_dep: (a) => ({ method: 'POST', path: '/api/setup/upgrade', body: a }),
+  rollback_dep: (a) => ({ method: 'POST', path: '/api/setup/rollback', body: a }),
 
   // ── Settings ──
   get_settings: { method: 'GET', path: '/api/settings' },

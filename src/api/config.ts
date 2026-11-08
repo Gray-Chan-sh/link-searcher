@@ -44,6 +44,8 @@ export interface ConfigInfo {
     active_llm_model_id: string
     active_reranker_model_id: string
     semantic_weight: number
+    /// 模型后台自动升级（依赖中心开关）
+    auto_update_models: boolean
 }
 
 export interface MigrationProgress {

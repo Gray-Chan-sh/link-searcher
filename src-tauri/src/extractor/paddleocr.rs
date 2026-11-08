@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -34,6 +34,11 @@ const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
 ///    `tauri dev` needs no download.
 pub fn resolve_model_dir(data_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(dd) = data_dir {
+        // 1) 版本化目录：远端清单升级后的当前版本（`models/paddleocr/versions/<ver>`）
+        if let Some(dir) = crate::deps::state::current_dir(dd, "paddleocr", 2) {
+            return Some(dir);
+        }
+        // 2) 老的平铺安装（`models/ppocrv5`）：兼容旧安装，启动时会被迁移成版本目录
         let p = dd.join("models").join("ppocrv5");
         if p.join("det.onnx").is_file() && p.join("rec.onnx").is_file() {
             return Some(p);
@@ -94,7 +99,13 @@ impl EnginePool {
     }
 }
 
-static POOL: OnceLock<Result<EnginePool, String>> = OnceLock::new();
+/// 引擎池。用 `RwLock<Option<_>>` 而不是 `OnceLock`：模型可以**在线升级**，
+/// 升级/回退后必须能让下一轮推理用上新模型（`reload_engine_pool`）。
+///
+/// 单飞仍然成立：`POOL_INIT` 保证同一时刻只有一个线程在建池，
+/// 与原先 `OnceLock::get_or_init` 的语义一致（避免 N 线程各建一份 20MB 模型）。
+static POOL: std::sync::RwLock<Option<Arc<EnginePool>>> = std::sync::RwLock::new(None);
+static POOL_INIT: Mutex<()> = Mutex::new(());
 static MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Point the OCR engine at a data dir (packaged builds). Called at startup
@@ -102,6 +113,30 @@ static MODEL_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// models dir). Must run before the first inference.
 pub fn init(data_dir: &Path) {
     let _ = MODEL_DIR.set(data_dir.to_path_buf());
+    adopt_flat_install(data_dir);
+}
+
+/// 把老的平铺安装（`models/ppocrv5/`）登记成版本目录。
+///
+/// 启动时跑一次（老用户升级），**首次下载完成后也跑一次** —— 这样"当前版本"
+/// 从一开始就是已知的，远端清单才能正确判断"要不要升级"。
+pub fn adopt_flat_install(data_dir: &Path) {
+    let def = crate::deps::catalog::all().into_iter().find(|d| d.id == "paddleocr");
+    let Some(def) = def else { return };
+    let legacy = data_dir.join("models").join("ppocrv5");
+    let expected = crate::deps::catalog::builtin_digests(&def);
+    if crate::deps::state::migrate_legacy_flat(
+        data_dir,
+        "paddleocr",
+        &legacy,
+        crate::deps::catalog::PADDLEOCR_BUILTIN_VERSION,
+        &expected,
+    ) {
+        log::info!(
+            "[OCR] 内置模型已迁移到版本目录（{}）",
+            crate::deps::catalog::PADDLEOCR_BUILTIN_VERSION
+        );
+    }
 }
 
 fn resolved_model_dir() -> Option<&'static Path> {
@@ -116,7 +151,13 @@ fn try_build_engine() -> Result<SendEngine, String> {
 
     let det = dir.join("det.onnx");
     let rec = dir.join("rec.onnx");
-    let dict = dict_with_space_token(&dir.join("ppocrv5_dict.txt"))?;
+    // 版本目录里新版模型用 `dict.txt`；老的平铺安装是 `ppocrv5_dict.txt`。
+    let dict_name = if dir.join("dict.txt").is_file() {
+        "dict.txt"
+    } else {
+        "ppocrv5_dict.txt"
+    };
+    let dict = dict_with_space_token(&dir.join(dict_name))?;
 
     let inner = OcrPipeline::load(&det, &rec, &dict, 1280)?;
 
@@ -168,28 +209,54 @@ where
     // 自适应并发闸门：一次调用 = 一张页图的整轮推理，正是内存/CPU 的大头。
     // 压力升高时这里排队（而不是失败），暂停档则等待恢复。
     let _permit = crate::load::acquire_ocr();
-    engine_pool()?.with_engine(f)
+    let pool = engine_pool()?;
+    pool.with_engine(f)
 }
 
-/// Build the engine pool exactly once.
+/// 取（必要时构建）引擎池。
 ///
-/// The previous `POOL.get()`-then-`EnginePool::new()` sequence was a race: when
-/// several OCR threads started simultaneously (parallel per-page OCR on a fresh
-/// process), each built its own pool. That means N threads × N engines of
-/// duplicate 21 MB models at once, and a build failure in any of them made the
-/// whole page's OCR return `None` and get silently dropped — the cause of the
-/// "only part of the document was extracted" symptom. `OnceLock::get_or_init`
-/// runs the initializer once and makes the others wait for it.
-fn engine_pool() -> Result<&'static EnginePool, String> {
-    match POOL.get_or_init(|| {
-        let n = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(2)
-            .clamp(1, 8);
-        EnginePool::new(n)
-    }) {
-        Ok(pool) => Ok(pool),
-        Err(e) => Err(e.clone()),
+/// 历史教训：早期是 `POOL.get()` 然后 `EnginePool::new()`，并发首调时每个线程
+/// 各建一份池（N 线程 × N 份 20MB 模型），且任一份构建失败会让整页 OCR 静默
+/// 丢弃。现在用 `POOL_INIT` 互斥 + 双重检查保证"只建一次"；
+/// 与 `OnceLock` 的唯一区别是**可以被 `reload_engine_pool` 清掉**。
+fn engine_pool() -> Result<Arc<EnginePool>, String> {
+    if let Some(pool) = POOL
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+    {
+        return Ok(pool);
+    }
+
+    let _guard = POOL_INIT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(pool) = POOL
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .cloned()
+    {
+        return Ok(pool);
+    }
+
+    let n = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(2)
+        .clamp(1, 8);
+    let built = EnginePool::new(n)?;
+    let arc = Arc::new(built);
+    *POOL.write().unwrap_or_else(|e| e.into_inner()) = Some(arc.clone());
+    Ok(arc)
+}
+
+/// 丢弃当前引擎池 —— 模型升级/回退后调用，让下一轮推理重新加载新模型。
+///
+/// 不阻塞正在跑的推理：它们持有 `Arc<EnginePool>`，跑完自然释放；
+/// 新调用会构建新的池（旧池在最后一个引用释放时销毁）。
+pub fn reload_engine_pool() {
+    let old = POOL.write().unwrap_or_else(|e| e.into_inner()).take();
+    if old.is_some() {
+        log::info!("[OCR] 已丢弃旧引擎池，下一轮推理将重新加载模型");
     }
 }
 
@@ -200,6 +267,48 @@ pub fn health_check() -> Result<(), String> {
             .map_err(|e| format!("PaddleOCR 引擎自检失败: {e}"))?;
         Ok(())
     })
+}
+
+/// 校验**指定目录**里的模型能否真正跑起来（升级后的冒烟测试）。
+///
+/// 不复用全局引擎池（池是 `OnceLock`，缓存的是旧模型），而是新建一条流水线：
+/// 只用于"装完先验一遍"，成功后才把 `state.json` 切到新版本。
+///
+/// 为什么不能用空白图：检测框数为 0 时同样"没报错"，但模型其实可能是坏的
+/// （tract 0.20 上 v6 就是这样：能跑、结果全 blank）。这里画几条黑色横条当作
+/// "文字行"，要求至少检出 1 个区域。
+pub fn verify_model_dir(dir: &Path) -> Result<usize, String> {
+    let det = dir.join("det.onnx");
+    let rec = dir.join("rec.onnx");
+    if !det.is_file() || !rec.is_file() {
+        return Err("模型目录缺少 det.onnx / rec.onnx".to_string());
+    }
+    let dict_name = if dir.join("dict.txt").is_file() {
+        "dict.txt"
+    } else {
+        "ppocrv5_dict.txt"
+    };
+    let dict = dict_with_space_token(&dir.join(dict_name))?;
+    let pipeline = pipeline::OcrPipeline::load(&det, &rec, &dict, 1280)?;
+    let run = pipeline.run_from_image(&synthetic_text_page())?;
+    Ok(run.results.len())
+}
+
+/// 生成一张"像文字行"的合成图：白底 + 若干条长短不一的黑色横条。
+fn synthetic_text_page() -> image::DynamicImage {
+    let (w, h) = (800u32, 600u32);
+    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 255, 255]));
+    let ink = image::Rgb([20, 20, 20]);
+    for row in 0..8u32 {
+        let y0 = 40 + row * 65;
+        let len = 300 + (row * 97) % 380;
+        for y in y0..(y0 + 26).min(h) {
+            for x in 40..(40 + len).min(w) {
+                img.put_pixel(x, y, ink);
+            }
+        }
+    }
+    image::DynamicImage::ImageRgb8(img)
 }
 
 pub fn recognize_from_path_enriched(
@@ -307,8 +416,9 @@ mod tests {
 /// Number of engines currently built in the pool (0 if not yet built).
 /// Used for per-page OCR performance diagnosis in `pdf.rs`.
 pub fn active_pool_size() -> usize {
-    POOL.get()
-        .and_then(|r| r.as_ref().ok())
+    POOL.read()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
         .map(|p| p.engines.len())
         .unwrap_or(0)
 }

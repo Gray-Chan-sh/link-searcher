@@ -226,11 +226,29 @@ pub fn all() -> Vec<DepDef> {
 /// Release assets are named exactly like the local files so a plain
 /// `<base>/<remote>` join works.
 pub fn gh_base() -> String {
-    let repo = std::env::var("LINK_SEARCHER_MODELS_GH")
-        .unwrap_or_else(|_| "Gray-Chan-sh/link-searcher-models".to_string());
     let tag = std::env::var("LINK_SEARCHER_MODELS_TAG")
         .unwrap_or_else(|_| "models-v1".to_string());
+    gh_base_for_tag(&tag)
+}
+
+/// 指定 tag 的 Releases 资产基址（远端清单里每个版本自带 `tag`）。
+pub fn gh_base_for_tag(tag: &str) -> String {
+    let repo = std::env::var("LINK_SEARCHER_MODELS_GH")
+        .unwrap_or_else(|_| "Gray-Chan-sh/link-searcher-models".to_string());
     format!("https://github.com/{repo}/releases/download/{tag}")
+}
+
+/// 内置的 PaddleOCR 版本标识（也用作 `versions/<version>/` 目录名）。
+///
+/// 老版本的平铺安装会被迁移成这个版本，从而不再重复下载。
+pub const PADDLEOCR_BUILTIN_VERSION: &str = "v5-mobile-1";
+
+/// 某依赖内置清单的 `(local, sha256)`，供"平铺→版本目录"迁移校验。
+pub fn builtin_digests(def: &DepDef) -> Vec<(String, String)> {
+    def.files
+        .iter()
+        .map(|f| (f.local.to_string(), f.sha256.to_string()))
+        .collect()
 }
 
 /// PP-OCRv5 (det + rec + dict) — built-in cross-platform Chinese OCR.
@@ -558,6 +576,13 @@ pub fn is_ready(def: &DepDef, data_dir: &Path) -> bool {
     let dir = install_dir(def, data_dir);
     if files_ready(&dir, def.files) {
         return true;
+    }
+
+    // 版本化目录（远端清单升级后的当前版本）
+    if def.id == "paddleocr" {
+        if let Some(vdir) = crate::deps::state::current_dir(data_dir, "paddleocr", def.files.len()) {
+            return files_ready(&vdir, def.files);
+        }
     }
 
     // Dev fast-path: PP-OCRv5 is git-tracked in the source tree.

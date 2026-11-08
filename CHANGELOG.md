@@ -158,6 +158,31 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十一轮）：模型可在线升级（远端清单 + 版本目录 + 一键回退），不发版换 OCR 模型
+
+> 起因：想换 PP-OCRv6 tiny（体积 20MB→6MB、速度约 4 倍），但模型文件名/sha256/Release tag
+> 全写死在 `deps/catalog.rs`，**换模型必须发版**；而且安装目录是平铺的，放不下"新旧两版并存/回退"。
+
+- **远端清单**（`deps/remote.rs`）：`models-catalog.json` 托管在模型仓库的 **raw 分支文件**，
+  按 ghfast.top → gh-proxy.com → 官方 raw 兜底拉取；`schema` 不认整份忽略，
+  `min_app_version` 高于当前 app 的条目跳过。清单只描述元数据，资产仍在 GitHub Releases（复用现有镜像链/断点续传）。
+- **版本化安装**（`deps/state.rs`）：`models/<dep>/versions/<ver>/` + `models/.dep-state.json`
+  （tmp+rename 原子写；损坏的 JSON 按空状态处理）。升级后旧版变 `previous`，可一键回退；
+  超过 2 版自动清理。**老平铺安装**在启动/首次装完后按 sha256 校验并登记为 `v5-mobile-1`，
+  不重复下载 20MB。
+- **升级流程**：下载到 `.staging-<ver>` → 逐文件 sha256 → **自检推理**（用合成"文字条"图，
+  必须检出区域，而不是空白图"没报错"）→ 原子改名 → 写状态 → 清理 → **丢弃旧引擎池**
+  （`paddleocr::reload_engine_pool`，`OnceLock` 改为 `RwLock` + 互斥单飞，升级后立即生效、无需重启）。
+  任一步失败只删 staging，旧版本保持不变。
+- **依赖中心**：新增「检查模型更新」（离线静默）、当前版本号、「升级」/「回退到 x.y」按钮，
+  以及「后台自动升级模型」开关（`config.auto_update_models`，默认**关闭**＝只提示）。
+  打开后启动 30s 后台静默升级，失败仅记日志。Web API 同步暴露
+  `GET /api/setup/updates`、`POST /api/setup/upgrade|rollback`。
+- **新增测试**：`deps::state` 5 条（登记/回退/缺文件/清理/原子写与容错）、
+  `deps::remote` 5 条（清单解析、schema、版本比较、可选字段、"有更新"以本地状态为基线）。
+- 清单格式示例：`docs/models-catalog.example.json`；发布时应把 v6 的 ONNX **预处理补齐**
+  （batch 写死 1 + 去掉 value_info）后再上传，客户端只做 sha256 校验、不解图。
+
 ## 2026-11-08（第九十轮）：OCR 识别按宽度分桶，长行不再被压扁（字符再 +18%）
 
 > 起因：上一轮补竖排旋转后，识别仍沿用上游的「单块最大宽固定 320」，超长行被横向压缩丢字。

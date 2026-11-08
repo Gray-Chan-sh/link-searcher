@@ -31,6 +31,9 @@ pub struct ConfigInfo {
     pub semantic_weight: f64,
     #[serde(default)]
     pub active_reranker_model_id: String,
+    /// 模型后台自动升级（设置页开关）。
+    #[serde(default)]
+    pub auto_update_models: bool,
 }
 
 #[tauri::command]
@@ -52,6 +55,7 @@ pub fn get_config() -> Result<ConfigInfo, String> {
         active_llm_model_id: config.active_llm_model_id,
         semantic_weight: config.semantic_weight,
         active_reranker_model_id: config.active_reranker_model_id,
+        auto_update_models: config.auto_update_models,
     })
 }
 
@@ -170,6 +174,7 @@ fn update_config_core(
     config.active_llm_model_id = new_config.active_llm_model_id;
     config.semantic_weight = new_config.semantic_weight;
     config.active_reranker_model_id = new_config.active_reranker_model_id;
+    config.auto_update_models = new_config.auto_update_models;
     // New UI writes the split pairs; mirror into the legacy single-gateway
     // fields for any older consumers that still read ai_api_base/key.
     config.ai_api_base = config.embedding_api_base.clone();

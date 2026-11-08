@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "generated_at": "2026-11-09T00:00:00Z",
+  "deps": {
+    "paddleocr": {
+      "version": "v6-tiny-1",
+      "tag": "models-v2",
+      "min_app_version": "1.5.16",
+      "published_at": "2026-11-09T00:00:00Z",
+      "size_bytes": 6400000,
+      "notes": "PP-OCRv6 tiny：体积约 1/3、速度约 4 倍",
+      "files": [
+        {
+          "remote": "paddleocr-v6-det.onnx",
+          "local": "det.onnx",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "size": 1783000
+        },
+        {
+          "remote": "paddleocr-v6-rec.onnx",
+          "local": "rec.onnx",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "size": 4460000
+        },
+        {
+          "remote": "paddleocr-v6-dict.txt",
+          "local": "dict.txt",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+          "size": 30000
+        }
+      ]
+    }
+  }
+}

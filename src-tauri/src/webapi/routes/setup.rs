@@ -36,6 +36,9 @@ pub fn router(_state: ApiState) -> Router<ApiState> {
         .route("/api/setup/install", post(install_dep_handler))
         .route("/api/setup/cancel", post(cancel_dep_install_handler))
         .route("/api/setup/install-status", get(dep_install_status_handler))
+        .route("/api/setup/updates", get(dep_updates_handler))
+        .route("/api/setup/upgrade", post(upgrade_dep_handler))
+        .route("/api/setup/rollback", post(rollback_dep_handler))
 }
 
 async fn setup_status_handler(
@@ -80,4 +83,50 @@ async fn dep_install_status_handler() -> Result<Json<serde_json::Value>, ApiErro
     crate::deps::commands::dep_install_status()
         .map(Json)
         .map_err(|e| ApiError { error: e })
+}
+
+/// `GET /api/setup/updates` → `check_dep_updates`（远端模型清单）。
+async fn dep_updates_handler(
+    State(state): State<ApiState>,
+) -> Result<Json<crate::deps::commands::UpdateCheck>, ApiError> {
+    let app_state = state.app_handle.state::<AppState>();
+    crate::deps::commands::check_dep_updates(app_state)
+        .await
+        .map(Json)
+        .map_err(|e| ApiError { error: e })
+}
+
+#[derive(Deserialize)]
+struct DepOnlyBody {
+    dep: String,
+}
+
+/// `POST /api/setup/upgrade` → `upgrade_dep`（后台线程 + 事件桥）。
+async fn upgrade_dep_handler(
+    State(state): State<ApiState>,
+    Json(body): Json<DepOnlyBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dep = body.dep.trim().to_string();
+    if dep.is_empty() {
+        return Err(ApiError { error: "missing 'dep'".into() });
+    }
+    let app_state = state.app_handle.state::<AppState>();
+    crate::deps::commands::upgrade_dep(app_state, state.app_handle.clone(), dep)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "status": "started" })))
+}
+
+/// `POST /api/setup/rollback` → `rollback_dep`。
+async fn rollback_dep_handler(
+    State(state): State<ApiState>,
+    Json(body): Json<DepOnlyBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let dep = body.dep.trim().to_string();
+    if dep.is_empty() {
+        return Err(ApiError { error: "missing 'dep'".into() });
+    }
+    let app_state = state.app_handle.state::<AppState>();
+    crate::deps::commands::rollback_dep(app_state, state.app_handle.clone(), dep)
+        .map_err(|e| ApiError { error: e })?;
+    Ok(Json(serde_json::json!({ "status": "started" })))
 }

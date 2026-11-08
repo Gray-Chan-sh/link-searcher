@@ -88,6 +88,11 @@ pub fn install_dep(
         // the tool stays "not found".
         if res.is_ok() {
             crate::process::refresh_path();
+            // 首次装完 PaddleOCR 后立刻把平铺目录登记为"当前版本"，
+            // 这样远端清单的"要不要升级"从一开始就有基线。
+            if dep == "paddleocr" {
+                crate::extractor::paddleocr::adopt_flat_install(&data_dir);
+            }
         }
         let cancelled = CANCEL.load(Ordering::SeqCst);
         let result = match res {
@@ -229,4 +234,258 @@ pub fn dep_install_status() -> Result<serde_json::Value, String> {
         "installing": INSTALLING_DEP.load(Ordering::SeqCst),
         "dep": current,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// 模型在线升级（远端清单驱动，不发版换模型）
+// ---------------------------------------------------------------------------
+
+/// 「检查更新」的结果。`ok=false` 表示没拉到清单（网络问题），前端只提示不打扰。
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateCheck {
+    pub ok: bool,
+    pub error: Option<String>,
+    pub app_version: String,
+    pub updates: Vec<crate::deps::remote::UpdateInfo>,
+}
+
+/// 检查各依赖是否有新版本。网络请求 5s 超时，失败**不报错**给用户
+/// （返回 `ok=false`），避免离线状态下每次开依赖中心都弹错误。
+#[tauri::command]
+pub async fn check_dep_updates(
+    state: State<'_, AppState>,
+) -> Result<UpdateCheck, String> {
+    let data_dir = state.data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_version = crate::deps::remote::app_version().to_string();
+        match crate::deps::remote::fetch(std::time::Duration::from_secs(5)) {
+            Ok(cat) => UpdateCheck {
+                ok: true,
+                error: None,
+                app_version,
+                updates: crate::deps::remote::pending_updates(&cat, &data_dir),
+            },
+            Err(e) => {
+                log::info!("[DEPS] 检查更新失败（按无更新处理）: {e}");
+                UpdateCheck { ok: false, error: Some(e), app_version, updates: Vec::new() }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("检查更新失败: {e}"))
+}
+
+/// 升级到远端清单里的最新版本（后台线程，进度复用 `dep-progress` 事件）。
+///
+/// 顺序刻意如此：下载到 `versions/.staging-<ver>` → **冒烟**（能检出文本）→
+/// 原子改名进 `versions/<ver>` → 写状态 → 清理旧版本。任何一步失败都保持
+/// 当前版本不变，只删 staging 目录。
+#[tauri::command]
+pub fn upgrade_dep(state: State<'_, AppState>, app: AppHandle, dep: String) -> Result<(), String> {
+    if !crate::deps::remote::is_versioned(&dep) {
+        return Err(format!("依赖 {dep} 暂不支持在线升级"));
+    }
+    if INSTALLING_DEP.swap(true, Ordering::SeqCst) {
+        return Err("已有依赖正在安装中".into());
+    }
+    CANCEL.store(false, Ordering::SeqCst);
+    *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(dep.clone());
+
+    let data_dir = state.data_dir.clone();
+    std::thread::spawn(move || {
+        let app_progress = app.clone();
+        let dep_progress = dep.clone();
+        let on_progress = move |cur: u64, total: u64, bytes: u64| {
+            let _ = app_progress.emit(
+                "dep-progress",
+                serde_json::json!({
+                    "dep": dep_progress,
+                    "current": cur,
+                    "total": total,
+                    "bytes": bytes,
+                }),
+            );
+        };
+
+        let res = do_upgrade(&data_dir, &dep, &on_progress);
+        let cancelled = CANCEL.load(Ordering::SeqCst);
+        let result = match res {
+            Ok(version) => DepInstallResult {
+                dep: dep.clone(),
+                success: true,
+                message: format!("已升级到 {version}"),
+            },
+            Err(e) => DepInstallResult {
+                dep: dep.clone(),
+                success: false,
+                message: if cancelled { "已取消".into() } else { e },
+            },
+        };
+
+        INSTALLING_DEP.store(false, Ordering::SeqCst);
+        CANCEL.store(false, Ordering::SeqCst);
+        *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let _ = app.emit("dep-install-done", &result);
+    });
+
+    Ok(())
+}
+
+pub(crate) fn do_upgrade(data_dir: &std::path::Path, dep: &str, on_progress: &download::ProgressFn) -> Result<String, String> {
+    use crate::deps::{remote, state};
+
+    let cat = remote::fetch(std::time::Duration::from_secs(8))
+        .map_err(|e| format!("拉取模型清单失败: {e}"))?;
+    let st = state::load(data_dir);
+    let current = st.deps.get(dep).map(|e| e.current.clone());
+    let plan = remote::plan_for(&cat, dep, current.as_deref())
+        .ok_or_else(|| "没有可用的新版本".to_string())?;
+
+    let files: Vec<download::FileTuple> = plan
+        .files
+        .iter()
+        .map(|f| (f.remote.clone(), f.local.clone(), f.sha256.clone()))
+        .collect();
+
+    let staging = state::versions_root(data_dir, dep).join(format!(".staging-{}", plan.version));
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let dl = download::install_into(
+        &files,
+        &plan.sources,
+        &staging,
+        &format!("{dep}@{}", plan.version),
+        plan.size_bytes,
+        &CANCEL,
+        on_progress,
+    );
+    if let Err(e) = dl {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e.0);
+    }
+
+    // 冒烟：真正跑一遍推理，而不只是校验 sha256（历史教训：v6 在 tract 0.20 上
+    // 校验全对、但输出全 blank）。
+    if dep == "paddleocr" {
+        match crate::extractor::paddleocr::verify_model_dir(&staging) {
+            Ok(n) if n > 0 => {}
+            Ok(_) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err("新模型自检没有检出任何文本区域，已放弃切换（旧版本保持不变）".into());
+            }
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                return Err(format!("新模型自检失败，已放弃切换: {e}"));
+            }
+        }
+    }
+
+    let final_dir = state::version_dir(data_dir, dep, &plan.version);
+    let _ = std::fs::remove_dir_all(&final_dir);
+    std::fs::rename(&staging, &final_dir)
+        .map_err(|e| format!("提交新版本目录失败: {e}"))?;
+
+    state::register_install(data_dir, dep, &plan.version)?;
+    state::prune(data_dir, dep, Some(&plan.version));
+
+    // 让应用立刻用上新模型（否则要重启才生效）
+    if dep == "paddleocr" {
+        crate::extractor::paddleocr::reload_engine_pool();
+    }
+    log::info!("[DEPS] {dep} 已升级到 {}（回退可用）", plan.version);
+    Ok(plan.version)
+}
+
+/// 回退到上一版本（同样走冒烟 + 重启引擎池）。
+#[tauri::command]
+pub fn rollback_dep(state: State<'_, AppState>, app: AppHandle, dep: String) -> Result<(), String> {
+    if !crate::deps::remote::is_versioned(&dep) {
+        return Err(format!("依赖 {dep} 暂不支持版本回退"));
+    }
+    if INSTALLING_DEP.swap(true, Ordering::SeqCst) {
+        return Err("已有依赖正在安装中".into());
+    }
+    *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = Some(dep.clone());
+    let data_dir = state.data_dir.clone();
+    std::thread::spawn(move || {
+        let res = do_rollback(&data_dir, &dep);
+        let result = match res {
+            Ok(v) => DepInstallResult {
+                dep: dep.clone(),
+                success: true,
+                message: format!("已回退到 {v}"),
+            },
+            Err(e) => DepInstallResult { dep: dep.clone(), success: false, message: e },
+        };
+        INSTALLING_DEP.store(false, Ordering::SeqCst);
+        *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let _ = app.emit("dep-install-done", &result);
+    });
+    Ok(())
+}
+
+fn do_rollback(data_dir: &std::path::Path, dep: &str) -> Result<String, String> {
+    use crate::deps::state;
+    let version = state::rollback(data_dir, dep, 2)?;
+    if dep == "paddleocr" {
+        let dir = state::version_dir(data_dir, dep, &version);
+        crate::extractor::paddleocr::verify_model_dir(&dir)
+            .map_err(|e| format!("回退后的模型自检失败: {e}"))?;
+        crate::extractor::paddleocr::reload_engine_pool();
+    }
+    log::info!("[DEPS] {dep} 已回退到 {version}");
+    Ok(version)
+}
+
+/// 启动后延迟检查并**静默**升级（仅在设置里打开 `auto_update_models` 时）。
+///
+/// 失败一律静默：断网、清单坏了、冒烟不通过 → 保持旧版本，只写日志。
+/// 单独起线程 + 延迟 30s，避免和启动扫描抢 CPU / 网络。
+pub fn auto_update(app: AppHandle, data_dir: std::path::PathBuf) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        if !crate::config::load_config().auto_update_models {
+            return;
+        }
+        let cat = match crate::deps::remote::fetch(std::time::Duration::from_secs(8)) {
+            Ok(c) => c,
+            Err(e) => {
+                log::info!("[DEPS] 自动检查更新失败（忽略）: {e}");
+                return;
+            }
+        };
+        let st = crate::deps::state::load(&data_dir);
+        let current = st.deps.get("paddleocr").map(|e| e.current.clone());
+        if crate::deps::remote::plan_for(&cat, "paddleocr", current.as_deref()).is_none() {
+            return;
+        }
+        if INSTALLING_DEP.swap(true, Ordering::SeqCst) {
+            log::info!("[DEPS] 自动升级跳过：已有安装任务在进行");
+            return;
+        }
+        CANCEL.store(false, Ordering::SeqCst);
+        *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = Some("paddleocr".into());
+
+        let app_progress = app.clone();
+        let on_progress = move |cur: u64, total: u64, bytes: u64| {
+            let _ = app_progress.emit(
+                "dep-progress",
+                serde_json::json!({ "dep": "paddleocr", "current": cur, "total": total, "bytes": bytes }),
+            );
+        };
+        let res = do_upgrade(&data_dir, "paddleocr", &on_progress);
+
+        INSTALLING_DEP.store(false, Ordering::SeqCst);
+        *CURRENT_DEP.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        match res {
+            Ok(v) => {
+                log::info!("[DEPS] 自动升级完成: paddleocr -> {v}");
+                let _ = app.emit(
+                    "dep-install-done",
+                    &DepInstallResult { dep: "paddleocr".into(), success: true, message: format!("已自动升级到 {v}") },
+                );
+            }
+            Err(e) => log::warn!("[DEPS] 自动升级失败（保持旧版本）: {e}"),
+        }
+    });
 }

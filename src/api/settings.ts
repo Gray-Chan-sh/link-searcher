@@ -104,6 +104,8 @@ export interface DepStatus {
     size_bytes: number
     hint: string
     required_files: string[]
+    current_version?: string
+    previous_version?: string
 }
 
 export interface SetupStatus {
@@ -114,6 +116,35 @@ export interface SetupStatus {
 
 export async function getSetupStatus(): Promise<SetupStatus> {
     return client.invoke<SetupStatus>('get_setup_status')
+}
+
+export interface DepUpdate {
+    dep: string
+    name: string
+    current: string | null
+    latest: string
+    size_bytes: number
+    notes: string
+}
+
+export interface UpdateCheck {
+    ok: boolean
+    error: string | null
+    app_version: string
+    updates: DepUpdate[]
+}
+
+/// 检查模型是否有新版本（远端清单）。失败时 `ok=false`，不应弹错误。
+export async function checkDepUpdates(): Promise<UpdateCheck> {
+    return client.invoke<UpdateCheck>('check_dep_updates')
+}
+
+export async function upgradeDep(dep: string): Promise<void> {
+    return client.invoke('upgrade_dep', { dep })
+}
+
+export async function rollbackDep(dep: string): Promise<void> {
+    return client.invoke('rollback_dep', { dep })
 }
 
 export interface DepInstallResult {

@@ -40,7 +40,10 @@ use crate::commands::logs::{clear_logs, get_logs, list_session_logs, log_slow_in
 use crate::commands::bge::{check_bge_installed, install_bge};
 use crate::commands::rerank::check_rerank_installed;
 use crate::commands::tesseract::{check_dependencies, check_tesseract, get_file_type_support, get_unsupported_ext_stats, list_ocr_engines, test_ocr_engine};
-use crate::deps::commands::{cancel_dep_install, dep_install_status, get_setup_status, install_dep};
+use crate::deps::commands::{
+    cancel_dep_install, check_dep_updates, dep_install_status, get_setup_status, install_dep,
+    rollback_dep, upgrade_dep,
+};
 use crate::scanner::watcher::FileWatcher;
 use crate::state::AppState;
 use crate::state::ScanDelta;
@@ -223,6 +226,9 @@ get_dir_children,
             check_rerank_installed,
             get_setup_status,
             install_dep,
+    check_dep_updates,
+    upgrade_dep,
+    rollback_dep,
             cancel_dep_install,
             dep_install_status,
             get_config,
@@ -440,6 +446,10 @@ get_dir_children,
             );
 
             app.manage(app_state);
+
+            // 模型在线升级（默认只提示；设置里打开 auto_update_models 才静默升级）。
+            // 延迟 30s 在后台跑，避免和启动扫描抢 CPU / 网络。
+            crate::deps::commands::auto_update(app.handle().clone(), data_dir.clone());
 
             // Web API server — 默认开启（`web_api_enabled == "false"` 才关闭），
             // 启动即监听，远程机器可直接访问（token 见 config.json / 设置页）。
