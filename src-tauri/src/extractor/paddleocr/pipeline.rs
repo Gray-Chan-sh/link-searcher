@@ -1,4 +1,4 @@
-//! PaddleOCR 推理流水线（det → 裁剪 → **竖排旋转** → rec）。
+//! PaddleOCR 推理流水线（det → 裁剪 → **竖排旋转** → **按宽度分桶** → rec）。
 //!
 //! 为什么不用上游的 `OcrEngine`：
 //! `pure-onnx-ocr` 0.1 的识别前处理直接按外接矩形裁剪，**没有 PP-OCR 的竖排旋转**
@@ -9,8 +9,13 @@
 //! 这里复用 crate 暴露的各阶段（det 预处理/后处理/unclip/scaler、
 //! rec 会话与 CTC 解码），只把"裁剪 + 旋转 + 组批"换成我们自己的实现。
 //!
-//! 其余行为与上游保持一致：识别高度 48、单块最大宽 320、批大小 8、
-//! 归一化 `(v/255 - 0.5) / 0.5`、右填充为 0（归一化后即 -1）。
+//! 与上游的差异（均为实测，见 `D:\test\_probe\out\analysis.md`）：
+//! - 竖排旋转：见上；
+//! - 宽度分桶：固定 320 会压缩超长行，改为 `[320, 480]` 按自然宽度落桶
+//!   （字符 16037 → 18835，耗时 +3.3%）。
+//!
+//! 其余行为与上游一致：识别高度 48、批大小 8、归一化 `(v/255 - 0.5) / 0.5`、
+//! 右填充为 0（归一化后即 -1）。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -26,8 +31,13 @@ use pure_onnx_ocr::{
 
 /// 识别输入高度（PP-OCR 固定 48）。
 const REC_HEIGHT: u32 = 48;
-/// 单个裁剪块的最大宽度（与上游默认一致；更宽的行会被压缩，属已知限制）。
-const REC_MAX_WIDTH: u32 = 320;
+/// 单块宽度分桶：按自然宽度落到最小够用的桶。
+///
+/// 固定 320 会把长行压缩丢字；实测（样例库 45 张）：
+/// `[320]` 16037 字 / 5991ms，`[320,480]` 18835 字（+17.5%）/ 6191ms（+3.3%），
+/// `[320,480,640]` 19326 字（+20.5%）/ 7408ms（+23.6%），`[…,800]` 19492 字 / 8700ms。
+/// 480 是拐点：拿到约 96% 的收益、只多 3% 时间；更宽的桶留给需要时再开。
+const REC_WIDTH_BUCKETS: [u32; 2] = [320, 480];
 /// 识别批大小（与上游默认一致）。
 const REC_BATCH: usize = 8;
 /// 竖排判定阈值：高/宽 >= 1.5 视为竖排，需要旋转 90°。
@@ -172,29 +182,41 @@ impl OcrPipeline {
             });
         }
 
-        // ---- 识别（裁剪 + 竖排旋转 + 组批）----
+        // ---- 识别（裁剪 + 竖排旋转 + 按宽度分桶组批）----
         let t = Instant::now();
-        let mut crops = Vec::with_capacity(scaled.len());
+        let mut by_bucket: Vec<(u32, Vec<(usize, Vec<f32>, u32)>)> =
+            REC_WIDTH_BUCKETS.iter().map(|b| (*b, Vec::new())).collect();
         let mut rotated = 0usize;
-        for poly in &scaled {
+        for (idx, poly) in scaled.iter().enumerate() {
             let region = bounds(poly, dims);
-            let (buf, width, did_rotate) = prepare_crop(image, region);
+            let bucket = bucket_for(natural_width(region));
+            let (buf, width, did_rotate) = prepare_crop(image, region, bucket);
             if did_rotate {
                 rotated += 1;
             }
-            crops.push((buf, width));
+            if let Some(slot) = by_bucket.iter_mut().find(|(b, _)| *b == bucket) {
+                slot.1.push((idx, buf, width));
+            }
         }
         let rec_pre_t = t.elapsed();
 
         let t = Instant::now();
-        let mut texts = Vec::with_capacity(crops.len());
-        for chunk in crops.chunks(REC_BATCH) {
-            texts.extend(self.recognize_batch(chunk)?);
+        let mut slots: Vec<Option<(String, f32)>> = vec![None; scaled.len()];
+        for (bucket, items) in by_bucket.iter() {
+            if items.is_empty() {
+                continue;
+            }
+            for (idx, text, confidence) in self.recognize_bucket(items, *bucket)? {
+                if let Some(slot) = slots.get_mut(idx) {
+                    *slot = Some((text, confidence));
+                }
+            }
         }
         let rec_inf_t = t.elapsed();
 
-        let results: Vec<Recognized> = texts
+        let results: Vec<Recognized> = slots
             .into_iter()
+            .flatten()
             .map(|(text, confidence)| Recognized { text, confidence })
             .collect();
 
@@ -218,56 +240,58 @@ impl OcrPipeline {
         })
     }
 
-    /// 对一批裁剪块（已归一化）做识别；批未满时复制最后一块补齐，
-    /// 让 tract 只需要缓存 `(REC_BATCH, REC_MAX_WIDTH)` 一种形状，
-    /// 否则每换一个批大小都要重新 optimize（实测每新增一种形状 2~3 秒）。
-    fn recognize_batch(&self, chunk: &[(Vec<f32>, u32)]) -> Result<Vec<(String, f32)>, String> {
-        let mut flat: Vec<f32> =
-            Vec::with_capacity(REC_BATCH * (3 * REC_HEIGHT * REC_MAX_WIDTH) as usize);
-        let mut widths: Vec<u32> = Vec::with_capacity(REC_BATCH);
+    /// 对同一宽度桶内的一批裁剪块做识别；批未满时复制最后一块补齐，
+    /// 让 tract 每个桶只缓存 `(REC_BATCH, bucket)` 一种形状 ——
+    /// 形状一变就要重新 optimize（实测每种新形状 2~3 秒）。
+    fn recognize_bucket(
+        &self,
+        items: &[(usize, Vec<f32>, u32)],
+        bucket: u32,
+    ) -> Result<Vec<(usize, String, f32)>, String> {
+        let mut out = Vec::with_capacity(items.len());
+        for chunk in items.chunks(REC_BATCH) {
+            let mut flat: Vec<f32> =
+                Vec::with_capacity(REC_BATCH * (3 * REC_HEIGHT * bucket) as usize);
+            let mut widths: Vec<u32> = Vec::with_capacity(REC_BATCH);
 
-        for (buf, width) in chunk {
-            flat.extend_from_slice(buf);
-            widths.push(*width);
-        }
-        if let Some((last_buf, last_width)) = chunk.last() {
-            for _ in chunk.len()..REC_BATCH {
-                flat.extend_from_slice(last_buf);
-                widths.push(*last_width);
+            for (_, buf, width) in chunk {
+                flat.extend_from_slice(buf);
+                widths.push(*width);
+            }
+            if let Some((_, last_buf, last_width)) = chunk.last() {
+                for _ in chunk.len()..REC_BATCH {
+                    flat.extend_from_slice(last_buf);
+                    widths.push(*last_width);
+                }
+            }
+
+            let tensor: tract_onnx::prelude::Tensor = tract_onnx::prelude::tract_ndarray::Array4::<f32>::from_shape_vec(
+                (REC_BATCH, 3, REC_HEIGHT as usize, bucket as usize),
+                flat,
+            )
+            .map_err(|e| format!("识别输入张量构造失败: {e}"))?
+            .into_dyn()
+            .into();
+
+            let batch = PreprocessedRecBatch {
+                tensor,
+                valid_widths: widths,
+                max_width: bucket,
+            };
+            let run = self
+                .rec
+                .run(&batch)
+                .map_err(|e| format!("识别推理失败: {e}"))?;
+            let decoded = self
+                .rec_post
+                .process(&run)
+                .map_err(|e| format!("识别解码失败: {e}"))?;
+
+            for ((idx, _, _), seq) in chunk.iter().zip(decoded.iter()) {
+                out.push((*idx, seq.text.clone(), seq.confidence));
             }
         }
-
-        let tensor: tract_onnx::prelude::Tensor = tract_onnx::prelude::tract_ndarray::Array4::<f32>::from_shape_vec(
-            (
-                REC_BATCH,
-                3,
-                REC_HEIGHT as usize,
-                REC_MAX_WIDTH as usize,
-            ),
-            flat,
-        )
-        .map_err(|e| format!("识别输入张量构造失败: {e}"))?
-        .into_dyn()
-        .into();
-
-        let batch = PreprocessedRecBatch {
-            tensor,
-            valid_widths: widths,
-            max_width: REC_MAX_WIDTH,
-        };
-        let out = self
-            .rec
-            .run(&batch)
-            .map_err(|e| format!("识别推理失败: {e}"))?;
-        let mut decoded = self
-            .rec_post
-            .process(&out)
-            .map_err(|e| format!("识别解码失败: {e}"))?;
-        decoded.truncate(chunk.len());
-        Ok(decoded
-            .into_iter()
-            .map(|seq| (seq.text, seq.confidence))
-            .collect())
+        Ok(out)
     }
 }
 
@@ -295,7 +319,11 @@ fn bounds(poly: &pure_onnx_ocr::Polygon<f64>, dims: (u32, u32)) -> (u32, u32, u3
 ///
 /// 缓冲区固定为 `3 * 48 * 320`，右侧未使用部分填 `-1.0`（即原图 0 黑，
 /// 与上游 `pad_value = [0,0,0]` 归一化后的值一致）。
-fn prepare_crop(image: &DynamicImage, region: (u32, u32, u32, u32)) -> (Vec<f32>, u32, bool) {
+fn prepare_crop(
+    image: &DynamicImage,
+    region: (u32, u32, u32, u32),
+    bucket: u32,
+) -> (Vec<f32>, u32, bool) {
     let (x, y, w, h) = region;
     let mut crop: DynamicImage = image.crop_imm(x, y, w, h);
 
@@ -310,11 +338,11 @@ fn prepare_crop(image: &DynamicImage, region: (u32, u32, u32, u32)) -> (Vec<f32>
     let target_w = ((REC_HEIGHT as f32) * (cw as f32) / (ch.max(1) as f32))
         .round()
         .max(1.0) as u32;
-    let target_w = target_w.min(REC_MAX_WIDTH);
+    let target_w = target_w.min(bucket);
     let resized = crop.resize_exact(target_w, REC_HEIGHT, image::imageops::FilterType::Triangle);
     let rgb: RgbImage = resized.to_rgb8();
 
-    let plane = (REC_HEIGHT * REC_MAX_WIDTH) as usize;
+    let plane = (REC_HEIGHT * bucket) as usize;
     let mut buf = vec![-1.0f32; 3 * plane];
     // 用裸字节切片逐行写，避免 `get_pixel` 的逐像素边界检查
     // （dev 构建下我们的 crate 是 O0，这个循环是整条流水线最热的地方）。
@@ -322,7 +350,7 @@ fn prepare_crop(image: &DynamicImage, region: (u32, u32, u32, u32)) -> (Vec<f32>
     let row_bytes = (target_w * 3) as usize;
     for yy in 0..REC_HEIGHT as usize {
         let src_row = &raw[yy * row_bytes..yy * row_bytes + row_bytes];
-        let dst_row = yy * REC_MAX_WIDTH as usize;
+        let dst_row = yy * bucket as usize;
         for xx in 0..target_w as usize {
             let s = xx * 3;
             let d = dst_row + xx;
@@ -334,9 +362,34 @@ fn prepare_crop(image: &DynamicImage, region: (u32, u32, u32, u32)) -> (Vec<f32>
     (buf, target_w, did_rotate)
 }
 
+/// 裁剪块按高度 48 缩放后的自然宽度（不做任何截断）。
+///
+/// 竖排块会先旋转 90°，此时宽高互换，直接按互换后的比例算，
+/// 省掉一次真正的旋转/裁剪。
+fn natural_width(region: (u32, u32, u32, u32)) -> u32 {
+    let (_, _, w, h) = region;
+    if h == 0 {
+        return 1;
+    }
+    let (cw, ch) = if is_vertical(h, w) { (h, w) } else { (w, h) };
+    ((REC_HEIGHT as f32) * (cw as f32) / (ch.max(1) as f32))
+        .round()
+        .max(1.0) as u32
+}
+
+/// 选宽度桶：取第一个装得下自然宽度的桶，超出的按最大桶处理。
+fn bucket_for(natural: u32) -> u32 {
+    let max = *REC_WIDTH_BUCKETS.last().unwrap_or(&320);
+    REC_WIDTH_BUCKETS
+        .iter()
+        .copied()
+        .find(|b| *b >= natural)
+        .unwrap_or(max)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_vertical;
+    use super::{bucket_for, is_vertical, natural_width, REC_WIDTH_BUCKETS};
 
     #[test]
     fn vertical_ratio_uses_h_over_w() {
@@ -344,5 +397,25 @@ mod tests {
         assert!(is_vertical(300, 200), "1.5 倍整好达到阈值");
         assert!(!is_vertical(20, 60));
         assert!(!is_vertical(48, 0), "宽度为 0 时不做旋转");
+    }
+
+    #[test]
+    fn natural_width_matches_aspect_ratio() {
+        // 横排 200x40 -> 48 * 200/40 = 240
+        assert_eq!(natural_width((0, 0, 200, 40)), 240);
+        // 竖排 20x100 旋转后为 100x20 -> 48 * 100/20 = 240
+        assert_eq!(natural_width((0, 0, 20, 100)), 240);
+        // 极端细长
+        assert_eq!(natural_width((0, 0, 1000, 48)), 1000);
+        assert!(natural_width((0, 0, 0, 48)) >= 1);
+    }
+
+    #[test]
+    fn bucket_selection_picks_smallest_fitting() {
+        assert_eq!(bucket_for(10), REC_WIDTH_BUCKETS[0]);
+        assert_eq!(bucket_for(320), 320);
+        assert_eq!(bucket_for(321), 480, "321 必须升到 480 桶，否则会被压缩");
+        assert_eq!(bucket_for(480), 480);
+        assert_eq!(bucket_for(5000), *REC_WIDTH_BUCKETS.last().unwrap(), "超上限用最大桶");
     }
 }
