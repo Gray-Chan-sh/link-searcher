@@ -8,12 +8,19 @@ Release；我们只维护这份清单（版本 + sha256 + URL）。
 ## 用法
 
 ```bash
+# 1) 生成清单（pin 上游 revision + 下载校验 + 自检）
 python scripts/models/prepare_ppocrv6.py --out D:\dist\catalog
-# 只生成清单、跳过自检
-python scripts/models/prepare_ppocrv6.py --out D:\dist\catalog --no-verify
-# 指定 revision（默认自动取 HF 当前 commit sha）
-python scripts/models/prepare_ppocrv6.py --out D:\dist\catalog --revision-det <sha> --revision-rec <sha>
+
+# 2) 发布（校验 + 提交到模型仓库 + 推送）
+python scripts/models/publish_catalog.py ^
+  --catalog D:\dist\catalog\models-catalog.json ^
+  --repo-dir D:\repos\link-searcher-models ^
+  --check-urls
 ```
+
+`publish_catalog.py` 的开关：`--no-push` 只提交、`--dry-run` 只看计划、`--branch` 指定分支、
+`--check-urls` 逐个 HEAD 探测资产（hf-mirror 失败自动试 huggingface.co）。
+重复执行是幂等的：清单没变化时不会产生空提交。
 
 产物：
 

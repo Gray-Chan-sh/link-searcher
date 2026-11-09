@@ -158,6 +158,22 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十七轮）：发布清单自动化（publish_catalog.py：校验 → 提交 → 推送）
+
+> 上一轮把"造清单"自动化了，但"上线"还是手敲 git。这一步补上。
+
+- 新增 `scripts/models/publish_catalog.py`：
+  - **校验**：`schema==1`、`deps.<id>.version/files` 必填、`sha256` 必须 64 位小写 hex、
+    `local` 不重名、`remote` 非绝对 URL 时给提示；
+  - **`--check-urls`**：逐个 HEAD 探测资产，`hf-mirror` 失败自动回落 `huggingface.co`
+    （实测 hf-mirror 对部分路径返回 403/429，只有镜像不够）；
+  - **提交**：复制到模型仓库根目录 → `git add/commit`（**清单无变化则跳过，幂等**）→ 默认 `git push`；
+  - 结束时打印 commit id 与最终 raw 清单地址（可直接用作 `LINK_SEARCHER_MODELS_CATALOG`）。
+- 开关：`--no-push` / `--dry-run` / `--branch` / `--message`。
+- 本地实测：新建空仓库首跑生成 `catalog: paddleocr=v6-tiny-1` 提交；重复执行输出"清单无变化"；
+  错误清单（sha256 非法）在校验阶段被拒绝。
+- 文档：`docs/MODEL_RELEASE.md` 1.2 与 `scripts/models/README.md` 改为两步（生成 → 发布）。
+
 ## 2026-11-09（第九十六轮）：改为**全直连上游**（HF + 微软 Release），不再自托管任何模型/运行时
 
 > 起因：之前把 v6 模型和 ORT dll 都托管在我们自己的 Release 上，需要 `gh release upload`，

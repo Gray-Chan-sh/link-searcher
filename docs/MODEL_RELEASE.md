@@ -46,14 +46,22 @@ python scripts/models/prepare_ppocrv6.py --out D:\dist\catalog
 > 为什么必须 pin revision：`resolve/main` 随时可能被上游改，一旦变了我们钉的 sha256
 > 就对不上，用户升级会失败。HF 的 commit sha 是不可变的。
 
-### 1.2 提交清单
+### 1.2 发布（提交清单）
 
 ```powershell
-# 在模型仓库里
-git add models-catalog.json && git commit -m "catalog: v6-tiny-1" && git push
+python scripts/models/publish_catalog.py `
+  --catalog D:\dist\catalog\models-catalog.json `
+  --repo-dir D:\repos\link-searcher-models `
+  --check-urls
 ```
 
-无需上传模型文件——它们留在 HuggingFace。
+它会：校验清单（schema / 字段 / sha256 格式 / local 重名）→ 可选 `--check-urls` 探测每个
+`remote` 是否可达（hf-mirror 失败会自动试 huggingface.co）→ 复制到仓库根目录 →
+`git add/commit`（无变化则跳过）→ `git push` → 打印最终的 raw 清单地址。
+
+常用开关：`--no-push`（只提交）、`--dry-run`（只看计划）、`--branch <name>`、`--message <msg>`。
+
+无需上传模型文件——它们留在 HuggingFace；**这一步就是全部发布动作**。
 
 ### 1.3 清单字段
 
