@@ -158,6 +158,20 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十四轮）：发布端脚本——一条命令产出 v6 资产 + 清单（含自检）
+
+> 承接第九十一/九十三轮：应用侧"在线升级 + ORT"都齐了，缺的是**发布端怎么造资产**。
+
+- 新增 `scripts/models/prepare_ppocrv6.py`：取 HF 原始 det/rec/inference.yml（或 `--from-dir` 离线），
+  抽 `character_dict`（PyYAML，缺失时逐行兜底），输出 `paddleocr-v6-{det,rec}.onnx` + `dict.txt`，
+  计算 sha256/size，生成可直接提交的 `models-catalog.json` 与 `UPLOAD.md`。
+- **不改 ONNX**：HF 原始模型（符号 batch + value_info）在 ORT 下可直接跑（实测 det 92ms / rec 12ms）；
+  只有 tract 需要补丁，而 tract 0.20 对 v6 有数值 bug，故 v6 只面向 ORT，升级时自检会把关。
+- **自检**：用仓库 `smoke_text.png` 跑 det（要求检出区域）+ rec（要求至少 1 个字符），
+  不通过就拒绝生成清单。实测输出 `检测图 4% 像素 > 0.3` / `识别出 5 字 '诚文本AC'`。
+- `docs/models-catalog.example.json` 换成这次真实产物的摘要，可直接照抄上传。
+- 新增 `scripts/models/README.md`：用法、产物结构、为什么不用打补丁、发布后验证步骤。
+
 ## 2026-11-09（第九十三轮）：ONNX Runtime 加速包进依赖中心（一键安装，装完即生效）
 
 > 承接第九十二轮：ORT 后端已就绪，但用户得手动把 18MB 的 DLL 放到数据目录 —— 体验断层。

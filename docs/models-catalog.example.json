@@ -7,26 +7,26 @@
       "tag": "models-v2",
       "min_app_version": "1.5.16",
       "published_at": "2026-11-09T00:00:00Z",
-      "size_bytes": 6400000,
-      "notes": "PP-OCRv6 tiny：体积约 1/3、速度约 4 倍",
+      "size_bytes": 6270385,
+      "notes": "PP-OCRv6 tiny：体积约 1/3、速度约 4 倍（需 ONNX Runtime 加速包）",
       "files": [
         {
           "remote": "paddleocr-v6-det.onnx",
           "local": "det.onnx",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "size": 1783000
+          "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
+          "size": 1780590
         },
         {
           "remote": "paddleocr-v6-rec.onnx",
           "local": "rec.onnx",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "size": 4460000
+          "sha256": "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
+          "size": 4462639
         },
         {
           "remote": "paddleocr-v6-dict.txt",
           "local": "dict.txt",
-          "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-          "size": 30000
+          "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
+          "size": 27156
         }
       ]
     }
