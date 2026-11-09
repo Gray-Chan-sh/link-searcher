@@ -93,6 +93,11 @@ pub fn install_dep(
             if dep == "paddleocr" {
                 crate::extractor::paddleocr::adopt_flat_install(&data_dir);
             }
+            // 装完 ORT 加速包：丢掉旧的 tract 引擎池，下一次推理自动切到 ORT。
+            if dep == "onnxruntime" {
+                crate::extractor::paddleocr::reload_engine_pool();
+                log::info!("[DEPS] ONNX Runtime 已安装，OCR 下次推理将使用 ORT 后端");
+            }
         }
         let cancelled = CANCEL.load(Ordering::SeqCst);
         let result = match res {

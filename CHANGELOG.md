@@ -158,6 +158,21 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十三轮）：ONNX Runtime 加速包进依赖中心（一键安装，装完即生效）
+
+> 承接第九十二轮：ORT 后端已就绪，但用户得手动把 18MB 的 DLL 放到数据目录 —— 体验断层。
+
+- **新增依赖条目 `onnxruntime`**（`deps/catalog.rs`，仅 Windows x64）：`recommended: false`，
+  19.3MB，`local = onnxruntime.dll`，sha256 钉死（换版本必须同步更新）；
+  `install_dir` 特例 → `<data_dir>/runtime/onnxruntime/`（正好是 `paddleocr::locate_dylib` 的查找路径）。
+- **装完即生效**：安装成功后 `paddleocr::reload_engine_pool()`，下一次 OCR 自动切到 ORT，无需重启。
+- **不装也能用**：`ocr_backend=auto` 时找不到库自动回退 tract；条目本身不是必需依赖，
+  不会阻塞首启向导。
+- 资产要求：把官方 1.31.x 的 `onnxruntime.dll` 以 `onnxruntime-win-x64-1.31.1.dll`
+  上传到 models 仓库 Release（tag 同 `models-v1`），摘要见 `catalog.rs` 注释。
+- 测试：`install_dir_layout_is_expected` 覆盖 runtime 目录特例；新增
+  `onnxruntime_dep_is_pinned_and_optional`（非必需 / sha256 完整 / 单一 dll / 同源）。
+
 ## 2026-11-09（第九十二轮）：新增可选 ONNX Runtime 后端（实测 det 快 21×、rec 快 60×），缺库自动回退 tract
 
 > 起因：C 路线的落地。`ort` 实测（同形状同机）：det 1589→75ms、rec(8×48×320) 667→11ms，

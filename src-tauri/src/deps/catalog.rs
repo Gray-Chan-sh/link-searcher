@@ -214,7 +214,38 @@ pub fn all() -> Vec<DepDef> {
     defs.push(ffmpeg());
     defs.push(poppler());
     defs.push(lark_cli());
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    defs.push(onnxruntime());
     defs
+}
+
+/// ONNX Runtime 加速包（可选）：只装一个动态库，OCR 走 ORT 后端。
+///
+/// 为什么放在"依赖中心"而不是随包内置：18MB / 平台，且**不是必需**——
+/// 缺了会自动回退 tract（见 `paddleocr::build_engine_at`）。
+///
+/// 资产要求：把官方 1.31.x 的 `onnxruntime.dll` 原样以
+/// `onnxruntime-win-x64-1.31.1.dll` 上传到 models 仓库对应 Release tag。
+/// 换版本时**必须**同步更新这里的 sha256（`Get-FileHash -Algorithm SHA256`）。
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+fn onnxruntime() -> DepDef {
+    DepDef {
+        id: "onnxruntime",
+        name: "ONNX Runtime 加速包（可选）",
+        recommended: false,
+        size_bytes: 19_288_376,
+        hint: "OCR 推理加速（实测约 4 倍）；不装也能用，只是慢一些",
+        files: &[FileSpec {
+            remote: "onnxruntime-win-x64-1.31.1.dll",
+            local: "onnxruntime.dll",
+            sha256: "e45f61e50d8650885452be538a00bb14a715e46a1bc3691000ce947e89ed0306",
+        }],
+        sources: vec![Source {
+            label: "GitHub Releases",
+            base_url: gh_base(),
+        }],
+        system_package: None,
+    }
 }
 
 /// GitHub owner/repo + release tag hosting Link-Searcher's model assets.
@@ -549,6 +580,11 @@ fn poppler() -> DepDef {
 
 /// Install directory for a dep under `data_dir`.
 pub fn install_dir(def: &DepDef, data_dir: &Path) -> std::path::PathBuf {
+    // ONNX Runtime 不是模型，落在 `<data_dir>/runtime/onnxruntime/`
+    // （`paddleocr::locate_dylib` 按这个路径找）。
+    if def.id == "onnxruntime" {
+        return data_dir.join("runtime").join("onnxruntime");
+    }
     let sub = match def.id {
         "paddleocr" => "ppocrv5",
         "bge-large" => "bge-large-zh-v1.5",
@@ -755,6 +791,11 @@ mod tests {
         let data = PathBuf::from("/tmp/ls_data");
         for def in all() {
             let dir = install_dir(&def, &data);
+            // ONNX Runtime 是运行库不是模型：落在 `<data>/runtime/onnxruntime`
+            if def.id == "onnxruntime" {
+                assert_eq!(dir, data.join("runtime").join("onnxruntime"), "layout for onnxruntime");
+                continue;
+            }
             let expected = match def.id {
                 "paddleocr" => "ppocrv5",
                 "bge-large" => "bge-large-zh-v1.5",
@@ -766,6 +807,25 @@ mod tests {
             };
             assert_eq!(dir, data.join("models").join(expected), "layout for {}", def.id);
         }
+    }
+
+    /// ONNX Runtime 加速包：只在 Windows x64 提供，且清单里必须带完整 sha256
+    /// （下载层逐文件校验，留空等于永远失败）。
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    #[test]
+    fn onnxruntime_dep_is_pinned_and_optional() {
+        let _g = env_lock();
+        let def = all()
+            .into_iter()
+            .find(|d| d.id == "onnxruntime")
+            .expect("windows x64 上应提供 ORT 加速包");
+        assert!(!def.recommended, "加速包不能是必需依赖");
+        assert_eq!(def.files.len(), 1);
+        assert_eq!(def.files[0].local, "onnxruntime.dll");
+        assert_eq!(def.files[0].sha256.len(), 64, "sha256 必须是完整摘要");
+        assert!(def.files[0].remote.ends_with(".dll"));
+        assert!(def.size_bytes > 10 * 1024 * 1024);
+        assert_eq!(def.sources[0].base_url, gh_base());
     }
 
     #[test]
