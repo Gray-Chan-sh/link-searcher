@@ -149,7 +149,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--cache", default=None, help="下载缓存目录（默认 <out>/cache）")
     ap.add_argument("--version", default="v6-tiny-1")
-    ap.add_argument("--min-app-version", default="1.5.16")
+    ap.add_argument("--min-app-version", default="1.5.17")
     ap.add_argument("--revision-det", default=None)
     ap.add_argument("--revision-rec", default=None)
     ap.add_argument("--no-verify", action="store_true")

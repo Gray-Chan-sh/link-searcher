@@ -4,7 +4,7 @@
     "paddleocr": {
       "version": "v6-tiny-1",
       "tag": "upstream-hf",
-      "min_app_version": "1.5.16",
+      "min_app_version": "1.5.17",
       "size_bytes": 6298800,
       "notes": "PP-OCRv6 tiny：直连 HuggingFace；需 ONNX Runtime 加速包",
       "files": [
