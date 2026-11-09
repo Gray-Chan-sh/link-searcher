@@ -346,11 +346,8 @@ pub(crate) fn do_upgrade(data_dir: &std::path::Path, dep: &str, on_progress: &do
     let plan = remote::plan_for(&cat, dep, current.as_deref())
         .ok_or_else(|| "没有可用的新版本".to_string())?;
 
-    let files: Vec<download::FileTuple> = plan
-        .files
-        .iter()
-        .map(|f| (f.remote.clone(), f.local.clone(), f.sha256.clone()))
-        .collect();
+    let files: Vec<download::DownloadFile> =
+        plan.files.iter().map(|f| f.to_download()).collect();
 
     let staging = state::versions_root(data_dir, dep).join(format!(".staging-{}", plan.version));
     let _ = std::fs::remove_dir_all(&staging);

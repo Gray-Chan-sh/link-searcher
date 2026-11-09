@@ -51,6 +51,22 @@ fn effective_urls(source: &Source, remote: &str) -> Vec<String> {
             remote
         )
     };
+
+    // HuggingFace：`hf-mirror.com`（国内快）与 `huggingface.co`（官方）互为兜底。
+    // 实测 hf-mirror 会返回 429 限流，只有镜像是不够的。
+    if canonical.contains("://hf-mirror.com/") {
+        return vec![
+            canonical.clone(),
+            canonical.replace("://hf-mirror.com/", "://huggingface.co/"),
+        ];
+    }
+    if canonical.contains("://huggingface.co/") {
+        return vec![
+            canonical.replace("://huggingface.co/", "://hf-mirror.com/"),
+            canonical,
+        ];
+    }
+
     if !canonical.starts_with("https://github.com/") {
         return vec![canonical];
     }
@@ -89,8 +105,33 @@ fn err<T>(msg: impl Into<String>) -> Result<T, DownloadError> {
     Err(DownloadError(msg.into()))
 }
 
-/// 一个待下载文件的 (remote 资产名, local 落地名, sha256)。
-pub type FileTuple = (String, String, String);
+/// 下载完成后的二次加工：有些上游只提供"打包形态"，落地前要取成员 / 抽内容。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PostStep {
+    /// 下载的是 zip，取出文件名以该后缀结尾的成员写到 `local`
+    /// （例：`lib/onnxruntime.dll`）。
+    ZipMember(String),
+    /// 下载的是 PaddleOCR 的 `inference.yml`，把 `character_dict` 抽成字典文件。
+    YamlDict,
+}
+
+/// 一个待下载文件。
+#[derive(Debug, Clone)]
+pub struct DownloadFile {
+    /// Releases 资产名或**绝对 URL**（上游直连）。
+    pub remote: String,
+    /// 落地文件名（可含子目录）。
+    pub local: String,
+    /// 被下载**原始文件**的 sha256（不是加工后的结果）。
+    pub sha256: String,
+    pub post: Option<PostStep>,
+}
+
+impl DownloadFile {
+    pub fn plain(remote: impl Into<String>, local: impl Into<String>, sha256: impl Into<String>) -> Self {
+        Self { remote: remote.into(), local: local.into(), sha256: sha256.into(), post: None }
+    }
+}
 
 /// Install a dep's files into `data_dir`（老布局：平铺到 `install_dir`）。
 pub fn install_dep(
@@ -103,10 +144,15 @@ pub fn install_dep(
         return err(format!("dep '{}' has no downloadable files", def.id));
     }
     let dest_dir = crate::deps::catalog::install_dir(def, data_dir);
-    let files: Vec<FileTuple> = def
+    let files: Vec<DownloadFile> = def
         .files
         .iter()
-        .map(|f| (f.remote.to_string(), f.local.to_string(), f.sha256.to_string()))
+        .map(|f| DownloadFile {
+            remote: f.remote.to_string(),
+            local: f.local.to_string(),
+            sha256: f.sha256.to_string(),
+            post: crate::deps::catalog::post_step_for(def.id, f),
+        })
         .collect();
     install_into(&files, &def.sources, &dest_dir, def.id, def.size_bytes, cancel, on_progress)
 }
@@ -116,7 +162,7 @@ pub fn install_dep(
 /// Idempotent — already-present files verified against their SHA-256 are
 /// skipped; a truncated/interrupted download resumes from its `.part`.
 pub fn install_into(
-    files: &[FileTuple],
+    files: &[DownloadFile],
     sources_in: &[Source],
     dest_dir: &Path,
     label: &str,
@@ -134,22 +180,31 @@ pub fn install_into(
     // Files that are missing OR fail their integrity check need (re)fetching.
     // `files_ready` only checks existence/non-empty; here we do the real
     // SHA-256 verification so a corrupt file from a previous crash is redone.
-    let mut pending: Vec<&FileTuple> = Vec::new();
+    let mut pending: Vec<&DownloadFile> = Vec::new();
     for f in files {
-        let local_path = dest_dir.join(&f.1);
+        let local_path = dest_dir.join(&f.local);
+        // 加工产物（解压 zip / 抽字典）与"原始包"的 sha256 不同，无法直接比对；
+        // 下载阶段已经校验过原始包，这里存在且非空即视为完成。
+        if f.post.is_some() {
+            if local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                continue;
+            }
+            pending.push(f);
+            continue;
+        }
         if local_path.is_file() {
             match file_sha256(&local_path) {
-                Ok(digest) if digest == f.2 => continue, // verified, skip
+                Ok(digest) if digest == f.sha256 => continue, // verified, skip
                 Ok(digest) => {
                     log::warn!(
                         "[DEPS] {} 已存在但校验失败 (got {digest}, want {}), 重新下载",
-                        f.1,
-                        f.2
+                        f.local,
+                        f.sha256
                     );
                     let _ = fs::remove_file(&local_path);
                 }
                 Err(e) => {
-                    log::warn!("[DEPS] {} 读取校验失败: {e}, 重新下载", f.1);
+                    log::warn!("[DEPS] {} 读取校验失败: {e}, 重新下载", f.local);
                     let _ = fs::remove_file(&local_path);
                 }
             }
@@ -175,7 +230,7 @@ pub fn install_into(
         if cancel.load(Ordering::SeqCst) {
             return err("已取消");
         }
-        let local_path = dest_dir.join(&file.1);
+        let local_path = dest_dir.join(&file.local);
         // Nested local paths (e.g. `Qwen3-0.6B/tokenizer.json`) need their
         // parent dir created before the final rename.
         if let Some(parent) = local_path.parent() {
@@ -201,7 +256,7 @@ pub fn install_into(
             sources_in.to_vec()
         };
         for source in &sources {
-            for url in effective_urls(source, &file.0) {
+            for url in effective_urls(source, &file.remote) {
                 url_plan.push((source.label.to_string(), url));
             }
         }
@@ -213,7 +268,7 @@ pub fn install_into(
             let offset = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
             log::info!(
                 "[DEPS] {} ← {} ({}){}",
-                file.1,
+                file.local,
                 label,
                 url,
                 if offset > 0 {
@@ -234,14 +289,25 @@ pub fn install_into(
                     }
                     // Verify integrity before atomically renaming into place.
                     match file_sha256(&part_path) {
-                        Ok(digest) if digest == file.2 => {
-                            fs::rename(&part_path, &local_path).map_err(|e| {
-                                DownloadError(format!("写入 {} 失败: {e}", local_path.display()))
-                            })?;
+                        Ok(digest) if digest == file.sha256 => {
+                            match &file.post {
+                                Some(step) => {
+                                    materialize(step, &part_path, &local_path)?;
+                                    let _ = fs::remove_file(&part_path);
+                                }
+                                None => {
+                                    fs::rename(&part_path, &local_path).map_err(|e| {
+                                        DownloadError(format!(
+                                            "写入 {} 失败: {e}",
+                                            local_path.display()
+                                        ))
+                                    })?;
+                                }
+                            }
                             succeeded = true;
                             log::info!(
                                 "[DEPS] {} 完成 ({:.1} MB, sha256 ✓)",
-                                file.1,
+                                file.local,
                                 n as f64 / 1_048_576.0
                             );
                             break;
@@ -273,7 +339,7 @@ pub fn install_into(
         if !succeeded {
             return err(format!(
                 "下载 {} 失败：所有镜像源均不可用。{}",
-                file.0,
+                file.remote,
                 last_error.unwrap_or_else(|| "未知错误".into())
             ));
         }
@@ -284,6 +350,103 @@ pub fn install_into(
 }
 
 /// Compute the lowercase hex SHA-256 of a file.
+/// 把下载好的"原始包"加工成目标文件（解压 / 抽字典）。
+fn materialize(step: &PostStep, src: &Path, dest: &Path) -> Result<(), DownloadError> {
+    match step {
+        PostStep::ZipMember(suffix) => extract_zip_member(src, suffix, dest),
+        PostStep::YamlDict => yaml_dict_to_file(src, dest).map(|_| ()),
+    }
+}
+
+/// 从 zip 里取出文件名以 `suffix` 结尾的成员写到 `dest`。
+///
+/// 上游的 ORT 压缩包路径带版本号（`onnxruntime-win-x64-1.31.1/lib/onnxruntime.dll`），
+/// 所以按**后缀**匹配，升级时不用改代码。
+fn extract_zip_member(zip_path: &Path, suffix: &str, dest: &Path) -> Result<(), DownloadError> {
+    let f = fs::File::open(zip_path)
+        .map_err(|e| DownloadError(format!("打开压缩包失败: {e}")))?;
+    let mut zip = zip::ZipArchive::new(f)
+        .map_err(|e| DownloadError(format!("解析压缩包失败: {e}")))?;
+
+    let mut target: Option<String> = None;
+    for name in zip.file_names() {
+        if name.ends_with(suffix) {
+            target = Some(name.to_string());
+            break;
+        }
+    }
+    let Some(target) = target else {
+        return err(format!("压缩包里找不到 *{suffix}"));
+    };
+
+    let mut member = zip
+        .by_name(&target)
+        .map_err(|e| DownloadError(format!("读取 {target} 失败: {e}")))?;
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| DownloadError(format!("创建目录失败: {e}")))?;
+    }
+    let mut out = fs::File::create(dest)
+        .map_err(|e| DownloadError(format!("写入 {} 失败: {e}", dest.display())))?;
+    std::io::copy(&mut member, &mut out)
+        .map_err(|e| DownloadError(format!("解压 {target} 失败: {e}")))?;
+    log::info!("[DEPS] 已从压缩包取出 {target} -> {}", dest.display());
+    Ok(())
+}
+
+/// 从 PaddleOCR 的 `inference.yml` 里抽 `character_dict` 写成字典文件。
+///
+/// 只认 `character_dict:` 之后的 `- <标量>` 行（这是该导出格式的固定写法），
+/// 遇到别的键就停；条目数 < 1000 视为解析失败（宁可报错也不装一份坏字典）。
+fn yaml_dict_to_file(yml: &Path, dest: &Path) -> Result<usize, DownloadError> {
+    let text = fs::read_to_string(yml)
+        .map_err(|e| DownloadError(format!("读取 inference.yml 失败: {e}")))?;
+    let mut chars: Vec<String> = Vec::new();
+    let mut in_dict = false;
+    for line in text.lines() {
+        if !in_dict {
+            if line.trim_start().starts_with("character_dict:") {
+                in_dict = true;
+            }
+            continue;
+        }
+        let trimmed_start = line.trim_start();
+        if let Some(rest) = trimmed_start.strip_prefix("- ") {
+            chars.push(unquote_scalar(rest));
+        } else if trimmed_start == "-" {
+            // `- ` 后面恰好是空白字符（例如 U+3000）时会被 trim 掉
+            chars.push(String::new());
+        } else if trimmed_start.is_empty() {
+            continue;
+        } else {
+            break;
+        }
+    }
+    if chars.len() < 1000 {
+        return err(format!("字典条目异常（{} 条），拒绝写入", chars.len()));
+    }
+    let mut body = String::with_capacity(chars.len() * 4);
+    for c in &chars {
+        body.push_str(c);
+        body.push('\n');
+    }
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).map_err(|e| DownloadError(format!("创建目录失败: {e}")))?;
+    }
+    fs::write(dest, body)
+        .map_err(|e| DownloadError(format!("写入字典 {} 失败: {e}", dest.display())))?;
+    Ok(chars.len())
+}
+
+fn unquote_scalar(s: &str) -> String {
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        s[1..s.len() - 1].replace("''", "'")
+    } else if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+        s[1..s.len() - 1].replace("\\\"", "\"").replace("\\\\", "\\")
+    } else {
+        s.to_string()
+    }
+}
+
 pub(crate) fn file_sha256(path: &Path) -> Result<String, DownloadError> {
     let mut file = fs::File::open(path)
         .map_err(|e| DownloadError(format!("打开失败: {e}")))?;
@@ -429,6 +592,97 @@ mod tests {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn tmp_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "ls_dl_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// 上游直连：HF 镜像与官方互为兜底（hf-mirror 实测会 429）。
+    #[test]
+    fn huggingface_urls_fall_back_between_mirror_and_canonical() {
+        let src = Source { label: "upstream".into(), base_url: String::new() };
+        let mirror = "https://hf-mirror.com/PaddlePaddle/X/resolve/abc/inference.onnx";
+        let urls = effective_urls(&src, mirror);
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].contains("hf-mirror.com"));
+        assert!(urls[1].contains("huggingface.co"));
+
+        let canonical = "https://huggingface.co/PaddlePaddle/X/resolve/abc/inference.onnx";
+        let urls = effective_urls(&src, canonical);
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].contains("hf-mirror.com"), "国内优先镜像: {urls:?}");
+        assert!(urls[1].contains("huggingface.co"));
+    }
+
+    /// 上游 ORT 包是 zip：按后缀取出 `lib/onnxruntime.dll`。
+    #[test]
+    fn extracts_zip_member_by_suffix() {
+        use std::io::Write as _;
+        let dir = tmp_dir("zip");
+        let zip_path = dir.join("onnxruntime.zip");
+        {
+            let f = fs::File::create(&zip_path).unwrap();
+            let mut z = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            z.start_file("onnxruntime-win-x64-1.31.1/include/onnxruntime_cxx_api.h", opts)
+                .unwrap();
+            z.write_all(b"header").unwrap();
+            z.start_file("onnxruntime-win-x64-1.31.1/lib/onnxruntime.dll", opts)
+                .unwrap();
+            z.write_all(b"DUMMY-DLL").unwrap();
+            z.finish().unwrap();
+        }
+        let dest = dir.join("runtime").join("onnxruntime.dll");
+        extract_zip_member(&zip_path, "lib/onnxruntime.dll", &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"DUMMY-DLL");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PaddleOCR 的字典藏在 `inference.yml` 里，按 `character_dict:` 段抽取。
+    #[test]
+    fn yaml_dict_extracts_character_list() {
+        let dir = tmp_dir("yaml");
+        let yml = dir.join("inference.yml");
+        let mut body = String::from("Global:\n  model_name: x\nPostProcess:\n  character_dict:\n");
+        for i in 0..1200 {
+            body.push_str(&format!("  - c{i}\n"));
+        }
+        // 引号与空白字符（U+3000）都要原样保留
+        body.push_str("  - ''''\n  - 　\n");
+        body.push_str("NextSection:\n  k: v\n");
+        fs::write(&yml, body).unwrap();
+
+        let out = dir.join("dict.txt");
+        let n = yaml_dict_to_file(&yml, &out).unwrap();
+        assert_eq!(n, 1202);
+        let text = fs::read_to_string(&out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "c0");
+        assert_eq!(*lines.last().unwrap(), "\u{3000}");
+        assert!(lines.contains(&"'"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 字典条目太少必须拒绝（防止把半个 yml 当字典装进去）。
+    #[test]
+    fn yaml_dict_rejects_tiny_dicts() {
+        let dir = tmp_dir("yaml_bad");
+        let yml = dir.join("inference.yml");
+        fs::write(&yml, "PostProcess:\n  character_dict:\n  - a\n  - b\n").unwrap();
+        let out = dir.join("dict.txt");
+        assert!(yaml_dict_to_file(&yml, &out).is_err());
+        assert!(!out.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     fn clear_env(_guard: &MutexGuard<'static, ()>) {
         // edition 2024 marks env mutation unsafe.
         unsafe {
@@ -494,7 +748,14 @@ mod tests {
             base_url: "https://huggingface.co/owner/resolve/main".to_string(),
         };
         let urls = effective_urls(&source, "model.onnx");
-        assert_eq!(urls, vec!["https://huggingface.co/owner/resolve/main/model.onnx"]);
+        // HF 现在会给出「镜像 + 官方」两条（实测 hf-mirror 会 429）
+        assert_eq!(
+            urls,
+            vec![
+                "https://hf-mirror.com/owner/resolve/main/model.onnx",
+                "https://huggingface.co/owner/resolve/main/model.onnx",
+            ]
+        );
     }
 
     /// 说话人分离模型来自两个不同上游仓库 → `remote` 必须是绝对 URL，
@@ -510,7 +771,10 @@ mod tests {
         );
         assert_eq!(
             urls,
-            vec!["https://hf-mirror.com/csukuangfj/pyannote/resolve/main/model.onnx"]
+            vec![
+                "https://hf-mirror.com/csukuangfj/pyannote/resolve/main/model.onnx",
+                "https://huggingface.co/csukuangfj/pyannote/resolve/main/model.onnx",
+            ]
         );
 
         // 绝对 GitHub URL 仍享受镜像链（国内直连 ~29KB/s 实测）。

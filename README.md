@@ -83,7 +83,7 @@ sherpa-onnx 不提供 token 级时间戳。
 
 **竖排文字**：检测到的裁剪块若「高/宽 ≥ 1.5」则先逆时针旋转 90° 再送识别（对齐 PaddleOCR 官方 `get_rotate_crop_image`），流程图标签、竖排书名、竖版扫描件不再整行丢失。样例库 45 张扫描件实测识别字符 `14458 → 16037`（+11.6%），单页最多 `89 → 528` 字。实现见 `extractor/paddleocr/pipeline.rs`。
 
-**可选 ONNX Runtime 后端**（默认 `auto`）：`config.json` 里 `ocr_backend` 可设 `auto` / `tract` / `ort`。`auto` 会查找 `onnxruntime` 动态库（`ORT_DYLIB_PATH` → `<数据目录>/runtime/onnxruntime/` → exe 同级），找到就用 ORT，找不到或版本不符**自动回退 tract**——应用不装 ORT 也能正常跑。同形状实测 det `1589→75ms`、rec `667→11ms`；端到端样例库 45 张 `390.7s → 97.0s`（4.0×），识别字符一致。需要 ORT **1.31.x** 的 `onnxruntime.dll` / `libonnxruntime.so` / `libonnxruntime.dylib`；Windows x64 可直接在依赖中心一键安装。
+**可选 ONNX Runtime 后端**（默认 `auto`）：`config.json` 里 `ocr_backend` 可设 `auto` / `tract` / `ort`。`auto` 会查找 `onnxruntime` 动态库（`ORT_DYLIB_PATH` → `<数据目录>/runtime/onnxruntime/` → exe 同级），找到就用 ORT，找不到或版本不符**自动回退 tract**——应用不装 ORT 也能正常跑。同形状实测 det `1589→75ms`、rec `667→11ms`；端到端样例库 45 张 `390.7s → 97.0s`（4.0×），识别字符一致。需要 ORT **1.31.x**；Windows x64 可在依赖中心一键安装（**直连微软官方发布包**，约 79MB，装完自动启用）。
 
 **宽度分桶**：识别输入不再固定 320 宽，而是按裁剪块的自然宽度落到 `[320, 480]` 两档（长行不再被压缩丢字）。同一批图实测再增 17.5% 字符、耗时仅 +3.3%；两档合计 `14369 → 18835`（+31%）。再往上加 640/800 档只多 2% 字符却多 20~45% 耗时，故默认不开。
 

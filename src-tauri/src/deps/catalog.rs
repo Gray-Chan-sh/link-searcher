@@ -219,30 +219,39 @@ pub fn all() -> Vec<DepDef> {
     defs
 }
 
-/// ONNX Runtime 加速包（可选）：只装一个动态库，OCR 走 ORT 后端。
+/// 某依赖的下载文件需要怎样的二次加工（解压 / 抽字典）。
 ///
-/// 为什么放在"依赖中心"而不是随包内置：18MB / 平台，且**不是必需**——
-/// 缺了会自动回退 tract（见 `paddleocr::build_engine_at`）。
+/// 只在这里按 `dep_id` 判定，避免给 `FileSpec` 加字段而改动 20 处既有字面量。
+pub fn post_step_for(dep_id: &str, _f: &FileSpec) -> Option<crate::deps::download::PostStep> {
+    match dep_id {
+        // 微软只发布整包 zip（~83MB），落地时取出 lib/onnxruntime.dll
+        "onnxruntime" => Some(crate::deps::download::PostStep::ZipMember(
+            "lib/onnxruntime.dll".to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// ONNX Runtime 加速包（可选）：**直连上游**微软 Release 的整包 zip。
 ///
-/// 资产要求：把官方 1.31.x 的 `onnxruntime.dll` 原样以
-/// `onnxruntime-win-x64-1.31.1.dll` 上传到 models 仓库对应 Release tag。
-/// 换版本时**必须**同步更新这里的 sha256（`Get-FileHash -Algorithm SHA256`）。
+/// 为什么不自己托管单个 dll：上游就是权威来源，避免再分发；代价是下载 83MB
+/// 只取其中 18MB 的 dll（一次性操作，装到 `<data_dir>/runtime/onnxruntime/`）。
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 fn onnxruntime() -> DepDef {
     DepDef {
         id: "onnxruntime",
         name: "ONNX Runtime 加速包（可选）",
         recommended: false,
-        size_bytes: 19_288_376,
-        hint: "OCR 推理加速（实测约 4 倍）；不装也能用，只是慢一些",
+        size_bytes: 82_929_944,
+        hint: "直连微软官方发布包（约 79MB，解压出 dll）；OCR 推理快约 4 倍，不装也能用",
         files: &[FileSpec {
-            remote: "onnxruntime-win-x64-1.31.1.dll",
+            remote: "https://github.com/microsoft/onnxruntime/releases/download/v1.31.1/onnxruntime-win-x64-1.31.1.zip",
             local: "onnxruntime.dll",
-            sha256: "e45f61e50d8650885452be538a00bb14a715e46a1bc3691000ce947e89ed0306",
+            sha256: "5869e26bb25314375f2d5ef1877e3ea06b1543d6c710e6e4a1ec2f7177ab4b2c",
         }],
         sources: vec![Source {
             label: "GitHub Releases",
-            base_url: gh_base(),
+            base_url: String::new(),
         }],
         system_package: None,
     }
@@ -809,11 +818,10 @@ mod tests {
         }
     }
 
-    /// ONNX Runtime 加速包：只在 Windows x64 提供，且清单里必须带完整 sha256
-    /// （下载层逐文件校验，留空等于永远失败）。
+    /// ONNX Runtime 加速包：只在 Windows x64 提供；**直连上游 zip**，落地时解压取 dll。
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     #[test]
-    fn onnxruntime_dep_is_pinned_and_optional() {
+    fn onnxruntime_dep_points_upstream_and_extracts_dll() {
         let _g = env_lock();
         let def = all()
             .into_iter()
@@ -823,9 +831,19 @@ mod tests {
         assert_eq!(def.files.len(), 1);
         assert_eq!(def.files[0].local, "onnxruntime.dll");
         assert_eq!(def.files[0].sha256.len(), 64, "sha256 必须是完整摘要");
-        assert!(def.files[0].remote.ends_with(".dll"));
+        assert!(
+            def.files[0].remote.starts_with("https://github.com/microsoft/onnxruntime/releases/"),
+            "应直连微软官方发布包: {}",
+            def.files[0].remote
+        );
+        assert!(def.files[0].remote.ends_with(".zip"));
+        assert_eq!(
+            post_step_for("onnxruntime", &def.files[0]),
+            Some(crate::deps::download::PostStep::ZipMember(
+                "lib/onnxruntime.dll".to_string()
+            ))
+        );
         assert!(def.size_bytes > 10 * 1024 * 1024);
-        assert_eq!(def.sources[0].base_url, gh_base());
     }
 
     #[test]

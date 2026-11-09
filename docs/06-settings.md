@@ -117,7 +117,7 @@
 
 默认用纯 Rust 的 tract（零原生依赖）。如果机器上有 **ONNX Runtime 1.31.x** 的动态库，可以切到 ORT 后端，实测快 3~20 倍（det `1589→75ms`、rec `667→11ms`）：
 
-1. **一键安装**（Windows x64，推荐）：依赖中心里会出现「ONNX Runtime 加速包（可选）」条目，点「立即安装」即可，装到 `<数据目录>/runtime/onnxruntime/` 后**下一次推理自动切到 ORT**（无需重启）；
+1. **一键安装**（Windows x64，推荐）：依赖中心里会出现「ONNX Runtime 加速包（可选）」条目，点「立即安装」即可——**直连微软官方发布包**（约 79MB zip，自动解压出 dll），装到 `<数据目录>/runtime/onnxruntime/` 后**下一次推理自动切到 ORT**（无需重启）；
 2. 手动方式：把 `onnxruntime.dll`（Windows）/ `libonnxruntime.so`（Linux）/ `libonnxruntime.dylib`（macOS）放到 `<数据目录>/runtime/onnxruntime/`，或设置环境变量 `ORT_DYLIB_PATH` 指向它；
 3. `config.json` 里 `ocr_backend` 可设 `"auto"`（默认，检测到就用）/ `"ort"`（强制，失败即报错）/ `"tract"`（强制纯 Rust）。
 

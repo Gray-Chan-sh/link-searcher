@@ -158,6 +158,26 @@
   不会走到补查。
 - 新增 5 条单测（JSON 解析、缺失项去空/封顶 3 个、`gap_query` 拼装与回退）。
 
+## 2026-11-09（第九十六轮）：改为**全直连上游**（HF + 微软 Release），不再自托管任何模型/运行时
+
+> 起因：之前把 v6 模型和 ORT dll 都托管在我们自己的 Release 上，需要 `gh release upload`，
+> 且仓库/资产要跟着版本走。用户要求"从原来的仓库下载"。
+
+- **模型直连 HuggingFace**（`hf-mirror.com` ↔ `huggingface.co` 互为兜底，实测 hf-mirror 会
+  返回 429 限流，必须有官方兜底）：清单里 `files[].remote` 写**绝对 URL** 并 **pin 到 commit
+  revision**（`resolve/main` 会变，变了 sha256 就对不上）。下载层原本就支持绝对 URL。
+- **字典不再单独托管**：上游只有 `inference.yml`，清单里该文件标 `"dict_from_yaml": true`，
+  应用下载后自己抽 `character_dict`（`download.rs` 新增 `PostStep::YamlDict`，< 1000 条即拒绝）。
+- **ORT 直连微软官方 zip**：`PostStep::ZipMember("lib/onnxruntime.dll")` 按后缀取成员，
+  解压到 `runtime/onnxruntime/`；摘要改为**整包 zip** 的（1.31.1：`5869e26b…4b2c`，82,929,944 字节）。
+- **镜像链补全**：`effective_urls` 让 `hf-mirror.com` 与 `huggingface.co` 双向互为兜底
+  （原来只对 `github.com` 套 ghfast/gh-proxy）。
+- 发布流程简化：**只提交 `models-catalog.json`**，不需要上传任何资产；`prepare_ppocrv6.py`
+  改为"pin revision + 下载校验 + 生成清单"，`docs/MODEL_RELEASE.md` 同步重写。
+- 测试：新增 zip 取成员 / yml 抽字典（含引号与 U+3000）/ 条目过少拒绝 / HF 双向兜底 4 条；
+  端到端实测：从上游装下 v6（det 1.78MB + rec 4.46MB + yml 55KB）→ 抽出 6904 条字典 →
+  ORT 自检出 8 字。
+
 ## 2026-11-09（第九十五轮）：新增发布手册 docs/MODEL_RELEASE.md（模型 / ORT 加速包的发布与回滚）
 
 > 前几轮把"在线升级 + ORT 后端 + 发布脚本"做完了，但知识散在 CHANGELOG 与代码注释里；

@@ -1,44 +1,41 @@
 # -*- coding: utf-8 -*-
-"""发布端：把 PP-OCRv6 tiny 打成"模型在线升级"可用的资产，并生成清单。
+"""发布端：生成 PP-OCRv6 tiny 的在线升级清单（**直连上游 HuggingFace**，零自托管）。
 
-为什么不需要改 ONNX：
-  - 应用走 ORT 后端时，原始 ONNX（符号 batch + value_info）**可以直接跑**；
-  - 我们自己的 tract 后端才需要"batch 写死 / 去 value_info"的补丁，但 tract 0.20 对
-    v6 rec 有已知数值 bug（见 `_probe/out/b1_findings.md`），所以 v6 只面向 ORT 用户。
-  - 依赖中心升级前会跑自检推理：没有 ORT 的机器升级会被拦下并提示先装加速包，
-    因此"v6 只在 ORT 下可用"是安全的，不会把用户的 OCR 搞坏。
+设计（A 方案）：
+  - 模型文件直接从 HuggingFace（经 hf-mirror.com）下载，我们**不重新托管**；
+  - 识别字典上游没有独立文件，它在 `inference.yml` 的 `character_dict` 里 ——
+    清单里标 `"dict_from_yaml": true`，应用下载 yml 后自己抽成 `dict.txt`；
+  - 路径必须 pin 到**commit revision**（不能用 main），否则上游一改文件，
+    我们钉的 sha256 就对不上，用户升级会失败；
+  - 发布 = 提交一份 catalog JSON，**不需要 gh release / 上传任何资产**。
 
 用法：
-  # 1) 直接从 HuggingFace 拉（需要网络）
-  python scripts/models/prepare_ppocrv6.py --out D:\\dist\\models-v2
+  python scripts/models/prepare_ppocrv6.py --out D:\\dist\\catalog
+  python scripts/models/prepare_ppocrv6.py --out D:\\dist\\catalog --no-verify
+  python scripts/models/prepare_ppocrv6.py --out D:\\dist\\catalog --revision-det <sha> --revision-rec <sha>
 
-  # 2) 用本地已下载的模型（离线）
-  python scripts/models/prepare_ppocrv6.py --out D:\\dist\\models-v2 --from-dir D:\\test\\_probe\\models\\v6tiny
-
-产物：
-  <out>/files/paddleocr-v6-det.onnx
-  <out>/files/paddleocr-v6-rec.onnx
-  <out>/files/paddleocr-v6-dict.txt
-  <out>/models-catalog.json      ← 直接放到模型仓库 main 分支
-  <out>/UPLOAD.md                ← 上传步骤（含 gh 命令与校验值）
-
-依赖：onnx（校验）、pyyaml（解析 inference.yml）、numpy、onnxruntime（可选，用于自检）
+产物：<out>/models-catalog.json（提交到模型仓库 main 分支根目录）
 """
 
 import argparse
 import hashlib
 import json
 import os
-import shutil
 import sys
-
-HF = "https://huggingface.co/PaddlePaddle"
+import urllib.request
 
 DET_REPO = "PP-OCRv6_tiny_det_onnx"
 REC_REPO = "PP-OCRv6_tiny_rec_onnx"
+HF_API = "https://huggingface.co/api/models/PaddlePaddle/%s"
+MIRROR = "https://hf-mirror.com/PaddlePaddle/%s/resolve/%s/%s"
+CANONICAL = "https://huggingface.co/PaddlePaddle/%s/resolve/%s/%s"
 
-# 应用内 `deps::remote` 只认这些字段
-SCHEMA = 1
+
+def resolve_revision(repo, override=None):
+    if override:
+        return override
+    with urllib.request.urlopen(HF_API % repo, timeout=30) as r:
+        return json.load(r)["sha"]
 
 
 def sha256_of(path):
@@ -49,108 +46,90 @@ def sha256_of(path):
     return h.hexdigest()
 
 
-def download(url, dest):
+def fetch(repo, rev, name, dest):
+    """镜像优先，官方兜底；已存在则复用。"""
     if os.path.isfile(dest):
-        print("  cached:", dest)
-        return
-    try:
-        import urllib.request
-
-        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
-        print("  GET", url)
-        with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
-            shutil.copyfileobj(r, f)
-    except Exception as e:  # noqa: BLE001
-        raise SystemExit("下载失败: %s\n%s" % (url, e))
-
-
-def extract_dict(yml_path, out_path):
-    """从 inference.yml 的 PostProcess.character_dict 抽字典（保持模型原始顺序）。"""
-    try:
-        import yaml
-
-        with open(yml_path, encoding="utf-8") as f:
-            doc = yaml.safe_load(f)
-        chars = doc["PostProcess"]["character_dict"]
-    except Exception as e:  # noqa: BLE001
-        print("  ! PyYAML 解析失败（%s），改用逐行解析" % e)
-        chars = []
-        with open(yml_path, encoding="utf-8") as f:
-            in_dict = False
-            for line in f:
-                if line.startswith("character_dict:"):
-                    in_dict = True
-                    continue
-                if in_dict:
-                    if not line.startswith("- ") and line.strip() and not line.startswith(" "):
+        return dest
+    os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+    for tpl in (MIRROR, CANONICAL):
+        url = tpl % (repo, rev, name)
+        try:
+            print("  GET", url)
+            with urllib.request.urlopen(url, timeout=180) as r, open(dest, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
                         break
-                    s = line[2:].rstrip("\n")
-                    if s.startswith("'") and s.endswith("'") and len(s) >= 2:
-                        s = s[1:-1].replace("''", "'")
-                    elif s.startswith('"') and s.endswith('"') and len(s) >= 2:
-                        s = s[1:-1].replace('\\"', '"').replace("\\\\", "\\")
-                    chars.append(s)
+                    f.write(chunk)
+            return dest
+        except Exception as e:  # noqa: BLE001
+            print("   ! %s" % e)
+            if os.path.exists(dest):
+                os.remove(dest)
+    raise SystemExit("下载失败：%s/%s@%s" % (repo, name, rev))
+
+
+def parse_dict(yml_path):
+    """从 inference.yml 抽 character_dict（应用侧 Rust 也是同一套规则）。"""
+    chars, in_dict = [], False
+    with open(yml_path, encoding="utf-8") as f:
+        for line in f:
+            if not in_dict:
+                if line.lstrip().startswith("character_dict:"):
+                    in_dict = True
+                continue
+            s = line.lstrip()
+            if s.startswith("- "):
+                v = s[2:].rstrip("\n")
+                if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
+                    v = v[1:-1].replace("''", "'")
+                elif len(v) >= 2 and v[0] == '"' and v[-1] == '"':
+                    v = v[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+                chars.append(v)
+            elif s.strip():
+                break
     if len(chars) < 1000:
-        raise SystemExit("字典条目异常（%d），拒绝发布" % len(chars))
-    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-        for c in chars:
-            f.write(c + "\n")
-    print("  字典: %d 条" % len(chars))
-    return len(chars)
+        raise SystemExit("字典条目异常（%d）" % len(chars))
+    return chars
 
 
-def verify_with_ort(det, rec, dict_path):
-    """可选自检：用样例图跑一遍，确认模型能出字（而不是静默全 blank）。"""
+def verify(det, rec, chars):
+    """用仓库里的 smoke_text.png 跑一遍（det 要检出区域，rec 要出字）。"""
     try:
         import numpy as np
         import onnxruntime as ort
+        from PIL import Image
     except Exception as e:  # noqa: BLE001
         print("  (跳过自检: %s)" % e)
-        return None
-    import subprocess
-    import tempfile
-
-    # 用仓库里的自检图（应用侧同一张）
+        return
     img = os.path.join("src-tauri", "src", "extractor", "paddleocr", "smoke_text.png")
     if not os.path.isfile(img):
         print("  (跳过自检: 缺少 %s)" % img)
-        return None
-
-    from PIL import Image
+        return
 
     det_sess = ort.InferenceSession(det, providers=["CPUExecutionProvider"])
     rec_sess = ort.InferenceSession(rec, providers=["CPUExecutionProvider"])
     sample = Image.open(img).convert("RGB")
-    # 检测：整图缩放到 max side 1280，并把宽高**补齐到 32 的倍数**（PP-OCR 标准做法；
-    # 不补齐会在内部的 Add/Broadcast 处报 "15 by 16"）。
     w, h = sample.size
     scale = min(1.0, 1280.0 / max(w, h))
     nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
-    nw32 = (nw + 31) // 32 * 32
-    nh32 = (nh + 31) // 32 * 32
-    resized = sample.resize((nw, nh), Image.BILINEAR)
-    canvas = Image.new("RGB", (nw32, nh32), (255, 255, 255))
-    canvas.paste(resized, (0, 0))
-    arr = np.asarray(canvas, dtype=np.float32)[:, :, ::-1] / 255.0  # BGR
-    mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-    std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-    arr = (arr - mean) / std
-    x = arr.transpose(2, 0, 1)[None, ...].astype(np.float32)
-    prob = det_sess.run(None, {det_sess.get_inputs()[0].name: x})[0][0, 0]
-    print("  自检：检测图 %.0f%% 像素 > 0.3" % (100.0 * float((prob > 0.3).mean())))
-    if float((prob > 0.3).mean()) <= 0.0005:
-        raise SystemExit("检测模型在自检图上没有响应（全背景）")
-    # 识别：整图按 48 高送一次（只验证"能出字"，不追求版面）
-    rec_in = sample.resize((min(320, max(32, int(48 * w / h))), 48), Image.BILINEAR)
-    ra = np.asarray(rec_in, dtype=np.float32)[:, :, ::-1] / 255.0
-    canvas = np.zeros((48, 320, 3), dtype=np.float32)
-    canvas[:, : ra.shape[1], :] = ra
-    rx = ((canvas - 0.5) / 0.5).transpose(2, 0, 1)[None, ...].astype(np.float32)
-    logits = rec_sess.run(None, {rec_sess.get_inputs()[0].name: rx})[0][0]
-    idx = logits.argmax(-1)
-    chars = open(dict_path, encoding="utf-8").read().splitlines()
+    canvas = Image.new("RGB", ((nw + 31) // 32 * 32, (nh + 31) // 32 * 32), (255, 255, 255))
+    canvas.paste(sample.resize((nw, nh), Image.BILINEAR), (0, 0))
+    arr = np.asarray(canvas, dtype=np.float32)[:, :, ::-1] / 255.0
+    arr = (arr - np.array([0.485, 0.456, 0.406], np.float32)) / np.array([0.229, 0.224, 0.225], np.float32)
+    prob = det_sess.run(None, {det_sess.get_inputs()[0].name: arr.transpose(2, 0, 1)[None].astype(np.float32)})[0][0, 0]
+    ratio = float((prob > 0.3).mean())
+    print("  det: %.2f%% 像素 > 0.3" % (100 * ratio))
+    if ratio <= 0.0005:
+        raise SystemExit("检测模型无响应")
+
+    rw = min(320, max(32, int(48 * w / h)))
+    ra = np.asarray(sample.resize((rw, 48), Image.BILINEAR), dtype=np.float32)[:, :, ::-1] / 255.0
+    pad = np.zeros((48, 320, 3), np.float32)
+    pad[:, :rw, :] = ra
+    logits = rec_sess.run(None, {rec_sess.get_inputs()[0].name: ((pad - 0.5) / 0.5).transpose(2, 0, 1)[None].astype(np.float32)})[0][0]
     text, prev = [], None
-    for i in idx:
+    for i in logits.argmax(-1):
         i = int(i)
         if i == 0:
             continue
@@ -160,116 +139,82 @@ def verify_with_ort(det, rec, dict_path):
             text.append(chars[i - 1])
         prev = i
     s = "".join(text)
-    print("  自检：识别出 %d 字 %r" % (len(s), s[:40]))
+    print("  rec: %d 字 %r" % (len(s), s[:40]))
     if not s.strip():
-        raise SystemExit("识别模型在自检图上没有输出任何文字")
-    return s
+        raise SystemExit("识别模型没有输出任何文字")
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", required=True, help="输出目录")
-    ap.add_argument("--from-dir", help="用本地模型目录（含 det.onnx/rec.onnx，可选 inference.yml）")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--cache", default=None, help="下载缓存目录（默认 <out>/cache）")
     ap.add_argument("--version", default="v6-tiny-1")
-    ap.add_argument("--tag", default="models-v2")
     ap.add_argument("--min-app-version", default="1.5.16")
+    ap.add_argument("--revision-det", default=None)
+    ap.add_argument("--revision-rec", default=None)
     ap.add_argument("--no-verify", action="store_true")
     args = ap.parse_args()
 
     out = os.path.abspath(args.out)
-    files_dir = os.path.join(out, "files")
-    os.makedirs(files_dir, exist_ok=True)
-    src = os.path.abspath(args.from_dir) if args.from_dir else None
+    cache = os.path.abspath(args.cache) if args.cache else os.path.join(out, "cache")
+    os.makedirs(cache, exist_ok=True)
 
-    print("[1/4] 取模型文件")
-    if src:
-        pairs = [
-            (os.path.join(src, "det.onnx"), "paddleocr-v6-det.onnx"),
-            (os.path.join(src, "rec.onnx"), "paddleocr-v6-rec.onnx"),
-        ]
-        for s, name in pairs:
-            if not os.path.isfile(s):
-                raise SystemExit("缺少 %s" % s)
-            shutil.copyfile(s, os.path.join(files_dir, name))
-            print("  copy", os.path.basename(s), "->", name)
-        yml = os.path.join(src, "inference.yml")
-        if not os.path.isfile(yml):
-            yml = os.path.join(src, "rec_inference.yml")
-    else:
-        yml = os.path.join(out, "download", "inference.yml")
-        download("%s/%s/resolve/main/inference.onnx" % (HF, DET_REPO), os.path.join(files_dir, "paddleocr-v6-det.onnx"))
-        download("%s/%s/resolve/main/inference.onnx" % (HF, REC_REPO), os.path.join(files_dir, "paddleocr-v6-rec.onnx"))
-        download("%s/%s/resolve/main/inference.yml" % (HF, REC_REPO), yml)
+    print("[1/3] 解析上游 revision（pin 到 commit，避免上游改文件）")
+    rev_det = resolve_revision(DET_REPO, args.revision_det)
+    rev_rec = resolve_revision(REC_REPO, args.revision_rec)
+    print("  det:", rev_det)
+    print("  rec:", rev_rec)
 
-    print("[2/4] 抽识别字典")
-    dict_out = os.path.join(files_dir, "paddleocr-v6-dict.txt")
-    if os.path.isfile(yml):
-        extract_dict(yml, dict_out)
-    else:
-        raise SystemExit("找不到 inference.yml，无法抽字典")
+    print("[2/3] 取文件并计算摘要")
+    det = fetch(DET_REPO, rev_det, "inference.onnx", os.path.join(cache, "det.onnx"))
+    rec = fetch(REC_REPO, rev_rec, "inference.onnx", os.path.join(cache, "rec.onnx"))
+    yml = fetch(REC_REPO, rev_rec, "inference.yml", os.path.join(cache, "inference.yml"))
+    chars = parse_dict(yml)
+    print("  字典: %d 条（运行时由应用从 yml 抽取）" % len(chars))
 
-    print("[3/4] 可选自检")
     if args.no_verify:
-        print("  (已跳过)")
+        print("[3/3] (已跳过自检)")
     else:
-        verify_with_ort(
-            os.path.join(files_dir, "paddleocr-v6-det.onnx"),
-            os.path.join(files_dir, "paddleocr-v6-rec.onnx"),
-            dict_out,
-        )
+        print("[3/3] 自检")
+        verify(det, rec, chars)
 
-    print("[4/4] 生成清单")
-    files = []
-    local_names = {
-        "paddleocr-v6-det.onnx": "det.onnx",
-        "paddleocr-v6-rec.onnx": "rec.onnx",
-        "paddleocr-v6-dict.txt": "dict.txt",
-    }
-    for name in ("paddleocr-v6-det.onnx", "paddleocr-v6-rec.onnx", "paddleocr-v6-dict.txt"):
-        p = os.path.join(files_dir, name)
-        size = os.path.getsize(p)
-        entry = {
-            "remote": name,
-            "local": local_names[name],
-            "sha256": sha256_of(p),
-            "size": size,
+    def entry(path, repo, rev, name, local, **extra):
+        e = {
+            "remote": MIRROR % (repo, rev, name),
+            "local": local,
+            "sha256": sha256_of(path),
+            "size": os.path.getsize(path),
         }
-        files.append(entry)
-        print("  %-24s %8.2f MB  %s…" % (name, size / 1048576, entry["sha256"][:16]))
+        e.update(extra)
+        return e
 
-    total = sum(f["size"] for f in files)
+    files = [
+        entry(det, DET_REPO, rev_det, "inference.onnx", "det.onnx"),
+        entry(rec, REC_REPO, rev_rec, "inference.onnx", "rec.onnx"),
+        entry(yml, REC_REPO, rev_rec, "inference.yml", "dict.txt", dict_from_yaml=True),
+    ]
     catalog = {
-        "schema": SCHEMA,
-        "generated_at": None,
+        "schema": 1,
         "deps": {
             "paddleocr": {
                 "version": args.version,
-                "tag": args.tag,
+                "tag": "upstream-hf",
                 "min_app_version": args.min_app_version,
-                "size_bytes": total,
-                "notes": "PP-OCRv6 tiny：体积约 1/3、速度约 4 倍（需 ONNX Runtime 加速包）",
+                "size_bytes": sum(f["size"] for f in files),
+                "notes": "PP-OCRv6 tiny：直连 HuggingFace；需 ONNX Runtime 加速包",
                 "files": files,
             }
         },
     }
-    cat_path = os.path.join(out, "models-catalog.json")
-    with open(cat_path, "w", encoding="utf-8", newline="\n") as f:
+    path = os.path.join(out, "models-catalog.json")
+    os.makedirs(out, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
         json.dump(catalog, f, ensure_ascii=False, indent=2)
         f.write("\n")
-
-    with open(os.path.join(out, "UPLOAD.md"), "w", encoding="utf-8", newline="\n") as f:
-        f.write("# 上传步骤\n\n")
-        f.write("1. 新建/复用 Release tag `%s`，上传 `files/` 下三个文件（文件名保持原样）：\n\n" % args.tag)
-        for it in files:
-            f.write("- `%s`  sha256 `%s`  %d bytes\n" % (it["remote"], it["sha256"], it["size"]))
-        f.write("\n2. 把 `models-catalog.json` 提交到模型仓库 `main` 分支根目录。\n\n")
-        f.write("3. 应用侧：依赖中心 →「检查模型更新」→「升级」。\n\n")
-        f.write("> 注意：v6 需要 ONNX Runtime 加速包；没装的机器升级时会被自检拦下（旧版本保持不变）。\n")
-
-    print("\n完成：")
-    print("  资产:", files_dir)
-    print("  清单:", cat_path)
-    print("  说明:", os.path.join(out, "UPLOAD.md"))
+    print("\n清单:", path)
+    for it in files:
+        print("  %-10s %8.2f MB  %s" % (it["local"], it["size"] / 1048576, it["sha256"][:16] + "…"))
+    print("\n下一步：把 models-catalog.json 提交到模型仓库 main 分支根目录即可（无需上传资产）。")
     return 0
 
 

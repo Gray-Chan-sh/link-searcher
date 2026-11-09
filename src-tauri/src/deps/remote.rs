@@ -29,13 +29,38 @@ pub const SCHEMA: u32 = 1;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RemoteFile {
-    /// Releases 资产名（`<tag>/<remote>`）。
+    /// Releases 资产名或**绝对 URL**（直连上游）。
     pub remote: String,
     /// 落地文件名（可含子目录）。
     pub local: String,
     pub sha256: String,
     #[serde(default)]
     pub size: u64,
+    /// 下载的是 zip：取出文件名以该后缀结尾的成员（如 `lib/onnxruntime.dll`）。
+    #[serde(default)]
+    pub extract: Option<String>,
+    /// 下载的是 PaddleOCR 的 `inference.yml`：抽取 `character_dict` 作为字典。
+    #[serde(default)]
+    pub dict_from_yaml: bool,
+}
+
+impl RemoteFile {
+    /// 转成下载层认识的描述（含二次加工步骤）。
+    pub fn to_download(&self) -> crate::deps::download::DownloadFile {
+        let post = if let Some(suffix) = &self.extract {
+            Some(crate::deps::download::PostStep::ZipMember(suffix.clone()))
+        } else if self.dict_from_yaml {
+            Some(crate::deps::download::PostStep::YamlDict)
+        } else {
+            None
+        };
+        crate::deps::download::DownloadFile {
+            remote: self.remote.clone(),
+            local: self.local.clone(),
+            sha256: self.sha256.clone(),
+            post,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

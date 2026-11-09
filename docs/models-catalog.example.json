@@ -1,32 +1,31 @@
 {
   "schema": 1,
-  "generated_at": "2026-11-09T00:00:00Z",
   "deps": {
     "paddleocr": {
       "version": "v6-tiny-1",
-      "tag": "models-v2",
+      "tag": "upstream-hf",
       "min_app_version": "1.5.16",
-      "published_at": "2026-11-09T00:00:00Z",
-      "size_bytes": 6270385,
-      "notes": "PP-OCRv6 tiny：体积约 1/3、速度约 4 倍（需 ONNX Runtime 加速包）",
+      "size_bytes": 6298800,
+      "notes": "PP-OCRv6 tiny：直连 HuggingFace；需 ONNX Runtime 加速包",
       "files": [
         {
-          "remote": "paddleocr-v6-det.onnx",
+          "remote": "https://hf-mirror.com/PaddlePaddle/PP-OCRv6_tiny_det_onnx/resolve/2ba1506c0380b8f0b03dd142459aac66d4421f6c/inference.onnx",
           "local": "det.onnx",
           "sha256": "193bab7a04fca699a6c82e6abb5b81bdb28177f0abd4062552b04908dafb19f8",
           "size": 1780590
         },
         {
-          "remote": "paddleocr-v6-rec.onnx",
+          "remote": "https://hf-mirror.com/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/2612ab37152ae0a677521bae4e1e3d4fb4cf7c30/inference.onnx",
           "local": "rec.onnx",
           "sha256": "9ef676d6ed3c88256a2d92c640c44f25b0c40947e111b14b8be8f594091563e6",
           "size": 4462639
         },
         {
-          "remote": "paddleocr-v6-dict.txt",
+          "remote": "https://hf-mirror.com/PaddlePaddle/PP-OCRv6_tiny_rec_onnx/resolve/2612ab37152ae0a677521bae4e1e3d4fb4cf7c30/inference.yml",
           "local": "dict.txt",
-          "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd",
-          "size": 27156
+          "sha256": "66170210bad538e83fff3c4a3867e547d6bf20b50d64b20347c4b913f3034ea1",
+          "size": 55571,
+          "dict_from_yaml": true
         }
       ]
     }
